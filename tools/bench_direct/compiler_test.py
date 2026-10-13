@@ -2216,6 +2216,199 @@ class MachineRecordRequiredTest(unittest.TestCase):
         self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
 
 
+class SealingRequiredTest(unittest.TestCase):
+    """Recovery waives sealed raw evidence only for a producer revision that never sealed (#2918)."""
+
+    REVISION = "7" * 40
+    PRODUCER = Path(__file__).resolve().with_name("compiler_compare.py")
+
+    def required(self, answer: object, revision: str = REVISION) -> tuple[bool, list[str]]:
+        paths: list[str] = []
+
+        class Contents:
+            def request(self, path: str, data: dict | None = None) -> object:
+                paths.append(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return compiler_publish.sealing_required(Contents(), revision), paths
+
+    def test_the_current_producer_seals_and_only_a_readable_legacy_one_waives_it(self) -> None:
+        text = self.PRODUCER.read_text(encoding="utf-8")
+        self.assertIn(compiler_publish.SEALING_PRODUCER_MARKER.decode(), text)
+        self.assertEqual(self.required(contents_record(text))[0], True)
+        legacy = text.replace(compiler_publish.SEALING_PRODUCER_MARKER.decode(), "def unsealed(")
+        required, paths = self.required(contents_record(legacy))
+        self.assertEqual(required, False)
+        self.assertEqual(urllib.parse.urlsplit(paths[0]).path, "/contents/tools/bench_direct/compiler_compare.py")
+        for label, answer in (("absent file", urllib.error.HTTPError("u", 404, "absent", {}, None)),
+                              ("server error", urllib.error.HTTPError("u", 502, "bad gateway", {}, None)),
+                              ("network", OSError("reset")), ("malformed record", {"type": "dir"})):
+            with self.subTest(label=label):
+                self.assertEqual(self.required(answer)[0], True)
+        self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
+
+    def test_a_required_seal_missing_from_a_measured_attempt_is_a_refusal(self) -> None:
+        unsealed = compiler_publish.verify_evidence_bundle({}, {}, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        self.assertEqual(unsealed, {"state": "unsealed"})
+        self.assertEqual(compiler_publish.evidence_bundle_note(unsealed), "")
+        self.assertIn("is required on this route", compiler_publish.evidence_bundle_problems({}, unsealed)[0])
+        legacy = compiler_publish.verify_evidence_bundle({}, {}, compiler_receipt.THROUGHPUT_PROFILE, "1", False)
+        self.assertEqual((legacy, compiler_publish.evidence_bundle_problems({}, legacy)), ({"state": "legacy-unsealed"}, []))
+
+
+def raw_lab(directory: Path, pairs: int = 10) -> dict[str, bytes]:
+    """A raw compiler-compare-v1 lab and its summary from the trusted uarch_lab statistics, as `lab/` members."""
+    from sampling_qualification_receipt import _lab
+    directory.mkdir(parents=True)
+    write = lambda name, text: ((directory / name).parent.mkdir(parents=True, exist_ok=True),  # noqa: E731
+                                (directory / name).write_text(text))
+    variants = {key: {"role": role, "ide": f"/work/bin/ide-{key}", "sha256": key * 64, "size_bytes": 4096}
+                for key, role in _lab.VARIANTS}
+    config = {"command": "IDE cc -o OUT", "repo_root": "/work/candidate", "cpu": 2, "perf": "perf", "pairs": None,
+              "target_minutes": 10, "warmups": 1, "seed": _lab.DEFAULT_SEED, "profile_steps": [], "sudo": False,
+              "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
+              "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": _lab.DEFAULT_MIN_EFFECT}
+    write("compare.json", json.dumps({"version": 1, "mode": "compare", "config": config, "variants": variants,
+                                      "plan": {"pairs": pairs, "reason": "--target-minutes 10: fixture", "order": "ABBA",
+                                               "fresh_copy": True},
+                                      "steps": {name: {"status": "ok"} for name in ("env", "prepare", "timed")},
+                                      "phase_metrics": {"enabled": True, "reason": "both compilers support -fmetrics-out"}}))
+    write("a/env/env.json", json.dumps({"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"}))
+    for key, usable in (("a", True), ("b", False)):
+        write(f"{key}/lab.json", json.dumps({"capabilities": {"perf_stat": {"usable": usable, "reason": f"probe {key}"}},
+                                             "collection": {"metrics_out": True}}))
+    records = []
+    for pair in range(1, pairs + 1):
+        for key in ("ab" if pair % 2 else "ba"):
+            seconds = 1.0 + 0.01 * pair + (0.002 if key == "b" else 0.0)
+            record = {"pair": pair, "order": "AB" if pair % 2 else "BA", "variant": key, "exit": 0, "identical": True,
+                      "span_s": seconds, "counters": key == "a", "cpu_s": seconds * 0.9, "maxrss_bytes": 400000000,
+                      "harness_rss_bytes": 20000000, "wrapper_rss_bytes": 10000000}
+            records.append(record)
+            if key == "a":
+                write(f"pairs/{pair:04d}-a.csv", f"{seconds * 900:.2f},msec,task-clock,1,100.00,,\n"
+                                                 f"{1000000 + pair},,instructions,1,100.00,,\n{800000 + pair},,cycles,1,100.00,,\n")
+            phases = " ".join(f"{phase}_ns={(index + 1) * 1000 + pair}" for index, phase in enumerate(_lab.PHASES))
+            write(f"pairs/{pair:04d}-{key}.ccmetrics", f"CC_METRICS wall_ns={int(seconds * 1e9)}\n"
+                  f"CC_METRICS_INPUT measured=1 start_ns=0 total_ns={9000 + pair} {phases}\n")
+    write("pairs.json", json.dumps(records))
+    write("summary.json", json.dumps(_lab.compare_summary(str(directory))))
+    return {"lab/" + path.relative_to(directory).as_posix(): path.read_bytes()
+            for path in sorted(directory.rglob("*")) if path.is_file()}
+
+
+def raw_corpus(directory: Path, pairs: int = 20) -> None:
+    """A complete one-job native corpus bundle without summaries, as `bench_throughput run` leaves its raw files."""
+    header = ("round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,instructions,"
+              "branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,output_bytes,source_bytes,"
+              "source_lines,source_functions,output_sha256,minor_faults,major_faults,voluntary_context_switches,"
+              "involuntary_context_switches\n")
+
+    def row(round_: int, pair: int, order: int, variant: int, wall: float, counted: bool) -> str:
+        counters = "100,200,30,4,50,6,3,15" if counted else "NA,NA,NA,NA,NA,NA,NA,NA"
+        return f"{round_},{pair},{order},{variant},0,{wall!r},0.25,0.125,67108864,{counters},4,16,2,1,{'0' * 64},1,0,2,3\n"
+    directory.mkdir(parents=True)
+    (directory / "samples.csv").write_text(header + "".join(
+        row(round_, pair, variant ^ (pair & 1), variant, 1.0 + 0.001 * pair + 0.01 * variant, False)
+        for round_ in range(2) for pair in range(pairs) for variant in range(2)))
+    (directory / "telemetry.csv").write_text(header + "".join(
+        row(kind, repeat, variant, variant, 1.0, True) for kind in range(2) for repeat in range(3) for variant in range(2)))
+    for name, text in (("metadata.json", "{}\n"), ("jobs.tsv", "0\ttiny_startup/fast\n"), ("commands.jsonl", "{}\n"),
+                       ("capabilities.jsonl", "{}\n")):
+        (directory / name).write_text(text)
+    (directory / "complete.txt").write_text(f"schema=2 jobs=1 pairs={pairs} rounds=2 guard=1\n" + "".join(
+        hashlib.sha256((directory / name).read_bytes()).hexdigest() + " " + name + "\n"
+        for name in ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl", "capabilities.jsonl")))
+
+
+class SealedReplayTest(unittest.TestCase):
+    """A verified bundle's lab and corpus are replayed from its raw bytes by the trusted statistics (#2918)."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.files = raw_lab(self.root / "lab")
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def edited(self, name: str, change) -> dict[str, bytes]:
+        files = dict(self.files)
+        files[name] = json.dumps(change(json.loads(files[name]))).encode("utf-8")
+        return files
+
+    def test_a_complete_lab_replays_from_its_raw_pairs(self) -> None:
+        self.assertEqual(compiler_publish.sealed_lab_replay(self.files), 10)
+
+    def test_a_lab_whose_raw_bytes_or_saved_inference_disagree_is_refused(self) -> None:
+        def records(change):
+            return lambda rows: [change(dict(row), index) for index, row in enumerate(rows)]
+        cases = {
+            "changed counter bytes": dict(self.files, **{"lab/pairs/0003-a.csv": self.files["lab/pairs/0003-a.csv"].replace(
+                b"927.00,msec,task-clock", b"999.00,msec,task-clock")}),
+            "changed compiler metrics": dict(self.files, **{"lab/pairs/0004-b.ccmetrics": self.files[
+                "lab/pairs/0004-b.ccmetrics"].replace(b"read_ns=1004", b"read_ns=9004")}),
+            "missing compiler metrics": {name: data for name, data in self.files.items() if name != "lab/pairs/0005-b.ccmetrics"},
+            "duplicated pair": self.edited("lab/pairs.json", records(lambda row, index: dict(row, pair=2) if index in (4, 5) else row)),
+            "failed member": self.edited("lab/pairs.json", records(lambda row, index: dict(row, exit=1) if index == 7 else row)),
+            "unordered members": self.edited("lab/pairs.json", lambda rows: [rows[1], rows[0], *rows[2:]]),
+            "truncated population": self.edited("lab/pairs.json", lambda rows: rows[:-1]),
+            "counter claim without its probe": self.edited("lab/b/lab.json", lambda meta: dict(
+                meta, capabilities={"perf_stat": {"usable": True, "reason": "x"}})),
+            "edited verdict": self.edited("lab/summary.json", lambda summary: dict(
+                summary, verdict=dict(summary["verdict"], outcome="faster"))),
+            "edited population": self.edited("lab/summary.json", lambda summary: dict(
+                summary, baseline=dict(summary["baseline"], failed=1))),
+            "edited plan": self.edited("lab/summary.json", lambda summary: dict(
+                summary, plan=dict(summary["plan"], complete_pairs=12))),
+            "another profile": self.edited("lab/compare.json", lambda raw: dict(raw, config=dict(raw["config"], cpu=3))),
+            "a fixed pair count": self.edited("lab/compare.json", lambda raw: dict(raw, config=dict(raw["config"], pairs=10))),
+            "an odd plan": self.edited("lab/compare.json", lambda raw: dict(raw, plan=dict(raw["plan"], pairs=9))),
+            "a flag pair": self.edited("lab/compare.json", lambda raw: dict(raw, config=dict(raw["config"],
+                                                                                             canonical_inline_pair=True))),
+            "duplicate key": dict(self.files, **{"lab/compare.json": b'{"version": 1, "version": 1}'}),
+        }
+        for label, files in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                compiler_publish.sealed_lab_replay(files)
+
+    def corpus_command(self) -> tuple:
+        driver = bootstrapped_driver()
+        if driver is None or shutil.which("clang") is None:
+            self.skipTest("no native driver or clang: set BUSTER_COMPILER_EVIDENCE_DRIVER or put tcc and clang on PATH")
+        return (str(driver), "bench_throughput", "compare")
+
+    def test_a_corpus_replays_through_the_trusted_native_comparison(self) -> None:
+        command = self.corpus_command()
+        produced = self.root / "produced"
+        raw_corpus(produced)
+        made = subprocess.run([*command, "--output", str(produced)], cwd=compiler_publish.TRUSTED_ROOT,
+                              capture_output=True, text=True, timeout=600, check=False)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        files = {"throughput/" + path.relative_to(produced).as_posix(): path.read_bytes()
+                 for path in sorted(produced.rglob("*")) if path.is_file()}
+        self.assertIn("throughput/summary.md", files)
+        replay = lambda members: compiler_publish.sealed_corpus_replay(  # noqa: E731
+            members, tempfile.mkdtemp(dir=self.root))
+        with mock.patch.object(compiler_publish, "CORPUS_REPLAY_COMMAND", command):
+            self.assertEqual(replay(files), 1)
+            samples = files["throughput/samples.csv"].replace(b"\n0,1,1,0,0,1.001,", b"\n0,1,1,0,0,1.5,", 1)
+            self.assertTrue(samples != files["throughput/samples.csv"])
+            summary = files["throughput/summary.json"].replace(b'"valid":true', b'"valid":false')
+            for label, members in (("raw sample", dict(files, **{"throughput/samples.csv": samples})),
+                                   ("summary", dict(files, **{"throughput/summary.json": summary})),
+                                   ("report", dict(files, **{"throughput/summary.md": b"# edited\n"}))):
+                with self.subTest(label=label), self.assertRaisesRegex(ValueError, "does not replay"):
+                    replay(members)
+
+    def test_a_corpus_replay_that_cannot_run_is_refused(self) -> None:
+        files = {"throughput/summary.json": b'{"comparisons": []}'}
+        with mock.patch.object(compiler_publish, "CORPUS_REPLAY_COMMAND", ("/nonexistent/build.sh",)), \
+                self.assertRaisesRegex(ValueError, "corpus replay did not run"):
+            compiler_publish.sealed_corpus_replay(files, str(self.root))
+
+
 class EvidenceTest(unittest.TestCase):
     def test_reads_receipt_and_summary_as_data(self) -> None:
         payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
@@ -3110,37 +3303,70 @@ class HarnessTest(unittest.TestCase):
         (evidence / "machine-specifications" / "report.json").write_text("{}")  # appended after the seal
         throughput = dict(retained(evidence), sealed_files=compiler_publish.sampling_archive(
             self.zipped(evidence), member_limit=compiler_publish.EVIDENCE_ARCHIVE_MEMBERS, require_nonexecutable=True))
-        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (str(driver), "compiler_evidence")):
+        # The harness's stand-in lab and corpus carry no real statistics; SealedReplayTest replays real ones.
+        replayed: list[dict] = []
+
+        def lab(files: dict) -> int:
+            replayed.append(files)
+            return 10
+
+        def corpus(files: dict, temporary: str) -> int:
+            if "replay-refused" in files:
+                raise ValueError("corpus summary.json does not replay")
+            return 12
+        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (str(driver), "compiler_evidence")), \
+                mock.patch.object(compiler_publish, "sealed_lab_replay", lab), \
+                mock.patch.object(compiler_publish, "sealed_corpus_replay", corpus):
             verified = compiler_publish.verify_evidence_bundle(throughput, expected, compiler_receipt.THROUGHPUT_PROFILE, "2")
             other_attempt = compiler_publish.verify_evidence_bundle(throughput, expected, compiler_receipt.THROUGHPUT_PROFILE, "3")
             files = dict(throughput["sealed_files"])
             files["lab/pairs/0007-b.ccmetrics"] = b"tampered\n"
             tampered = compiler_publish.verify_evidence_bundle(dict(throughput, sealed_files=files), expected,
                                                                compiler_receipt.THROUGHPUT_PROFILE, "2")
+            with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", (
+                    "print('COMPILER_EVIDENCE_VERIFIED members=3 payload_bytes=4 manifest_sha256=' + 'a' * 64)"))):
+                unreplayed = compiler_publish.verify_evidence_bundle(
+                    dict(throughput, sealed_files=dict(throughput["sealed_files"], **{"replay-refused": b""})), expected,
+                    compiler_receipt.THROUGHPUT_PROFILE, "2")
         self.maxDiff = None
-        self.assertEqual(verified, {"state": "verified", **{key: result["evidence_bundle"][key]
-                                                            for key in ("members", "payload_bytes", "manifest_sha256")}})
+        self.assertEqual(verified, {"state": "verified", "replay": {"lab_pairs": 10, "corpus_cases": 12},
+                                    **{key: result["evidence_bundle"][key]
+                                       for key in ("members", "payload_bytes", "manifest_sha256")}})
+        self.assertIs(replayed[0], throughput["sealed_files"])
         self.assertEqual((other_attempt["state"], tampered["state"]), ("refused", "refused"))
         self.assertIn("COMPILER_EVIDENCE_REFUSED", tampered["reason"])
+        self.assertEqual(unreplayed, {"state": "refused", "reason": "sealed raw evidence does not replay: corpus summary.json "
+                                                                    "does not replay"})
+        self.assertIn("replayed 10 lab pairs and 12 corpus cases", compiler_publish.evidence_bundle_note(verified))
         decide = lambda bundle, receipt=result: compiler_publish.decide(  # noqa: E731
             expected, True, "success", receipt, summary, "", throughput, evidence_bundle=bundle)
         self.assertEqual(decide(verified)[0], "success")
         self.assertIn("sealed raw evidence refused", decide(tampered)[2][0])
+        self.assertIn("sealed raw evidence refused: sealed raw evidence does not replay", decide(unreplayed)[2][0])
         forged = dict(result, evidence_bundle=dict(result["evidence_bundle"], members=1))
         self.assertIn("receipt evidence_bundle does not name the verified sealed manifest", decide(verified, forged)[2])
         self.assertIn("receipt names sealed raw evidence that the artifact does not carry",
                       decide({"state": "legacy-unsealed"})[2])
 
-    def test_legacy_unsealed_evidence_keeps_its_outcome_and_is_reported_unverified(self) -> None:
+    def test_unsealed_evidence_is_refused_unless_its_producer_predates_sealing(self) -> None:
         code, result, evidence = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (0, "measured"))
         expected = dict(result["identity"], first_parent=self.base, range="1")
         summary = json.loads((evidence / "lab" / "summary.json").read_text())
-        bundle = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        # Only recovery of a run whose producer predates sealing may stand unsealed.
+        bundle = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE,
+                                                         "1", False)
         self.assertEqual(bundle, {"state": "legacy-unsealed"})
         self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
                                                  evidence_bundle=bundle)[0], "success")
         self.assertIn("unverified", compiler_publish.evidence_bundle_note(bundle))
+        required = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        self.assertEqual(required, {"state": "unsealed"})
+        decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                          evidence_bundle=required)
+        self.assertEqual(decided[0], "failure")
+        self.assertIn(f"sealed raw evidence {compiler_receipt.EVIDENCE_INVENTORY} is required on this route, but the "
+                      "artifact carries neither control file", decided[2])
 
     def test_an_unreadable_or_unverifiable_sealed_bundle_fails_closed(self) -> None:
         expected = {"repository": "buster14a/buster", "request_run_id": "91", "run_id": "92", "run_attempt": "1",

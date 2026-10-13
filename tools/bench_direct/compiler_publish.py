@@ -56,18 +56,24 @@ Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
 artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
 with the strict sampling_archive reader and verified by the trusted native
 `./build.sh compiler_evidence verify` under the identity this publisher
-authorized (verify_evidence_bundle); the receipt's evidence_bundle must name
-the verified manifest (evidence_bundle_problems). An artifact with neither is
-legacy-unsealed: its outcome stands and its raw bytes are reported unverified.
-Anything else fails closed.
+authorized (verify_evidence_bundle). The verified bytes are then replayed: the
+lab's raw pairs through the trusted uarch_lab statistics (sealed_lab_replay,
+lab_raw_inference) and the corpus through this checkout's `bench_throughput
+compare` in a disposable copy (sealed_corpus_replay); the saved summaries must
+follow. The receipt's evidence_bundle must name the verified manifest
+(evidence_bundle_problems). A measured ordinary attempt must be sealed; only
+publication-only recovery of a run whose producer predates sealing
+(sealing_required) may be legacy-unsealed, its outcome standing with its raw
+bytes reported unverified. Anything else fails closed.
 
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle,
 validate_compiler_probes_bundle, validate_frontend_selector_bundle and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 validate_selfhost_inline_bundle (#58),
-decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
-(sealed raw evidence), inventory_rows (discharged inventory rows),
+decide (pure decision), sealed_lab_replay, sealed_corpus_replay,
+verify_evidence_bundle, evidence_bundle_problems and sealing_required (sealed raw
+evidence), lab_raw_inference (shared lab replay), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
 verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
@@ -779,16 +785,111 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     return conclusion, title, reasons
 
 
-def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str) -> dict:
+# The trusted corpus replayer (#2918): this checkout's own `bench_throughput compare`, run from its root.
+TRUSTED_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CORPUS_REPLAY_COMMAND = (os.path.join(TRUSTED_ROOT, "build.sh"), "bench_throughput", "compare")
+CORPUS_REPLAY_TIMEOUT_SECONDS = 600
+CORPUS_REPLAYED = ("summary.json", "summary.md")
+
+
+def sealed_lab_replay(files: dict[str, bytes]) -> int:
+    """Replay a verified bundle's compiler-compare-v1 lab from its raw pairs; the pair count (#2918).
+
+    The raw plan must be the frozen profile's adaptive ABBA plan, every saved variant fact must
+    follow from the raw records and the trusted uarch_lab statistics must reproduce the saved
+    inference (lab_raw_inference). The cross-variant output and code-size facts read the
+    unretained reference images, so they are not replayed. ValueError otherwise.
+    """
+    from sampling_qualification_receipt import _lab
+    raw, summary = sampling_json(files, "lab/compare.json"), sampling_json(files, "lab/summary.json")
+    records = sampling_json(files, "lab/pairs.json", False)
+    config, saved = raw.get("config"), raw.get("plan")
+    if raw.get("version") != 1 or raw.get("mode") != "compare" or not isinstance(config, dict) or \
+            any(config.get(key) != PROFILE[key] for key in ("cpu", "target_minutes", "warmups", "profile_steps")) or \
+            config.get("pairs") is not None or type(config.get("seed")) is not int or \
+            type(config.get("min_effect_percent")) not in (int, float) or \
+            any(config.get(key) for key in ("ast_pilot_pair", "constant_reuse_pair", "canonical_inline_pair", "sudo")):
+        raise ValueError("lab raw config is not the frozen compiler-compare-v1 profile")
+    count = saved.get("pairs") if isinstance(saved, dict) else None
+    if type(count) is not int or not 10 <= count <= 1000 or count % 2 or saved.get("order") != "ABBA" or \
+            not isinstance(records, list) or len(records) != count * 2:
+        raise ValueError("lab adaptive plan or complete paired population is missing")
+    expected_plan = dict(saved, seed=config["seed"], confidence=_lab.CONFIDENCE,
+                         bootstrap_resamples=_lab.BOOTSTRAP_RESAMPLES, complete_pairs=count,
+                         fresh_copy=bool(config.get("fresh_copy")))
+    if summary.get("plan") != expected_plan or summary.get("method") != _lab.COMPARE_METHOD or \
+            summary.get("command") != config.get("command") or summary.get("cpu") != config["cpu"]:
+        raise ValueError("lab saved plan or method differs from its raw configuration")
+    variant_meta = {}
+    for key, role in _lab.VARIANTS:
+        variant, observed = (raw.get("variants") or {}).get(key), summary.get(role)
+        meta = sampling_json(files, f"lab/{key}/lab.json")
+        if not isinstance(variant, dict) or not isinstance(observed, dict) or \
+                any(observed.get(field) != value for field, value in
+                    (("path", variant.get("ide")), ("sha256", variant.get("sha256")),
+                     ("size_bytes", variant.get("size_bytes")), ("runs", count), ("failed", 0),
+                     ("identical_runs", count), ("deterministic", True))):
+            raise ValueError(f"lab saved {role} population does not follow from its raw records")
+        perf, collection = (meta.get("capabilities") or {}).get("perf_stat"), meta.get("collection")
+        if not isinstance(perf, dict) or type(perf.get("usable")) is not bool or not isinstance(perf.get("reason"), str) or \
+                not isinstance(collection, dict) or type(collection.get("metrics_out")) is not bool:
+            raise ValueError(f"lab variant {key} counter or metrics availability was not observed")
+        variant_meta[key] = meta
+    lab_raw_inference(files, "lab/", records, variant_meta, summary, raw, config["seed"], config["min_effect_percent"])
+    return count
+
+
+def sealed_corpus_replay(files: dict[str, bytes], temporary: str) -> int:
+    """Replay a verified bundle's corpus with the trusted native comparison; the case count (#2918).
+
+    `bench_throughput compare` checks the completion hashes and population and recomputes the
+    statistics in a disposable copy, since it rewrites its summaries; the regenerated summaries
+    must equal the retained bytes. A valid regression stays report-only. ValueError otherwise.
+    """
+    root = os.path.join(temporary, "corpus-replay")
+    for name, data in files.items():
+        if name.startswith("throughput/"):
+            target = os.path.join(root, *name[len("throughput/"):].split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "xb") as writer:
+                writer.write(data)
+    try:
+        completed = subprocess.run([*CORPUS_REPLAY_COMMAND, "--output", root], capture_output=True, text=True,
+                                   timeout=CORPUS_REPLAY_TIMEOUT_SECONDS, check=False,
+                                   cwd=TRUSTED_ROOT)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"corpus replay did not run: {error.__class__.__name__}: {error}") from error
+    for name in CORPUS_REPLAYED:
+        retained = files.get("throughput/" + name)
+        if name == "summary.json" or retained is not None:
+            try:
+                with open(os.path.join(root, name), "rb") as reader:
+                    replayed = reader.read()
+            except OSError:
+                replayed = None
+            if replayed != retained:
+                tail = ((completed.stderr or "") + (completed.stdout or "")).strip()[-300:]
+                raise ValueError(f"corpus {name} does not replay (bench_throughput compare exited "
+                                 f"{completed.returncode}{': ' + tail if tail else ''})")
+    comparisons = sampling_json(files, "throughput/summary.json").get("comparisons")
+    if not isinstance(comparisons, list):
+        raise ValueError("corpus summary has no comparisons")
+    return len(comparisons)
+
+
+def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str,
+                           required: bool = True) -> dict:
     """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
 
-    {"state": "legacy-unsealed"} when read_evidence found neither control file; {"state": "verified",
-    "members", "payload_bytes", "manifest_sha256"} when `compiler_evidence verify` reproduces the sealed
-    manifest from the extracted bytes; otherwise {"state": "refused", "reason"}. The identity comes from
-    the authorized expected identity and admitted profiles, never from the receipt.
+    {"state": "legacy-unsealed"} when read_evidence found neither control file and the route does not
+    require v1 (sealing_required), {"state": "unsealed"} when it does; {"state": "verified",
+    "members", "payload_bytes", "manifest_sha256", "replay"} when `compiler_evidence verify` reproduces
+    the sealed manifest from the extracted bytes and the lab and corpus replay from them
+    (sealed_lab_replay, sealed_corpus_replay); otherwise {"state": "refused", "reason"}. The identity
+    comes from the authorized expected identity and admitted profiles, never from the receipt.
     """
     import tempfile
-    result: dict = {"state": "legacy-unsealed"}
+    result: dict = {"state": "unsealed" if required else "legacy-unsealed"}
     if "sealed_files" in throughput:
         files = throughput.get("sealed_files")
         identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile},
@@ -813,16 +914,22 @@ def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dic
                                                 os.path.join(temporary, "identity.tsv")],
                                                capture_output=True, text=True, timeout=EVIDENCE_VERIFY_TIMEOUT_SECONDS,
                                                check=False)
-                lines = (completed.stdout or "").strip().splitlines()
-                line = lines[-1] if lines else (completed.stderr or "").strip()[-400:]
-                fields = dict(item.split("=", 1) for item in line.split()[1:] if "=" in item)
-                if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
-                        fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
-                        re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
-                    result = {"state": "verified", "members": int(fields["members"]),
-                              "payload_bytes": int(fields["payload_bytes"]), "manifest_sha256": fields["manifest_sha256"]}
-                else:
-                    result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
+                    lines = (completed.stdout or "").strip().splitlines()
+                    line = lines[-1] if lines else (completed.stderr or "").strip()[-400:]
+                    fields = dict(item.split("=", 1) for item in line.split()[1:] if "=" in item)
+                    if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
+                            fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
+                            re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
+                        try:
+                            replay = {"lab_pairs": sealed_lab_replay(files),
+                                      "corpus_cases": sealed_corpus_replay(files, temporary)}
+                            result = {"state": "verified", "members": int(fields["members"]),
+                                      "payload_bytes": int(fields["payload_bytes"]),
+                                      "manifest_sha256": fields["manifest_sha256"], "replay": replay}
+                        except (ValueError, LookupError, TypeError, AttributeError, ArithmeticError) as error:
+                            result["reason"] = f"sealed raw evidence does not replay: {error}"
+                    else:
+                        result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
             except (OSError, ValueError, subprocess.SubprocessError, UnicodeError) as error:
                 result["reason"] = f"sealed evidence could not be verified: {error.__class__.__name__}: {error}"
     return result
@@ -835,6 +942,9 @@ def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
     if bundle.get("state") == "legacy-unsealed":
         if claimed is not None:
             problems.append("receipt names sealed raw evidence that the artifact does not carry")
+    elif bundle.get("state") == "unsealed":
+        problems.append(f"sealed raw evidence {EVIDENCE_INVENTORY} is required on this route, but the artifact "
+                        "carries neither control file")
     elif bundle.get("state") != "verified":
         problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
     elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != EVIDENCE_INVENTORY or \
@@ -850,8 +960,10 @@ def evidence_bundle_note(bundle: dict) -> str:
         note = ("raw evidence: legacy-unsealed (no v1 manifest or seal, #2918); the outcome stands but its "
                 "retained raw bytes are unverified")
     elif bundle.get("state") == "verified":
+        replay = bundle.get("replay") or {}
         note = (f"raw evidence: sealed {EVIDENCE_INVENTORY} verified natively, {bundle['members']} members, "
-                f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}")
+                f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}; replayed "
+                f"{replay.get('lab_pairs', 'NA')} lab pairs and {replay.get('corpus_cases', 'NA')} corpus cases")
     return note
 
 
@@ -1299,6 +1411,24 @@ def machine_record(raw: object, receipt: object, mode: str, run_id: str, attempt
                 if not wanted or value[key] != wanted:
                     problems.append(f"machine-specification record {key} {value[key]!r} is not this attempt's {wanted!r}")
     return problems, facts
+
+
+# The producer seals every measured ordinary attempt from the revision that added this (#2918).
+SEALING_PRODUCER = "tools/bench_direct/compiler_compare.py"
+SEALING_PRODUCER_MARKER = b"def seal_evidence("
+
+
+def sealing_required(api: Api, revision: str) -> bool:
+    """Whether an authenticated run revision's producer sealed its measured ordinary attempts (#2918).
+
+    Only a readable producer without the sealing step is a legacy revision whose recovered
+    attempt may be legacy-unsealed; a malformed revision, an unreadable or absent file and
+    every later revision require v1.
+    """
+    content = None
+    if isinstance(revision, str) and SHA.fullmatch(revision):
+        content, unused_problem = _github_file(api, revision, SEALING_PRODUCER)
+    return not content or SEALING_PRODUCER_MARKER in content
 
 
 def machine_record_required(api: Api, revision: str) -> bool:
@@ -5240,6 +5370,68 @@ def utility_leg_records(authority: dict, files: dict[str, bytes], host: dict, te
 
 
 
+def lab_raw_inference(files: dict[str, bytes], prefix: str, records: list, variant_meta: dict, summary: dict,
+                      raw: dict, seed: int, min_effect: float) -> object:
+    """Recompute a compare lab's inference from its retained raw pairs with the trusted uarch_lab statistics.
+
+    Each record must be the next member of the declared ABBA order, succeeded, deterministic and
+    bounded, with its counter state equal to its variant's actual probe and the raw counter and
+    compiler-metrics files its availability claims. The saved counters, metrics, phases, checks
+    and verdict must equal the recomputed ones; ValueError otherwise. Returns the phases.
+    """
+    from sampling_qualification_receipt import _lab
+    loaded = []
+    for index, record in enumerate(records):
+        number, variant = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
+        order = "AB" if number % 2 else "BA"
+        if not isinstance(record, dict) or type(record.get("pair")) is not int or record["pair"] != number or \
+                record.get("order") != order or record.get("variant") != variant or \
+                type(record.get("exit")) is not int or record["exit"] != 0 or record.get("identical") is not True or \
+                not _number(record.get("span_s")) or \
+                not 0 < record["span_s"] <= 3600 or type(record.get("counters")) is not bool:
+            raise ValueError("lab raw pair is failed, truncated, unordered or non-deterministic")
+        if record["counters"] is not variant_meta[variant]["capabilities"]["perf_stat"]["usable"]:
+            raise ValueError("lab raw timed counter status differs from its actual probe")
+        for field in ("cpu_s", "maxrss_bytes", "harness_rss_bytes", "wrapper_rss_bytes"):
+            value = record.get(field)
+            if value is not None and (not _number(value) or value < 0):
+                raise ValueError("lab unavailable resource observation is malformed")
+        stem = prefix + "pairs/" + f"{number:04d}-{variant}"
+        counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")
+        if record["counters"] and (not isinstance(counter_raw, bytes) or not counter_raw) or \
+                variant_meta[variant]["collection"]["metrics_out"] and (not isinstance(metrics_raw, bytes) or not metrics_raw):
+            raise ValueError("lab claimed counters/compiler metrics lack their raw files")
+        rows = _lab.parse_stat((counter_raw or b"").decode("utf-8"))
+        metrics = _lab.parse_cc_metrics((metrics_raw or b"").decode("utf-8"))
+        wall_ns = metrics["header"].get("wall_ns")
+        task = record.get("cpu_s") if record["counters"] is False else _lab.task_seconds(rows)
+        loaded.append(dict(record, values=_lab.stat_values(rows), lines=_lab.stat_lines(rows), metrics=metrics,
+                           cc_wall_s=_lab.ratio(wall_ns, 1e9) if type(wall_ns) in (int, float) else None, task_s=task))
+    pairs = _lab.complete_pairs(loaded)
+    metrics = {key: dict(_lab.compare_series([(pair["metrics_a"][key], pair["metrics_b"][key]) for pair in pairs],
+                    unit, direction, seed, time_metric=unit == "s", floor=_lab.metric_floor(key, min_effect)), label=label)
+               for key, unit, direction, label in _lab.COMPARE_METRICS}
+    phase_records = [(_lab.measured_input(pair["a"]["metrics"]), _lab.measured_input(pair["b"]["metrics"])) for pair in pairs]
+    phase_records = [(a, b) for a, b in phase_records if a and b]
+    phases = None
+    if phase_records:
+        phases = {}
+        for phase in _lab.PHASES + ("total",):
+            a, b = (_lab.phase_ns_series([pair[side] for pair in phase_records], phase) for side in (0, 1))
+            values = [(x / 1e6, y / 1e6) for x, y in zip(a, b)] if a and b else [(None, None)] * len(phase_records)
+            phases[phase] = _lab.compare_series(values, "ms", "lower", seed, time_metric=True, floor=min_effect / 100.0)
+    counter_states = [variant_meta[key]["capabilities"]["perf_stat"] for key in ("a", "b")]
+    counters = {"perf_stat": all(row["usable"] for row in counter_states),
+                "reason": "; ".join(sorted({str(row["reason"]) for row in counter_states}))}
+    if summary.get("counters") != counters or summary.get("phase_metrics") != raw.get("phase_metrics"):
+        raise ValueError("lab saved optional counter/phase availability contradicts raw observations")
+    if summary.get("metrics") != metrics or summary.get("phases") != phases or \
+            summary.get("checks") != _lab.compare_checks(pairs) or \
+            summary.get("verdict") != _lab.compare_verdict(metrics, phases, min_effect):
+        raise ValueError("lab inference contradicts independently retained raw pairs")
+    return phases
+
+
 def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg: str, binaries: dict, *,
                           expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor",
                           expected_profile: str = "compiler-compare-v1", work_root: str | None = None) -> dict:
@@ -5312,55 +5504,7 @@ def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg:
             if not isinstance(files.get(prefix + key + "/" + suffix), bytes):
                 raise ValueError("utility ordinary raw preparation/warmup/command log is missing")
     sampling_json(files, prefix + "a/env/env.json")
-    loaded = []
-    for index, record in enumerate(records):
-        number, variant = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
-        order = "AB" if number % 2 else "BA"
-        if not isinstance(record, dict) or type(record.get("pair")) is not int or record["pair"] != number or \
-                record.get("order") != order or record.get("variant") != variant or \
-                type(record.get("exit")) is not int or record["exit"] != 0 or record.get("identical") is not True or \
-                not _number(record.get("span_s")) or \
-                not 0 < record["span_s"] <= 3600 or type(record.get("counters")) is not bool:
-            raise ValueError("utility ordinary raw pair is failed, truncated, unordered or non-deterministic")
-        if record["counters"] is not variant_meta[variant]["capabilities"]["perf_stat"]["usable"]:
-            raise ValueError("utility raw timed counter status differs from its actual probe")
-        for field in ("cpu_s", "maxrss_bytes", "harness_rss_bytes", "wrapper_rss_bytes"):
-            value = record.get(field)
-            if value is not None and (not _number(value) or value < 0):
-                raise ValueError("utility unavailable resource observation is malformed")
-        stem = prefix + "pairs/" + f"{number:04d}-{variant}"
-        counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")
-        if record["counters"] and (not isinstance(counter_raw, bytes) or not counter_raw) or \
-                variant_meta[variant]["collection"]["metrics_out"] and (not isinstance(metrics_raw, bytes) or not metrics_raw):
-            raise ValueError("utility claimed counters/compiler metrics lack their raw files")
-        rows = _lab.parse_stat((counter_raw or b"").decode("utf-8"))
-        metrics = _lab.parse_cc_metrics((metrics_raw or b"").decode("utf-8"))
-        wall_ns = metrics["header"].get("wall_ns")
-        task = record.get("cpu_s") if record["counters"] is False else _lab.task_seconds(rows)
-        loaded.append(dict(record, values=_lab.stat_values(rows), lines=_lab.stat_lines(rows), metrics=metrics,
-                           cc_wall_s=_lab.ratio(wall_ns, 1e9) if type(wall_ns) in (int, float) else None, task_s=task))
-    pairs = _lab.complete_pairs(loaded)
-    metrics = {key: dict(_lab.compare_series([(pair["metrics_a"][key], pair["metrics_b"][key]) for pair in pairs],
-                    unit, direction, 20261003, time_metric=unit == "s", floor=_lab.metric_floor(key, 0.5)), label=label)
-               for key, unit, direction, label in _lab.COMPARE_METRICS}
-    phase_records = [(_lab.measured_input(pair["a"]["metrics"]), _lab.measured_input(pair["b"]["metrics"])) for pair in pairs]
-    phase_records = [(a, b) for a, b in phase_records if a and b]
-    phases = None
-    if phase_records:
-        phases = {}
-        for phase in _lab.PHASES + ("total",):
-            a, b = (_lab.phase_ns_series([pair[side] for pair in phase_records], phase) for side in (0, 1))
-            values = [(x / 1e6, y / 1e6) for x, y in zip(a, b)] if a and b else [(None, None)] * len(phase_records)
-            phases[phase] = _lab.compare_series(values, "ms", "lower", 20261003, time_metric=True, floor=0.005)
-    counter_states = [variant_meta[key]["capabilities"]["perf_stat"] for key in ("a", "b")]
-    counters = {"perf_stat": all(row["usable"] for row in counter_states),
-                "reason": "; ".join(sorted({str(row["reason"]) for row in counter_states}))}
-    if summary.get("counters") != counters or summary.get("phase_metrics") != raw.get("phase_metrics"):
-        raise ValueError("utility saved optional counter/phase availability contradicts raw observations")
-    if summary.get("metrics") != metrics or summary.get("phases") != phases or \
-            summary.get("checks") != _lab.compare_checks(pairs) or \
-            summary.get("verdict") != _lab.compare_verdict(metrics, phases, 0.5):
-        raise ValueError("utility ordinary inference contradicts independently retained raw pairs")
+    phases = lab_raw_inference(files, prefix, records, variant_meta, summary, raw, 20261003, 0.5)
     # Flags, cross-arm outputs, wide CIs and NA counters remain report-only.
     return {"complete_pairs": count, "observed_timed_wall_us": sum(row["span_s"] for row in records) * 1000000,
             "verdict": summary["verdict"], "checks": summary["checks"], "warnings": summary.get("warnings"),
@@ -5952,7 +6096,8 @@ def main() -> int:
                 # that names another request run, or none, cannot name a sealed bundle and refuses it.
                 request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
                     titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
-                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt)
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt,
+                                                         not recover or sealing_required(api, workflow_revision))
                 if evidence_bundle_note(evidence_bundle):
                     notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):
