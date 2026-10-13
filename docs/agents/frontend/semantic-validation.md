@@ -13,6 +13,12 @@ for callers that explicitly pair them with `c_lower_to_ir`.
 The semantic model remains `CAnalysisResult` (`CParseResult` is its compatibility
 name). Validation uses its types, entities, declaration ranges, identifier
 bindings, delimiter index and scope index. It does not construct a second IR.
+Size and alignment operator recognition in semantic analysis and lowering uses
+the existing well-known symbol IDs. `C_ALIGNOF_WORDS` preserves `_Alignof`,
+`__alignof` and `__alignof__`; `C_SIZEOF_ALIGNOF_WORDS` additionally accepts
+`sizeof`. Readers that accept plain C23 `alignof` retain their separate rule.
+Uninterned tokens retain spelling lookup. `c_test_word_class_token_kinds`
+checks the spelling and ID paths, including tokens with no accessible spelling.
 Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.

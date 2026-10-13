@@ -48183,6 +48183,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_word_class_token_kinds(UnitTestArgumen
         {S8("integer"), 0, 0, 0},
         {S8("Const"), 0, 0, 0},
         {S8("types"), 0, 0, 0},
+        {S8("sizeof"), C_TEST_WORD_CLASS_SIZEOF_ALIGNOF, 0, 0},
+        {S8("_Alignof"), C_TEST_WORD_CLASS_ALIGNOF | C_TEST_WORD_CLASS_SIZEOF_ALIGNOF, 0, 0},
+        {S8("__alignof"), C_TEST_WORD_CLASS_ALIGNOF | C_TEST_WORD_CLASS_SIZEOF_ALIGNOF, 0, 0},
+        {S8("__alignof__"), C_TEST_WORD_CLASS_ALIGNOF | C_TEST_WORD_CLASS_SIZEOF_ALIGNOF, 0, 0},
+        {S8("alignof"), 0, 0, 0},
+        {S8("Sizeof"), 0, 0, 0},
+        {S8("sizeof_suffix"), 0, 0, 0},
+        {S8("__alignof___"), 0, 0, 0},
     };
     CPreprocessDialect const dialects[] = {
         C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU99, C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_GNU23,

@@ -312,7 +312,7 @@ enum
 };
 BUSTER_F_DECL u64 c_test_parse_tag_scan_count(u32 slot);
 
-// Observable answers of the five production specifier-word token queries,
+// Observable answers of the production specifier and size/alignment token queries,
 // including their qualifier writes. No counters or state enter production.
 enum
 {
@@ -326,6 +326,8 @@ enum
     C_TEST_WORD_CLASS_RESTRICT = 1 << 7,
     C_TEST_WORD_CLASS_ATOMIC = 1 << 8,
     C_TEST_WORD_CLASS_QUALIFIERS_AGREE = 1 << 9,
+    C_TEST_WORD_CLASS_ALIGNOF = 1 << 10,
+    C_TEST_WORD_CLASS_SIZEOF_ALIGNOF = 1 << 11,
 };
 BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
 
