@@ -1534,7 +1534,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
     // not an address — an INDEX into one, reachable now that vector-ABI
     // calls and signatures select, snapshots the immutable SSA value into a
     // dedicated 64-byte slot and hands out that slot's address instead.
-    if (value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER)
+    // FIELD/INDEX/DEREFERENCE places carry general-class addresses even
+    // when their object type is a 512-bit vector. Only rvalues need a snapshot.
+    if (value->category == IR_VALUE_VALUE && (value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER))
     {
         u32 vector_register;
         if (!machine_x64_operand_register(selector, base, &vector_register))

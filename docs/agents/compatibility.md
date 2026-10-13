@@ -31,6 +31,7 @@ directory and removes the compiler and in-progress outputs.
 | QEMU (opt-in Linux x86-64 TCG census) | [QEMU](compatibility/qemu.md) |
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
 | curl/libcurl (Linux x86-64 blocker census) | [curl/libcurl](compatibility/curl.md) |
+| SDL3 (Linux x86-64 pending qualification intake) | [SDL3](compatibility/sdl3.md) |
 | Clang test corpus | [Clang suite](compatibility/clang-suite.md) |
 
 ## Compiler selection

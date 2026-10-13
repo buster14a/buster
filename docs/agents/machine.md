@@ -723,6 +723,15 @@ hosts execute its independent expected-value fixture.
   valid canonical-only inline-assembly transaction. Current unsupported assembly
   controls require structured refusal and preserve existing output artifacts;
   ABI retirement no longer doubles as a negative test.
+- X86 vector places retain their general-register subobject address when an
+  address is taken or a vector array decays. Only canonical vector rvalues
+  take the ZMM-to-frame snapshot path in `machine_x64_select_place_address_offset`;
+  the canonical type alone does not distinguish a place from its stored value.
+  `compiler_driver_test_wide_vector_place_address` checks member addresses,
+  vector-array decay and indexed addresses, pointer identity, scalar writes,
+  guard storage and immutable rvalue lane snapshots on Linux/macOS/Windows
+  objects, both allocators/frontend forms, O0/O2 and baseline/Haswell/Zen 5.
+  Matching desktop hosts execute every supported CPU profile.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;

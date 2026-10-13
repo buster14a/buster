@@ -1,0 +1,12 @@
+Breakpoint 1, c_test_direct_ssa_nested_do_while_work (arguments=0x7fffffffb5e0) at /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/tests/compiler/frontend/c/c_test.c:57231
+warning: Source file is more recent than executable.
+57231	{
+Breakpoint 2 at 0x555557277716: file /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/lib/compiler/frontend/c/c_gen.c, line 7297.
+Breakpoint 3 at 0x555556e6001a: file /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/tests/compiler/frontend/c/c_test.c, line 57246.
+ordinary_steps != UINT64_MAX && ordinary_levels != UINT64_MAX && ordinary_exit_blocks == 0 failed at /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_direct_ssa_nested_do_while_work:57245
+
+Program received signal SIGTRAP, Trace/breakpoint trap.
+0x0000555556cf5d7f in buster_test_error_arguments (arguments=0x7fffffffb5e0, line=57245, function=..., file_path=..., format=...) at /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/tests/test.c:3222
+3222	        os_fail();
+../4029-evidence/eager-control.gdb:13: Error in sourced command file:
+No symbol "ordinary_exit_blocks" in current context.
