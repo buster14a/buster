@@ -2961,9 +2961,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_i386_abi(UnitTestArguments* arguments
     return result;
 }
 
+// ir_type_from_id answers only rows a table actually holds: a missing table,
+// an out-of-range id, or a row-less table with a nonzero count (#3952) is null.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_type_from_id_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrType rows[2] = {0};
+    IrTypeTable table = {.types = rows, .count = 2, .capacity = 2};
+    IrTypeTable rowless = {.types = 0, .count = 2, .capacity = 2};
+    BUSTER_TEST(arguments, ir_type_from_id(&table, (IrTypeId){.value = 1}) == rows + 1);
+    BUSTER_TEST(arguments, ir_type_from_id(&table, (IrTypeId){.value = 2}) == 0);
+    BUSTER_TEST(arguments, ir_type_from_id(0, (IrTypeId){.value = 0}) == 0);
+    BUSTER_TEST(arguments, ir_type_from_id(&rowless, (IrTypeId){.value = 1}) == 0);
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_type_from_id_bounds);
     BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
