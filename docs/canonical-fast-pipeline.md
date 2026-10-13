@@ -520,13 +520,28 @@ What the data show:
   hosted run-to-run range. Neither is established here.
 
 Interning is therefore the cheaper way to obtain most of the constant reuse,
-with less memory and without the spill growth. Both stay opt-in. Adopting
-either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
-peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
-measures both flags on the 9700X; its method is in
-[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
-expect today's default, so enabling interning by default would also update
-those expectations.
+with less memory and without the spill growth. The fixed report-only profile
+`profile: constant-reuse-acceptance-v1` measures both flags on the 9700X; its
+method is in [benchmarking.md](agents/benchmarking.md).
+
+### Zen 5 measurement (9700X)
+
+The profile ran on main `446f742e`, check
+[115128610735](https://github.com/buster14a/buster/runs/115128610735). It used
+one binary on the `-g0` unity `-c` self-host compile, with 20 ABBA pairs per
+cell. Ratios are B (flag) over A (default):
+
+| Flag | Wall [95% CI] | Retired instructions | Peak RSS | Code bytes |
+| --- | --- | --- | --- | --- |
+| `-fcanonical-intern-constants` | 0.9932 [0.9912, 0.9954] | 0.9868 | −1.81% | −1.62% |
+| `-fcanonical-fast-cse` | 1.0024 [1.0007, 1.0034] | 0.9957 | −0.47% | −1.96% |
+
+Both flags left diagnostics identical to the default. Interning is a
+detectable compile-time win, while the late table is a detectable cost that
+buys 0.34 points more code reduction. Interning is the only adoption candidate
+under the throughput priority. Both stay opt-in until the owner decides on
+#3011. Enabling interning by default would also update the C frontend's
+row-capacity, codegen-shape and CSE-count tests, which expect today's default.
 
 ## Tests
 
