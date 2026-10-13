@@ -222,17 +222,52 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_has_line(String8 text, String8 expected)
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL void ffmpeg_profile_required_features(Arena* arena, String8List* required)
+{
+    String8 names[] = {
+        S8("ARCH_X86_64"), S8("HAVE_INLINE_ASM"), S8("HAVE_X86ASM"), S8("HAVE_INTRINSICS_SSE2"), S8("CONFIG_RUNTIME_CPUDETECT"),
+        S8("HAVE_AESNI_EXTERNAL"), S8("HAVE_AMD3DNOW_EXTERNAL"), S8("HAVE_AMD3DNOWEXT_EXTERNAL"),
+        S8("HAVE_AVX_EXTERNAL"), S8("HAVE_AVX2_EXTERNAL"), S8("HAVE_AVX512_EXTERNAL"), S8("HAVE_AVX512ICL_EXTERNAL"),
+        S8("HAVE_FMA3_EXTERNAL"), S8("HAVE_FMA4_EXTERNAL"), S8("HAVE_MMX_EXTERNAL"), S8("HAVE_MMXEXT_EXTERNAL"),
+        S8("HAVE_SSE_EXTERNAL"), S8("HAVE_SSE2_EXTERNAL"), S8("HAVE_SSE3_EXTERNAL"), S8("HAVE_SSE4_EXTERNAL"),
+        S8("HAVE_SSE42_EXTERNAL"), S8("HAVE_SSSE3_EXTERNAL"), S8("HAVE_XOP_EXTERNAL"),
+        S8("HAVE_MMXEXT_INLINE"), S8("HAVE_SSSE3_INLINE")
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        string8_list_push(arena, required, names[i]);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 ffmpeg_profile_test_header(Arena* arena, String8 omitted)
+{
+    String8List required = {0};
+    String8List rows = {0};
+    ffmpeg_profile_required_features(arena, &required);
+    SliceString8 features = string8_list_to_slice(arena, required);
+    for (u64 i = 0; i < features.length; i += 1)
+    {
+        if (!omitted.length || !string_equal(features.pointer[i], omitted))
+        {
+            string8_list_push(arena, &rows, string_format(arena, S8("#define {S8} 1\n"), features.pointer[i]));
+        }
+    }
+    return string_join_arena(arena, string8_list_to_slice(arena, rows), false);
+}
+
 BUSTER_GLOBAL_LOCAL String8 ffmpeg_profile_manifest(Arena* arena, String8 config_h, String8 config_mak, String8 nasm, bool* valid)
 {
     String8List rows = {0};
+    String8List required = {0};
     string8_list_push(arena, &rows, S8("feature\tstatus\texpected\n"));
-    String8 names[] = {S8("ARCH_X86_64"), S8("HAVE_INLINE_ASM"), S8("HAVE_X86ASM"), S8("HAVE_INTRINSICS_SSE2"), S8("CONFIG_RUNTIME_CPUDETECT")};
+    ffmpeg_profile_required_features(arena, &required);
+    SliceString8 names = string8_list_to_slice(arena, required);
     bool result = true;
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    for (u64 i = 0; i < names.length; i += 1)
     {
-        bool present = ffmpeg_has_line(config_h, string_format(arena, S8("#define {S8} 1"), names[i]));
+        bool present = ffmpeg_has_line(config_h, string_format(arena, S8("#define {S8} 1"), names.pointer[i]));
         result = present && result;
-        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\t1\n"), names[i], present ? S8("present") : S8("missing")));
+        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\t1\n"), names.pointer[i], present ? S8("present") : S8("missing")));
     }
     String8 x86asm = string_format(arena, S8("X86ASM={S8}"), nasm);
     String8 depx86asm = string_format(arena, S8("DEPX86ASM={S8}"), nasm);
@@ -323,6 +358,39 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm_family_record(Arena* arena, String8 tex
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL void ffmpeg_checkasm_required_families(Arena* arena, String8List* families)
+{
+    String8 names[] = {S8("h264chroma"), S8("h264dsp"), S8("h264pred"), S8("h264qpel"),
+                       S8("hevc_add_res"), S8("hevc_deblock"), S8("hevc_idct"), S8("hevc_pel"), S8("hevc_sao"),
+                       S8("flacdsp"), S8("sw_scale")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        string8_list_push(arena, families, names[i]);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm_not_run_ledger(Arena* arena, String8 output, String8 compiler)
+{
+    String8List rows = {0};
+    String8List families = {0};
+    string8_list_push(arena, &rows, S8("selection\tstatus\toptimized_function_pointers\n"));
+    string8_list_push(arena, &rows, S8("x86_checkasm_object\tnot-run\tunknown\n"));
+    string8_list_push(arena, &rows, S8("all\tnot-run\tunknown\n"));
+    ffmpeg_checkasm_required_families(arena, &families);
+    SliceString8 names = string8_list_to_slice(arena, families);
+    for (u64 i = 0; i < names.length; i += 1)
+    {
+        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\tnot-run\tunknown\n"), names.pointer[i]));
+    }
+    return clang_suite_write(arena, path_join(arena, output, string_format(arena, S8("checkasm-{S8}-counts.tsv"), compiler)),
+                             string_join_arena(arena, string8_list_to_slice(arena, rows), false));
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm_counts_match(u64 reference, u64 candidate)
+{
+    return reference == candidate;
+}
+
 BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm(Arena* arena, String8 directory, String8 output, String8 compiler, u64* total_functions)
 {
     String8 executable = path_join(arena, directory, S8("tests/checkasm/checkasm"));
@@ -337,14 +405,14 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm(Arena* arena, String8 directory, String
     bool valid = abi_valid && ffmpeg_ok(all) && ffmpeg_checkasm_summary(all.error, &all_count);
     string8_list_push(arena, &rows, string_format(arena, S8("x86_checkasm_object\t{S8}\t{S8}\n"), abi_valid ? S8("built") : S8("missing"), S8("required")));
     string8_list_push(arena, &rows, string_format(arena, S8("all\t{S8}\t{u64}\n"), valid ? S8("pass") : S8("fail"), all_count));
-    String8 families[] = {S8("h264chroma"), S8("h264dsp"), S8("h264pred"), S8("h264qpel"),
-                          S8("hevc_add_res"), S8("hevc_deblock"), S8("hevc_idct"), S8("hevc_pel"), S8("hevc_sao"),
-                          S8("flacdsp"), S8("sw_scale")};
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(families); i += 1)
+    String8List families = {0};
+    ffmpeg_checkasm_required_families(arena, &families);
+    SliceString8 names = string8_list_to_slice(arena, families);
+    for (u64 i = 0; i < names.length; i += 1)
     {
-        bool family_valid = ffmpeg_checkasm_family_record(arena, all.error, families[i]);
+        bool family_valid = ffmpeg_checkasm_family_record(arena, all.error, names.pointer[i]);
         valid = family_valid && valid;
-        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\tunknown\n"), families[i],
+        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\tunknown\n"), names.pointer[i],
                                                        family_valid ? S8("passed-record") : S8("missing-passed-record")));
     }
     bool written = clang_suite_write(arena, path_join(arena, output, string_format(arena, S8("checkasm-{S8}-counts.tsv"), compiler)),
@@ -365,7 +433,10 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm_controls_self_test(void)
     bool malformed = !ffmpeg_checkasm_summary(S8("checkasm: all seventeen tests passed\n"), &count);
     bool unknown = !ffmpeg_checkasm_summary(S8("unrecognized checkasm output\n"), &count);
     bool duplicate = !ffmpeg_checkasm_summary(S8("checkasm: all 1 tests passed\ncheckasm: all 1 tests passed\n"), &count);
-    bool result = positive && zero && empty && no_tests && failed && malformed && unknown && duplicate;
+    bool equal_pointer_counts = ffmpeg_checkasm_counts_match(7, 7);
+    bool differing_pointer_counts = !ffmpeg_checkasm_counts_match(7, 6);
+    bool result = positive && zero && empty && no_tests && failed && malformed && unknown && duplicate &&
+                  equal_pointer_counts && differing_pointer_counts;
     return result;
 }
 
@@ -409,15 +480,18 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_config_controls_self_test(Arena* arena)
 
 BUSTER_GLOBAL_LOCAL bool ffmpeg_profile_self_test(Arena* arena)
 {
-    String8 config_h = S8("#define ARCH_X86_64 1\n#define HAVE_INLINE_ASM 1\n#define HAVE_X86ASM 1\n#define HAVE_INTRINSICS_SSE2 1\n#define CONFIG_RUNTIME_CPUDETECT 1\n");
+    String8 config_h = ffmpeg_profile_test_header(arena, (String8){0});
     String8 config_mak = S8("X86ASM=/usr/bin/nasm\nDEPX86ASM=/usr/bin/nasm\n");
     bool valid = false;
     String8 manifest = ffmpeg_profile_manifest(arena, config_h, config_mak, S8("/usr/bin/nasm"), &valid);
-    bool positive = valid && ffmpeg_contains(manifest, S8("HAVE_X86ASM\tpresent\t1"));
-    String8 missing_inline = S8("#define ARCH_X86_64 1\n#define HAVE_X86ASM 1\n#define HAVE_INTRINSICS_SSE2 1\n#define CONFIG_RUNTIME_CPUDETECT 1\n");
-    String8 missing_x86asm = S8("#define ARCH_X86_64 1\n#define HAVE_INLINE_ASM 1\n#define HAVE_INTRINSICS_SSE2 1\n#define CONFIG_RUNTIME_CPUDETECT 1\n");
-    String8 missing_sse2 = S8("#define ARCH_X86_64 1\n#define HAVE_INLINE_ASM 1\n#define HAVE_X86ASM 1\n#define CONFIG_RUNTIME_CPUDETECT 1\n");
-    String8 missing_runtime = S8("#define ARCH_X86_64 1\n#define HAVE_INLINE_ASM 1\n#define HAVE_X86ASM 1\n#define HAVE_INTRINSICS_SSE2 1\n");
+    bool positive = valid && ffmpeg_contains(manifest, S8("HAVE_X86ASM\tpresent\t1")) &&
+                    ffmpeg_contains(manifest, S8("HAVE_AVX2_EXTERNAL\tpresent\t1"));
+    String8 missing_inline = ffmpeg_profile_test_header(arena, S8("HAVE_INLINE_ASM"));
+    String8 missing_x86asm = ffmpeg_profile_test_header(arena, S8("HAVE_X86ASM"));
+    String8 missing_sse2 = ffmpeg_profile_test_header(arena, S8("HAVE_INTRINSICS_SSE2"));
+    String8 missing_runtime = ffmpeg_profile_test_header(arena, S8("CONFIG_RUNTIME_CPUDETECT"));
+    String8 missing_external_tier = ffmpeg_profile_test_header(arena, S8("HAVE_AVX2_EXTERNAL"));
+    String8 missing_inline_tier = ffmpeg_profile_test_header(arena, S8("HAVE_SSSE3_INLINE"));
     bool control_valid = false;
     ffmpeg_profile_manifest(arena, missing_inline, config_mak, S8("/usr/bin/nasm"), &control_valid);
     bool missing_inline_rejected = !control_valid;
@@ -427,6 +501,10 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_profile_self_test(Arena* arena)
     bool missing_sse2_rejected = !control_valid;
     ffmpeg_profile_manifest(arena, missing_runtime, config_mak, S8("/usr/bin/nasm"), &control_valid);
     bool missing_runtime_rejected = !control_valid;
+    ffmpeg_profile_manifest(arena, missing_external_tier, config_mak, S8("/usr/bin/nasm"), &control_valid);
+    bool missing_external_tier_rejected = !control_valid;
+    ffmpeg_profile_manifest(arena, missing_inline_tier, config_mak, S8("/usr/bin/nasm"), &control_valid);
+    bool missing_inline_tier_rejected = !control_valid;
     ffmpeg_profile_manifest(arena, config_h, config_mak, S8("/usr/local/bin/nasm"), &control_valid);
     bool tool_mismatch_rejected = !control_valid;
     String8 mismatched_dependency = S8("X86ASM=/usr/bin/nasm\nDEPX86ASM=/usr/local/bin/nasm\n");
@@ -434,11 +512,12 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_profile_self_test(Arena* arena)
     bool dependency_mismatch_rejected = !control_valid;
     bool configs = ffmpeg_config_controls_self_test(arena);
     bool checkasm = ffmpeg_checkasm_controls_self_test();
-    bool result = positive && missing_inline_rejected && missing_x86asm_rejected && missing_sse2_rejected &&
-                  missing_runtime_rejected && tool_mismatch_rejected && dependency_mismatch_rejected && configs && checkasm;
-    string_print(S8("FFMPEG_HARNESS_CONTROLS status={S8} config_profiles={S8} feature_manifest={S8} nasm_identity={S8} checkasm_parser={S8}\n"),
+    bool feature_floor = positive && missing_inline_rejected && missing_x86asm_rejected && missing_sse2_rejected &&
+                         missing_runtime_rejected && missing_external_tier_rejected && missing_inline_tier_rejected;
+    bool result = feature_floor && tool_mismatch_rejected && dependency_mismatch_rejected && configs && checkasm;
+    string_print(S8("FFMPEG_HARNESS_CONTROLS status={S8} config_profiles={S8} feature_manifest={S8} nasm_identity={S8} checkasm_controls={S8}\n"),
                  result ? S8("pass") : S8("fail"), configs ? S8("pass") : S8("fail"),
-                 (positive && missing_inline_rejected && missing_x86asm_rejected && missing_sse2_rejected && missing_runtime_rejected) ? S8("pass") : S8("fail"),
+                 feature_floor ? S8("pass") : S8("fail"),
                  (positive && tool_mismatch_rejected && dependency_mismatch_rejected) ? S8("pass") : S8("fail"), checkasm ? S8("pass") : S8("fail"));
     return result;
 }
@@ -666,12 +745,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
         bool profile_valid[2] = {0};
         bool built[2] = {0};
         bool checkasm[2] = {0};
+        bool checkasm_attempted[2] = {0};
         u64 checkasm_functions[2] = {0};
         bool media[2] = {0};
         bool fate[2] = {0};
         String8 directories[2] = {path_join(arena, output, S8("reference")), path_join(arena, output, S8("buster"))};
         String8 compiler_names[2] = {S8("clang"), S8("buster")};
         String8 pcm = path_join(arena, output, S8("fixture.pcm"));
+        if (valid && optimized)
+        {
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(compiler_names); i += 1)
+            {
+                valid = ffmpeg_checkasm_not_run_ledger(arena, output, compiler_names[i]) && valid;
+            }
+        }
         if (valid)
         {
             String8 git_arguments[] = {S8("git"), S8("--no-replace-objects"), S8("ls-tree"), S8("-r"), S8("--full-tree"), S8(BUSTER_FFMPEG_COMMIT)};
@@ -711,7 +798,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                     if (optimized)
                     {
                         bool checkasm_built = ffmpeg_make(arena, directories[i], S8("checkasm"), S8("checkasm-build"));
-                        checkasm[i] = checkasm_built && ffmpeg_checkasm(arena, directories[i], output, compiler_names[i], &checkasm_functions[i]);
+                        if (checkasm_built)
+                        {
+                            checkasm_attempted[i] = true;
+                            checkasm[i] = ffmpeg_checkasm(arena, directories[i], output, compiler_names[i], &checkasm_functions[i]);
+                        }
                     }
                     media[i] = ffmpeg_media(arena, directories[i], pcm);
                     // The denominator is only upstream's no-external-sample tests for this configuration.
@@ -723,9 +814,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                     fate[i] = ffmpeg_fate_counts(arena, directories[i], list.output, ran);
                 }
             }
-            string_print(S8("FFMPEG_CENSUS compiler={S8} configure={u32} profile={u32} build={u32} checkasm={u32} functions={u64} media={u32} no_sample_fate={u32}\n"),
-                         compiler_names[i], (u32)configured[i], (u32)profile_valid[i], (u32)built[i], (u32)checkasm[i],
+            string_print(S8("FFMPEG_CENSUS compiler={S8} configure={u32} profile={u32} build={u32} checkasm_attempted={u32} checkasm={u32} functions={u64} media={u32} no_sample_fate={u32}\n"),
+                         compiler_names[i], (u32)configured[i], (u32)profile_valid[i], (u32)built[i], (u32)checkasm_attempted[i], (u32)checkasm[i],
                          checkasm_functions[i], (u32)media[i], (u32)fate[i]);
+        }
+        String8 checkasm_count_comparison = S8("not-run");
+        if (optimized && checkasm_attempted[0] && checkasm_attempted[1])
+        {
+            checkasm_count_comparison = ffmpeg_checkasm_counts_match(checkasm_functions[0], checkasm_functions[1]) ?
+                                       S8("equal-diagnostic-only") : S8("different-unqualified");
         }
         bool matching = false;
         if (configured[0] && configured[1])
@@ -744,18 +841,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
             bool pristine = ffmpeg_pristine(arena, checkout);
             String8 receipt = string_format(arena, S8("BUSTER_FFMPEG_CENSUS_V1\nupstream={S8}\nconfiguration={S8}\n"
                                                      "nasm_path={S8}\nreference_configure={u32}\nreference_profile_manifest={u32}\nreference_build={u32}\n"
-                                                     "reference_checkasm_status={S8}\nreference_checkasm_function_pointers={u64}\nreference_media={u32}\nreference_no_sample_fate={u32}\n"
+                                                     "reference_checkasm_status={S8}\nreference_checkasm_attempted={u32}\nreference_checkasm_function_pointers={u64}\nreference_media={u32}\nreference_no_sample_fate={u32}\n"
                                                      "buster_configure={u32}\nbuster_profile_manifest={u32}\nbuster_build={u32}\n"
-                                                     "buster_checkasm_status={S8}\nbuster_checkasm_function_pointers={u64}\nbuster_media={u32}\nbuster_no_sample_fate={u32}\n"
-                                                     "matching_configurations={u32}\npristine_after={u32}\n"
+                                                     "buster_checkasm_status={S8}\nbuster_checkasm_attempted={u32}\nbuster_checkasm_function_pointers={u64}\nbuster_media={u32}\nbuster_no_sample_fate={u32}\n"
+                                                     "cross_compiler_checkasm_count_comparison={S8}\nmatching_configurations={u32}\npristine_after={u32}\n"
                                                      "sample_fate=not-run\nproduction_dispatch=not-run\nper_function_denominator=unknown\n"
                                                      "video_media=not-run\nperformance_qualified=0\nwhole_issue_qualified=0\n"),
                                             S8(BUSTER_FFMPEG_COMMIT), optimized ? S8("assembly-enabled-software") : S8("portable-software"), nasm,
                                             (u32)configured[0], (u32)profile_valid[0], (u32)built[0],
-                                            optimized ? (checkasm[0] ? S8("pass") : S8("fail")) : S8("not-run"), checkasm_functions[0], (u32)media[0], (u32)fate[0],
+                                            (checkasm_attempted[0] ? (checkasm[0] ? S8("pass") : S8("fail")) : S8("not-run")),
+                                            (u32)checkasm_attempted[0], checkasm_functions[0], (u32)media[0], (u32)fate[0],
                                             (u32)configured[1], (u32)profile_valid[1], (u32)built[1],
-                                            optimized ? (checkasm[1] ? S8("pass") : S8("fail")) : S8("not-run"), checkasm_functions[1],
-                                            (u32)media[1], (u32)fate[1], (u32)matching, (u32)pristine);
+                                            (checkasm_attempted[1] ? (checkasm[1] ? S8("pass") : S8("fail")) : S8("not-run")),
+                                            (u32)checkasm_attempted[1], checkasm_functions[1],
+                                            (u32)media[1], (u32)fate[1], checkasm_count_comparison, (u32)matching, (u32)pristine);
             bool written = clang_suite_write(arena, path_join(arena, output, S8("receipt.txt")), receipt);
             bool checkasm_valid = !optimized || (checkasm[0] && checkasm[1]);
             valid = written && pristine && configured[0] && configured[1] && profile_valid[0] && profile_valid[1] &&

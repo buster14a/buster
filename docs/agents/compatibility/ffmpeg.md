@@ -103,12 +103,23 @@ does not silently remove a failing feature.
 
 For the optimized profile, `feature-manifest.tsv` requires
 `ARCH_X86_64`, `HAVE_INLINE_ASM`, `HAVE_X86ASM`,
-`HAVE_INTRINSICS_SSE2` and `CONFIG_RUNTIME_CPUDETECT`. It also requires the
-generated `X86ASM` and `DEPX86ASM` entries in `ffbuild/config.mak` to equal the
-requested NASM path, which catches configure's fallback to another assembler.
-The run retains NASM's version output and SHA-256 identity. The SSE2 macro is
-only FFmpeg's configure probe; it does not prove that every intrinsic lowered
-to the intended instructions.
+`HAVE_INTRINSICS_SSE2` and `CONFIG_RUNTIME_CPUDETECT`, plus
+`HAVE_MMXEXT_INLINE` and `HAVE_SSSE3_INLINE`. It requires every
+`HAVE_AESNI_EXTERNAL`, `HAVE_AMD3DNOW_EXTERNAL`,
+`HAVE_AMD3DNOWEXT_EXTERNAL`, `HAVE_AVX_EXTERNAL`, `HAVE_AVX2_EXTERNAL`,
+`HAVE_AVX512_EXTERNAL`, `HAVE_AVX512ICL_EXTERNAL`, `HAVE_FMA3_EXTERNAL`,
+`HAVE_FMA4_EXTERNAL`, `HAVE_MMX_EXTERNAL`, `HAVE_MMXEXT_EXTERNAL`,
+`HAVE_SSE_EXTERNAL`, `HAVE_SSE2_EXTERNAL`, `HAVE_SSE3_EXTERNAL`,
+`HAVE_SSE4_EXTERNAL`, `HAVE_SSE42_EXTERNAL`, `HAVE_SSSE3_EXTERNAL` and
+`HAVE_XOP_EXTERNAL` generated from this pin's `ARCH_EXT_LIST_X86_SIMD`. A
+missing assembler or inline-assembly probe fails the profile instead of
+silently accepting a reduced tier set. These are build/configuration floors;
+they do not claim that every instruction tier executes on the host. It also
+requires the generated `X86ASM` and `DEPX86ASM` entries in
+`ffbuild/config.mak` to equal the requested NASM path, which catches
+configure's fallback to another assembler. The run retains NASM's version
+output and SHA-256 identity. The SSE2 macro is only FFmpeg's configure probe;
+it does not prove that every intrinsic lowered to the intended instructions.
 
 ## Correctness and evidence
 
@@ -130,10 +141,16 @@ stdout/stderr and a family ledger are retained.
 
 Upstream's summary counts unique optimized function pointers, not every test
 case or the complete implementation denominator. Family `[OK]` rows are
-grouped reports, not named implementation witnesses. These checks compare
-optimized functions to C references inside each compiler's build; they do not
-prove cross-compiler equivalence or production dispatch. The receipt therefore
-records `production_dispatch=not-run` and
+grouped reports, not named implementation witnesses. A per-compiler checkasm
+status is `not-run` until the checkasm executable is invoked; an earlier
+configure, library build or checkasm-target build failure stays `not-run`,
+with a matching not-run ledger. The receipt reports whether the two aggregate
+pointer counts are equal, different or not run. A difference leaves that
+comparison unqualified and does not identify a compiler fault; equality is
+diagnostic only and does not prove the same functions or implementations ran.
+These checks compare optimized functions to C references inside each compiler's
+build; they do not prove cross-compiler equivalence or production dispatch. The
+receipt therefore records `production_dispatch=not-run` and
 `per_function_denominator=unknown`.
 
 The harness prepares upstream's `tests/pixfmts.mak` through normal generation
@@ -160,9 +177,10 @@ is no performance qualification or ranking.
 ## Hosted scheduling
 
 FFmpeg has no workflow of its own. The no-input `--harness-self-test` runs in
-both existing native-driver lint blocks; it checks configuration construction,
-feature-manifest failures and checkasm summary controls without an external
-checkout or build. Full portable or optimized external builds are reserved for
+both existing native-driver lint blocks; it checks configuration
+construction, the complete pinned x86 feature floor, tool identity, checkasm
+summary and count controls without an external checkout or build. Full portable
+or optimized external builds are reserved for
 the approved shared main-only external-projects workflow under
 [main-only scheduling](../../external-project-ci.md) (#3501). This change adds
 no PR, merge-group, branch-push or manual full-build workload. A qualified
@@ -178,5 +196,8 @@ sample provenance/negative controls and sample-test counts; enabled-component
 and test-asset licensing; existing compiler blockers with their owners; all
 required C actions and libraries; declared video/audio media cells; independent
 reference artifacts; clean/edit/header rebuild, memory and code-size evidence;
-and throughput evidence through the approved 9700X route. Green ordinary
-correctness CI cannot replace those missing results.
+and throughput evidence. Under #4013, eligible build/resource/native-host
+claims use the admitted alternative route; ISA-width, instruction-scheduling,
+branchless-selection and explicit Zen 5 throughput claims require the relevant
+approved hardware experiment. Green ordinary correctness CI cannot replace
+those missing results.
