@@ -94,6 +94,11 @@
     compare-exchange per first fill. `BUSTER_SINGLE_THREADED` compiles the
     atomics to plain accesses.
 
+  The prologue, epilogue and zero-idiom shapes pin the form key the selector
+  picks, so their first lookup prepares that key without a selector search;
+  `machine_x86_64_exact_prewarm_all()` re-checks each pin against the
+  selector and refuses the shape cache on a disagreement (#1125).
+
   The TLS and GOT relocation recipes fill one group at a time under a fill
   claim that returns to idle after each fill, and publish their prepared and
   valid masks with release stores. The whole-table fills over these caches —

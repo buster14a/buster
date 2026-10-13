@@ -10011,6 +10011,9 @@ enum
     MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID = 10575u,
     MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID = 9845u,
     MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID = 9722u,
+    MACHINE_X64_POP_REGISTER_EXACT_FORM_ID = 9724u,
+    MACHINE_X64_RET_EXACT_FORM_ID = 10020u,
+    MACHINE_X64_LEAVE_EXACT_FORM_ID = 10024u,
     MACHINE_X64_ADD_RSP_EXACT_FORM_ID = 9270u,
     MACHINE_X64_PUSH_FRAME_EXACT_FORM_ID = 9490u,
     MACHINE_X64_VMOV_RR_EXACT_FORM_ID = 5635u,
@@ -10081,6 +10084,15 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER(
 // still misses and fails closed.  machine_x86_64_exact_prewarm_all resolves
 // every registration, including the duplicate-signature agreement checks,
 // for the audits.
+//
+// Every x86-64 compile reaches the prologue, epilogue and zero-idiom shapes,
+// and the selector search for them alone (mostly XOR's) cost about 3.4 M
+// instructions of a one-function compile (#1125).  Those registrations pin
+// the durable form key the selector picks, as the exact recipe rows do, and
+// their first lookup prepares that key directly; a stale key fails closed in
+// the key lookup.  machine_x64_metadata_shape_cache_resolve_all still runs
+// the selector for every pinned registration and refuses the cache when it
+// disagrees, so the selector stays the authority the audits check.
 #define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 288u
 #define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
 #define MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY 384u
@@ -10113,6 +10125,8 @@ struct MachineX64MetadataShapeRegistration
     BusterX86MetadataFeatureInput features;
     BusterX86MetadataPhysicalAttributes attributes;
     BusterX86MetadataPhysicalOperand operands[MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY];
+    // The selector's form for this query, pinned; zero selects on resolve.
+    BusterX86MetadataFormKey key;
     u32 operand_count;
     u32 entry;
 };
@@ -13399,10 +13413,9 @@ BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeHashes machine_x64_metadata_shape_has
     return hashes;
 }
 
-// Resolves one registered query exactly as the eager walk resolved it: the
-// generic selector, then the serial plan preparation and its machine token.
-BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataShapeRegistration const* registration,
-                                                            BusterX86MetadataMachineExactToken* token)
+// Runs the generic selector over one registered query.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_select(MachineX64MetadataShapeRegistration const* registration,
+                                                           BusterX86MetadataFormKey* key)
 {
     BusterX86MetadataPhysicalQuery query = {
         .mnemonic = registration->mnemonic,
@@ -13418,10 +13431,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataSh
         .source_semantics = false,
     };
     BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(query);
-    BusterX86MetadataFormKey key = {.form_id = selected.form_id, .stable_hash = selected.stable_hash};
+    *key = (BusterX86MetadataFormKey){.form_id = selected.form_id, .stable_hash = selected.stable_hash};
+    bool result = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected.form_id != UINT32_MAX && selected.stable_hash;
+
+    return result;
+}
+
+// Resolves one registered query as the eager walk resolved it: its form --
+// the pinned key, else the generic selector's -- then the plan
+// preparation and its machine token.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataShapeRegistration const* registration,
+                                                            BusterX86MetadataMachineExactToken* token)
+{
+    BusterX86MetadataFormKey key = registration->key;
     BusterX86MetadataExactPlan plan = {0};
     *token = (BusterX86MetadataMachineExactToken){0};
-    bool result = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected.form_id != UINT32_MAX && selected.stable_hash &&
+    bool result = (key.stable_hash || machine_x64_metadata_shape_select(registration, &key)) &&
                   buster_x86_metadata_exact_plan_prepare(key, &plan) &&
                   buster_x86_metadata_machine_exact_token_for_plan(plan, registration->features, token);
 
@@ -13484,6 +13509,19 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
     return result;
 }
 
+// Registers one closed-set query with the form the selector picks for it
+// pinned; see the shape-cache notes above.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_add_keyed(BusterX86MetadataFormKey key, String8 mnemonic,
+                                                                     BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                                     BusterX86MetadataFeatureInput features,
+                                                                     BusterX86MetadataPhysicalAttributes attributes)
+{
+    if (machine_x64_metadata_shape_cache_add(mnemonic, operands, operand_count, features, attributes))
+    {
+        machine_x64_metadata_shape_registrations[machine_x64_metadata_shape_registration_count - 1u].key = key;
+    }
+}
+
 // Resolves a pending entry under its once-claim, from any thread; a thread
 // that meets the entry busy waits for the resolver's result.  A failed
 // resolution refuses that shape only.  The eager walk refused every bridge
@@ -13506,7 +13544,8 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_entry(MachineX
 
 // Resolves every registration in registration order -- the order of the
 // eager walk -- and repeats its check that queries sharing a signature select
-// the same token, so no gang can reach a pending entry.
+// the same token, so no gang can reach a pending entry.  A pinned key must
+// also be the selector's choice, whether or not a lookup already resolved it.
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
 {
     if (!machine_x64_metadata_shape_cache_complete)
@@ -13529,6 +13568,18 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
                 bool agrees = machine_x64_metadata_shape_resolve(registration, &token) &&
                               entry->state == MACHINE_X64_METADATA_SHAPE_VALID && entry->token.slot_plus_one == token.slot_plus_one &&
                               entry->token.policy_flags == token.policy_flags && entry->token.integrity == token.integrity;
+                if (!agrees)
+                {
+                    machine_x64_metadata_shape_cache_invalid_count += 1;
+                    machine_x64_metadata_shape_cache_ready = false;
+                }
+            }
+            if (registration->key.stable_hash)
+            {
+                BusterX86MetadataFormKey selected = {0};
+                bool agrees = machine_x64_metadata_shape_select(registration, &selected) &&
+                              selected.form_id == registration->key.form_id &&
+                              selected.stable_hash == registration->key.stable_hash;
                 if (!agrees)
                 {
                     machine_x64_metadata_shape_cache_invalid_count += 1;
@@ -13697,8 +13748,10 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_zero(void)
     BusterX86MetadataPhysicalAttributes attributes = {0};
     (void)machine_x64_metadata_shape_cache_add(S8("CDQ"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CQO"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
-    (void)machine_x64_metadata_shape_cache_add(S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
-    (void)machine_x64_metadata_shape_cache_add(S8("LEAVE"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_RET_EXACT_FORM_ID, UINT64_C(0x3b8bf68c76094aa5)},
+                                               S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_LEAVE_EXACT_FORM_ID, UINT64_C(0x0e061e3ec5a0a740)},
+                                               S8("LEAVE"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CPUID"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("NOP"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -13720,8 +13773,10 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
 {
     BusterX86MetadataPhysicalAttributes attributes = {0};
     BusterX86MetadataPhysicalOperand operand = machine_x64_exact_gpr_operand(0, 64);
-    (void)machine_x64_metadata_shape_cache_add(S8("PUSH"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
-    (void)machine_x64_metadata_shape_cache_add(S8("POP"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID, UINT64_C(0x849cc7557c589605)},
+                                               S8("PUSH"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_POP_REGISTER_EXACT_FORM_ID, UINT64_C(0x688b3c3e7157d7f6)},
+                                               S8("POP"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CALL"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     operand.width = operand.reg.width = 32;
     (void)machine_x64_metadata_shape_cache_add(S8("DIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -13755,6 +13810,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void
     BusterX86MetadataPhysicalAttributes attributes = {0};
     String8 binary_names[] = {S8("MOV"), S8("XOR"), S8("ADD"), S8("ADC"), S8("SUB"), S8("SBB"), S8("AND"), S8("OR")};
     u16 binary_widths[] = {8, 16, 32, 64};
+    // The frame-pointer copy and the zero idiom are in every compile.
+    BusterX86MetadataFormKey binary_keys[BUSTER_ARRAY_LENGTH(binary_names)][BUSTER_ARRAY_LENGTH(binary_widths)] = {
+        [0][3] = {MACHINE_X64_MOV_RR_EXACT_FORM_ID, UINT64_C(0x3ab69ab9d0d06329)},
+        [1][2] = {MACHINE_X64_XOR_RR_EXACT_FORM_ID, UINT64_C(0x915fb23b51f8b7d1)},
+    };
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(binary_names); name_index += 1)
     {
         for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(binary_widths); width_index += 1)
@@ -13763,8 +13823,8 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void
             BusterX86MetadataPhysicalOperand operands[2] = {
                 machine_x64_exact_gpr_operand(0, width), machine_x64_exact_gpr_operand(1, width),
             };
-            (void)machine_x64_metadata_shape_cache_add(binary_names[name_index], operands, 2,
-                                                        (BusterX86MetadataFeatureInput){0}, attributes);
+            machine_x64_metadata_shape_cache_add_keyed(binary_keys[name_index][width_index], binary_names[name_index], operands, 2,
+                                                       (BusterX86MetadataFeatureInput){0}, attributes);
         }
     }
     u16 compare_widths[] = {32, 64};
@@ -14073,12 +14133,18 @@ MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void
     {
         pending_rows += machine_x64_metadata_shape_cache[entry_index].state == MACHINE_X64_METADATA_SHAPE_PENDING;
     }
+    u32 pinned_queries = 0;
+    for (u32 registration_index = 0; registration_index < machine_x64_metadata_shape_registration_count; registration_index += 1)
+    {
+        pinned_queries += machine_x64_metadata_shape_registrations[registration_index].key.stable_hash != 0;
+    }
     return (MachineX64MetadataShapeCacheAudit){
         .prepared_rows = machine_x64_metadata_shape_cache_count,
         .registered_queries = machine_x64_metadata_shape_registration_count,
         .resolved_rows = machine_x64_metadata_shape_cache_resolved_count,
         .pending_rows = pending_rows,
         .invalid_rows = machine_x64_metadata_shape_cache_invalid_count,
+        .pinned_queries = pinned_queries,
         .valid = machine_x64_metadata_shape_cache_ready && machine_x64_metadata_shape_cache_count != 0 &&
                  machine_x64_metadata_shape_cache_invalid_count == 0,
     };
