@@ -96,6 +96,7 @@ PROFILE_ROWS = {
     "ide:bench": "FRONTEND_SELECTOR_PROFILE",
     "tool:wild_linker_bench.c": "WILD_LINKER_PROFILE",
     "tool:link_tls_bench.py": "LINK_TLS_PROFILE",
+    "uarch_lab:compare@self-host-inline-compare": "SELFHOST_INLINE_PROFILE",
 }
 
 

@@ -36,7 +36,7 @@
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
 // Minimum-work gate for -fcompile-jobs translation-unit lanes (#53). Entering
-// the multi-lane path costs a fixed compiler_parallel_prewarm(); a link whose
+// the multi-lane path costs a fixed native-family preparation; a link whose
 // native C inputs cannot repay it keeps the one-worker path. Estimated work is
 // each eligible input's file size plus a per-input charge for the fixed cost of
 // a translation unit, in bytes. Calibration pending: the gate is disabled until
@@ -682,8 +682,10 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // Before an embedding caller launches a gang that may compile native C,
 // prepare both native families, including all x86 forms/inline assembly.
 // Idle persistent workers are still live threads; preparing a new target
-// after the first gang starts is too late. The opt-in multi-TU driver calls
-// this before creating its first gang; ordinary serial compilation does not.
+// after the first gang starts is too late. The opt-in multi-TU driver does
+// not call this: it prepares only its cohort's family and releases its own
+// parked gang (lane_release) before preparing another. Ordinary serial
+// compilation does neither.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 // When true, an absent -march keeps the host CPU (the test runners set it);
 // when false, the default is the portable baseline like Clang and GCC (#1557).

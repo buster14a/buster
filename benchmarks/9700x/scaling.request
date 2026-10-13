@@ -7,4 +7,6 @@
 # compiler_receipt.SCALING_PROFILE names. See README.md in this directory.
 #
 # request: issue #424 scaling-v1, first 9700X run
+# request: issue #53 prewarm only the cohort native family, claude/clever-johnson-db6ay6 (count/tiny entry cost)
+# request: issue #53 re-request on docs-only head after 8cedbf9b run 38314166940 was cancelled by a push; same compiler source
 # request: issue #53 lane-gate calibration, gate disabled (MIN_WORK=0), size series

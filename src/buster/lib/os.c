@@ -23,7 +23,8 @@
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
-// shape it exists to avoid.
+// shape it exists to avoid. lane_release joins a parked gang so its caller
+// can run serial initialization again.
 
 #include <buster/lib/os.h>
 #include <buster/lib/os_internal.h>
@@ -8367,6 +8368,19 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
         }
         lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }
+#endif
+}
+
+void lane_release(void)
+{
+#if !BUSTER_SINGLE_THREADED
+    ThreadContext* thread_context = thread_context_selected();
+    BUSTER_CHECK(thread_context != 0);
+    // Releasing from inside a region would join workers that are still
+    // running this caller's callback.
+    BUSTER_CHECK(thread_context->lane_context.lane_count == 1);
+    BUSTER_CHECK(!thread_context->lane_gang || !thread_context->lane_gang->running);
+    lane_gang_release(thread_context);
 #endif
 }
 

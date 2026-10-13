@@ -100,6 +100,11 @@ IR source cursors, module line suppression and inline-assembly symbol changes
 are shared within a TU. Serial table prewarm does not remove these dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
+The driver's own cohorts prepare only their target family. To prepare another
+family later, the owner of a parked gang calls `lane_release()` outside any lane
+region. The calling thread is then the only live thread again, the serial
+prewarm runs, and the next `lane_run` recreates the workers. Releasing never
+helps while another caller's threads are alive.
 
 `buster_x86_metadata_exact_plan_prepare` checks serial initialization only on
 an unprepared key. A prepared key validates and returns immutable process-owned
