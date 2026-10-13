@@ -443,12 +443,14 @@ matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
 constants, the next section measures a construction-time constant cache
 against the late pass.
 
-## Opt-in construction-time constant interning (#3011)
+## Construction-time constant interning (#3011)
 
-`-fcanonical-intern-constants` (cleared by `-fno-canonical-intern-constants`,
-the last one given winning) asks C lowering to reuse an integer constant
-already built earlier in the current block instead of building another one.
-It is independent of every `-O` level and FAST control, and off by default.
+C lowering reuses an integer constant already built earlier in the current
+block instead of building another one. This is on by default;
+`-fno-canonical-intern-constants` turns it off and
+`-fcanonical-intern-constants` turns it back on, the last one given winning.
+It is independent of every `-O` level and FAST control. It was opt-in until
+the Zen 5 measurement below justified making it the default.
 `c_ir_emit_integer_value_at` looks up a 64-slot direct-mapped table shared by
 one lowering. Each function builder takes a fresh generation, so no entry
 crosses a function and none is cleared. The key is the canonical type, the
@@ -539,9 +541,12 @@ cell. Ratios are B (flag) over A (default):
 Both flags left diagnostics identical to the default. Interning is a
 detectable compile-time win, while the late table is a detectable cost that
 buys 0.34 points more code reduction. Interning is the only adoption candidate
-under the throughput priority. Both stay opt-in until the owner decides on
-#3011. Enabling interning by default would also update the C frontend's
-row-capacity, codegen-shape and CSE-count tests, which expect today's default.
+under the throughput priority. On that measurement it became the default; the
+late CSE table stays opt-in. Making interning the default also updated the C
+frontend's row-capacity, codegen-shape and CSE-count tests, which had
+expected the old default. The constant-reuse profile's `intern` cell passes
+`-fcanonical-intern-constants` to B, so after this change both of its
+variants intern and the cell no longer measures the arm.
 
 ## Opt-in construction-time folding (#3010)
 

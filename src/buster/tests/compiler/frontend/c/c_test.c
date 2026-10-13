@@ -70419,8 +70419,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
         CParseResult label_metadata_growth_parse = c_parse(label_metadata_growth_temporary.arena, label_metadata_growth_tokens);
-        CIRLowerResult label_metadata_growth_lowered = c_lower_to_ir(label_metadata_growth_temporary.arena, S8("label-metadata-growth.c"),
-                                                                      label_metadata_growth_tokens, label_metadata_growth_parse, target_native);
+        // The value table must outgrow its initial capacity; repeated constants keep their own values.
+        CIRLowerResult label_metadata_growth_lowered = c_lower_to_ir_with_options(label_metadata_growth_temporary.arena, S8("label-metadata-growth.c"),
+            label_metadata_growth_tokens, label_metadata_growth_parse, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
         BUSTER_TEST(arguments, label_metadata_growth_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_metadata_growth_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_metadata_growth_lowered.diagnostic_count == 0);
