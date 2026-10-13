@@ -3,10 +3,12 @@
  * Build through ./build.sh bench_throughput self-test; shared.c owns linkage.
  */
 #define TP_WORKLOAD_TEST_ALLOCATIONS 1
+#define TP_PROCESS_TEST_OBSERVATIONS 1
 #define main throughput_cli_main
 #include "throughput.c"
 #undef main
 #undef TP_WORKLOAD_TEST_ALLOCATIONS
+#undef TP_PROCESS_TEST_OBSERVATIONS
 #include "retirement_stats.h"
 
 static unsigned test_assertions, test_failures;
@@ -466,6 +468,111 @@ static int test_admission_descriptor(char const* directory, char const* tree_has
     return controls_ok && length > 0 && (size_t)length < sizeof(text) && test_text(directory, "admission.workload", text);
 }
 
+#ifdef __linux__
+/* Cumulative disagreement is telemetry, not a collector failure: Linux may
+ * account the final child context switch between its two rusage snapshots. */
+static int test_child_counter_diagnostics(FILE* file, TpProcess const* process,
+    struct rusage const* before, struct rusage const* after, TpProcessTestObservation const* observed)
+{
+    int mismatch = process->diagnostics[TP_VOLUNTARY_SWITCHES] != (uint64_t)(after->ru_nvcsw - before->ru_nvcsw);
+    if (mismatch)
+    {
+        fprintf(file, "THROUGHPUT_CHILD_COUNTER_MISMATCH_V1 child=%ld waited=%ld wait_error=%d "
+            "wait4_minor=%ld wait4_major=%ld wait4_voluntary=%ld wait4_involuntary=%ld "
+            "before_minor=%ld after_minor=%ld before_major=%ld after_major=%ld "
+            "before_voluntary=%ld after_voluntary=%ld before_involuntary=%ld after_involuntary=%ld "
+            "collected_voluntary=%" PRIu64 " diagnostics_available=%u exit=%d signal=%d timed_out=%d "
+            "launch_error=%d cleanup_attempted=%d cleanup_result=%d cleanup_error=%d descriptor_cleanup=%d\n",
+            (long)observed->child, (long)observed->waited, observed->wait_error,
+            observed->usage.ru_minflt, observed->usage.ru_majflt, observed->usage.ru_nvcsw, observed->usage.ru_nivcsw,
+            before->ru_minflt, after->ru_minflt, before->ru_majflt, after->ru_majflt,
+            before->ru_nvcsw, after->ru_nvcsw, before->ru_nivcsw, after->ru_nivcsw,
+            process->diagnostics[TP_VOLUNTARY_SWITCHES], process->diagnostics_available,
+            process->exit_code, process->signal_number, process->timed_out, process->launch_error,
+            observed->cleanup_attempted, observed->cleanup_result, observed->cleanup_error, observed->descriptor_cleanup);
+    }
+    return mismatch;
+}
+
+static void test_child_counter_diagnostic_control(void)
+{
+    TpProcess process = {0};
+    process.diagnostics[TP_VOLUNTARY_SWITCHES] = 2;
+    process.diagnostics_available = (1u << TP_DIAGNOSTICS) - 1u;
+    struct rusage before = {0}, after = {0};
+    before.ru_nvcsw = 17;
+    after.ru_nvcsw = 19;
+    TpProcessTestObservation observed = {0};
+    observed.child = 123;
+    observed.waited = 123;
+    observed.usage.ru_nvcsw = 2;
+    observed.cleanup_attempted = 1;
+    observed.cleanup_result = -1;
+    observed.cleanup_error = ESRCH;
+    FILE* file = tmpfile();
+    CHECK(file != NULL);
+    if (file)
+    {
+        CHECK(!test_child_counter_diagnostics(file, &process, &before, &after, &observed));
+        CHECK(ftell(file) == 0);
+        after.ru_nvcsw = 20;
+        CHECK(test_child_counter_diagnostics(file, &process, &before, &after, &observed));
+        CHECK(fflush(file) == 0 && fseek(file, 0, SEEK_SET) == 0);
+        char text[2048] = {0};
+        size_t count = fread(text, 1, sizeof(text) - 1, file);
+        CHECK(count > 0 && count < sizeof(text) - 1 && !ferror(file));
+        CHECK(strstr(text, "THROUGHPUT_CHILD_COUNTER_MISMATCH_V1 child=123 waited=123 wait_error=0 ") != NULL);
+        CHECK(strstr(text, "wait4_voluntary=2") && strstr(text, "before_voluntary=17 after_voluntary=20"));
+        CHECK(strstr(text, "collected_voluntary=2 diagnostics_available=15 exit=0 signal=0 timed_out=0 launch_error=0 ") != NULL);
+        char cleanup[128];
+        int length = snprintf(cleanup, sizeof(cleanup), "cleanup_attempted=1 cleanup_result=-1 cleanup_error=%d descriptor_cleanup=0\n", ESRCH);
+        CHECK(length > 0 && (size_t)length < sizeof(cleanup) && strstr(text, cleanup) != NULL);
+        CHECK(process.diagnostics[TP_VOLUNTARY_SWITCHES] == 2 && observed.usage.ru_nvcsw == 2 &&
+              before.ru_nvcsw == 17 && after.ru_nvcsw == 20);
+        /* Retained hosted recurrence: wait4=2, cumulative 87->88. This
+         * disagreement must remain observable without invalidating wait4. */
+        before.ru_nvcsw = 87;
+        after.ru_nvcsw = 88;
+        CHECK(test_child_counter_diagnostics(file, &process, &before, &after, &observed));
+        CHECK(process.diagnostics[TP_VOLUNTARY_SWITCHES] == 2 && observed.usage.ru_nvcsw == 2);
+        CHECK(fclose(file) == 0);
+    }
+}
+
+static void test_child_counter_mapping(void)
+{
+    typedef struct TestChildCounterCase
+    {
+        long minor, major, voluntary, involuntary;
+        unsigned available;
+        uint64_t expected[TP_DIAGNOSTICS];
+    } TestChildCounterCase;
+    TestChildCounterCase const cases[] = {
+        {11, 23, 37, 53, 15, {11, 23, 37, 53}},
+        {0, 0, 0, 0, 15, {0, 0, 0, 0}},
+        {-1, -2, -3, -4, 0, {0, 0, 0, 0}},
+        {-1, 23, 37, 53, 14, {0, 23, 37, 53}},
+        {11, -1, 37, 53, 13, {11, 0, 37, 53}},
+        {11, 23, -1, 53, 11, {11, 23, 0, 53}},
+        {11, 23, 37, -1, 7, {11, 23, 37, 0}},
+        {LONG_MAX, 0, LONG_MAX, 0, 15, {LONG_MAX, 0, LONG_MAX, 0}},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+    {
+        struct rusage usage = {0};
+        usage.ru_minflt = cases[i].minor;
+        usage.ru_majflt = cases[i].major;
+        usage.ru_nvcsw = cases[i].voluntary;
+        usage.ru_nivcsw = cases[i].involuntary;
+        TpProcess process = {0};
+        tp_process_diagnostics(&process, &usage);
+        CHECK(process.diagnostics_available == cases[i].available);
+        for (unsigned j = 0; j < TP_DIAGNOSTICS; ++j)
+            CHECK(process.diagnostics[j] == cases[i].expected[j]);
+    }
+}
+#endif
+
 static void test_processes(char const* executable, char const* root)
 {
     // Foundation-only tools have no application entry-point clock prewarm.
@@ -500,13 +607,18 @@ static void test_processes(char const* executable, char const* root)
     TpProcess large = tp_process(memory, NULL, log, 3, -1, 0);
 #ifdef __linux__
     CHECK(getrusage(RUSAGE_CHILDREN, &after) == 0);
-    /* No other child runs between these snapshots. The independent cumulative
-     * OS delta must match this invocation's wait4 result, not lifetime totals. */
+    /* Validate the collector against the raw exact-PID wait4 result. The
+     * cumulative counters are separately sampled and remain diagnostic only. */
+    TpProcessTestObservation const* observed = &tp_process_test_observation;
+    CHECK(observed->child > 0 && observed->waited == observed->child && observed->wait_error == 0);
     CHECK(large.diagnostics_available == (1u << TP_DIAGNOSTICS) - 1u);
-    CHECK(large.diagnostics[TP_MINOR_FAULTS] == (uint64_t)(after.ru_minflt - before.ru_minflt));
-    CHECK(large.diagnostics[TP_MAJOR_FAULTS] == (uint64_t)(after.ru_majflt - before.ru_majflt));
-    CHECK(large.diagnostics[TP_VOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nvcsw - before.ru_nvcsw));
-    CHECK(large.diagnostics[TP_INVOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nivcsw - before.ru_nivcsw));
+    CHECK(observed->usage.ru_minflt >= 0 && large.diagnostics[TP_MINOR_FAULTS] == (uint64_t)observed->usage.ru_minflt);
+    CHECK(observed->usage.ru_majflt >= 0 && large.diagnostics[TP_MAJOR_FAULTS] == (uint64_t)observed->usage.ru_majflt);
+    (void)test_child_counter_diagnostics(stderr, &large, &before, &after, &tp_process_test_observation);
+    CHECK(observed->usage.ru_nvcsw >= 0 && large.diagnostics[TP_VOLUNTARY_SWITCHES] == (uint64_t)observed->usage.ru_nvcsw);
+    CHECK(observed->cleanup_attempted && !observed->descriptor_cleanup);
+    CHECK(observed->usage.ru_nivcsw >= 0 && large.diagnostics[TP_INVOLUNTARY_SWITCHES] == (uint64_t)observed->usage.ru_nivcsw);
+    CHECK(large.exit_code == 0 && large.signal_number == 0 && !large.timed_out && !large.launch_error);
     CHECK(large.diagnostics[TP_MINOR_FAULTS] > 0 && large.diagnostics[TP_VOLUNTARY_SWITCHES] > 0);
     printf("PROCESS_DIAGNOSTICS minor=%" PRIu64 " major=%" PRIu64 " voluntary=%" PRIu64 " involuntary=%" PRIu64 "\n",
            large.diagnostics[TP_MINOR_FAULTS], large.diagnostics[TP_MAJOR_FAULTS],
@@ -2271,6 +2383,10 @@ int main(int argc, char** argv)
         test_checked_in_workload_descriptors();
         test_inputs(root);
         test_maximum_jobs(root);
+#ifdef __linux__
+        test_child_counter_diagnostic_control();
+        test_child_counter_mapping();
+#endif
         test_processes(executable, root);
 #ifndef _WIN32
         test_process_group_postcondition();

@@ -258,6 +258,13 @@ shrinkage/foreign rows, missing jobs, native-step evidence, pagination and
 rerun rules. The existing coverage tests retain real executable/hash/re-probe
 controls.
 
+The workflow-step replay keeps its 30-second subprocess deadline. On a timeout,
+it reports the step and exit-control identity, bounded captured stdout/stderr
+(4,096 characters each), and the existing process-owner log's last 4,096 bytes
+when available, then re-raises the original timeout. These diagnostics also
+cover helper qualification before any suite starts; they do not establish the
+timeout's cause or change the workflow's budgets, suites, or cleanup.
+
 ## Performance qualification — required before closing #333
 
 Implementation and synthetic tests do **not** establish a speedup. Require at
@@ -304,8 +311,8 @@ row ownership remain unchanged; alternative-order predictions are diagnostic.
 ## Isolated module process experiment
 
 The `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`; the CI
-matrix enables it for sanitized Clang trees and native Windows AArch64 Clang
-trees. Their serialized test phases receive
+matrix enables it for every Clang tree, including the unsanitized Release
+artifact-fanout producer (#3912). Their serialized test phases receive
 the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition

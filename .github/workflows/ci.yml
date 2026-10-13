@@ -432,9 +432,10 @@ jobs:
           retention-days: 7
 
   test:
-    # Ordinary desktop work has no full-lint ancestor. Queue work waits for
-    # the event-specific lint preflight; main still waits for exact-SHA reuse.
-    needs: [queue_lint, reuse, no_code_plan]
+    # Desktop work has no lint ancestor in any event: merge-group lint runs
+    # beside it and CI complete still requires it (#3912). Main still waits
+    # for exact-SHA reuse.
+    needs: [reuse, no_code_plan]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -443,7 +444,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success')) }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.
@@ -596,6 +597,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Hosted Clang bootstraps build.c; native policy builds and qualifies
+          # the existing case-job helper. Python only receives its path.
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          process_owner_driver="$RUNNER_TEMP/buster-ci/workflow-tools-build.exe"
+          # Bash 3.2 with nounset requires a nonempty array.
+          process_owner_bootstrap_flags=(-Wall -Werror -Wno-unused-function -Wno-unused-variable)
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            process_owner_bootstrap_flags+=(-Wno-microsoft-enum-forward-reference -lws2_32)
+          fi
+          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char \
+            build.c "${process_owner_bootstrap_flags[@]}" -o "$process_owner_driver"
+          "$process_owner_driver" bootstrap_process_owner_test | tee "$RUNNER_TEMP/buster-ci/workflow-tools-process-owner.log"
+          while IFS= read -r line; do
+            line=${line%$'\r'}
+            case "$line" in
+              'BOOTSTRAP_PROCESS_OWNER '*) export BUSTER_WINDOWS_PROCESS_TREE="${line#BOOTSTRAP_PROCESS_OWNER }" ;;
+            esac
+          done < "$RUNNER_TEMP/buster-ci/workflow-tools-process-owner.log"
           # Independent suites share three lanes, slowest first (#2021).
           suites=(
             tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
@@ -644,9 +663,26 @@ jobs:
             printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'
             exit 0
           fi
+          # Hosted Clang bootstraps build.c; native policy builds and qualifies
+          # the existing case-job helper. Python only receives its path.
           mkdir -p "$RUNNER_TEMP/buster-ci"
+          process_owner_driver="$RUNNER_TEMP/buster-ci/bootstrap-wrapper-build.exe"
+          # Bash 3.2 with nounset requires a nonempty array.
+          process_owner_bootstrap_flags=(-Wall -Werror -Wno-unused-function -Wno-unused-variable)
           if [[ "$RUNNER_OS" == Windows ]]; then
-            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+            process_owner_bootstrap_flags+=(-Wno-microsoft-enum-forward-reference -lws2_32)
+          fi
+          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char \
+            build.c "${process_owner_bootstrap_flags[@]}" -o "$process_owner_driver"
+          "$process_owner_driver" bootstrap_process_owner_test | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper-process-owner.log"
+          while IFS= read -r line; do
+            line=${line%$'\r'}
+            case "$line" in
+              'BOOTSTRAP_PROCESS_OWNER '*) export BUSTER_WINDOWS_PROCESS_TREE="${line#BOOTSTRAP_PROCESS_OWNER }" ;;
+            esac
+          done < "$RUNNER_TEMP/buster-ci/bootstrap-wrapper-process-owner.log"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           else
             "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           fi
@@ -888,10 +924,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Linux, macOS)
         if: ${{ always() && steps.backend_capability_report_unix.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
@@ -907,10 +946,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Windows)
         if: ${{ always() && steps.backend_capability_report_windows.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
@@ -1129,9 +1171,15 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase producer_build --sequence 30 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase mode_payload --sequence 40 --             "$driver" test_mode_matrix --config Release
 
+      # #2067: step bounds below the 300-minute job limit. On a responsive
+      # runner, expiry ends the step and makes the pack/retain steps eligible;
+      # evidence still needs the runner to survive and packing and upload to
+      # succeed, and phase records may be partial. Passing runs, 2026-09-28
+      # to 2026-10-12: mode matrix max 299 s (AArch64), MSVC reference 137 s.
       - name: Execution-mode matrix (Windows)
         id: modes_windows
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
+        timeout-minutes: 15
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
@@ -1172,6 +1220,7 @@ jobs:
       - name: Native MSVC reference differential
         id: msvc_reference
         if: ${{ !cancelled() && steps.modes_windows.outcome == 'success' && matrix.platform == 'windows' }}
+        timeout-minutes: 10
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}

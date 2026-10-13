@@ -7,10 +7,11 @@ import unittest
 
 import compiler_owned_plan as contract
 from compiler_receipt import (PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE,
-                              AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+                              AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE,
+                              CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
 
 
-def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False):
+def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False, reuse=False):
     trusted, root, work, evidence = (("/trusted main", "/candidate tree", "/work space", "/evidence space")
                                     if spaces else ("/trusted", "/checkout", "/work", "/evidence"))
     python, lab = "/usr/bin/python3", trusted + "/tools/uarch_lab.py"
@@ -32,6 +33,9 @@ def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False
     if ast:
         receipt["ast_pilot_acceptance"] = {"requested": True, "request_line": AST_PILOT_ACCEPTANCE_REQUEST_LINE,
                                            "profile": copy.deepcopy(AST_PILOT_ACCEPTANCE_PROFILE)}
+    if reuse:
+        receipt["constant_reuse_acceptance"] = {"requested": True, "request_line": CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                                                "profile": copy.deepcopy(CONSTANT_REUSE_ACCEPTANCE_PROFILE)}
     git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null", "-C", root]
     rows = []
 
@@ -57,6 +61,10 @@ def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False
         row("ast-pilot-acceptance", [python, "-B", trusted + "/tools/bench_direct/ast_pilot_acceptance.py",
             "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root,
             "--head-revision", identity["head"], "--cpu", "2", "--output", work + "/ast-pilot-acceptance"], 7200)
+    if reuse:
+        row("constant-reuse-acceptance", [python, "-B", trusted + "/tools/bench_direct/constant_reuse_acceptance.py",
+            "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root,
+            "--head-revision", identity["head"], "--cpu", "2", "--output", work + "/constant-reuse-acceptance"], 7200)
     row("build-closure", [*git, "checkout", "--quiet", "--detach", identity["base"]], 120)
     row("build-closure", [driver, "compiler_closure", "restore", root, work + "/frozen-baseline",
         identity["base"], identity["base_tree"], evidence + "/closure-restore.json", manifest], 1800, trusted)
@@ -217,6 +225,35 @@ class OwnedPlanTest(unittest.TestCase):
                 commands[index]["argv"][6] = ownership["binaries_root"] + "/ide-base"
             elif case == "output":
                 commands[index]["argv"][-1] = "/other/ast-output"
+            else:
+                commands[index]["argv"][-3] = "3"
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate_plan(changed, ownership, commands))
+
+    def test_constant_reuse_extension_is_pull_only_frozen_and_exact(self):
+        receipt, ownership, rows = fixture(reuse=True)
+        self.assertEqual(contract.validate_plan(receipt, ownership, rows), [])
+        plain_receipt, unused_ownership, plain_rows = fixture()
+        for case in ("main-mode", "profile", "requested", "undeclared-row", "missing-row", "program", "binary",
+                     "output", "cpu"):
+            changed, commands = copy.deepcopy(receipt), copy.deepcopy(rows)
+            index = next(index for index, row in enumerate(commands) if row["phase"] == "constant-reuse-acceptance")
+            if case == "main-mode":
+                changed["mode"] = "main"
+            elif case == "profile":
+                changed["constant_reuse_acceptance"]["profile"]["pairs"] = 2
+            elif case == "requested":
+                changed["constant_reuse_acceptance"]["requested"] = 1
+            elif case == "undeclared-row":
+                changed = copy.deepcopy(plain_receipt)
+            elif case == "missing-row":
+                commands = copy.deepcopy(plain_rows)
+            elif case == "program":
+                commands[index]["argv"][2] = ownership["trusted_root"] + "/tools/bench_direct/ast_pilot_acceptance.py"
+            elif case == "binary":
+                commands[index]["argv"][6] = ownership["binaries_root"] + "/ide-base"
+            elif case == "output":
+                commands[index]["argv"][-1] = "/other/reuse-output"
             else:
                 commands[index]["argv"][-3] = "3"
             with self.subTest(case=case):

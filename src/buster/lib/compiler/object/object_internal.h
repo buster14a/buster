@@ -10,7 +10,7 @@ BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module_borrowed_text(Aren
 #if BUSTER_INCLUDE_TESTS
 // Compare indexed printer queries against original-table scan semantics.
 BUSTER_F_DECL bool object_assembly_test_index_queries(Arena* arena, ObjectFile* object);
-// The ELF64 plan alone. It never reads payloads, and only compares bounded
+// The ELF plan alone, selected by the object target. It never reads payloads, and only compares bounded
 // canonical names for empty slots. It can size hostile nonempty shapes --
 // lengths near 2^64, names past 4 GiB, section counts
 // at SHN_LORESERVE -- that no test could allocate. `size` is the planned file
