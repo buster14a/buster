@@ -4460,3 +4460,59 @@ diagnostic only. Its appended note lists what is retained: the full
 instrument patch, the positive control and the artifact hashes. A later attempt needs a workload that has statement
 expressions, such as a GNU-heavy compatibility input, and a floor declared
 on that workload. Zen 5 validation stays incomplete (#2761).
+
+### Root-token predicate refusals and the pilot's `?` gate
+
+This section has its own anchor because other open AST branches append to
+the plan's end. The [token-to-node map census](#token-to-node-map-for-lowering)
+left two tree-free leads on the token path, tracked in
+[#3924](https://github.com/buster14a/buster/issues/3924):
+- **The predicates.** `c_ir_has_root_comma`, `c_ir_has_root_assignment`,
+  `c_ir_has_root_control_operator`, `c_ir_has_root_question` and
+  `c_ir_call_argument_separator` scan 703,748 ranges (71.8 M Ir) that hold
+  no candidate token. On such a range each answer is fixed.
+- **The pilot's root conditional.** Under `-fc-ast-pilot`,
+  `c_ir_root_conditional` sends every range to the tree's records (79.1 M)
+  without the `?` count the default path tests first.
+
+The change adds a `,` count and an assignment-operator count to the body's
+token prefix table (`CIrTokenPrefix`). Each predicate refuses an in-body range
+in O(1) when its candidate count does not change across it. The control
+operators' candidates are the `controls` count less the assignment count.
+The pilot tests the `?` count before the records. Both are token-path changes
+and are not credited to the tree; tree slices are budgeted net of them.
+
+These budgets were declared before any measured run. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at `-g -c`
+for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `56b6fca3`, which the candidate branches from. The budgets:
+- **Correctness.** Each refusal is exact by construction: every scan can
+  answer other than its fixed answer only at a candidate token in its range,
+  and the counts use the scans' own punctuator tests. Reference-check builds
+  run the skipped scan behind every refusal and check that it agrees, and
+  check each new class against its token test as the table is built. The
+  pilot's refusal keeps its statistics: a refused non-empty range counts as
+  the records' negative, which is the records' answer for a range with no
+  `?`. The `-c` objects (`-g0` and `-g`) must be byte-identical across the
+  four arms. `test_self_host` must keep its fixed point, and `test_all` must
+  pass.
+- **The predicates (D against A).** `-c` (`-g0`) must fall by at least 30 M
+  Ir, with the new columns' work in `c_ir_token_prefix_build` charged.
+  Below that floor the result is recorded as negative and the predicate
+  gates do not ship.
+- **The pilot gate (C against B).** `-c` (`-g0`) must fall by at least
+  30 M Ir more than D against A. Below that floor the pilot gate does not
+  ship.
+- **Not measured.** `-fsyntax-only` runs no lowering.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
