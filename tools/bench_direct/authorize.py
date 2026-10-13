@@ -507,6 +507,38 @@ def sampling_executor_inventory(repository: str, token: str, since: str, *, api=
     return values
 
 
+def closed_request_pulls(repository: str, request: dict, sha: str, number: int | None, read) -> list[dict]:
+    """Closed-unmerged same-repository pulls on the request's head ref that contain `sha`."""
+    branch = request.get("head_branch")
+    if not isinstance(branch, str) or not branch or full_name(request.get("head_repository")) != repository:
+        return []
+    owner = repository.split("/", 1)[0]
+    query = urllib.parse.urlencode({"state": "closed", "head": owner + ":" + branch, "per_page": 100})
+    listed = read(f"/repos/{repository}/pulls?{query}")
+    if not isinstance(listed, list) or len(listed) >= 100:
+        raise ValueError("sampling closed request pull lookup is unavailable or capped")
+    candidates = [pull for pull in listed if isinstance(pull, dict) and pull.get("state") == "closed" and
+                  pull.get("merged_at") is None and type(pull.get("number")) is int and pull["number"] > 0 and
+                  (number is None or pull["number"] == number) and isinstance(pull.get("head"), dict) and
+                  pull["head"].get("ref") == branch]
+    owned = []
+    for pull in candidates:
+        commits = []
+        # GitHub lists at most 250 commits for a pull; a full list may be truncated.
+        for page in range(1, 4):
+            values = read(f"/repos/{repository}/pulls/{pull['number']}/commits?per_page=100&page={page}")
+            if not isinstance(values, list):
+                raise ValueError("sampling closed request pull commits are unavailable")
+            commits.extend(values)
+            if len(values) < 100:
+                break
+        if len(commits) >= 250:
+            raise ValueError("sampling closed request pull commits are capped")
+        if any(isinstance(commit, dict) and commit.get("sha") == sha for commit in commits):
+            owned.append(pull)
+    return owned
+
+
 def sampling_attempt_history(repository: str, token: str, current: str, since: str,
                              freeze_revision: str, campaign: str, parent_revision: str,
                              parent_campaign: str, ancestor_revision: str = "-", ancestor_campaign: str = "-",
@@ -619,6 +651,11 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             raise ValueError("sampling history request has no canonical pull number")
         matches = [pull for pull in associated if isinstance(pull, dict) and
                    (number is None or pull.get("number") == number)] if isinstance(associated, list) else []
+        if not matches:
+            # GitHub drops a closed-unmerged pull from commits/{sha}/pulls and
+            # from the run snapshot (#3955); recover it by head ref and prove
+            # membership through the pull's own commit list.
+            matches = closed_request_pulls(repository, request, sha, number, read)
         if len(matches) != 1:
             raise ValueError("sampling history request has no unique owning pull")
         pull = matches[0]
