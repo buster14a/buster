@@ -10,3 +10,4 @@
 # request: issue #53 prewarm only the cohort native family, claude/clever-johnson-db6ay6 (count/tiny entry cost)
 # request: issue #53 re-request on docs-only head after 8cedbf9b run 38314166940 was cancelled by a push; same compiler source
 # request: issue #53 lane-gate calibration, gate disabled (MIN_WORK=0), size series
+# request: issue #53 lane-gate calibration re-run on main 50135638 with the one-family prewarm (#3910); gate disabled
