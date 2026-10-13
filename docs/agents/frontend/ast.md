@@ -4328,6 +4328,18 @@ The base is main `446f742e`, which the candidate branches from. The budgets:
   requested. The report-only main comparison runs after the merge, and Zen 5
   validation stays incomplete (#2761).
 
+The hosted census is
+[`2026-10-13T084504Z`](../../performance-audits/2026-10-13T084504Z.md),
+diagnostic only:
+- **Both sites ship on the token path.** Both arms fall by 4.09 M Ir
+  (−0.016% default, −0.018% pilot). `c_ir_query_execute` makes no
+  spelling-ladder call, and no caller of the ladder remains in either
+  candidate arm. The objects are byte-identical across the four arms at
+  `-g0` and `-g`.
+- **Leads, unclaimed:** the dead-code hop's proofs (2.19 M), still under the
+  floor.
+- Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
 ### Settling the name checks, second cut
