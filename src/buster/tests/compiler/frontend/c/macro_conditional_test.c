@@ -1694,34 +1694,82 @@ BUSTER_GLOBAL_LOCAL bool c_macro_expansion_rlimit_virtual_size(u64* result)
     return valid;
 }
 
-// Allow the driver TU, all preprocessing base arenas, one 8 GiB macro arena,
-// and setup headroom. The paired second macro arena cannot fit in the remainder.
-BUSTER_GLOBAL_LOCAL bool c_macro_expansion_rlimit_apply(void)
+// This child uses one in-memory C input through the driver's single-input fast path,
+// which executes the unit in the caller/test arena already present in the statm
+// baseline. Only c_preprocess's three base arenas, phase arena, and the first
+// macro arena are new reservations; the second macro arena must fail.
+typedef struct CMacroExpansionRlimitBudget CMacroExpansionRlimitBudget;
+struct CMacroExpansionRlimitBudget
 {
+    u64 baseline_virtual_bytes;
+    u64 phase_arena_bytes;
+    u64 base_arenas_bytes;
+    u64 first_macro_arena_bytes;
+    u64 setup_headroom_bytes;
+    u64 planned_limit_bytes;
+    u64 applied_limit_bytes;
+    u64 hard_limit_bytes;
+    bool hard_limit_unlimited;
+    bool applied;
+};
+
+BUSTER_GLOBAL_LOCAL CMacroExpansionRlimitBudget c_macro_expansion_rlimit_apply(void)
+{
+    CMacroExpansionRlimitBudget result = {
+        .phase_arena_bytes = C_PHASE_ARENA_RESERVED_SIZE,
+        .base_arenas_bytes = BUSTER_GB(3),
+        .first_macro_arena_bytes = BUSTER_GB(8),
+        .setup_headroom_bytes = BUSTER_GB(2),
+    };
     struct rlimit current_limit = {0};
+    bool limit_read = getrlimit(RLIMIT_AS, &current_limit) == 0;
     u64 current_virtual_size = 0;
-    bool valid = getrlimit(RLIMIT_AS, &current_limit) == 0 &&
-                 c_macro_expansion_rlimit_virtual_size(&current_virtual_size);
-    u64 allowance = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE + C_PHASE_ARENA_RESERVED_SIZE +
-                    BUSTER_GB(3) + BUSTER_GB(8) + BUSTER_GB(2);
-    u64 limit_bytes = 0;
-    if (valid && current_virtual_size <= UINT64_MAX - allowance)
+    bool statm_read = c_macro_expansion_rlimit_virtual_size(&current_virtual_size);
+    if (statm_read)
     {
-        limit_bytes = current_virtual_size + allowance;
+        result.baseline_virtual_bytes = current_virtual_size;
     }
-    else
+    result.hard_limit_unlimited = limit_read && current_limit.rlim_max == RLIM_INFINITY;
+    result.hard_limit_bytes = limit_read && !result.hard_limit_unlimited ? (u64)current_limit.rlim_max : 0;
+
+    u64 allowance = 0;
+    bool sums_valid = result.phase_arena_bytes <= UINT64_MAX - result.base_arenas_bytes;
+    if (sums_valid)
     {
-        valid = false;
+        allowance = result.phase_arena_bytes + result.base_arenas_bytes;
+        sums_valid = allowance <= UINT64_MAX - result.first_macro_arena_bytes;
     }
-    rlim_t limit_value = (rlim_t)limit_bytes;
-    valid = valid && (u64)limit_value == limit_bytes &&
-            (current_limit.rlim_max == RLIM_INFINITY || limit_value <= current_limit.rlim_max);
+    if (sums_valid)
+    {
+        allowance += result.first_macro_arena_bytes;
+        sums_valid = allowance <= UINT64_MAX - result.setup_headroom_bytes;
+    }
+    if (sums_valid)
+    {
+        allowance += result.setup_headroom_bytes;
+    }
+    bool valid = limit_read && statm_read && sums_valid &&
+                 current_virtual_size <= UINT64_MAX - allowance;
+    if (valid)
+    {
+        result.planned_limit_bytes = current_virtual_size + allowance;
+    }
+    rlim_t limit_value = (rlim_t)result.planned_limit_bytes;
+    valid = valid && (u64)limit_value == result.planned_limit_bytes &&
+            (result.hard_limit_unlimited || limit_value <= current_limit.rlim_max);
     if (valid)
     {
         current_limit.rlim_cur = limit_value;
         valid = setrlimit(RLIMIT_AS, &current_limit) == 0;
+        struct rlimit applied_limit = {0};
+        valid = valid && getrlimit(RLIMIT_AS, &applied_limit) == 0 && applied_limit.rlim_cur == limit_value;
+        if (valid)
+        {
+            result.applied_limit_bytes = (u64)applied_limit.rlim_cur;
+        }
     }
-    return valid;
+    result.applied = valid;
+    return result;
 }
 
 typedef struct CMacroExpansionRlimitChild CMacroExpansionRlimitChild;
@@ -1808,7 +1856,19 @@ void c_macro_expansion_rlimit_child_run(UnitTestArguments* arguments)
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
             invocation.input_source = S8("#define F(x) (x+1)\nint value = F(7);\n");
             prepared = invocation.error == COMPILER_DRIVER_ERROR_NONE;
-            bool limited_ready = prepared && (!limited || c_macro_expansion_rlimit_apply());
+            CMacroExpansionRlimitBudget budget = {0};
+            bool limited_ready = prepared;
+            if (prepared && limited)
+            {
+                budget = c_macro_expansion_rlimit_apply();
+                String8 budget_record = string_format(arena,
+                    S8("C_MACRO_RLIMIT_AS_BUDGET baseline_bytes={u64} unit_arena_bytes=0 phase_arena_bytes={u64} base_arenas_bytes={u64} first_macro_arena_bytes={u64} setup_headroom_bytes={u64} planned_limit_bytes={u64} applied_limit_bytes={u64} hard_limit_bytes={u64} hard_limit_unlimited={u32} applied={u32}\n"),
+                    budget.baseline_virtual_bytes, budget.phase_arena_bytes, budget.base_arenas_bytes,
+                    budget.first_macro_arena_bytes, budget.setup_headroom_bytes, budget.planned_limit_bytes,
+                    budget.applied_limit_bytes, budget.hard_limit_bytes, (u32)budget.hard_limit_unlimited, (u32)budget.applied);
+                os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(budget_record));
+                limited_ready = budget.applied;
+            }
             if (limited_ready)
             {
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
@@ -1890,21 +1950,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_rlimit_tests(UnitTestArgume
     }
 
     CMacroExpansionRlimitChild limited = c_macro_expansion_rlimit_spawn(arena, S8("limited"), limited_path);
+    String8 limited_standard_error = {
+        .pointer = (char8*)limited.wait.streams[STANDARD_STREAM_ERROR].pointer,
+        .length = limited.wait.streams[STANDARD_STREAM_ERROR].length,
+    };
+    string_print(S8("C_MACRO_RLIMIT_AS_CHILD spawn={u32} result={u32} timed_out={u32} platform_status={u32} stderr={S8}\n"),
+                 (u32)(limited.spawn.handle != 0), (u32)limited.wait.result, (u32)limited.wait.timed_out,
+                 limited.wait.platform_status, limited_standard_error);
     if (BUSTER_REQUIRE(arguments, limited.spawn.handle != 0))
     {
         BUSTER_TEST(arguments, !limited.wait.timed_out && limited.wait.result == PROCESS_RESULT_FAILED);
         int limited_status = (int)limited.wait.platform_status;
         BUSTER_TEST(arguments, WIFEXITED(limited_status) && WEXITSTATUS(limited_status) == 1);
-        String8 standard_error = {
-            .pointer = (char8*)limited.wait.streams[STANDARD_STREAM_ERROR].pointer,
-            .length = limited.wait.streams[STANDARD_STREAM_ERROR].length,
-        };
         String8 standard_output = {
             .pointer = (char8*)limited.wait.streams[STANDARD_STREAM_OUTPUT].pointer,
             .length = limited.wait.streams[STANDARD_STREAM_OUTPUT].length,
         };
         BUSTER_TEST(arguments, c_macro_expansion_rlimit_contains(
-                                   standard_error, S8("could not reserve 8589934592 bytes for C macro expansion arena")));
+                                   limited_standard_error, S8("could not reserve 8589934592 bytes for C macro expansion arena")));
         BUSTER_TEST(arguments, !c_macro_expansion_rlimit_contains(standard_output, S8("int value")));
     }
     FileReadResult limited_output = file_read_checked(arena, limited_path, (FileReadOptions){0});
