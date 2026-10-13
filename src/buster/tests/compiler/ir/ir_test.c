@@ -3111,6 +3111,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
             BUSTER_TEST(arguments, old_repeated_projection_floor > IR_FAST_WORK_BUDGET);
 
             IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+            if (prepared.error != IR_VALIDATION_NONE)
+            {
+                arguments->show(arguments,
+                    S8("required-work 600 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64} growth={u64}\n"),
+                    (u32)prepared.error, (u32)module->inlining.required_budget_reason,
+                    module->inlining.required_budget_demand, module->inlining.required_budget_limit,
+                    module->inlining.budget_skips, module->inlining.always_inlined, module->inlining.growth);
+            }
             BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, module->inline_complete);
             BUSTER_TEST(arguments, module->inlining.always_inlined == required_call_sites);
@@ -3137,6 +3145,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
         limited_program->fast_passes = 0;
         limited_program->inline_options = (IrInlineOptions){.max_call_sites = required_call_sites - 1u};
         IrValidationResult refused = ir_prepare_canonical_module(limited_program, limited_module, false);
+        if (refused.error != IR_VALIDATION_INLINE_REQUIRED ||
+            limited_module->inlining.required_budget_reason != IR_INLINE_BUDGET_CALL_SITES ||
+            limited_module->inlining.required_budget_limit != required_call_sites - 1u)
+        {
+            arguments->show(arguments,
+                S8("required-work 599 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64}\n"),
+                (u32)refused.error, (u32)limited_module->inlining.required_budget_reason,
+                limited_module->inlining.required_budget_demand, limited_module->inlining.required_budget_limit,
+                limited_module->inlining.budget_skips, limited_module->inlining.always_inlined);
+        }
         IrFunction* caller = ir_test_inline_find_function(limited_module, S8("required_work_caller"));
         BUSTER_TEST(arguments, refused.error == IR_VALIDATION_INLINE_REQUIRED);
         BUSTER_TEST(arguments, !limited_module->inline_complete);
