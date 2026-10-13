@@ -24,8 +24,9 @@
 // Lowering always has the unit's implicit postorder syntax tree (GitHub
 // #3102 step 1): the caller passes it in CIRLowerOptions.syntax_tree (the
 // driver's -fc-ast-pilot), or c_lower_to_ir_tree_run builds it from the final
-// token stream and releases it after the call; a unit whose tree cannot be
-// built fails with the builder's diagnostic. c_ir_syntax_spans_create keeps
+// token stream and releases it after the call. A tree that cannot be reserved
+// fails the unit; a unit whose syntax the builder rejects lowers without one
+// (CAstLowerStatistics.tree_rejections). c_ir_syntax_spans_create keeps
 // every node's token span (c_ast_spans_build) and its range-to-node chain for
 // the whole call (CIntegerIrBuilder.syntax_spans). Most structure questions
 // still re-walk token ranges, resolving identifiers through the parse
