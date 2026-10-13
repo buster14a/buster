@@ -1008,7 +1008,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    tree. It times the one candidate binary as both A (default) and B with
    `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity
    `-c` compile. The `intern` cell passes `-fcanonical-intern-constants` to B
-   and the `cse` cell passes `-fcanonical-fast-cse`. Each cell is 20 ABBA
+   and the `cse` cell passes `-fcanonical-fast-cse`. Interning has been on by
+   default since its measurement, so the `intern` cell now compares two
+   interning compiles; its recorded result is the 9700X run in
+   `docs/canonical-fast-pipeline.md`. Each cell is 20 ABBA
    pairs after one warmup on CPU 2 with fresh copies. It records:
    - wall time with its 95% CI;
    - retired instructions when perf can count them (NA needs a recorded

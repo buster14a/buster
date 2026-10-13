@@ -2910,7 +2910,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-fcanonical-intern-constants")) || string_equal(argument, S8("-fno-canonical-intern-constants")))
         {
-            invocation.intern_block_constants = string_equal(argument, S8("-fcanonical-intern-constants"));
+            invocation.disable_block_constant_interning = string_equal(argument, S8("-fno-canonical-intern-constants"));
             continue;
         }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
@@ -8756,7 +8756,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                    .intern_block_constants = invocation.intern_block_constants,
+                                                                    .disable_block_constant_interning = invocation.disable_block_constant_interning,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
                                                                     // A GPU target has no symbol visibility to restrict.
                                                                     .default_visibility = invocation.has_gpu_target ? C_SYMBOL_VISIBILITY_UNSPECIFIED : invocation.default_visibility,

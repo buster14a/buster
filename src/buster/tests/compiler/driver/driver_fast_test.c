@@ -883,7 +883,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
         {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
     };
     struct { String8 first; String8 second; bool intern; } interning[] = {
-        {S8("source.c"), S8("-O2"), false},
+        {S8("source.c"), S8("-O2"), true},
+        {S8("-fno-canonical-intern-constants"), S8("-O2"), false},
         {S8("-fcanonical-intern-constants"), S8("-O0"), true},
         {S8("-fcanonical-intern-constants"), S8("-fno-canonical-intern-constants"), false},
         {S8("-fno-canonical-intern-constants"), S8("-fcanonical-intern-constants"), true},
@@ -893,7 +894,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
     {
         String8 command[] = {interning[index].first, interning[index].second, S8("source.c")};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.intern_block_constants == interning[index].intern);
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.disable_block_constant_interning == !interning[index].intern);
     }
     struct { String8 first; String8 second; bool window; } strategies[] = {
         {S8("-fcanonical-fast-cse-strategy=window"), S8("source.c"), true},
@@ -1247,7 +1248,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             command[count++] = S8("-fcanonical-fast");
             if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
-            if (intern) command[count++] = S8("-fcanonical-intern-constants");
+            if (!intern) command[count++] = S8("-fno-canonical-intern-constants");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
                 bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
@@ -1259,7 +1260,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
-            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern);
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.disable_block_constant_interning == !intern);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);

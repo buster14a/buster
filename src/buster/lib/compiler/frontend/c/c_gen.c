@@ -53,7 +53,7 @@
 // is the one way back into a closed block, retraction and SSA memory
 // restoration use the checked ir_block_* primitives, and
 // c_ir_finish_construction rejects a function with a refused row or an open
-// block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
+// block. Unless -fno-canonical-intern-constants, c_ir_emit_integer_value_at
 // reuses a constant built earlier in the current block (CIrConstantIntern),
 // re-proving the cached row against retraction and truncation on every hit.
 // In BUSTER_BENCH_ALLOCATIONS builds c_ir_fold_census_body takes the #3010
@@ -1082,7 +1082,7 @@ struct CIrArrayTypeSlot
     bool used;
 };
 
-// Opt-in construction-time constant interning (#3011, c_ir_emit_integer_value_at).
+// Construction-time constant interning (#3011, c_ir_emit_integer_value_at), on by default.
 // One direct-mapped table serves a whole lowering; each function builder takes
 // a fresh generation, so no entry crosses a function and none is cleared.
 // An entry is only a hint: a lookup re-proves that its value is still defined
@@ -3667,7 +3667,7 @@ struct CIntegerIrBuilder
     // (c_ir_initializer_slot_table); shared by the constant builder and
     // every function builder of one lowering, null in the test hooks.
     CIrInitializerSlotCache* slot_cache;
-    // Opt-in constant interning shared by every function builder of one
+    // Constant interning shared by every function builder of one
     // lowering, and this function's generation in it; null when off.
     CIrConstantIntern* constant_intern;
     u32 constant_intern_generation;
@@ -66227,8 +66227,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
-            .constant_intern = options.intern_block_constants ? &constant_intern : 0,
-            .constant_intern_generation = options.intern_block_constants ? ++constant_intern.generation : 0,
+            .constant_intern = options.disable_block_constant_interning ? 0 : &constant_intern,
+            .constant_intern_generation = options.disable_block_constant_interning ? 0 : ++constant_intern.generation,
             .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,

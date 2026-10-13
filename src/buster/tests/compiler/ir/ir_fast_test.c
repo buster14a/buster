@@ -427,7 +427,7 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_fast_intern_lower(UnitTestArguments* argum
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("intern.c"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){.intern_block_constants = intern});
+                                                            (CIRLowerOptions){.disable_block_constant_interning = !intern});
         if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
         {
             lowered.program->fast_passes = 0;
