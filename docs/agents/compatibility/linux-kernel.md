@@ -99,7 +99,8 @@ evidence of successful kernel work.
 
 Native controls check argument preservation (spaces and empty arguments),
 nonzero exit attribution, timeout cleanup, malformed records, ledger row/status
-parsing, and C-action classification. Both the Clang and GCC builds must be
+parsing, C-action classification, and collision-free record names after PID
+reuse. Both the Clang and GCC builds must be
 warning-clean.
 
 `kernel_source_controls` runs the source-pin gate against a disposable Git
@@ -191,12 +192,20 @@ Buster compiler as unknown, and all 24 unchanged-flag diagnostic replays
 refuse `-Wp,-MMD,<path>`; the other 908 actions remain unattempted.
 The passing frontier reports `qualified_kernel=no` and leaves #3186 open.
 
-A later container rerun against main `897275fb9e3c` (GCC 14.2.0 and QEMU
-8.2.2 on Ubuntu 24.04, so the inventory is 926 actions) again passes the
-`max` reference with seven controls. Configuration still stops at `-P`
-(#1418). The depfile and macro-prefix-map blockers are fixed; 15 boot
-replays now stop at i386 code generation (#3654) and nine at
-`-mcmodel=small` (#4052). A separate unchanged-flag replay of all 926
-actions, outside this tool's 24-action bound, first stops at `-fshort-wchar`
-for 897 of them (#4052). Frontend findings behind those options are #3237
-and #4053.
+A later container rerun against main `897275fb9e3c` used GCC 14.2.0 and
+QEMU 8.2.2 on Ubuntu 24.04. Source verification passed on all 86,680 tracked
+entries, both before and after the run. The `max` reference again passes all
+seven controls. The census again records 932 required actions.
+
+- **Configuration** still stops at `-P` (#1418).
+- **Bounded replays:** the depfile and macro-prefix-map blockers are fixed.
+  Of the 24 replays, 15 boot actions now stop at i386 code generation (#3654)
+  and nine at `-mcmodel=small` (#4052).
+- **Full replay:** a separate unchanged-flag replay of all 932 actions,
+  outside this tool's 24-action bound, first stops at `-fshort-wchar` for
+  903 of them (#4052).
+- **Frontend findings** behind those options are #3237 and #4053.
+
+An earlier container run recorded only 926 actions. Process IDs wrapped
+during that build, so PID-only record names overwrote earlier records. Records
+are now reserved with `O_EXCL` (`kernel_reserve`).

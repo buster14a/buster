@@ -205,9 +205,34 @@ BUSTER_GLOBAL_LOCAL int kernel_run(char const* name, char const* cwd, char* cons
     return result;
 }
 
+// Reserves a fresh record name with O_EXCL. Process IDs wrap during a long
+// Kbuild run, so a PID-only name would let a later compiler process silently
+// overwrite an earlier action's record and undercount the census.
+BUSTER_GLOBAL_LOCAL bool kernel_reserve(char const* directory, char const* kind, char* record, char* result_path)
+{
+    bool reserved = false, valid = true;
+    for (unsigned attempt = 0; valid && !reserved && attempt < 4096; ++attempt)
+    {
+        char leaf[128];
+        int n = snprintf(leaf, sizeof(leaf), "%s-%ld-%u.argv", kind, (long)getpid(), attempt);
+        valid = n > 0 && n < (int)sizeof(leaf) && kernel_path(record, directory, leaf);
+        int fd = valid ? open(record, O_CREAT | O_EXCL | O_WRONLY, 0600) : -1;
+        valid = valid && (fd >= 0 || errno == EEXIST);
+        reserved = fd >= 0;
+        if (reserved)
+        {
+            valid = close(fd) == 0;
+            n = snprintf(leaf, sizeof(leaf), "%s-%ld-%u.result", kind, (long)getpid(), attempt);
+            valid = valid && n > 0 && n < (int)sizeof(leaf) && kernel_path(result_path, directory, leaf);
+        }
+    }
+    valid = valid && reserved;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL int kernel_record(int argc, char** argv, bool host, bool buster)
 {
-    char cwd[KERNEL_PATH_BYTES], record[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES], leaf[128];
+    char cwd[KERNEL_PATH_BYTES], record[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES];
     char const* directory = getenv("BUSTER_KERNEL_RECORDS");
     char const* compiler = getenv("BUSTER_KERNEL_COMPILER");
     char const* reference_cc = getenv("BUSTER_KERNEL_REFERENCE_CC");
@@ -216,10 +241,7 @@ BUSTER_GLOBAL_LOCAL int kernel_record(int argc, char** argv, bool host, bool bus
                  argc < KERNEL_MAX_ARGUMENTS - 3;
     if (valid)
     {
-        int n = snprintf(leaf, sizeof(leaf), "%s-%ld.argv", buster ? "buster" : host ? "host" : "target", (long)getpid());
-        valid = n > 0 && n < (int)sizeof(leaf) && kernel_path(record, directory, leaf);
-        n = snprintf(leaf, sizeof(leaf), "%s-%ld.result", buster ? "buster" : host ? "host" : "target", (long)getpid());
-        valid = n > 0 && n < (int)sizeof(leaf) && kernel_path(result_path, directory, leaf) && valid;
+        valid = kernel_reserve(directory, buster ? "buster" : host ? "host" : "target", record, result_path);
         size_t count = 0;
         kernel_arguments[count++] = (char*)(buster ? compiler : reference_cc ? reference_cc : "gcc-14");
         if (buster)
@@ -945,6 +967,10 @@ BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
             fixture[3] = "-E";
             valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
                     !kernel_target_c(count);
+            // Two records from one process (as after PID reuse) must not collide.
+            char first[KERNEL_PATH_BYTES], second[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES];
+            valid = valid && kernel_reserve(temporary, "target", first, result_path) &&
+                    kernel_reserve(temporary, "target", second, result_path) && strcmp(first, second) != 0;
             valid = valid && kernel_source_controls(temporary);
         }
     }
