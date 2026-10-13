@@ -47226,6 +47226,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
 
 BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
 {
+    // GCC and Clang accept one optional leading '%' on an x86 register clobber
+    // ("%rax" is "rax"); "memory" is not a register and keeps its bare spelling.
+    if (cpu_arch_is_x86(target.cpu_arch) && clobber.length > 1 && clobber.pointer[0] == '%')
+    {
+        String8 bare = string_slice(clobber, 1, clobber.length);
+        // Callers normalize an already-normalized name, so a second '%' must stay refused.
+        if (bare.pointer[0] != '%' && !string_equal(bare, S8("memory"))) clobber = bare;
+    }
     // GNU x86 register number zero denotes AX, independently of operand ties.
     String8 result = cpu_arch_is_x86(target.cpu_arch) && string_equal(clobber, S8("0"))
                          ? target.cpu_arch == CPU_ARCH_X86_64 ? S8("rax") : S8("eax")

@@ -69266,6 +69266,48 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         c_test_scratch_end(reserved_clobber_temporary);
     }
     {
+        // GCC and Clang accept one optional leading '%' on an x86 register clobber.
+        TemporalArena percent_clobber_temporary = scratch_begin(0, 0);
+        Target x86_64_target = target_native;
+        x86_64_target.cpu_arch = CPU_ARCH_X86_64;
+        CPreprocessResult percent_tokens = c_preprocess(
+            percent_clobber_temporary.arena,
+            S8("int percent_ok(void) { int r; __asm__ __volatile__(\"movl $1,%0\" : \"=m\"(r) : : \"%rax\", \"%rcx\", \"%xmm0\", \"%cc\", \"memory\"); return r; }\n"
+               "int percent_unknown(void) { __asm__(\"\" ::: \"%nosuchreg\"); return 0; }\n"
+               "int percent_double(void) { __asm__(\"\" ::: \"%%rax\"); return 0; }\n"
+               "int percent_memory(void) { __asm__(\"\" ::: \"%memory\"); return 0; }\n"
+               "int percent_frame(void) { __asm__(\"\" ::: \"%rbp\"); return 0; }\n"
+               "int percent_duplicate(void) { __asm__(\"\" ::: \"rax\", \"%rax\"); return 0; }\n"
+               "int percent_conflict(void) { int r; __asm__(\"\" : \"=a\"(r) : : \"%rax\"); return r; }\n"),
+            (CPreprocessOptions){
+                .target = x86_64_target,
+                .data_layout = target_data_layout(x86_64_target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult percent_parse = c_parse(percent_clobber_temporary.arena, percent_tokens);
+        CIRLowerResult percent_lowered = c_lower_to_ir(percent_clobber_temporary.arena, S8("x86_64-percent-clobber.c"),
+                                                       percent_tokens, percent_parse, x86_64_target);
+        BUSTER_TEST(arguments, percent_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, percent_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, percent_lowered.diagnostic_count == 6);
+        if (percent_lowered.diagnostic_count == 6)
+        {
+            BUSTER_STRING_TEST(arguments, percent_lowered.diagnostics[0].message,
+                               S8("in function 'percent_unknown': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, percent_lowered.diagnostics[1].message,
+                               S8("in function 'percent_double': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, percent_lowered.diagnostics[2].message,
+                               S8("in function 'percent_memory': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, percent_lowered.diagnostics[3].message,
+                               S8("in function 'percent_frame': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, percent_lowered.diagnostics[4].message,
+                               S8("in function 'percent_duplicate': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, percent_lowered.diagnostics[5].message,
+                               S8("in function 'percent_conflict': asm operand constraint conflicts with its clobber list"));
+        }
+        c_test_scratch_end(percent_clobber_temporary);
+    }
+    {
         TemporalArena malformed_recovery_temporary = scratch_begin(0, 0);
         CPreprocessResult malformed_recovery_tokens = c_preprocess(
             malformed_recovery_temporary.arena,
