@@ -891,6 +891,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.intern_block_constants == interning[index].intern);
     }
+    // -fcanonical-construction-fold is a lowering choice like interning:
+    // off by default, last one wins, and FAST controls leave it alone.
+    struct { String8 first; String8 second; bool fold; } construction_folds[] = {
+        {S8("source.c"), S8("-O2"), false},
+        {S8("-fcanonical-construction-fold"), S8("-O0"), true},
+        {S8("-fcanonical-construction-fold"), S8("-fno-canonical-construction-fold"), false},
+        {S8("-fno-canonical-construction-fold"), S8("-fcanonical-construction-fold"), true},
+        {S8("-fcanonical-construction-fold"), S8("-fno-canonical-fast"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(construction_folds); index += 1)
+    {
+        String8 command[] = {construction_folds[index].first, construction_folds[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.construction_fold == construction_folds[index].fold);
+    }
     struct { String8 first; String8 second; bool window; } strategies[] = {
         {S8("-fcanonical-fast-cse-strategy=window"), S8("source.c"), true},
         {S8("-fcanonical-fast-cse-strategy=window"), S8("-fcanonical-fast-cse-strategy=table"), false},
@@ -1200,16 +1215,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     {
         // Every subset of the adopted recipe, then the recipe plus opt-in CSE
         // on the shared fixture and, natively, on the separate CSE control
-        // with the table and then the linear window strategy, and finally
-        // the shared fixture with CSE and construction-time interning.
-        for (u32 selection = 0; selection <= IR_FAST_ALL + 4; selection += 1)
+        // with the table and then the linear window strategy, then the
+        // shared fixture with CSE and construction-time interning, and
+        // finally that fixture with construction-time folding and no FAST
+        // pass, so its constants are folded only where they are built.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 5; selection += 1)
         {
             bool control = selection == IR_FAST_ALL + 2 || selection == IR_FAST_ALL + 3;
             bool window = selection == IR_FAST_ALL + 3;
             // Construction-time constant interning (#3011) on the shared fixture.
             bool intern = selection == IR_FAST_ALL + 4;
+            // Construction-time folding (#3010) on the shared fixture.
+            bool fold = selection == IR_FAST_ALL + 5;
             if (control && backend >= native_count) continue;
-            u32 mask = selection <= IR_FAST_ALL ? selection : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
+            u32 mask = selection <= IR_FAST_ALL ? selection : fold ? 0 : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
             Arena* arena = temporary.arena;
             String8 path = buster_test_temporary_path(arena, S8("buster-canonical-fast"),
@@ -1244,6 +1263,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             command[count++] = S8("-fcanonical-fast");
             if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
             if (intern) command[count++] = S8("-fcanonical-intern-constants");
+            if (fold) command[count++] = S8("-fcanonical-construction-fold");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
                 bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
@@ -1255,10 +1275,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
-            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern);
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern &&
+                                   invocation.construction_fold == fold);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            // Both fixtures convert integer literals (`(unsigned char)511u`,
+            // `unsigned long long a = 3`), so folding on builds some directly.
+            BUSTER_TEST(arguments, (compiled.construction_folds.casts != 0) == (fold && compiled.error == COMPILER_DRIVER_ERROR_NONE));
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
             {
                 if (backend < native_count)
