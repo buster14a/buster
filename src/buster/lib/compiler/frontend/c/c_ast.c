@@ -4318,7 +4318,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_is_attribute_name(CToken token)
 
 // One group: `__attribute__ (( items ))`, `[[ items ]]` or
 // `__declspec ( items )`. An item is a name or `ns::name` with an optional
-// parenthesized argument list of expressions and type-names.
+// parenthesized argument list of expressions and type-names. A standard
+// attribute in a vendor namespace other than gnu or clang takes any balanced
+// token sequence as its arguments, which the item skips and keeps no node
+// for.
 BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* frame)
 {
     bool running = true;
@@ -4403,9 +4406,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
                 frame->flags = (u16)(frame->flags & ~C_AST_ATTRIBUTE_GROUP_SCOPED);
                 c_ast_advance(builder);
                 bool valid = true;
+                bool opaque = false;
                 if (standard && c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_COLON) &&
                     c_ast_is_punctuator(c_ast_peek(builder, 1), C_PUNCTUATOR_COLON))
                 {
+                    String8 scope = c_token_spelling(builder->preprocess.spelling_base, token);
+                    opaque = !string_equal(scope, S8("gnu")) && !string_equal(scope, S8("__gnu__")) && !string_equal(scope, S8("clang")) &&
+                             !string_equal(scope, S8("_Clang"));
                     c_ast_append(builder, C_AST_ATTRIBUTE_NAMESPACE, builder->node_count, frame->d, 0);
                     c_ast_advance(builder);
                     c_ast_advance(builder);
@@ -4422,7 +4429,37 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
                         c_ast_fail_expected(builder, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("an attribute name after '::'"));
                     }
                 }
-                if (valid)
+                if (valid && opaque && c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    // A vendor's standard attribute: its argument clause is
+                    // any balanced token sequence (C23 6.7.13.2), which no
+                    // node describes. The item keeps no argument children.
+                    u32 depth = 0;
+                    bool skipping = true;
+                    while (skipping && !builder->failed)
+                    {
+                        CToken skipped = c_ast_peek(builder, 0);
+                        if (skipped.kind == C_TOKEN_END_OF_FILE)
+                        {
+                            c_ast_fail_expected(builder, C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("')' to close the attribute arguments"));
+                        }
+                        else
+                        {
+                            bool opens = c_ast_is_punctuator(skipped, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                                         c_ast_is_punctuator(skipped, C_PUNCTUATOR_LEFT_BRACKET) ||
+                                         c_ast_is_punctuator(skipped, C_PUNCTUATOR_LEFT_BRACE);
+                            bool closes = c_ast_is_punctuator(skipped, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                                          c_ast_is_punctuator(skipped, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                                          c_ast_is_punctuator(skipped, C_PUNCTUATOR_RIGHT_BRACE);
+                            depth += opens ? 1 : 0;
+                            depth -= closes && depth ? 1 : 0;
+                            skipping = !(closes && depth == 0);
+                            c_ast_advance(builder);
+                        }
+                    }
+                    item_done = !builder->failed;
+                }
+                else if (valid)
                 {
                     if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
