@@ -51,9 +51,11 @@ failing at the first one that breaks: the library (`quickjs.c`, `dtoa.c`,
 `libregexp.c`, `libunicode.c`, `cutils.c`, `quickjs-libc.c`), then the bytecode
 compiler `qjsc.c`, then the one generated input the build needs, then the CLI
 `qjs.c`, then the conformance runner `run-test262.c`. Everything is built with
-one flag set (`-D_GNU_SOURCE -DCONFIG_VERSION -DCONFIG_CC -DCONFIG_PREFIX -O2
+one flag set (`-std=gnu17 -D_GNU_SOURCE -DCONFIG_VERSION -DCONFIG_CC -DCONFIG_PREFIX -O2
 -funsigned-char -fwrapv`) because upstream's Makefile does, and objects that
-disagreed about `CONFIG_VERSION` or `_GNU_SOURCE` would not link. The
+disagreed about `CONFIG_VERSION` or `_GNU_SOURCE` would not link. GNU C17
+matches the Clang reference dialect and admits upstream bare `asm` in
+`cpu_pause`; strict ISO C mode remains unchanged outside this harness (#3778). The
 documented minimal feature configuration is upstream's own `make qjs` default:
 no LTO, no sanitizers, no shared libraries, no cosmopolitan build and no
 `CONFIG_CHECK_JSVALUE`, which changes `JSValue`'s representation. Four units

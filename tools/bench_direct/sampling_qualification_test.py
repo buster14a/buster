@@ -9,6 +9,7 @@ These fixtures diagnose the consumer; they are never performance evidence.
 from __future__ import annotations
 
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -321,6 +322,43 @@ class SamplingQualificationTests(unittest.TestCase):
         self.assertEqual(compiler_receipt.THROUGHPUT_PROFILE["modes"], ["fast", "quality"])
         self.assertEqual(compiler_receipt.THROUGHPUT_PROFILE["workloads"],
                          ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"])
+
+    def test_committed_main_route_switch_stays_off_until_qualified(self):
+        # #3212 rollout: the routing TSV is the single switch. It may select the
+        # fixed-40 profile only in the same reviewed change that marks the
+        # protocol qualified; otherwise MAIN keeps compiler-compare-v1.
+        root = Path(__file__).resolve().parents[2]
+        protocol = json.loads((root / "docs/compiler-main-sampling-qualification-v1.json").read_text(encoding="utf-8"))
+        rows = [line.split("\t") for line in
+                (root / "docs/compiler-main-profile-routing-v1.tsv").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(all(len(row) == 2 for row in rows))
+        route = dict(rows)
+        self.assertEqual(len(route), len(rows))
+        self.assertEqual(route["schema"], "buster-compiler-main-profile-routing-v1")
+        self.assertIn(route["state"], ("disabled", "owned-long", "qualified-40", "rollback"))
+        enabled = protocol["routine_profile_enabled"]
+        self.assertIs(type(enabled), bool)
+        self.assertEqual(route["state"] == "qualified-40", enabled)
+        self.assertEqual(route["main_profile"], "compiler-main-40pairs-v1" if enabled else "compiler-compare-v1")
+        if not enabled:
+            self.assertEqual(protocol["rollout"]["status"], "disabled")
+        if protocol["state"] == "predeclared-not-measured":
+            self.assertEqual(route["state"], "disabled")
+            self.assertTrue(all(value == "-" for key, value in route.items()
+                                if key not in ("schema", "repository", "state", "main_profile", "preparation_policy")))
+
+    def test_only_the_fixed_forty_profile_can_shorten_main(self):
+        self.assertEqual(sorted(compiler_receipt.MAIN_PROFILES), ["compiler-compare-v1", "compiler-main-40pairs-v1"])
+        for name in ("compiler-main-40pairs-candidate-v1", "compiler-main-80pairs-candidate-v1",
+                     "compiler-main-80pairs-v1", "compiler-main-40pairs-v2", "", None, 40):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                compiler_receipt.named_main_profile(name)
+        short = compiler_receipt.named_main_profile("compiler-main-40pairs-v1")
+        self.assertEqual({key: value for key, value in short.items() if key in compiler_receipt.PROFILE},
+                         dict(compiler_receipt.PROFILE, name="compiler-main-40pairs-v1"))
+        self.assertEqual((short["pairs"], short["seed"], short["confidence"], short["bootstrap_resamples"],
+                          short["fresh_copy"], short["order"]), (40, 20261003, 0.95, 2000, True, "ABBA"))
+        self.assertIs(compiler_receipt.named_main_profile("compiler-compare-v1"), compiler_receipt.PROFILE)
 
     def test_duplicate_tsv_and_missing_packet_data_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:

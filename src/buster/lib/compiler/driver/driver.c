@@ -1,7 +1,7 @@
 // The Clang-like `ide cc` driver: two public calls (driver.h) split
 // argument parsing from execution. compiler_driver_parse_arguments turns
 // argv into a CompilerDriverInvocation — dialect, target/CPU/features,
-// inputs classified as C source, objects, or archives, their ordered library
+// inputs classified as C source, objects, archives, or ELF DSOs, their ordered library
 // occurrences through compiler_driver_link_operation, and every output
 // mode — rejecting unknown languages and retired options explicitly
 // rather than guessing. compiler_driver_validate_request is the request
@@ -13,6 +13,8 @@
 // Comma-separated -Wl payloads become individual linker arguments;
 // compiler_driver_validate_linker_query handles the native identity query;
 // link_validate_linker_arguments owns the image-producing semantic subset.
+// compiler_driver_elf_requested_libraries consumes ordered as-needed policy
+// against input prefixes before the native writer receives its DSO list.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
@@ -48,10 +50,17 @@
 // shares the serial/lane reservation path, and a failed reservation is a
 // resource failure with its required size. Opt-in native C link batches publish
 // in input order only after the gang returns; assembly and archive selection
-// remain serial boundaries.
+// remain serial boundaries. compiler_driver_native_family_prepare prepares
+// only the cohort's native family and releases a parked gang (lane_release)
+// before preparing another one; compiler_parallel_prewarm prepares both.
+// compiler_driver_unit_worker_limit clamps the request and applies the
+// minimum-work gate (COMPILER_DRIVER_LANE_MIN_WORK_BYTES): a population too
+// small to repay that preparation stays serial.
 // Dependency output follows successful C object or bounded -Wp assembly
 // publication: the preprocessor contributes identity-deduplicated prerequisites
 // and this driver renders their Makefile after the artifact writer succeeds.
+// The parser retains ordered -MT/-MQ fragments and joins them once, so
+// dependency target storage grows with argument and output bytes.
 // Every unit enters through compiler_driver_execute_unit. With
 // collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
@@ -573,6 +582,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverLanguage compiler_driver_input_language(Compil
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(CompilerDriverInvocation invocation, u32 input_index);
+
 // Parsed streams cover both indexed arrays in their original order. A legacy
 // API invocation omits the stream and retains its file-then-library placement.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_link_operations_valid(CompilerDriverInvocation const* invocation)
@@ -599,6 +610,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_link_operations_valid(CompilerDriverInv
             result = false;
             break;
         }
+        // API-built streams must obey the same policy bounds as parsed flags.
+        result = result && (!operation.as_needed ||
+                 ((operation.kind == COMPILER_DRIVER_LINK_OPERATION_LIBRARY ||
+                   (operation.kind == COMPILER_DRIVER_LINK_OPERATION_FILE && compiler_driver_native_shared_library_input(*invocation, operation.index))) &&
+                  invocation->action == COMPILER_DRIVER_ACTION_LINK &&
+                  !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
+                  invocation->target.os == OPERATING_SYSTEM_LINUX && invocation->target.cpu_arch == CPU_ARCH_X86_64));
     }
     return result;
 }
@@ -1069,8 +1087,42 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_linker_argument_takes_operand(String8 a
 {
     bool result = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) ||
                   string_equal(argument, S8("-h")) || string_equal(argument, S8("-z")) ||
-                  string_equal(argument, S8("--version-script"));
+                  string_equal(argument, S8("--version-script")) || string_equal(argument, S8("-rpath")) ||
+                  string_equal(argument, S8("--rpath"));
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_linker_policy_argument(String8 argument, bool* as_needed, bool* operand)
+{
+    if (!*operand)
+    {
+        if (string_equal(argument, S8("--as-needed"))) *as_needed = true;
+        else if (string_equal(argument, S8("--no-as-needed"))) *as_needed = false;
+    }
+    *operand = !*operand && compiler_driver_linker_argument_takes_operand(argument);
+}
+
+// These flags are consumed by the ordered driver selection, before the
+// native writer receives its already-selected DT_NEEDED list. Direct native
+// linker API requests still fail closed because that API has no input order.
+BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_as_needed(CompilerDriverInvocation* invocation)
+{
+    bool operand = false;
+    u32 count = 0;
+    for (u32 index = 0; index < invocation->linker_argument_count; index += 1)
+    {
+        String8 argument = invocation->linker_arguments[index];
+        bool policy = !operand && (string_equal(argument, S8("--as-needed")) || string_equal(argument, S8("--no-as-needed")));
+        if (policy && invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+            (!compiler_driver_native_linux_elf_link(*invocation) || invocation->target.cpu_arch != CPU_ARCH_X86_64))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("--as-needed/--no-as-needed require an x86-64 Linux native link");
+        }
+        if (!policy) invocation->linker_arguments[count++] = argument;
+        operand = !operand && compiler_driver_linker_argument_takes_operand(argument);
+    }
+    invocation->linker_argument_count = count;
 }
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_verbose(Arena* arena, CompilerDriverInvocation* invocation)
@@ -2066,9 +2118,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .inline_options = {
             .tiny = false,
             .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
-            .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
-            .max_module_growth = IR_INLINE_MODULE_GROWTH,
-            .max_call_sites = IR_INLINE_CALL_SITES,
+            // Zero: optional row caps; required calls use work/storage guards.
+            .max_function_growth = 0,
+            .max_module_growth = 0,
+            .max_call_sites = 0,
         },
     };
     if (!arena)
@@ -2081,13 +2134,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     arguments = compiler_driver_expand_response_files(arena, &invocation, arguments);
     // At most one resource directory plus four sysroot directories. Native
     // Windows INCLUDE entries reserve their own exact-sized array below.
+    bool linker_as_needed = false;
+    bool linker_operand = false;
     u64 default_include_capacity = 5;
     u64 linker_argument_capacity = arguments.length;
     u64 macro_prefix_map_capacity = 0;
+    u64 after_include_capacity = 0;
+    u64 dependency_target_capacity = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 argument = arguments.pointer[index];
         macro_prefix_map_capacity += string_starts_with_sequence(argument, S8("-fmacro-prefix-map="));
+        after_include_capacity += string_starts_with_sequence(argument, S8("-idirafter"));
+        dependency_target_capacity += string_starts_with_sequence(argument, S8("-MT")) ||
+                                      string_starts_with_sequence(argument, S8("-MQ"));
         if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
             for (u64 offset = 4; offset < argument.length; offset += 1)
@@ -2107,6 +2167,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.link_operations = arena_allocate(arena, CompilerDriverLinkOperation, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
+    String8* after_include_paths = after_include_capacity ? arena_allocate(arena, String8, after_include_capacity) : 0;
+    u32 after_include_count = 0;
     invocation.forced_includes = arena_allocate(arena, String8, arguments.length);
     invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
     if (macro_prefix_map_capacity)
@@ -2149,7 +2211,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 runtime_omission_option = {0};
     String8 dependency_option_without_mode = {0};
     bool direct_dependency_options = false;
-    u32 dependency_target_count = 0;
+    // The prepass may count option values too, but never undercounts targets.
+    // arguments.length is bounded above, so two fragments per target fit.
+    String8* dependency_fragments = dependency_target_capacity ? arena_allocate(arena, String8, 2 * dependency_target_capacity) : 0;
+    u64 dependency_fragment_count = 0;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -2162,6 +2227,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.input_language_count = invocation.input_count;
             invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
                 .index = input_index, .kind = COMPILER_DRIVER_LINK_OPERATION_FILE,
+                .as_needed = linker_as_needed && compiler_driver_native_shared_library_input(invocation, input_index),
             };
             continue;
         }
@@ -2170,10 +2236,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             options_ended = true;
             continue;
         }
-        if (string_equal(argument, S8("-m16")) || string_equal(argument, S8("-m32")))
+        if (string_equal(argument, S8("-m16")) || string_equal(argument, S8("-m32")) || string_equal(argument, S8("-m64")))
         {
             x86_execution_mode_option = argument;
-            x86_execution_mode = string_equal(argument, S8("-m16")) ? 16 : 32;
+            x86_execution_mode = string_equal(argument, S8("-m16")) ? 16 : string_equal(argument, S8("-m32")) ? 32 : 64;
             x86_execution_mode_seen = true;
             continue;
         }
@@ -2275,9 +2341,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     CompilerDriverDependencyQuoteResult quoted = compiler_driver_dependency_quote(arena, value);
                     target = quoted.representable ? quoted.text : value;
                 }
-                invocation.dependency_targets =
-                    dependency_target_count ? string_format(arena, S8("{S8} {S8}"), invocation.dependency_targets, target) : target;
-                dependency_target_count += 1;
+                if (dependency_fragment_count)
+                {
+                    dependency_fragments[dependency_fragment_count++] = S8(" ");
+                }
+                dependency_fragments[dependency_fragment_count++] = target;
             }
             continue;
         }
@@ -2474,7 +2542,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             continue;
         }
         if (string_equal(argument, S8("-o")) || string_equal(argument, S8("-e")) || string_equal(argument, S8("--entry")) ||
-            string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) ||
+            string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) || string_equal(argument, S8("-idirafter")) ||
             string_equal(argument, S8("-D")) || string_equal(argument, S8("-U")) || string_equal(argument, S8("-L")) || string_equal(argument, S8("-l")) ||
             string_equal(argument, S8("-F")) || string_equal(argument, S8("-framework")) || string_equal(argument, S8("-x")) ||
             string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")) || string_equal(argument, S8("-march")) ||
@@ -2518,6 +2586,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 invocation.system_include_paths[invocation.system_include_path_count++] = value;
             }
+            else if (string_equal(argument, S8("-idirafter")))
+            {
+                after_include_paths[after_include_count++] = value;
+            }
             else if (string_equal(argument, S8("-D")))
             {
                 invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
@@ -2541,7 +2613,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 u32 library_index = invocation.library_count++;
                 invocation.libraries[library_index] = value;
                 invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
-                    .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+                    .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY, .as_needed = linker_as_needed,
                 };
             }
             else if (string_equal(argument, S8("-F")))
@@ -2647,6 +2719,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else
             {
+                compiler_driver_linker_policy_argument(value, &linker_as_needed, &linker_operand);
                 invocation.linker_arguments[invocation.linker_argument_count++] = value;
             }
             continue;
@@ -2835,6 +2908,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.early_exit = string_equal(argument, S8("-fearly-exit"));
             continue;
         }
+        if (string_equal(argument, S8("-fcanonical-intern-constants")) || string_equal(argument, S8("-fno-canonical-intern-constants")))
+        {
+            invocation.intern_block_constants = string_equal(argument, S8("-fcanonical-intern-constants"));
+            continue;
+        }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
         {
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
@@ -2874,8 +2952,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-fcanonical-fast")) || string_equal(argument, S8("-fno-canonical-fast")))
         {
+            // The whole-pipeline controls select the adopted recipe or nothing;
+            // they also clear an earlier opt-in -fcanonical-fast-cse.
             invocation.fast_passes = string_equal(argument, S8("-fcanonical-fast")) ? IR_FAST_ALL : 0;
-            fast_override_mask = IR_FAST_ALL;
+            fast_override_mask = IR_FAST_PASS_MASK;
+            continue;
+        }
+        if (string_equal(argument, S8("-fcanonical-fast-cse-strategy=window")) || string_equal(argument, S8("-fcanonical-fast-cse-strategy=table")))
+        {
+            invocation.fast_cse_window = string_equal(argument, S8("-fcanonical-fast-cse-strategy=window"));
             continue;
         }
         if (string_equal(argument, S8("-ftime-canonical-fast")))
@@ -2911,6 +2996,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             S8("-fcanonical-inline-function-growth="),
             S8("-fcanonical-inline-module-growth="),
             S8("-fcanonical-inline-call-sites="),
+            S8("-fcanonical-inline-caller-growth-shift="),
         };
         bool inline_budget_option = false;
         for (u32 budget = 0; budget < BUSTER_ARRAY_LENGTH(inline_budget_prefixes); budget += 1)
@@ -2926,7 +3012,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     if (budget == 0) invocation.inline_options.max_callee_instructions = limit;
                     else if (budget == 1) invocation.inline_options.max_function_growth = limit;
                     else if (budget == 2) invocation.inline_options.max_module_growth = limit;
-                    else invocation.inline_options.max_call_sites = limit;
+                    else if (budget == 3) invocation.inline_options.max_call_sites = limit;
+                    else invocation.inline_options.caller_growth_shift = limit;
                 }
                 else
                 {
@@ -3138,7 +3225,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     }
                     else
                     {
-                        invocation.linker_arguments[invocation.linker_argument_count++] = string_slice(argument, start, end);
+                        String8 linker_argument = string_slice(argument, start, end);
+                        compiler_driver_linker_policy_argument(linker_argument, &linker_as_needed, &linker_operand);
+                        invocation.linker_arguments[invocation.linker_argument_count++] = linker_argument;
                     }
                     start = end + 1;
                 }
@@ -3169,6 +3258,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
             }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-idirafter")))
+        {
+            after_include_paths[after_include_count++] = compiler_driver_option_value(argument, S8("-idirafter"));
             continue;
         }
         String8 prefix = {
@@ -3220,7 +3314,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             u32 library_index = invocation.library_count++;
             invocation.libraries[library_index] = value;
             invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
-                .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+                .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY, .as_needed = linker_as_needed,
             };
             continue;
         }
@@ -3344,6 +3438,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         break;
     }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && dependency_fragment_count)
+    {
+        if (dependency_fragment_count == 1)
+        {
+            invocation.dependency_targets = dependency_fragments[0];
+        }
+        else if (!string_join_arena_attempt(arena,
+                                           (SliceString8){.pointer = dependency_fragments, .length = dependency_fragment_count},
+                                           false, &invocation.dependency_targets))
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("dependency targets exceed supported size");
+        }
+    }
     // Standard input has no suffix to classify, so, as for Clang, it needs an
     // explicit C language or -E, which reads it as C source. It is one stream
     // and can be consumed once.
@@ -3414,11 +3522,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 else
                 {
                     Target x86_mode_target = invocation.target;
-                    if (x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
+                    if (x86_execution_mode != 64 && x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
                     {
                         x86_mode_target.cpu_model = CPU_MODEL_BASELINE;
                     }
-                    x86_mode_target.cpu_arch = CPU_ARCH_I386;
+                    x86_mode_target.cpu_arch = x86_execution_mode == 64 ? CPU_ARCH_X86_64 : CPU_ARCH_I386;
                     x86_mode_target.x86_code16 = x86_execution_mode == 16;
                     if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
                     {
@@ -3579,11 +3687,40 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
     }
     compiler_driver_validate_linker_query(&invocation);
+    compiler_driver_consume_linker_as_needed(&invocation);
     compiler_driver_consume_linker_verbose(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
     {
         compiler_driver_append_system_includes(arena, &invocation);
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && after_include_count && invocation.has_gpu_target)
+    {
+        // External pipelines forward system paths as -isystem, before their
+        // own defaults. Do not silently change a late directory's semantics.
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-idirafter is unsupported for external GPU pipelines");
+    }
+    // Explicit after-directories survive -nostdinc and follow every default
+    // root, including Windows INCLUDE's exact-sized replacement allocation.
+    // Reuse the preprocessor's system classification and include_next indices.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && after_include_count)
+    {
+        u64 count = (u64)invocation.system_include_path_count + after_include_count;
+        if (count > UINT32_MAX)
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("too many system include paths");
+        }
+        else
+        {
+            String8* paths = arena_allocate(arena, String8, count);
+            if (invocation.system_include_path_count)
+                memcpy(paths, invocation.system_include_paths, (u64)invocation.system_include_path_count * sizeof(*paths));
+            memcpy(paths + invocation.system_include_path_count, after_include_paths, (u64)after_include_count * sizeof(*paths));
+            invocation.system_include_paths = paths;
+            invocation.system_include_path_count = (u32)count;
+        }
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
@@ -3751,59 +3888,12 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 missing_path;
     String8 missing_framework;
     String8 unsupported_script_path;
     String8 missing_runtime_symbol;
     String8 runtime_failure_library;
 };
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u16(ByteSlice bytes, u64 offset, u16* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u32(ByteSlice bytes, u64 offset, u32* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u64(ByteSlice bytes, u64 offset, u64* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_pe_rva_offset(ByteSlice bytes, u64 section_table, u16 section_count, u32 rva, u64* offset_out)
 {
@@ -3814,8 +3904,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_pe_rva_offset(ByteSlice bytes, u64 sect
         u32 virtual_address = 0;
         u32 raw_size = 0;
         u32 raw_offset = 0;
-        if (!compiler_driver_read_u32(bytes, section + 8, &virtual_size) || !compiler_driver_read_u32(bytes, section + 12, &virtual_address) ||
-            !compiler_driver_read_u32(bytes, section + 16, &raw_size) || !compiler_driver_read_u32(bytes, section + 20, &raw_offset))
+        if (!byte_slice_read_u32(bytes, section + 8, &virtual_size) || !byte_slice_read_u32(bytes, section + 12, &virtual_address) ||
+            !byte_slice_read_u32(bytes, section + 16, &raw_size) || !byte_slice_read_u32(bytes, section + 20, &raw_offset))
         {
             return false;
         }
@@ -3882,23 +3972,23 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     u32 pe_offset = 0;
     u16 section_count = 0;
     u16 optional_size = 0;
-    if (!bytes.pointer || bytes.length < 0x40 || bytes.pointer[0] != 'M' || bytes.pointer[1] != 'Z' || !compiler_driver_read_u32(bytes, 0x3c, &pe_offset) ||
+    if (!bytes.pointer || bytes.length < 0x40 || bytes.pointer[0] != 'M' || bytes.pointer[1] != 'Z' || !byte_slice_read_u32(bytes, 0x3c, &pe_offset) ||
         pe_offset > bytes.length || bytes.length - pe_offset < 24 || memcmp(bytes.pointer + pe_offset, "PE\0\0", 4) != 0 ||
-        !compiler_driver_read_u16(bytes, pe_offset + 6, &section_count) || !compiler_driver_read_u16(bytes, pe_offset + 20, &optional_size))
+        !byte_slice_read_u16(bytes, pe_offset + 6, &section_count) || !byte_slice_read_u16(bytes, pe_offset + 20, &optional_size))
     {
         file_map_unmap(file);
         return;
     }
     u64 optional = pe_offset + 24;
     u16 magic = 0;
-    if (!compiler_driver_read_u16(bytes, optional, &magic))
+    if (!byte_slice_read_u16(bytes, optional, &magic))
     {
         file_map_unmap(file);
         return;
     }
     u64 directory = optional + (magic == 0x20b ? 112 : 96);
     u32 export_rva = 0;
-    if ((magic != 0x20b && magic != 0x10b) || directory + 8 > optional + optional_size || !compiler_driver_read_u32(bytes, directory, &export_rva))
+    if ((magic != 0x20b && magic != 0x10b) || directory + 8 > optional + optional_size || !byte_slice_read_u32(bytes, directory, &export_rva))
     {
         file_map_unmap(file);
         return;
@@ -3914,7 +4004,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     u32 name_count = 0;
     u32 names_rva = 0;
     if (!compiler_driver_pe_rva_offset(bytes, section_table, section_count, export_rva, &export_offset) ||
-        !compiler_driver_read_u32(bytes, export_offset + 24, &name_count) || !compiler_driver_read_u32(bytes, export_offset + 32, &names_rva) ||
+        !byte_slice_read_u32(bytes, export_offset + 24, &name_count) || !byte_slice_read_u32(bytes, export_offset + 32, &names_rva) ||
         name_count > (bytes.length / sizeof(u32)))
     {
         file_map_unmap(file);
@@ -3932,7 +4022,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     {
         u32 name_rva = 0;
         u64 name_offset = 0;
-        if (!compiler_driver_read_u32(bytes, names_offset + (u64)name_index * sizeof(u32), &name_rva) ||
+        if (!byte_slice_read_u32(bytes, names_offset + (u64)name_index * sizeof(u32), &name_rva) ||
             !compiler_driver_pe_rva_offset(bytes, section_table, section_count, name_rva, &name_offset))
         {
             continue;
@@ -3991,9 +4081,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     u16 section_entry_size = 0;
     u16 section_count = 0;
     bool header_valid = bytes.length >= DRIVER_ELF_SECTION_HEADER_SIZE && memcmp(bytes.pointer, "\x7f" "ELF", 4) == 0 && bytes.pointer[4] == 2 &&
-                        bytes.pointer[5] == 1 && compiler_driver_read_u16(bytes, 16, &type) && compiler_driver_read_u16(bytes, 18, &file_machine) &&
-                        compiler_driver_read_u64(bytes, 40, &section_table) && compiler_driver_read_u16(bytes, 58, &section_entry_size) &&
-                        compiler_driver_read_u16(bytes, 60, &section_count) && type == DRIVER_ELF_TYPE_SHARED && file_machine == machine &&
+                        bytes.pointer[5] == 1 && byte_slice_read_u16(bytes, 16, &type) && byte_slice_read_u16(bytes, 18, &file_machine) &&
+                        byte_slice_read_u64(bytes, 40, &section_table) && byte_slice_read_u16(bytes, 58, &section_entry_size) &&
+                        byte_slice_read_u16(bytes, 60, &section_count) && type == DRIVER_ELF_TYPE_SHARED && file_machine == machine &&
                         section_entry_size == DRIVER_ELF_SECTION_HEADER_SIZE && section_count && section_table <= bytes.length &&
                         (u64)section_count * DRIVER_ELF_SECTION_HEADER_SIZE <= bytes.length - section_table;
     u64 symbol_offset = 0;
@@ -4018,25 +4108,25 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         u64 entry_size = 0;
         u64 strings_offset = 0;
         u64 strings_size = 0;
-        bool type_valid = compiler_driver_read_u32(bytes, section + 4, &section_type);
+        bool type_valid = byte_slice_read_u32(bytes, section + 4, &section_type);
         if (type_valid && section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS)
         {
             version_symbols_invalid |= version_symbols_present;
             version_symbols_present = true;
         }
-        if (!type_valid || !compiler_driver_read_u64(bytes, section + 24, &offset) ||
-            !compiler_driver_read_u64(bytes, section + 32, &size) || offset > bytes.length || size > bytes.length - offset)
+        if (!type_valid || !byte_slice_read_u64(bytes, section + 24, &offset) ||
+            !byte_slice_read_u64(bytes, section + 32, &size) || offset > bytes.length || size > bytes.length - offset)
         {
             version_symbols_invalid |= type_valid && section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS;
             continue;
         }
         if (section_type == DRIVER_ELF_SECTION_TYPE_DYNAMIC_SYMBOLS && !symbol_size)
         {
-            if (compiler_driver_read_u32(bytes, section + 40, &string_section) && compiler_driver_read_u64(bytes, section + 56, &entry_size) &&
+            if (byte_slice_read_u32(bytes, section + 40, &string_section) && byte_slice_read_u64(bytes, section + 56, &entry_size) &&
                 entry_size == DRIVER_ELF_SYMBOL_SIZE && size && !(size % DRIVER_ELF_SYMBOL_SIZE) && string_section < section_count)
             {
                 u64 strings = section_table + (u64)string_section * DRIVER_ELF_SECTION_HEADER_SIZE;
-                if (compiler_driver_read_u64(bytes, strings + 24, &strings_offset) && compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+                if (byte_slice_read_u64(bytes, strings + 24, &strings_offset) && byte_slice_read_u64(bytes, strings + 32, &strings_size) &&
                     strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset)
                 {
                     symbol_offset = offset;
@@ -4052,7 +4142,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             version_symbol_size = size;
         }
         else if (section_type == DRIVER_ELF_SECTION_TYPE_VERSION_DEFINITIONS && !version_definition_size &&
-                 compiler_driver_read_u32(bytes, section + 44, &definition_count) && definition_count)
+                 byte_slice_read_u32(bytes, section + 44, &definition_count) && definition_count)
         {
             version_definition_offset = offset;
             version_definition_size = size;
@@ -4063,48 +4153,59 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     // supplies loader identity independently of the filename used to find it.
     String8 soname = {0};
     bool identity_valid = true;
-    for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
+    String8* needed_names = 0;
+    u32 needed_count = 0;
+    u32 needed_written = 0;
+    for (u32 pass = 0; pass < 2 && header_valid && identity_valid; pass += 1)
     {
-        u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-        u32 section_type = 0;
-        u32 strings_index = 0;
-        u64 offset = 0;
-        u64 size = 0;
-        u64 strings_offset = 0;
-        u64 strings_size = 0;
-        compiler_driver_read_u32(bytes, section + 4, &section_type);
-        if (section_type == 6)
+        for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
         {
-            identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
-                             compiler_driver_read_u64(bytes, section + 32, &size) &&
-                             compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
-                             offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
-            u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-            identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
-                             compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
-                             strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
-            for (u64 entry = 0; identity_valid && entry < size; entry += 16)
+            u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+            u32 section_type = 0;
+            u32 strings_index = 0;
+            u64 offset = 0;
+            u64 size = 0;
+            u64 strings_offset = 0;
+            u64 strings_size = 0;
+            byte_slice_read_u32(bytes, section + 4, &section_type);
+            if (section_type == 6)
             {
-                u64 tag = 0;
-                u64 name = 0;
-                compiler_driver_read_u64(bytes, offset + entry, &tag);
-                if (!tag) { break; }
-                if (tag == 14)
+                identity_valid = byte_slice_read_u64(bytes, section + 24, &offset) &&
+                                 byte_slice_read_u64(bytes, section + 32, &size) &&
+                                 byte_slice_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
+                                 offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
+                u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+                identity_valid = identity_valid && byte_slice_read_u64(bytes, strings + 24, &strings_offset) &&
+                                 byte_slice_read_u64(bytes, strings + 32, &strings_size) &&
+                                 strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
+                for (u64 entry = 0; identity_valid && entry < size; entry += 16)
                 {
-                    compiler_driver_read_u64(bytes, offset + entry + 8, &name);
-                    u64 length = 0;
-                    while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                    u64 tag = 0;
+                    u64 name = 0;
+                    byte_slice_read_u64(bytes, offset + entry, &tag);
+                    if (!tag) { break; }
+                    if (tag == 1 || (tag == 14 && !pass))
                     {
-                        length += 1;
-                    }
-                    identity_valid = name < strings_size && length && length < strings_size - name && !soname.length;
-                    if (identity_valid)
-                    {
-                        soname = (String8){.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                        byte_slice_read_u64(bytes, offset + entry + 8, &name);
+                        u64 length = 0;
+                        while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                        {
+                            length += 1;
+                        }
+                        identity_valid = name < strings_size && length && length < strings_size - name &&
+                                         (tag != 14 || !soname.length) && (tag != 1 || pass || needed_count < UINT32_MAX);
+                        if (identity_valid)
+                        {
+                            String8 spelling = {.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                            if (tag == 14) { soname = spelling; }
+                            else if (pass) { needed_names[needed_written++] = spelling; }
+                            else { needed_count += 1; }
+                        }
                     }
                 }
             }
         }
+        if (!pass && identity_valid) { needed_names = arena_allocate(arena, String8, needed_count); }
     }
     // .gnu.version_d as an index-keyed table.  The definitions form a linked
     // list whose entries carry their own index, so the highest index decides
@@ -4125,8 +4226,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u16 flags = 0;
             u32 auxiliary = 0;
             u32 next = 0;
-            if (!compiler_driver_read_u16(bytes, cursor + 2, &flags) || !compiler_driver_read_u16(bytes, cursor + 4, &index) ||
-                !compiler_driver_read_u32(bytes, cursor + 12, &auxiliary) || !compiler_driver_read_u32(bytes, cursor + 16, &next))
+            if (!byte_slice_read_u16(bytes, cursor + 2, &flags) || !byte_slice_read_u16(bytes, cursor + 4, &index) ||
+                !byte_slice_read_u32(bytes, cursor + 12, &auxiliary) || !byte_slice_read_u32(bytes, cursor + 16, &next))
             {
                 break;
             }
@@ -4138,7 +4239,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u32 name = 0;
             u64 auxiliary_offset = cursor + auxiliary;
             if (pass && !base && index < version_name_count && auxiliary >= DRIVER_ELF_VERSION_DEFINITION_SIZE &&
-                auxiliary_offset + DRIVER_ELF_VERSION_AUXILIARY_SIZE <= end && compiler_driver_read_u32(bytes, auxiliary_offset, &name) && name &&
+                auxiliary_offset + DRIVER_ELF_VERSION_AUXILIARY_SIZE <= end && byte_slice_read_u32(bytes, auxiliary_offset, &name) && name &&
                 name < string_size)
             {
                 u64 length = 0;
@@ -4160,6 +4261,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             memset(version_names, 0, (u64)version_name_count * sizeof(*version_names));
         }
     }
+    for (u32 index = 0; index < version_name_count; index += 1)
+    {
+        library->supports_relr |= string_equal(version_names[index], S8("GLIBC_ABI_DT_RELR"));
+    }
     // Export arrays use u32 counts and the link indexes reserve UINT32_MAX
     // as an empty entry. Check before allocating or narrowing the ELF count.
     if (identity_valid && symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX && !version_symbols_invalid &&
@@ -4171,6 +4276,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         library->exported_data_symbols = collect_data ? arena_allocate(arena, NativeDynamicDataSymbol, symbol_count) : 0;
         library->versioned_symbols = arena_allocate(arena, NativeDynamicVersionedSymbol, symbol_count);
         library->referenced_symbols = arena_allocate(arena, String8, symbol_count);
+        u32 weak_references = 0;
         for (u64 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
         {
             u64 symbol = symbol_offset + symbol_index * DRIVER_ELF_SYMBOL_SIZE;
@@ -4178,8 +4284,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u16 section = 0;
             u64 value = 0;
             u64 size = 0;
-            if (!compiler_driver_read_u32(bytes, symbol, &name) || !compiler_driver_read_u16(bytes, symbol + 6, &section) ||
-                !compiler_driver_read_u64(bytes, symbol + 8, &value) || !compiler_driver_read_u64(bytes, symbol + 16, &size))
+            if (!byte_slice_read_u32(bytes, symbol, &name) || !byte_slice_read_u16(bytes, symbol + 6, &section) ||
+                !byte_slice_read_u64(bytes, symbol + 8, &value) || !byte_slice_read_u64(bytes, symbol + 16, &size))
             {
                 continue;
             }
@@ -4206,13 +4312,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             // module -- possibly this executable -- to define.
             if (!section)
             {
-                library->referenced_symbols[library->referenced_symbol_count++] = spelling;
+                if (binding == 1) library->referenced_symbols[library->strong_referenced_symbol_count++] = spelling;
+                else library->referenced_symbols[symbol_count - 1 - weak_references++] = spelling;
                 continue;
             }
             u16 version = 0;
             if (versioned)
             {
-                compiler_driver_read_u16(bytes, version_symbol_offset + symbol_index * sizeof(u16), &version);
+                byte_slice_read_u16(bytes, version_symbol_offset + symbol_index * sizeof(u16), &version);
             }
             u32 version_index = version & DRIVER_ELF_VERSION_INDEX_MAX;
             library->versioned_symbols[library->versioned_symbol_count++] = (NativeDynamicVersionedSymbol){
@@ -4235,6 +4342,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 };
             }
         }
+        memmove(library->referenced_symbols + library->strong_referenced_symbol_count,
+                library->referenced_symbols + symbol_count - weak_references, (u64)weak_references * sizeof(String8));
+        library->referenced_symbol_count = library->strong_referenced_symbol_count + weak_references;
         // Every name this library defines is now recorded, so the linker may
         // read the absence of a name from `versioned_symbols` as the library
         // not defining it -- which is what makes an undefined weak reference
@@ -4243,6 +4353,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         // than a second copy of the same names in `exported_symbols`, which
         // stays the PE side's.
         if (soname.length) { library->name = string_duplicate_arena(arena, soname, true); }
+        library->needed_names = needed_names;
+        library->needed_name_count = needed_count;
         library->exports_known = true;
         result = true;
     }
@@ -4255,7 +4367,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
 // also covers Debian's cross-libc/compiler-runtime installation convention.
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, CompilerDriverInvocation invocation, String8* roots)
 {
-    String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
+    bool android = invocation.target.os == OPERATING_SYSTEM_ANDROID;
+    String8 multiarch = android ? (invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-android") : S8("x86_64-linux-android"))
+                               : invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
     u32 root_count = 0;
     if (invocation.sysroot.length)
     {
@@ -4266,7 +4380,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
         roots[root_count++] = string_format(arena, S8("{S8}/lib"), invocation.sysroot);
         roots[root_count++] = string_format(arena, S8("{S8}/usr/lib"), invocation.sysroot);
     }
-    else
+    else if (!android)
     {
         roots[root_count++] = string_format(arena, S8("/lib/{S8}"), multiarch);
         roots[root_count++] = string_format(arena, S8("/usr/lib/{S8}"), multiarch);
@@ -4275,6 +4389,10 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
         roots[root_count++] = S8("/usr/lib64");
         roots[root_count++] = S8("/lib");
         roots[root_count++] = S8("/usr/lib");
+    }
+    else if (BUSTER_ANDROID)
+    {
+        roots[root_count++] = S8("/system/lib64");
     }
     return root_count;
 }
@@ -4333,13 +4451,42 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_report_argument(Arena* a
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_path(String8 path)
 {
+    // A directory named x.so.N does not classify the file beneath it.
+    u64 first = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (compiler_driver_path_separator(path.pointer[index])) { first = index + 1; }
+    }
+    path = string_slice(path, first, path.length);
     bool result = string_ends_with_sequence(path, S8(".so"));
     for (u64 index = 0; !result && index + 4 <= path.length; index += 1)
     {
-        result = string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length;
+        if (string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length)
+        {
+            bool digit = false;
+            bool valid = true;
+            for (u64 version = index + 4; valid && version < path.length; version += 1)
+            {
+                char8 byte = path.pointer[version];
+                if (byte >= '0' && byte <= '9') { digit = true; }
+                else if (byte == '.' && digit) { digit = false; }
+                else { valid = false; }
+            }
+            result = valid && digit;
+        }
     }
+    return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(CompilerDriverInvocation invocation, u32 input_index)
+{
+    // Explicit -x selects a source language for every suffix. Only automatic
+    // inputs may enter the DSO route, including API-built legacy invocations.
+    bool result = compiler_driver_input_language(invocation, input_index) == COMPILER_DRIVER_LANGUAGE_AUTOMATIC &&
+                  compiler_driver_native_shared_library_path(invocation.input_paths[input_index]);
     return result;
 }
 
@@ -4370,7 +4517,7 @@ String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocatio
             {
                 String8 input = invocation.input_paths[index];
                 if (compiler_driver_object_input(input) || compiler_driver_archive_input(input) ||
-                    compiler_driver_native_shared_library_input(input))
+                    compiler_driver_native_shared_library_input(invocation, index))
                 {
                     parts[part_count++] = compiler_driver_native_link_report_argument(arena, (String8){0}, input);
                 }
@@ -5797,7 +5944,7 @@ struct CompilerDriverElfScriptWork
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
                                                              NativeDynamicLibrary* library, FileMapRead* export_map, String8* script_path,
-                                                             String8 member_directory, bool literal)
+                                                             String8 member_directory, bool literal, bool direct_path)
 {
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     String8 roots[7];
@@ -5807,11 +5954,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     bool script_found = false;
     bool absolute = literal && library->name.length && library->name.pointer[0] == '/';
     u32 local_count = literal ? (member_directory.length ? 2u : 1u) : 0u;
-    u32 candidate_count = absolute ? 1u : local_count + invocation.library_path_count + root_count + (literal ? 0u : 1u);
+    u32 candidate_count = direct_path || absolute ? 1u : local_count + invocation.library_path_count + root_count + (literal ? 0u : 1u);
     for (u32 path_index = 0; !found && !script_found && path_index < candidate_count; path_index += 1)
     {
         String8 path;
-        if (absolute || (literal && path_index == local_count - 1) || (!literal && path_index == candidate_count - 1))
+        if (direct_path || absolute || (literal && path_index == local_count - 1) || (!literal && path_index == candidate_count - 1))
         {
             path = string_duplicate_arena(arena, library->name, true);
         }
@@ -5840,13 +5987,79 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
             library->versioned_symbol_count = 0;
             library->referenced_symbols = 0;
             library->referenced_symbol_count = 0;
+            library->needed_names = 0;
+            library->needed_name_count = 0;
             file_map_unmap(file);
         }
     }
 }
 
+typedef struct CompilerDriverElfNeededInput CompilerDriverElfNeededInput;
+struct CompilerDriverElfNeededInput
+{
+    ObjectFile* objects;
+    u32* prefix_counts;
+};
+
+// Reuse the incremental archive name index for a separate DSO-selection
+// view. Only already-seen objects and retained libraries can demand a DSO;
+// later inputs and undefined weak references cannot retroactively keep it.
+enum { COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE = 16 };
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_library_needed(CompilerDriverArchiveState* state, NativeDynamicLibrary* library,
+                                                           NativeDynamicLibrary* retained, u32 retained_count)
+{
+    bool indirect = false;
+    for (u32 index = 0; !indirect && index < retained_count; index += 1)
+    {
+        for (u32 dependency = 0; !indirect && dependency < retained[index].needed_name_count; dependency += 1)
+        {
+            indirect = string_equal(retained[index].needed_names[dependency], library->name);
+        }
+    }
+    bool needed = false;
+    for (u32 index = 0; !needed && state->capacity && index < library->versioned_symbol_count; index += 1)
+    {
+        NativeDynamicVersionedSymbol* symbol = library->versioned_symbols + index;
+        if (symbol->has_default)
+        {
+            CompilerDriverArchiveSymbol* entry = compiler_driver_archive_slot(state, symbol->name);
+            // Regular-object demand always counts. DSO-only demand counts
+            // only when no retained DSO already names this loader identity.
+            needed = !(entry->flags & COMPILER_DRIVER_ARCHIVE_DEFINED) &&
+                     ((entry->flags & COMPILER_DRIVER_ARCHIVE_STRONG) ||
+                      (!indirect && (entry->flags & COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE)));
+        }
+    }
+    return needed;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_needed_library_add(CompilerDriverArchiveState* state, NativeDynamicLibrary* library)
+{
+    for (u32 index = 0; index < library->versioned_symbol_count; index += 1)
+    {
+        NativeDynamicVersionedSymbol* symbol = library->versioned_symbols + index;
+        if (symbol->has_default) compiler_driver_archive_symbol(state, symbol->name)->flags |= COMPILER_DRIVER_ARCHIVE_DEFINED;
+    }
+    for (u32 index = 0; index < library->strong_referenced_symbol_count; index += 1)
+    {
+        compiler_driver_archive_symbol(state, library->referenced_symbols[index])->flags |= COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE;
+    }
+}
+
+typedef struct CompilerDriverDynamicRequest CompilerDriverDynamicRequest;
+struct CompilerDriverDynamicRequest
+{
+    String8 name;
+    // Prefix and policy belong to this original -l/direct-path occurrence.
+    u32 object_prefix;
+    bool path;
+    bool as_needed;
+};
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, CompilerDriverInvocation invocation, bool imports_data,
-                                                                 NativeDynamicLibrary* seeds, String8* requests, u32 seed_count,
+                                                                 NativeDynamicLibrary* seeds, CompilerDriverDynamicRequest* requests, u32 seed_count,
+                                                                 CompilerDriverElfNeededInput* needed_input,
                                                                  CompilerDriverDynamicLibraries* result)
 {
     NativeDynamicLibrary* libraries = seeds;
@@ -5856,19 +6069,30 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
     CompilerDriverElfScriptWork* stack = 0;
     String8* members = 0;
     u32 expanded_members = 0;
-    for (u32 seed_index = 0; !result->missing_request.length && seed_index < seed_count; seed_index += 1)
+    CompilerDriverArchiveState needed_state = {.arena = arena};
+    for (u32 seed_index = 0; !result->missing_request.length && !result->missing_path.length && seed_index < seed_count; seed_index += 1)
     {
-        CompilerDriverElfScriptWork seed = {.name = seeds[seed_index].name};
+        bool as_needed = requests[seed_index].as_needed;
+        if (needed_input)
+        {
+            u32 prefix = requests[seed_index].object_prefix;
+            while (needed_state.processed_objects < prefix)
+            {
+                compiler_driver_archive_add_object(&needed_state, 0, needed_input->objects + needed_state.processed_objects++);
+            }
+        }
+        CompilerDriverElfScriptWork seed = {.name = seeds[seed_index].name, .literal = requests[seed_index].path};
         CompilerDriverElfScriptWork* work = stack ? stack : &seed;
         work[0] = seed;
         u32 pending = 1;
-        while (pending && !result->missing_request.length)
+        while (pending && !result->missing_request.length && !result->missing_path.length)
         {
             CompilerDriverElfScriptWork item = work[--pending];
             NativeDynamicLibrary library = {.name = item.name};
             FileMapRead map = {0};
             String8 script_path = {0};
-            compiler_driver_elf_library_exports(arena, invocation, imports_data, &library, &map, &script_path, item.directory, item.literal);
+            compiler_driver_elf_library_exports(arena, invocation, imports_data, &library, &map, &script_path, item.directory, item.literal,
+                                                requests[seed_index].path && !item.depth);
             if (script_path.length)
             {
                 if (!stack)
@@ -5936,14 +6160,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                 }
                 else
                 {
-                    result->missing_request = requests[seed_index];
+                    if (requests[seed_index].path) { result->missing_path = requests[seed_index].name; }
+                    else { result->missing_request = requests[seed_index].name; }
                     result->unsupported_script_path = script_path;
                 }
                 file_map_unmap(map);
             }
             else if (!library.exports_known)
             {
-                result->missing_request = requests[seed_index];
+                if (requests[seed_index].path) { result->missing_path = requests[seed_index].name; }
+                else { result->missing_request = requests[seed_index].name; }
                 // Archives, including -l:FILE.a, cannot be admitted as DSOs.
                 if (compiler_driver_archive_input(item.name)) { result->unsupported_script_path = item.script_path; }
             }
@@ -5951,7 +6177,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
             {
                 bool duplicate = false;
                 for (u32 index = 0; !duplicate && index < count; index += 1) { duplicate = string_equal(libraries[index].name, library.name); }
-                if (duplicate)
+                if (duplicate || (as_needed && !compiler_driver_elf_library_needed(&needed_state, &library, libraries, count)))
                 {
                     file_map_unmap(map);
                 }
@@ -5961,6 +6187,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                     // path (bare members keep their original spelling).
                     libraries[count++] = library;
                     maps[map_count++] = map;
+                    if (needed_input) compiler_driver_elf_needed_library_add(&needed_state, &library);
                 }
             }
         }
@@ -6416,7 +6643,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
                 NativeDynamicLibrary* runtime = libraries->pointer + runtime_index;
                 *runtime = (NativeDynamicLibrary){.name = S8("libgcc_s.so.1")};
                 FileMapRead* export_map = libraries->export_maps + libraries->export_map_count;
-                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0, (String8){0}, false);
+                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0, (String8){0}, false, false);
                 libraries->export_map_count += export_map->bytes.pointer != 0;
                 provider = runtime;
                 provided = compiler_driver_elf_library_helper_provider(runtime, symbol->name);
@@ -6431,7 +6658,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
 }
 
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation, bool* static_libraries,
-                                                                                    bool imports_data, ObjectFile const* linked)
+                                                                                    bool imports_data, ObjectFile const* linked, CompilerDriverElfNeededInput* needed_input)
 {
     CompilerDriverDynamicLibraries result = {0};
     static String8 const windows_system_libraries[] = {
@@ -6444,16 +6671,21 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         S8_INITIALIZER("vcruntime140.dll"),
     };
     u32 default_library_count = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_system_libraries) : 0;
-    u32 library_capacity = invocation.library_count + invocation.framework_count + default_library_count +
+    u32 shared_library_count = 0;
+    for (u32 index = 0; index < invocation.input_count; index += 1)
+    {
+        shared_library_count += compiler_driver_native_shared_library_input(invocation, index);
+    }
+    u32 library_capacity = shared_library_count + invocation.library_count + invocation.framework_count + default_library_count +
                            (invocation.target.os == OPERATING_SYSTEM_LINUX ? 1u : 0u);
     NativeDynamicLibrary* libraries =
         arena_allocate(arena, NativeDynamicLibrary, library_capacity);
-    // The `-l` spelling that produced each entry, kept beside the mapped file
-    // name so a library the search below never finds is reported as the
-    // request the caller wrote rather than as the soname it was mapped to.
+    // The caller's -l name or direct path beside each mapped file name.
+    // A failed lookup reports that request rather than the SONAME.
+    // Direct paths stay distinct until their actual ELF identity is read.
     // Entries the caller did not request -- the Windows defaults and the
     // Apple frameworks -- keep an empty request and are never reported.
-    String8* requests = arena_allocate(arena, String8, library_capacity);
+    CompilerDriverDynamicRequest* requests = arena_allocate(arena, CompilerDriverDynamicRequest, library_capacity);
     memset(requests, 0, sizeof(*requests) * library_capacity);
     u32 count = 0;
     for (u32 index = 0; index < default_library_count; index += 1)
@@ -6462,8 +6694,25 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             .name = windows_system_libraries[index],
         };
     }
-    for (u32 index = 0; index < invocation.library_count; index += 1)
+    u64 operation_count = invocation.link_operation_count ? invocation.link_operation_count
+                                                        : (u64)invocation.input_count + invocation.library_count;
+    for (u64 operation_index = 0; operation_index < operation_count; operation_index += 1)
     {
+        CompilerDriverLinkOperation operation = compiler_driver_link_operation(&invocation, operation_index);
+        if (operation.kind == COMPILER_DRIVER_LINK_OPERATION_FILE)
+        {
+            String8 path = invocation.input_paths[operation.index];
+            if (compiler_driver_native_shared_library_input(invocation, operation.index))
+            {
+                // Read exactly the caller's path, retaining its spelling when
+                // the ELF has no SONAME. Dedupe after reading its identity.
+                requests[count] = (CompilerDriverDynamicRequest){.name = path, .path = true, .as_needed = operation.as_needed,
+                    .object_prefix = needed_input ? needed_input->prefix_counts[operation_index] : 0};
+                libraries[count++] = (NativeDynamicLibrary){.name = path};
+            }
+            continue;
+        }
+        u32 index = operation.index;
         if (static_libraries && static_libraries[index])
         {
             continue;
@@ -6548,9 +6797,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         {
             duplicate |= string_equal(libraries[previous].name, name);
         }
-        if (!duplicate)
+        if (!duplicate || needed_input)
         {
-            requests[count] = requested;
+            requests[count] = (CompilerDriverDynamicRequest){.name = requested, .as_needed = operation.as_needed,
+                .object_prefix = needed_input ? needed_input->prefix_counts[operation_index] : 0};
             libraries[count++] = (NativeDynamicLibrary){
                 .name = name,
                 .mach_current_version = mach_current_version,
@@ -6608,7 +6858,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             result.export_map_count += export_map->bytes.pointer != 0;
         }
     }
-    else if (invocation.target.os == OPERATING_SYSTEM_LINUX)
+    else if (invocation.target.os == OPERATING_SYSTEM_LINUX || invocation.target.os == OPERATING_SYSTEM_ANDROID)
     {
         // libc.so.6 is the library the ELF writers name themselves, so it is
         // read as the runtime rather than as one of the requested ones.
@@ -6621,11 +6871,11 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         // libc.so.6 where nothing did before costs about 0,65 M instructions
         // on this host, a tenth of a percent of the smallest hosted compile.
         result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
-        result.runtime.name = S8("libc.so.6");
+        result.runtime.name = invocation.target.os == OPERATING_SYSTEM_ANDROID ? S8("libc.so") : S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
-        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false);
+        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false, false);
         result.export_map_count += export_map->bytes.pointer != 0;
-        compiler_driver_elf_requested_libraries(arena, invocation, imports_data, libraries, requests, count, &result);
+        compiler_driver_elf_requested_libraries(arena, invocation, imports_data, libraries, requests, count, needed_input, &result);
         libraries = result.pointer;
         count = result.count;
     }
@@ -6639,7 +6889,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
 }
 
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation,
-                                                                                              bool* static_libraries, ObjectFile* linked)
+                                                                                              bool* static_libraries, ObjectFile* linked, CompilerDriverElfNeededInput* needed_input)
 {
     CompilerDriverDynamicLibraries result;
     if (invocation.target.os == OPERATING_SYSTEM_UEFI)
@@ -6648,7 +6898,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynami
     }
     else
     {
-        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries, compiler_driver_object_imports_data(linked), linked);
+        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries, compiler_driver_object_imports_data(linked), linked, needed_input);
     }
 
     return result;
@@ -6692,7 +6942,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_shared_is_incompatible(ByteSlice by
     u16 machine = 0;
     bool recognized = target.os == OPERATING_SYSTEM_LINUX && bytes.length >= 64 &&
                       memcmp(bytes.pointer, "\x7f" "ELF", 4) == 0 && bytes.pointer[4] == 2 && bytes.pointer[5] == 1 && bytes.pointer[6] == 1 &&
-                      compiler_driver_read_u16(bytes, 16, &type) && type == 3 && compiler_driver_read_u16(bytes, 18, &machine);
+                      byte_slice_read_u16(bytes, 16, &type) && type == 3 && byte_slice_read_u16(bytes, 18, &machine);
     u16 expected = target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     return recognized && machine != expected;
 }
@@ -7545,7 +7795,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 // address model establishes that cause. Malformed sites and TLS failures do
 // not say anything about the input's code model. A
 // failed artifact write names the operating-system error that refused it.
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link,
+                                                                         ObjectFile* objects, u32 object_count)
 {
     String8 diagnostic;
     if (link.error == LINK_ERROR_FILE_WRITE)
@@ -7562,6 +7813,23 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena,
                        link.requires_position_independent_objects
                            ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
         diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+    }
+    if ((link.error == LINK_ERROR_UNSUPPORTED_FEATURE || link.error == LINK_ERROR_UNRESOLVED_SYMBOL) && link.symbol.length)
+    {
+        bool attributed = false;
+        for (u32 input = 0; !attributed && input < object_count; input += 1)
+        {
+            for (u32 symbol = 0; !attributed && objects[input].source_name.length && symbol < objects[input].symbol_count; symbol += 1)
+            {
+                ObjectSymbol* reference = objects[input].symbols + symbol;
+                if (reference->undefined_untyped && string_equal(reference->name, link.symbol))
+                {
+                    diagnostic = string_format(arena, S8("{S8}: cannot determine ELF import type for {S8} from the providing library"),
+                                               objects[input].source_name, reference->name);
+                    attributed = true;
+                }
+            }
+        }
     }
     return diagnostic;
 }
@@ -7681,11 +7949,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     else
     {
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-        CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-        if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
+        CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object, 0);
+        if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_path.length || dynamic_libraries.missing_framework.length)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = !dynamic_libraries.missing_request.length
+            result->diagnostic = dynamic_libraries.missing_path.length
+                                    ? dynamic_libraries.unsupported_script_path.length
+                                          ? string_format(arena, S8("unsupported GNU linker script {S8} requested by shared-library input {S8}"),
+                                                          dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_path)
+                                          : string_format(arena, S8("could not read target shared library {S8}"), dynamic_libraries.missing_path)
+                                : !dynamic_libraries.missing_request.length
                                      ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
                                      : dynamic_libraries.unsupported_script_path.length
                                      ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
@@ -7729,6 +8002,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                         .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
                                                         .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                         .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                        .runtime_relr = dynamic_libraries.runtime.supports_relr,
                                                         .debug_info = invocation.debug_info,
                                                         .image_kind = (u8)invocation.image_kind,
                                                     });
@@ -7738,7 +8012,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         if (result->native_link.error != LINK_ERROR_NONE)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link, &object, 1);
         }
     }
 }
@@ -7901,6 +8175,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
         .symbol_count = unit.symbol_count,
         .requires_executable_stack = unit.requires_executable_stack,
         .executable_stack_source = unit.requires_executable_stack ? path : (String8){0},
+        .source_name = path,
     };
     for (u32 index = 0; index < unit.section_count; index += 1)
     {
@@ -7937,6 +8212,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             .weak = symbol.weak,
             .hidden = symbol.hidden,
             .untyped = symbol.untyped,
+            .undefined_untyped = !symbol.defined && !symbol.typed,
+            .thread_local_state = symbol.typed ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
         };
     }
     for (u32 index = 0; index < unit.relocation_count; index += 1)
@@ -8479,6 +8756,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
+                                                                    .intern_block_constants = invocation.intern_block_constants,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
                                                                     // A GPU target has no symbol visibility to restrict.
                                                                     .default_visibility = invocation.has_gpu_target ? C_SYMBOL_VISIBILITY_UNSPECIFIED : invocation.default_visibility,
@@ -8493,6 +8771,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
+    result.constant_interning = lowered.constant_interning;
     result.type_layout = lowered.type_layout;
     if (!lowered.program || lowered.diagnostic_count || !lowered.program->modules || lowered.program->module_count != 1)
     {
@@ -8518,12 +8797,20 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    lowered.program->fast_cse_window = invocation.fast_cse_window;
     lowered.program->inline_options = invocation.inline_options;
     WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
     result.fast = module->fast;
+    for (u64 index = 0; index < result.fast.decline_count; index += 1)
+    {
+        result.fast.declines[index].source = invocation.input_paths[0];
+        // Declaration names can borrow preprocessing's private spelling arena,
+        // released at end; even the single-input result must own these bytes.
+        result.fast.declines[index].function_name = string_duplicate_arena(arena, result.fast.declines[index].function_name, false);
+    }
     result.inlining = module->inlining;
     if (validation.error == IR_VALIDATION_INLINE_REQUIRED)
     {
@@ -9359,6 +9646,9 @@ BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(compiler_driver_section_classes) == OBJECT_S
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_function_limit_override;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 compiler_driver_unit_arena_failure_ordinal;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_lane_work_overridden;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 compiler_driver_lane_min_work_override;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 compiler_driver_lane_input_work_override;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_setup_order_armed;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CompilerDriverTestSetupOrder compiler_driver_setup_order;
 
@@ -9414,6 +9704,20 @@ CompilerDriverTestSetupOrder compiler_driver_test_setup_order_end(void)
 void compiler_driver_test_set_function_limit(u32 limit)
 {
     compiler_driver_function_limit_override = limit;
+}
+
+void compiler_driver_test_set_lane_work(u64 minimum_bytes, u64 per_input_bytes)
+{
+    compiler_driver_lane_work_overridden = true;
+    compiler_driver_lane_min_work_override = minimum_bytes;
+    compiler_driver_lane_input_work_override = per_input_bytes;
+}
+
+void compiler_driver_test_restore_lane_work(void)
+{
+    compiler_driver_lane_work_overridden = false;
+    compiler_driver_lane_min_work_override = 0;
+    compiler_driver_lane_input_work_override = 0;
 }
 
 void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal)
@@ -9614,20 +9918,61 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_parallel_c_input(CompilerDriverInvocati
     bool native = invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64;
     return native && invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.emit_llvm_bitcode &&
            !invocation.has_gpu_target && !compiler_driver_object_input(path) && !compiler_driver_archive_input(path) &&
+           !compiler_driver_native_shared_library_input(invocation, input_index) &&
            compiler_driver_c_input(language, path) &&
            !compiler_driver_assembly_input(language, path) && !compiler_driver_preprocessed_assembly_input(path);
 }
 
-BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocation invocation)
+typedef struct CompilerDriverUnitWorkers CompilerDriverUnitWorkers;
+struct CompilerDriverUnitWorkers
 {
-    u32 result = 1;
+    u32 limit;
+    CompilerDriverLaneGate gate;
+};
+
+BUSTER_GLOBAL_LOCAL CompilerDriverUnitWorkers compiler_driver_unit_worker_limit(CompilerDriverInvocation invocation)
+{
+    CompilerDriverUnitWorkers result = {.limit = 1, .gate = COMPILER_DRIVER_LANE_GATE_NONE};
 #if !BUSTER_SINGLE_THREADED
     // An embedding caller's existing gang already owns its parallel budget.
     // Do not turn each of its invocations into another gang.
     if (invocation.compile_jobs > 1 && !invocation.source_cache && lane_count() == 1)
     {
         u32 logical = BUSTER_MAX(os_get_logical_thread_count(), (u32)1);
-        result = BUSTER_MAX((u32)1, BUSTER_MIN(invocation.compile_jobs, BUSTER_MIN(logical, invocation.input_count)));
+        result.limit = BUSTER_MAX((u32)1, BUSTER_MIN(invocation.compile_jobs, BUSTER_MIN(logical, invocation.input_count)));
+    }
+    if (result.limit > 1)
+    {
+        // The minimum-work gate (#53). compiler_driver_native_family_prepare
+        // runs once per invocation, so the population is every eligible input. Inputs are
+        // stat'ed only until the work is known to repay it; a missing or
+        // unreadable input counts no bytes and still fails in input order.
+        u64 minimum = COMPILER_DRIVER_LANE_MIN_WORK_BYTES;
+        u64 per_input = COMPILER_DRIVER_LANE_INPUT_WORK_BYTES;
+#if BUSTER_INCLUDE_TESTS
+        minimum = compiler_driver_lane_work_overridden ? compiler_driver_lane_min_work_override : minimum;
+        per_input = compiler_driver_lane_work_overridden ? compiler_driver_lane_input_work_override : per_input;
+#endif
+        u64 work = 0;
+        u32 eligible = 0;
+        for (u32 input_index = 0; input_index < invocation.input_count && (eligible < 2 || work < minimum); input_index += 1)
+        {
+            if (compiler_driver_parallel_c_input(invocation, input_index))
+            {
+                eligible += 1;
+                work += per_input;
+                if (work < minimum)
+                {
+                    FileStats stats = os_path_followed_stats(invocation.input_paths[input_index]);
+                    work += stats.valid && stats.kind == OS_FILE_KIND_REGULAR ? stats.size : 0;
+                }
+            }
+        }
+        result.gate = eligible < 2       ? COMPILER_DRIVER_LANE_GATE_NONE
+                      : work < minimum ? COMPILER_DRIVER_LANE_GATE_SERIAL
+                                       : COMPILER_DRIVER_LANE_GATE_LANES;
+        // One worker is exactly the -fcompile-jobs=1 path: no prewarm, no gang.
+        result.limit = result.gate == COMPILER_DRIVER_LANE_GATE_SERIAL ? 1 : result.limit;
     }
 #else
     BUSTER_UNUSED(invocation);
@@ -9635,18 +9980,103 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocati
     return result;
 }
 
+typedef enum CompilerDriverNativeFamily
+{
+    COMPILER_DRIVER_NATIVE_FAMILY_X86_64,
+    COMPILER_DRIVER_NATIVE_FAMILY_AARCH64,
+    COMPILER_DRIVER_NATIVE_FAMILY_COUNT,
+} CompilerDriverNativeFamily;
+
+// Families whose complete multi-lane preparation has run. Written only while
+// the caller is the only live thread, so no reader can race the write; an
+// unpublished family is simply prepared again, which its tables make cheap.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_family_prepared[COMPILER_DRIVER_NATIVE_FAMILY_COUNT];
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_target(CpuArch cpu_arch)
+{
+    return cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverNativeFamily compiler_driver_native_family(CpuArch cpu_arch)
+{
+    return cpu_arch == CPU_ARCH_AARCH64 ? COMPILER_DRIVER_NATIVE_FAMILY_AARCH64 : COMPILER_DRIVER_NATIVE_FAMILY_X86_64;
+}
+
+// Everything a gang compiling native C for cpu_arch reads that is still built
+// serially, filled before the gang runs. On x86 that is the serial compile's
+// own prewarm plus the forwarding and NOP recipes: the per-form caches, exact
+// plans, TLS/GOT recipe groups, shapes, dense tables and template rows fill on
+// demand from the lanes, under once-claims, so a gang prepares the forms it
+// emits, not all 11,013 (#53). AArch64 readers keep an exact lazy fallback
+// but would pay the decode on every lookup. Parked workers are live threads (os.h), so a family
+// not yet prepared first releases the calling thread's gang; the next lane_run
+// recreates it. Preparing only the target family keeps the other family's
+// cold cost out of the multi-lane entry (#53).
+BUSTER_GLOBAL_LOCAL void compiler_driver_native_family_prepare(CpuArch cpu_arch)
+{
+    CompilerDriverNativeFamily family = compiler_driver_native_family(cpu_arch);
+    if (compiler_driver_native_target(cpu_arch) && !compiler_driver_native_family_prepared[family])
+    {
+        // Inside an embedding caller's lane there is no gang of ours to
+        // release; that caller prewarmed before its gang ran.
+        if (!os_is_only_live_thread() && lane_count() == 1)
+        {
+            lane_release();
+        }
+        compiler_prewarm();
+        if (family == COMPILER_DRIVER_NATIVE_FAMILY_X86_64)
+        {
+            codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
+            buster_x86_metadata_prewarm_for_lanes();
+        }
+        else
+        {
+            codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_AARCH64});
+            buster_aarch64_prewarm();
+            buster_aarch64_semantics_prewarm();
+        }
+        // Another caller's threads may still be live; the tables then stayed
+        // ready or failed their own serial checks, and the flag stays clear.
+        if (os_is_only_live_thread())
+        {
+            compiler_driver_native_family_prepared[family] = true;
+        }
+    }
+}
+
 void compiler_parallel_prewarm(void)
 {
-    compiler_prewarm();
-    // A later invocation may change targets while our persistent gang is
-    // parked. Prepare both native families before the first worker exists;
-    // this opt-in cold cost must not leak into ordinary serial compilation.
-    codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
-    machine_x86_64_exact_prewarm_all();
-    buster_x86_metadata_prewarm_all_forms();
-    buster_aarch64_prewarm();
-    buster_aarch64_semantics_prewarm();
+    // An embedding caller's gang may switch targets while it runs, and the
+    // driver cannot release that gang, so this entry prepares both families.
+    compiler_driver_native_family_prepare(CPU_ARCH_X86_64);
+    compiler_driver_native_family_prepare(CPU_ARCH_AARCH64);
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool compiler_driver_test_native_families_reset(void)
+{
+    if (lane_count() == 1)
+    {
+        lane_release();
+    }
+    bool result = os_is_only_live_thread();
+    if (result)
+    {
+        memset(compiler_driver_native_family_prepared, 0, sizeof(compiler_driver_native_family_prepared));
+    }
+    return result;
+}
+
+u32 compiler_driver_test_native_families_prepared(void)
+{
+    u32 result = 0;
+    for (u32 family = 0; family < COMPILER_DRIVER_NATIVE_FAMILY_COUNT; family += 1)
+    {
+        result |= compiler_driver_native_family_prepared[family] ? (u32)1 << family : 0;
+    }
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
 {
@@ -9800,6 +10230,39 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_destination(Arena* arena,
     return absolute;
 }
 
+// Copy decline names out of TU arenas before their ordered destruction. The
+// ordinary no-decline path retains no records and allocates nothing here.
+BUSTER_GLOBAL_LOCAL void compiler_driver_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit,
+                                                              String8 source, u64* capacity)
+{
+    if (unit->decline_count)
+    {
+        u64 needed = total->decline_count + unit->decline_count;
+        if (needed > *capacity)
+        {
+            *capacity = BUSTER_MAX(needed, *capacity * 2);
+            IrFastDecline* records = arena_allocate(arena, IrFastDecline, *capacity);
+            if (total->decline_count) memcpy(records, total->declines, sizeof(*records) * total->decline_count);
+            total->declines = records;
+        }
+        String8 retained_source = string_duplicate_arena(arena, source, false);
+        for (u64 index = 0; index < unit->decline_count; index += 1)
+        {
+            IrFastDecline record = unit->declines[index];
+            record.source = retained_source;
+            record.function_name = string_duplicate_arena(arena, record.function_name, false);
+            total->declines[total->decline_count++] = record;
+        }
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+void compiler_driver_test_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit, String8 source, u64* capacity)
+{
+    compiler_driver_merge_fast_declines(arena, total, unit, source, capacity);
+}
+#endif
+
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
     CompilerDriverDiagnosticCollector warnings = {
@@ -9815,6 +10278,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     FileMapRead* library_archive_maps = 0;
     FileMapRead cpu_runtime_map = {0};
     u32 fallback_record_capacity = 0;
+    u64 fast_decline_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
     CSourceCache* owned_source_cache = 0;
@@ -9866,6 +10330,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic;
         goto finish;
+    }
+    // An earlier cohort may have left its gang parked with only its own
+    // family prepared. Even a serial compile of the other family fills tables
+    // lazily under a serial check, so it gets the complete family first. A
+    // process that never ran a cohort keeps the serial lazy path.
+    if (lane_count() == 1 && compiler_driver_native_target(invocation.target.cpu_arch) &&
+        (compiler_driver_native_family_prepared[COMPILER_DRIVER_NATIVE_FAMILY_X86_64] ||
+         compiler_driver_native_family_prepared[COMPILER_DRIVER_NATIVE_FAMILY_AARCH64]) &&
+        !compiler_driver_native_family_prepared[compiler_driver_native_family(invocation.target.cpu_arch)] && !os_is_only_live_thread())
+    {
+        compiler_driver_native_family_prepare(invocation.target.cpu_arch);
     }
     if (invocation.query == COMPILER_DRIVER_QUERY_LINKER_VERSION)
     {
@@ -9994,6 +10469,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         // follows its existing capture-output path through the same convention.
         invocation.output_path = (String8){0};
     }
+    for (u32 index = 0; index < invocation.input_count; index += 1)
+    {
+        String8 path = invocation.input_paths[index];
+        if (compiler_driver_native_shared_library_input(invocation, index) &&
+            (!compiler_driver_native_linux_elf_link(invocation) || invocation.retain_linked_object))
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = string_format(arena, S8("shared-library input {S8} requires a native x86-64 or AArch64 Linux ELF image link"), path);
+            goto finish;
+        }
+    }
     if (invocation.has_gpu_target)
     {
         result = compiler_driver_execute_gpu(arena, invocation, &warnings);
@@ -10103,13 +10589,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         CompilerDriverLanguage language = compiler_driver_input_language(invocation, input_index);
         bool object_input = compiler_driver_object_input(path);
         bool archive_input = compiler_driver_archive_input(path);
-        if ((object_input || archive_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
+        bool shared_library_input = compiler_driver_native_shared_library_input(invocation, input_index);
+        if ((object_input || archive_input || shared_library_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), path);
             goto finish;
         }
-        if (!object_input && !archive_input && !compiler_driver_c_input(language, path) && !compiler_driver_assembly_input(language, path) &&
+        if (!object_input && !archive_input && !shared_library_input && !compiler_driver_c_input(language, path) && !compiler_driver_assembly_input(language, path) &&
             !compiler_driver_preprocessed_assembly_input(path))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
@@ -10135,7 +10622,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
 #endif
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
-        (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]))))
+        (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]) &&
+                                    !compiler_driver_native_shared_library_input(invocation, 0))))
     {
         CompilerDriverUnitMetrics single_metrics;
         CompilerDriverArenaWatch watch = {0};
@@ -10244,10 +10732,21 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         object_capacity += runtime_object_capacity;
     }
+    CompilerDriverElfNeededInput needed_input = {0};
+    for (u32 index = 0; index < invocation.link_operation_count; index += 1)
+    {
+        if (invocation.link_operations[index].as_needed && !needed_input.prefix_counts)
+        {
+            needed_input.prefix_counts = arena_allocate_zeroed(arena, u32, invocation.link_operation_count);
+        }
+    }
     ObjectFile* objects = arena_allocate(arena, ObjectFile, object_capacity);
+    needed_input.objects = objects;
     String8* preprocessed = arena_allocate(arena, String8, invocation.input_count);
     u32 object_count = 0;
-    u32 unit_task_capacity = compiler_driver_unit_worker_limit(invocation);
+    CompilerDriverUnitWorkers unit_workers = compiler_driver_unit_worker_limit(invocation);
+    u32 unit_task_capacity = unit_workers.limit;
+    result.lane_gate = unit_workers.gate;
     u32 batch_first = 0;
     u32 batch_end = 0;
     bool units_prewarmed = false;
@@ -10256,6 +10755,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     for (u64 operation_index = 0; operation_index < link_operation_count; operation_index += 1)
     {
         CompilerDriverLinkOperation operation = compiler_driver_link_operation(&invocation, operation_index);
+        if (needed_input.prefix_counts) needed_input.prefix_counts[operation_index] = object_count;
         if (operation.kind == COMPILER_DRIVER_LINK_OPERATION_LIBRARY)
         {
             u32 library_index = operation.index;
@@ -10275,11 +10775,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         u32 input_index = operation.index;
         String8 input_path = invocation.input_paths[input_index];
-        if (inputs && (compiler_driver_archive_input(input_path) || compiler_driver_object_input(input_path)))
+        if (inputs && (compiler_driver_archive_input(input_path) || compiler_driver_object_input(input_path) ||
+                       compiler_driver_native_shared_library_input(invocation, input_index)))
         {
             // Prebuilt link inputs are never compiled, and a malformed one
             // still stops the link even under -fkeep-going.
             inputs[input_index].status = COMPILER_DRIVER_INPUT_STATUS_PREBUILT;
+        }
+        if (compiler_driver_native_shared_library_input(invocation, input_index))
+        {
+            // The final export scan owns the mappings through ELF publication.
+            // This operand remains a serial boundary in the ordered input walk.
+            continue;
         }
         if (compiler_driver_archive_input(input_path))
         {
@@ -10304,6 +10811,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 goto finish;
             }
             ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
+            object.source_name = input_path;
             if (object.requires_executable_stack) object.executable_stack_source = input_path;
             file_map_unmap(object_file);
             if (object.error != OBJECT_ERROR_NONE)
@@ -10393,7 +10901,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 }
                 if (unit_task_count > 1 && !units_prewarmed)
                 {
-                    compiler_parallel_prewarm();
+                    compiler_driver_native_family_prepare(invocation.target.cpu_arch);
                     units_prewarmed = true;
                 }
                 CompilerDriverUnitBatch batch = {
@@ -10491,6 +10999,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.preprocessed.spelling_bytes += unit.preprocessed.spelling_bytes;
         result.preprocessed.expansions += unit.preprocessed.expansions;
         result.preprocessed.definitions += unit.preprocessed.definitions;
+        result.constant_interning.lookups += unit.constant_interning.lookups;
+        result.constant_interning.hits += unit.constant_interning.hits;
+        result.constant_interning.stale += unit.constant_interning.stale;
         result.direct_ssa.functions += unit.direct_ssa.functions;
         result.direct_ssa.locals += unit.direct_ssa.locals;
         result.direct_ssa.fallback_locals += unit.direct_ssa.fallback_locals;
@@ -10568,10 +11079,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.specifiers.type_name_primitive_answers += unit.c_ast.specifiers.type_name_primitive_answers;
         result.c_ast.specifiers.type_name_typedef_answers += unit.c_ast.specifiers.type_name_typedef_answers;
         result.c_ast.specifiers.type_name_fallbacks += unit.c_ast.specifiers.type_name_fallbacks;
+        result.c_ast.specifiers.member_primitive_answers += unit.c_ast.specifiers.member_primitive_answers;
+        result.c_ast.specifiers.member_typedef_answers += unit.c_ast.specifiers.member_typedef_answers;
+        result.c_ast.specifiers.member_fallbacks += unit.c_ast.specifiers.member_fallbacks;
         for (u32 reason = 0; reason < C_AST_SPECIFIER_FALLBACK_COUNT; reason += 1)
         {
             result.c_ast.specifiers.fallback_counts[reason] += unit.c_ast.specifiers.fallback_counts[reason];
             result.c_ast.specifiers.type_name_fallback_counts[reason] += unit.c_ast.specifiers.type_name_fallback_counts[reason];
+            result.c_ast.specifiers.member_fallback_counts[reason] += unit.c_ast.specifiers.member_fallback_counts[reason];
         }
         if (unit.c_ast.specifiers.fallbacks)
         {
@@ -10620,8 +11135,21 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.fast.passes[pass].visits += unit.fast.passes[pass].visits;
             result.fast.passes[pass].changes += unit.fast.passes[pass].changes;
         }
+        result.fast.cse.blocks += unit.fast.cse.blocks;
+        result.fast.cse.candidates += unit.fast.cse.candidates;
+        result.fast.cse.hits += unit.fast.cse.hits;
+        result.fast.cse.window_hits += unit.fast.cse.window_hits;
+        result.fast.cse.commuted_hits += unit.fast.cse.commuted_hits;
+        result.fast.cse.constant_hits += unit.fast.cse.constant_hits;
+        result.fast.cse.probes += unit.fast.cse.probes;
+        result.fast.cse.collisions += unit.fast.cse.collisions;
+        result.fast.cse.metadata_declines += unit.fast.cse.metadata_declines;
+        result.fast.cse.saturation_declines += unit.fast.cse.saturation_declines;
+        result.fast.cse.table_bytes += unit.fast.cse.table_bytes;
+        result.fast.cse.max_block_candidates = BUSTER_MAX(result.fast.cse.max_block_candidates, unit.fast.cse.max_block_candidates);
         result.fast.functions += unit.fast.functions;
         result.fast.validation_skips += unit.fast.validation_skips;
+        compiler_driver_merge_fast_declines(arena, &result.fast, &unit.fast, invocation.input_paths[input_index], &fast_decline_capacity);
         result.fast.budget_skips += unit.fast.budget_skips;
         result.fast.provenance_skips += unit.fast.provenance_skips;
         result.fast.parameter_budget_hits += unit.fast.parameter_budget_hits;
@@ -10640,6 +11168,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.inlining.linkage_skips += unit.inlining.linkage_skips;
         result.inlining.recursion_skips += unit.inlining.recursion_skips;
         result.inlining.visits += unit.inlining.visits;
+        result.inlining.released_bytes += unit.inlining.released_bytes;
         if (result.inlining.required_budget_reason == IR_INLINE_BUDGET_NONE &&
             unit.inlining.required_budget_reason != IR_INLINE_BUDGET_NONE)
         {
@@ -10718,11 +11247,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             if (unit_in_result_arena)
             {
+                unit.object.source_name = input_path;
                 objects[object_count++] = unit.object;
             }
             else
             {
                 ObjectFile object = {
+                    .source_name = string_duplicate_arena(arena, input_path, false),
                     .target = unit.object.target,
                     .error = unit.object.error,
                     .section_count = unit.object.section_count,
@@ -10896,16 +11427,28 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         goto finish;
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
-    if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
+    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object, needed_input.prefix_counts ? &needed_input : 0);
+    if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_path.length || dynamic_libraries.missing_framework.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = !dynamic_libraries.missing_request.length
+        result.diagnostic = dynamic_libraries.missing_path.length
+                                    ? dynamic_libraries.unsupported_script_path.length
+                                          ? string_format(arena, S8("unsupported GNU linker script {S8} requested by shared-library input {S8}"),
+                                                          dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_path)
+                                          : string_format(arena, S8("could not read target shared library {S8}"), dynamic_libraries.missing_path)
+                                : !dynamic_libraries.missing_request.length
                                 ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
                                 : dynamic_libraries.unsupported_script_path.length
                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        for (u32 index = 0; inputs && dynamic_libraries.missing_path.length && index < invocation.input_count; index += 1)
+        {
+            if (string_equal(invocation.input_paths[index], dynamic_libraries.missing_path))
+            {
+                compiler_driver_fail_input(&result, inputs, index, COMPILER_DRIVER_ERROR_LINK, OBJECT_ERROR_NONE, result.diagnostic);
+            }
+        }
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         goto finish;
     }
@@ -10942,6 +11485,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                    .runtime_relr = dynamic_libraries.runtime.supports_relr,
                                                     .debug_info = invocation.debug_info,
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });
@@ -10950,7 +11494,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
+        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link, objects, object_count);
     }
 finish:
     result.linker_report = linker_report;
@@ -11114,7 +11658,13 @@ String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation co
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(phase_keys) == COMPILER_DRIVER_PHASE_COUNT);
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(section_keys) == COMPILER_DRIVER_SECTION_CLASS_COUNT);
+    static const String8 lane_gate_names[] = {
+        [COMPILER_DRIVER_LANE_GATE_NONE] = S8_INITIALIZER("none"),
+        [COMPILER_DRIVER_LANE_GATE_LANES] = S8_INITIALIZER("lanes"),
+        [COMPILER_DRIVER_LANE_GATE_SERIAL] = S8_INITIALIZER("serial"),
+    };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(action_names) == COMPILER_DRIVER_ACTION_COUNT);
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(lane_gate_names) == COMPILER_DRIVER_LANE_GATE_COUNT);
     CompilerDriverMetricsText text = {.arena = arena};
     u32 status_counts[COMPILER_DRIVER_INPUT_STATUS_COUNT] = {0};
     for (u32 index = 0; index < result->input_result_count; index += 1)
@@ -11147,6 +11697,7 @@ String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation co
     compiler_driver_metrics_u64(&text, S8("function_sizes"), invocation->collect_function_sizes);
     compiler_driver_metrics_u64(&text, S8("wall_ns"), process.wall_nanoseconds);
     compiler_driver_metrics_u64(&text, S8("peak_rss_bytes"), process.peak_resident_bytes);
+    compiler_driver_metrics_word(&text, S8("lane_gate"), (u32)result->lane_gate < COMPILER_DRIVER_LANE_GATE_COUNT ? lane_gate_names[result->lane_gate] : S8("unknown"));
     compiler_driver_metrics_piece(&text, S8("\n"));
     for (u32 index = 0; index < result->input_result_count; index += 1)
     {

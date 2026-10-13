@@ -4,6 +4,10 @@
 
 [Compatibility harness index](../compatibility.md). Read only the harness you are working on; pins, measurements, and past failure counts describe the revision recorded below and must be rechecked before reuse.
 
+For the joint static userspace attempt, see [musl + BusyBox](busybox.md).
+Its native command reuses this complete gate and libc-test before building the
+application; a reduced archive cannot satisfy the joint prerequisite.
+
 The opt-in musl compatibility harness takes an external, pristine musl v1.2.6
 checkout; upstream sources are never copied into or patched in this repository:
 

@@ -126,6 +126,20 @@ BUSTER_F_DECL bool a64_pc_relative_displacement(u64 target, u64 place, s64 adden
 // with the same split field. These helpers perform checked subtraction without
 // relying on signed overflow.
 BUSTER_F_DECL bool a64_adrp_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word);
+
+// Mach-O style PAGE relocations are emitted against instructions whose
+// immediate field is zero. These predicates are the single authority shared
+// by the object writer, the static linker and the JIT, kept in lockstep with
+// LLVM's AArch64 PAGEOFF12 fixup rules: ADD (immediate) uses byte granularity,
+// while unsigned LD/ST (immediate) scales the low-page offset by access size.
+// a64_page21_instruction_valid accepts an ADRP with any destination register.
+// a64_pageoff12_shift accepts an unsigned-offset LD/ST or a 64-bit non-setting
+// ADD with no LSL #12 and a zero imm12, and reports the implicit scale shift.
+// a64_page_relocation_apply patches the 4-byte instruction at `patch` (whose
+// address is `place`) with target+addend: PAGE21 when `page21`, else PAGEOFF12.
+BUSTER_F_DECL bool a64_page21_instruction_valid(u32 instruction);
+BUSTER_F_DECL bool a64_pageoff12_shift(u32 instruction, u32* shift);
+BUSTER_F_DECL bool a64_page_relocation_apply(bool page21, u8* patch, u64 place, u64 target, s64 addend);
 BUSTER_F_DECL bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word);
 
 // Architectural condition values 0..13 form inverse pairs. AL/NV are valid
@@ -298,6 +312,8 @@ struct BusterAarch64ArmM1FixedSpelling
     bool system;
 };
 
+// True for an explicit Apple M1 target, or native when the host is an Apple M1.
+BUSTER_F_DECL bool a64_target_is_m1_profile(Target target);
 BUSTER_F_DECL u32 buster_aarch64_arm_m1_fixed_spelling_count(void);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpelling* result);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1FixedSpelling* result);
@@ -667,6 +683,8 @@ BUSTER_CT_CHECK(sizeof(BusterAarch64CanonicalFieldInfo) == 8);
 BUSTER_F_DECL void buster_aarch64_prewarm(void);
 BUSTER_F_DECL u32 buster_aarch64_canonical_form_count(void);
 BUSTER_F_DECL bool buster_aarch64_canonical_form(u32 form_index, BusterAarch64CanonicalFormInfo* result);
+/* The unique canonical form whose Arm row digest is `digest`; `result` is optional. */
+BUSTER_F_DECL bool buster_aarch64_canonical_form_by_digest(u64 digest, u32* form_index, BusterAarch64CanonicalFormInfo* result);
 BUSTER_F_DECL bool buster_aarch64_canonical_field(u32 form_index, u32 field_index, BusterAarch64CanonicalFieldInfo* result);
 BUSTER_F_DECL bool buster_aarch64_canonical_field_segment(u32 form_index, u32 field_index, u32 segment_index,
                                                            BusterAarch64MetadataSegment* result);

@@ -1,0 +1,8 @@
+Self-host stage 1 took 7.156166 seconds (7156166000 nanoseconds)
+Self-host stage 1 link took 0.491520 seconds (491520000 nanoseconds)
+Self-host stage 2 took 28.938804 seconds (28938804000 nanoseconds)
+Self-host stage 2 link took 0.604334 seconds (604334000 nanoseconds)
+Self-host stage 2 benchmark took 0.183686 seconds (183686000 nanoseconds)
+Self-host machine stage took 31.324590 seconds (31324590000 nanoseconds)
+Self-host machine stage link took 0.552930 seconds (552930000 nanoseconds)
+Self-host machine stage benchmark took 0.163361 seconds (163361000 nanoseconds)

@@ -86,7 +86,15 @@ Every experimental child starts in a fresh OS-owned process group. The native ow
 
 Each arm configures with `build.sh generate --cc clang --no-include-tests -- -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-fork`. Linux `generate` selects mold, whose default `--fork` leaves each finished link child to the phase subreaper; on CMake 3.29+ every try-compile and `ide` link then counts as an escaped descendant (#3372). `--no-fork` keeps the same linker and byte-identical output, so the descendant rule stays strict without exempting the linker.
 
-`harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt.
+Every snapshot/restore/verify receipt and its `COMPILER_CLOSURE` log line name
+the first failed step in `failed_step` (`-` when complete) with the `errno`
+observed right after it. Park and return renames report the `os_file_replace`
+error, so a SNAPSHOT on another filesystem fails at `park-build` with `EXDEV`
+(18 on Linux). Identity and content refusals such as `manifest-digest` record 0;
+for compound inventory steps the errno is the last OS error seen and only the
+step name is authoritative (#3390).
+
+`harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt. A sealed pull attempt also makes them, and its owned-phase population, required members of its raw bundle ([snapshot route](compiler-evidence-v1.md#snapshot-route), #2918).
 
 The staged implementation is reviewed and validated on hosted CI first. Trusted request/dispatch support is integrated separately, then the admitted physical preparation controls run on the 9700X. Only matching controls and a reduction in complete measured preparation cost permit a separate default-activation change. Until that activation is reviewed and admitted, ordinary comparisons use legacy-rebuild and this issue remains open for physical qualification.
 

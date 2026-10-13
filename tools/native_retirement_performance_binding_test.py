@@ -28,7 +28,7 @@ SPEC.loader.exec_module(binding)
 RETIREMENT_SCHEMA = binding.RETIREMENT_SCHEMA
 
 
-def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False):
+def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False, simd=False):
     """Project only the exact reviewed row versions in private test bytes."""
     rows = data.split(b"\n")
     revisions = (
@@ -41,6 +41,20 @@ def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False
         (b"tests/basic_c_ir_validation_values.c\t",
          b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t3124\t9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080",
          b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t3241\t8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65", aligned),
+    )
+    revisions += (
+        (b"tests/basic_c_predicate_bank.c\t",
+         b"tests/basic_c_predicate_bank.c\tsubject\tsupported-object-zero-fallback\t878\t16c2a225a704db51239cfb34bfbf98a214c1af038ecdad0a8c1ea0d9afbff432",
+         b"tests/basic_c_predicate_bank.c\tsubject\tsupported-object-zero-fallback\t865\ta194061e5e518e7c422cce6aea3af406aa01939297e3479c74098cd4bfd3cc64", simd),
+        (b"tests/basic_c_simd.c\t",
+         b"tests/basic_c_simd.c\tsubject\tsupported-object-zero-fallback\t21232\t51db4771299701fda73a9e33e4c9f00a443ff268edefbc4166f0bd78088bbd91",
+         b"tests/basic_c_simd.c\tsubject\tsupported-object-zero-fallback\t21095\te1971b2465b81fcc4f910fbbfd36afe6874fb5aaaed0b731fe52fc16e8e1ef28", simd),
+        (b"tests/basic_c_simd_translate.c\t",
+         b"tests/basic_c_simd_translate.c\tsubject\tsupported-object-zero-fallback\t7144\t76c1e91820227dcad6fd44a1ed159db4581006f86b6ba673f3834a13b5647d81",
+         b"tests/basic_c_simd_translate.c\tsubject\tsupported-object-zero-fallback\t7130\te283fc4b47513fecd564ebdedf4c2beab9a889fd2673287f522b2248a82859ce", simd),
+        (b"tests/basic_c_vector_register_pressure.c\t",
+         b"tests/basic_c_vector_register_pressure.c\tsubject\tsupported-object-zero-fallback\t8298\t0878f93f336f8e61faf2f5a2e79d6ae7939e2d354378e4aea679d0b12bf1a240",
+         b"tests/basic_c_vector_register_pressure.c\tsubject\tsupported-object-zero-fallback\t8220\te5e71360a03d663cdf20740e3c54efad379801c023101f9fb016827df6d00484", simd),
     )
     for prefix, predecessor, successor, selected in revisions:
         matches = [(index, row) for index, row in enumerate(rows) if row.startswith(prefix)]
@@ -2334,11 +2348,78 @@ class BootstrapSupportPinsTests(unittest.TestCase):
                     binding._check_support_output(ROOT, record, None)
                 read.assert_not_called()
 
+    def test_simd_vocabulary_successor_authenticates_bytes_before_manifest(self):
+        data = (ROOT / binding.SUPPORT_DECLARATION_PATH).read_bytes()
+        baseline = _reviewed_support_revision(data, mobile=True, aligned=True, stack=True)
+        successor = _reviewed_support_revision(baseline, mobile=True, aligned=True,
+                                              stack=True, simd=True)
+        changed = [(old, new) for old, new in zip(baseline.splitlines(), successor.splitlines())
+                   if old != new]
+        self.assertEqual(len(changed), 4)
+        self.assertEqual(len(successor), 79756)
+        self.assertEqual(successor.count(b"\n"), 560)
+        self.assertEqual([row.split(b"\t")[:3] for row in successor.splitlines()],
+                         [row.split(b"\t")[:3] for row in baseline.splitlines()])
+        for declaration, pin in ((baseline, binding.STACK_CALLER_SUPPORT_DECLARATION_SHA256),
+                                 (successor, binding.SIMD_VOCABULARY_SUPPORT_DECLARATION_SHA256)):
+            files = [{"path": binding.SUPPORT_DECLARATION_PATH, "sha256": pin}
+                     for _ in binding.SUPPORT_FILE_ROLES]
+            record = {"support": {"files": files}}
+            with self.subTest(pin=pin):
+                self.assertEqual(hashlib.sha256(declaration).hexdigest(), pin)
+                # Reaching the next required gate proves declaration admission,
+                # without claiming an empty manifest is valid performance evidence.
+                with mock.patch.object(binding, "_evidence_bytes", side_effect=[declaration, b""]), \
+                     self.assertRaisesRegex(ValueError, "manifest is empty"):
+                    binding._check_support_output(ROOT, record, None)
+                with mock.patch.object(binding, "_evidence_bytes", return_value=declaration + b"\n"), \
+                     self.assertRaisesRegex(ValueError, "support declaration bytes changed"):
+                    binding._check_support_output(ROOT, record, None)
+                manifest = dict.fromkeys((
+                    "version", "kind", "identity_hash", "support_contract", "support_contract_sha256",
+                    "inputs", "rows", "manifest_only", "environment", "unfrozen_dependencies", "sysroot",
+                    "system_include", "resource_include_sha256", "compiler_revision_claim",
+                    "baseline_revision_claim", "compiler_hash", "compiler_bytes", "compiler_sha256",
+                    "baseline_hash", "baseline_bytes", "baseline_sha256", "cpu"), "unused")
+                manifest.update(version="2", kind="object-coverage", identity_hash="sha256",
+                                manifest_only="0", support_contract=binding.SUPPORT_DECLARATION_PATH,
+                                support_contract_sha256="0" * 64)
+                manifest_bytes = "".join(f"{key}={value}\n" for key, value in manifest.items()).encode()
+                with mock.patch.object(binding, "_evidence_bytes", side_effect=[declaration, manifest_bytes]), \
+                     self.assertRaisesRegex(ValueError, "manifest support declaration digest differs"):
+                    binding._check_support_output(ROOT, record, None)
+        invalid = [successor + b"\n", successor[:-1] + b" "]
+        for mask in range(1, 15):
+            partial = baseline
+            for index, (old, new) in enumerate(changed):
+                if mask & (1 << index):
+                    partial = partial.replace(old, new)
+            invalid.append(partial)
+        row = changed[0][1]
+        fields = row.split(b"\t")
+        invalid.extend((successor.replace(row, b"\t".join([*fields[:-1], b"0" * 64])),
+                        successor.replace(row, b"\t".join([*fields[:3], b"99999", fields[4]])),
+                        successor.replace(row, row.replace(b"subject", b"support-file")),
+                        successor.replace(row, row.replace(b"supported-object-zero-fallback", b"dependency-only")),
+                        successor.replace(row + b"\n", b""),
+                        successor.replace(row, row + b"\n" + row)))
+        for declaration in invalid:
+            files[0]["sha256"] = hashlib.sha256(declaration).hexdigest()
+            with self.subTest(invalid=files[0]["sha256"]), \
+                 mock.patch.object(binding, "_evidence_bytes") as read, \
+                 self.assertRaisesRegex(ValueError, "not the approved immutable input"):
+                binding._check_support_output(ROOT, record, None)
+            read.assert_not_called()
+
     def test_reviewed_support_projection_rejects_unknown_missing_duplicate_rows(self):
         data = _reviewed_support_revision((ROOT / binding.SUPPORT_DECLARATION_PATH).read_bytes())
         for prefix in (b"tests/mobile_ci_scripts_test.sh\t",
                        b"tests/basic_c_ir_validation_values.c\t",
-                       b"tests/basic_c_overaligned_stack_caller.c\t"):
+                       b"tests/basic_c_overaligned_stack_caller.c\t",
+                       b"tests/basic_c_predicate_bank.c\t",
+                       b"tests/basic_c_simd.c\t",
+                       b"tests/basic_c_simd_translate.c\t",
+                       b"tests/basic_c_vector_register_pressure.c\t"):
             row = next(line for line in data.splitlines() if line.startswith(prefix))
             fields = row.split(b"\t")
             unknown_hash = b"\t".join([*fields[:-1], b"0" * 64])

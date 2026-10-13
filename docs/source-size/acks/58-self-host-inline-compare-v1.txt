@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 41009
+reason The self-host-inline-compare-v1 compare-pull leg: its trusted stage-1 and comparison helper, frozen profile, publisher validation, selector freshness checks and tests (#58).

@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 69947
+reason Native userspace input verification and pinned musl/BusyBox qualification orchestration (#3461).
