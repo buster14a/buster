@@ -7454,8 +7454,9 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
 // label releases (c_ast_release); its storage record lives in the unit's
 // arena. Nothing reads it after the unit. The driver has no phase
 // arena to lend (c_preprocess is not given one either), so the builder makes
-// and retires a private one. A tree that is not complete is counted in
-// `rejections`, and the caller compiles the unit without a tree.
+// and retires a private one. The caller fails the unit when the builder could
+// not reserve its storage, and otherwise compiles an incomplete tree's unit
+// without one, counting it in `rejections`.
 // Under -v three diagnostic passes over a finished tree are timed with the
 // same clock as the build: one c_ast_walk over the root, one linear pass over
 // the kinds column counting CALL nodes, and c_ast_children over every node
@@ -7467,7 +7468,6 @@ BUSTER_GLOBAL_LOCAL CAstResult compiler_driver_c_ast_pilot_run(Arena* arena, Com
     TimeDataType start = timestamp_take();
     CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){.layout = compiler_driver_c_ast_pilot_layout(invocation->c_ast_pilot)});
     u64 build_nanoseconds = timestamp_ns_between(start, timestamp_take());
-    pilot->rejections += !built.complete;
     if (built.complete)
     {
         pilot->units += 1;
@@ -8708,11 +8708,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
-        // A unit the builder rejects takes the tree-free path, so its
-        // diagnostics (or, for a form only the builder refuses, its object)
-        // come from the same authority as under -fno-c-ast-pilot; the
-        // builder's own message is not published (#3102 default switch).
+        // A unit the builder rejects on syntax takes the tree-free path, so
+        // its diagnostics (or, for a form only the builder refuses, its
+        // object) come from the same authority as under -fno-c-ast-pilot;
+        // the builder's own message is not published (#3102 default switch).
+        // A builder that could not reserve its storage still fails the unit.
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
+        bool exhausted = !tree.complete && tree.diagnostic_count && tree.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
+        if (exhausted)
+        {
+            result.parser_diagnostic_count = tree.diagnostic_count;
+            result.error = COMPILER_DRIVER_ERROR_PARSE;
+            result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, tree.diagnostics, tree.diagnostic_count,
+                                                                      invocation.input_paths[0], (String8){0}, 0);
+            goto end;
+        }
+        result.c_ast.rejections += !tree.complete;
         if (tree.complete)
         {
             pilot_tree = tree.ast;

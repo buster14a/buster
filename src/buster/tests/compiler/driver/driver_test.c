@@ -34968,7 +34968,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                     }
                     for (u32 ordinal = 1; ordinal <= counts[phase]; ordinal += 1)
                     {
-                        String8 command[] = {S8("-g0"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output, input};
+                        // The ordinals are the tree-free path's; the tree
+                        // builder's own reservation is checked below.
+                        String8 command[] = {S8("-g0"), S8("-fno-c-ast-pilot"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output,
+                                             input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                         c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
                         c_test_fail_frontend_reservation(phases[phase], ordinal);
@@ -34993,6 +34996,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                 }
             }
         }
+        // With the default tree, the builder's own phase arena is the first
+        // analysis reservation. Refusing it fails the unit with the builder's
+        // diagnostic rather than falling back to the tree-free path.
+        String8 tree_command[] = {S8("-g0"), S8("-c"), S8("-o"), output, input};
+        CompilerDriverInvocation tree_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tree_command));
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 1);
+        CompilerDriverResult refused = compiler_driver_execute_invocation(arena, tree_invocation);
+        bool tree_pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 0);
+        BUSTER_TEST(arguments, !tree_pending);
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_PARSE && refused.c_ast.rejections == 0);
+        BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic, S8("syntax tree")) != BUSTER_STRING_NO_MATCH, refused.diagnostic);
+        BUSTER_TEST(arguments, !refused.has_object && refused.output.length == 0);
         BUSTER_TEST(arguments, os_file_delete(input));
     }
     c_test_scratch_end(temporary);

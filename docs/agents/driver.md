@@ -713,8 +713,9 @@ answers its root-conditional splits from it
 stage reads it. Only with the tree does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical to the tree-free path's. A unit whose
-tree the builder rejects compiles without a tree, so it reports what
+and every diagnostic are byte-identical to the tree-free path's. A builder that
+cannot reserve its storage fails the unit with the parse error class; a unit
+whose tree the builder rejects on syntax compiles without a tree, so it reports what
 `-fno-c-ast-pilot` reports; `-v` counts it in a `C_AST_REJECTED` row. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints

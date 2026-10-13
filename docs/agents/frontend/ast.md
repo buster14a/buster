@@ -313,9 +313,10 @@ semantic analysis in `CParserResult.ast`, where the
 With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
-given one either), so the builder creates and retires its own. A build that is
-not complete no longer fails the unit: since the default switch the unit
-compiles without a tree, exactly as under `-fno-c-ast-pilot`, so its
+given one either), so the builder creates and retires its own. A builder that
+cannot reserve its storage fails the unit with the parse error class and its
+diagnostic. A build the builder rejects on syntax no longer fails the unit:
+since the default switch the unit compiles without a tree, exactly as under `-fno-c-ast-pilot`, so its
 diagnostics come from `c_parse_ast` and analysis as before, and the driver
 counts it in `CompilerDriverCAstPilotResult.rejections`. On the corpus at the
 switch, every rejected unit was invalid input that also fails without the tree
