@@ -170,7 +170,8 @@
     X(ATTRIBUTE_STANDARD, LIST, 0, 0)      /* `[[ ... ]]`: ATTRIBUTE*; token: first `[` */                                                  \
     X(ATTRIBUTE_DECLSPEC, LIST, 0, 0)      /* `__declspec ( ... )`: ATTRIBUTE*; token: keyword */                                           \
     X(ATTRIBUTE, LIST, 0, 0)               /* arguments (expressions or TYPE_NAME); token: name */                                          \
-    X(ATTRIBUTE_SCOPED, LIST, 1, 0)        /* `ns::name`: ATTRIBUTE_NAMESPACE, arguments; token: name */                                    \
+    X(ATTRIBUTE_SCOPED, LIST, 1, 0)        /* `ns::name`: ATTRIBUTE_NAMESPACE, arguments (none outside `gnu`/`clang`: a balanced token      \
+                                              sequence); token: name */                                                                     \
     X(ATTRIBUTE_NAMESPACE, LEAF, 0, 0)     /* token: the namespace word */                                                                  \
     /* ---- statements ---- */                                                                                                              \
     X(COMPOUND_STATEMENT, LIST, 0, 0)      /* block items; token: `{` */                                                                    \

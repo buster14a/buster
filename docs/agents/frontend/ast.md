@@ -1316,11 +1316,25 @@ function body from its statement nodes (#4060, step 2 of the
 It has no token path and no fallback: a body without a COMPOUND_STATEMENT
 node is refused with `function body has no syntax tree node`.
 
-**The tree.** The walker needs a tree in every compile. Until #3102 step 1
-retains the parse phase's tree through lowering, `c_lower_to_ir_with_options`
-builds the implicit layout itself when the caller passes none
-(`c_lower_to_ir_tree_run`, marked as step 1's placeholder) and releases it
-after lowering. Under `-fc-ast-pilot` the driver's tree is used. The unit's
+**The tree.** The walker needs a tree in every compile that lowers a body.
+Until #3102 step 1 retains the parse phase's tree through lowering,
+`c_lower_to_ir_with_options` builds the implicit layout itself when the
+caller passes none, the analysis completed and the unit has a function body
+(`c_lower_to_ir_tree_run`, marked as step 1's placeholder), and releases it
+after lowering. A unit the builder rejects fails with the builder's
+diagnostics: a malformed GNU case range (`case 1 ... 2 ... 3:`) is now the
+builder's syntax error rather than lowering's. A unit without a body lowers
+as before. Under `-fc-ast-pilot` the driver's tree is used.
+
+Lowering every body from the tree surfaced two builder gaps, which also
+failed `-fc-ast-pilot` and are closed with it:
+- a vendor attribute's argument clause is a balanced token sequence (C23
+  6.7.13.2). Under a namespace other than `gnu` or `clang` it is stepped
+  over to its closing parenthesis, and the ATTRIBUTE_SCOPED node keeps its
+  namespace alone (`[[vendor::tag({...})]]`);
+- `__fp16`, Arm's storage-only half, is a type word (`C_AST_WORD_FP16`). The
+  tree's specifier readers leave it to the type machine, as they leave
+  `__float128`. The unit's
 body index (`c_ir_body_nodes_build`) maps the `{` of every function
 definition, and of every statement expression, to its COMPOUND_STATEMENT
 node. It lives in the tree arena next to the
