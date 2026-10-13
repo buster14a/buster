@@ -9407,6 +9407,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
          {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n"),
           S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n")},
          true, true, true},
+        {S8("inherited weak same-section difference"),
+         {S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    .byte 1\n.globl _s\n.set _s, _a\n_x:\n    .long _x-_s\n"),
+          S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    .byte 1\n.globl _s\n.set _s, _a\n_x:\n    .long _x-_s\n")},
+         true, true, true},
         {S8("undefined weak reference"),
          {S8(".globl _w\n.globl _u\n.weak_definition _w, _u\n.text\n_w:\n    ret\n_f:\n    bl _u\n    ret\n"),
           S8(".globl _w\n.globl _u\n.weak_definition _w, _u\n.text\n_w:\n    ret\n_f:\n    call _u\n    ret\n")},
@@ -9477,7 +9481,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
                                 weak_case->name);
                         }
                     }
-                    if (string_first_sequence(weak_case->text[index], S8(".long _x-_w")) != BUSTER_STRING_NO_MATCH)
+                    if (string_first_sequence(weak_case->text[index], S8(".long _x-_w")) != BUSTER_STRING_NO_MATCH ||
+                        string_first_sequence(weak_case->text[index], S8(".long _x-_s")) != BUSTER_STRING_NO_MATCH)
                     {
                         ByteSlice section_text = {0};
                         if (reread.error == OBJECT_ERROR_NONE && reread.sections && reread.section_count > OBJECT_SECTION_TEXT)

@@ -565,6 +565,23 @@ bool assembly_unit_test_parse_number(String8 text, u64* value)
 // including its position in a comma-separated list. Names may be quoted, as
 // in the -S printer. At most one positive and one negative symbolic term fit
 // the relocation model; unsupported expressions are diagnosed by the caller.
+// A direct-reference alias inherits its terminal aliasee's weak-definition origin.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_symbol_has_weak_definition_origin(const AssemblyUnitBuilder* builder, u32 symbol)
+{
+    bool marked = false;
+    if (symbol < builder->result.symbol_count)
+    {
+        marked = builder->symbol_weak_definition_line[symbol] != 0;
+        u32 target_plus_one = builder->symbol_alias_target_plus_one[symbol];
+        if (!marked && builder->symbol_alias[symbol] && target_plus_one &&
+            target_plus_one <= builder->result.symbol_count)
+        {
+            marked = builder->symbol_weak_definition_line[target_plus_one - 1] != 0;
+        }
+    }
+    return marked;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, String8 text, u64 location, AssemblyUnitValue* value)
 {
     AssemblyUnitValue result = {.symbol = UINT32_MAX, .subtract_symbol = UINT32_MAX};
@@ -663,12 +680,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, St
         AssemblyUnitSymbol negative = result.subtract_location ? (AssemblyUnitSymbol){.defined = true, .section = builder->current_section}
                                                               : builder->result.symbols[result.subtract_symbol];
         bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
-        bool positive_weak_definition = !result.location && builder->symbol_weak_definition_line[result.symbol] != 0;
-        bool negative_weak_definition = !result.subtract_location && builder->symbol_weak_definition_line[result.subtract_symbol] != 0;
+        bool positive_weak_definition =
+            !result.location && assembly_unit_symbol_has_weak_definition_origin(builder, result.symbol);
+        bool negative_weak_definition =
+            !result.subtract_location && assembly_unit_symbol_has_weak_definition_origin(builder, result.subtract_symbol);
         bool weak_difference = macho && (!positive.weak || positive_weak_definition) &&
                                (!negative.weak || negative_weak_definition);
-        // llvm-mc folds same-section differences even when a Mach-O
-        // `.weak_definition` makes one operand replaceable.
+        // llvm-mc folds same-section differences when an operand is a Mach-O
+        // weak definition, including a pure alias inheriting that definition.
         if (positive.defined && negative.defined && positive.section == negative.section &&
             ((!positive.weak && !negative.weak) || weak_difference))
         {
