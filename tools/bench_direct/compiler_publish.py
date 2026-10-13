@@ -93,7 +93,7 @@ from datetime import datetime
 
 from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
-                             owned_checks, parse_chain, run_url)
+                             measured, owned_checks, parse_chain, run_url, stamp)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
@@ -124,6 +124,7 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number, _number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
                               THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows,
+                              render_inventory_coverage,
                               HARNESS_ADMISSIONS, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_HISTORICAL_HARNESS_REVISION,
                               THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE)
 
@@ -5839,6 +5840,108 @@ def utility_publish(environment: dict) -> int:
 
 
 
+UNCHANGED_SCHEMA = "buster-ci-main-unchanged-v1"
+UNCHANGED_TITLE = "Not measured: compiler/build and benchmark inputs unchanged."
+UNCHANGED_KEYS = ("schema", "event", "unchanged", "base", "head", "policy", "subject_changes", "policy_changes", "reason")
+
+
+def unchanged_proof(api: Api, environment: dict, expected: dict, route: dict | None, compare_result: str) -> tuple[dict, list[str]]:
+    """The validated #3923 unchanged-input decision for one authorized MAIN attempt, or its refusal reasons.
+
+    Every identity is re-checked here as data: the native receipt must name
+    this attempt's baseline, head and trusted policy; the compare job must not
+    have run; the route must be the non-owned legacy route; and the baseline
+    must still hold a valid main measurement in GitHub's own check records,
+    so a reference that changed or vanished while planning never anchors a skip.
+    """
+    get = lambda key: environment.get(key, "")  # noqa: E731
+    problems: list[str] = []
+    try:
+        receipt = json.loads(get("BQ_UNCHANGED_RECEIPT"), object_pairs_hook=unique_object)
+    except ValueError:
+        receipt = None
+    if not (isinstance(receipt, dict) and tuple(receipt) == UNCHANGED_KEYS):
+        problems.append("unchanged-input receipt is missing or malformed")
+        receipt = {}
+    for key, wanted in (("schema", UNCHANGED_SCHEMA), ("event", "main_push"), ("unchanged", True),
+                        ("base", expected.get("base")), ("head", expected.get("head")),
+                        ("policy", get("BQ_TRUSTED_REVISION")), ("reason", "reviewed-prose-only")):
+        if receipt and receipt.get(key) != wanted:
+            problems.append(f"unchanged-input receipt {key} {receipt.get(key)!r} is not {wanted!r}")
+    for key in ("subject_changes", "policy_changes"):
+        if receipt and not (type(receipt.get(key)) is int and receipt[key] >= 0):
+            problems.append(f"unchanged-input receipt {key} is not a count")
+    if compare_result != "skipped":
+        problems.append(f"compare job result is {compare_result!r}, not skipped")
+    if route is None or route.get("main_owned") is not False:
+        problems.append("unchanged-input skips apply only to the non-owned legacy main route")
+    if not DECIMAL.fullmatch(get("BQ_CLASSIFICATION_MS")):
+        problems.append("hosted classification time is missing")
+    reference = {"check_url": get("BQ_REFERENCE_CHECK_URL"), "measured_at": get("BQ_REFERENCE_MEASURED_AT")}
+    base = expected.get("base", "")
+    if get("BQ_BASE_MEASURED") != "true" or not SHA.fullmatch(base):
+        problems.append("the baseline is not an actual measurement")
+    elif not problems:
+        rows = [row for row in owned_checks(api, base, "main", "") if measured(row, base)]
+        if not any(row.get("html_url") == reference["check_url"] and row.get("completed_at") == reference["measured_at"]
+                   for row in rows):
+            problems.append("the baseline measurement changed or vanished while planning")
+    return ({**receipt, "reference": reference, "classification_ms": int(get("BQ_CLASSIFICATION_MS"))}
+            if not problems else {}), problems
+
+
+def unchanged_report(expected: dict, proof: dict, request_attempt: str, coverage: dict) -> str:
+    """The neutral report; it links the reference measurement and copies none of its samples or verdict."""
+    reference = proof["reference"]
+    lines = [f"**{check_name('main')}: neutral**", "", f"### {UNCHANGED_TITLE}", "",
+             "No 9700X job was allocated: no compiler was built and nothing was sampled. This is not a "
+             "measurement and carries no verdict, samples or 0% change; it makes no claim about physical host "
+             "conditions, the host toolchain or performance (docs/compiler-main-unchanged-skip.md).", "",
+             f"- Head: `{expected['head']}` (request run {expected['request_run_id']}.{request_attempt}, executor "
+             f"run {expected['run_id']} attempt {expected['run_attempt']})",
+             f"- Last actual measurement: `{expected['base']}`, [its check]({reference['check_url']}) completed "
+             f"{reference['measured_at']}; any regression or failure it reported is unchanged by this skip",
+             f"- Range: {expected.get('range', 'NA')} first-parent commits since that measurement "
+             f"(first parent `{expected.get('first_parent', 'NA')}`)",
+             f"- Classifier: `{proof['schema']}` at trusted revision `{proof['policy']}`; reason "
+             f"`{proof['reason']}`; {proof['subject_changes']} prose path changes in the measured subject, "
+             f"{proof['policy_changes']} in the measurement policy since the head",
+             f"- Observed hosted classification time: {proof['classification_ms'] / 1000:.3f} s. Avoided physical "
+             "runner time is not estimated here.", ""]
+    lines += render_inventory_coverage(coverage)
+    return "\n".join(lines)
+
+
+def unchanged_publish(api: Api, environment: dict, expected: dict, proof: dict) -> int:
+    """Complete the attempt's check as neutral and hand the commit report its entry."""
+    get = lambda key: environment.get(key, "")  # noqa: E731
+    head, attempt, mode = expected["head"], expected["run_attempt"], "main"
+    coverage = covered_inventory_rows(None, "neutral", mode)
+    shown = {"mode": mode, "identity": expected, "state": "unchanged-not-measured", "unchanged": proof,
+             "coverage": {"first_parent": expected.get("first_parent"), "range": expected.get("range")},
+             "inventory_coverage": coverage, "reasons": [UNCHANGED_TITLE]}
+    workflow_url = run_url(expected["repository"], expected["run_id"], attempt)
+    report = unchanged_report(expected, proof, get("BQ_REQUEST_ATTEMPT"), coverage)
+    marker = attempt_marker(head, mode, expected["request_run_id"], get("BQ_REQUEST_ATTEMPT"), attempt)
+    body = {"details_url": get("BQ_DETAILS_URL"), "status": "completed", "conclusion": "neutral",
+            "output": {"title": UNCHANGED_TITLE, "summary": (report + "\n\n" + links("", workflow_url, attempt, "", ""))[:TEXT_LIMIT],
+                       "text": ("```json\n" + json.dumps(shown, sort_keys=True, indent=2))[:TEXT_LIMIT - 4] + "\n```"}}
+    rows, written = complete_check(api, head, mode, marker, body)
+    check_url = rows[-1].get("html_url", "") if rows and isinstance(rows[-1].get("html_url"), str) else ""
+    print(f"BENCH_COMPILER_PUBLISHED neutral unchanged check_runs={[row.get('id') for row in rows]}"
+          + ("" if written else " (already completed by another writer; left unchanged)"))
+    link_line = links(check_url, workflow_url, attempt, "", "")
+    with open(get("GITHUB_STEP_SUMMARY") or os.devnull, "a", encoding="utf-8") as stream:
+        stream.write(report + "\n\n" + link_line + "\n")
+    entry = {"mode": mode, "head": head, "base": expected["base"], "run_id": expected["run_id"], "run_attempt": attempt,
+             "request_run_id": expected["request_run_id"], "trusted_revision": expected["trusted_revision"],
+             "conclusion": "neutral", "title": UNCHANGED_TITLE, "captured_at": stamp(), "check_url": check_url,
+             "run_url": workflow_url, "artifact_url": "", "artifact_expires_at": "NA",
+             "markdown": (report + "\n\n" + link_line)[:REPORT_MARKDOWN_LIMIT]}
+    write_output(get("GITHUB_OUTPUT"), {"comment": json.dumps(entry, sort_keys=True, separators=(",", ":")), "head": head})
+    return 0
+
+
 def main() -> int:
     if sys.argv[1:] in (["utility-queue"], ["utility-publish"]):
         try:
@@ -5918,6 +6021,13 @@ def main() -> int:
                 authorized = False
                 problem = "Main route refused: " + str(error)
                 notes.append(problem)
+        # #3923: a proven unchanged-input attempt never dispatched the 9700X;
+        # a refused proof falls through and reports the missing measurement.
+        if mode == "main" and not recover and authorized and get("BQ_UNCHANGED") == "true":
+            proof, refusals = unchanged_proof(api, environment, expected, route, compare_result)
+            if proof:
+                return unchanged_publish(api, environment, expected, proof)
+            notes.extend("unchanged-input skip refused: " + reason for reason in refusals)
         # #3714: the hosted pre-dispatch corpus disposition. An unsupported base was never
         # dispatched, so it has no evidence to read; only "historical" admits the named recipe.
         admission = get("BQ_HARNESS_ADMISSION") if mode == "pull" and not recover else "admitted"

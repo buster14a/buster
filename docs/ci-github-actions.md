@@ -670,7 +670,11 @@ retention/recovery, statistical policy and outstanding live acceptance.
 ## No-code classification and staged admission (#3107)
 
 The native build driver exposes `ci_no_code --repo PATH --base SHA --head SHA
---tested SHA --policy SHA --event pull_request|merge_group`. Its deterministic
+--tested SHA --policy SHA --event pull_request|merge_group|main_push`. The
+`main_push` event is the automatic MAIN compiler benchmark exemption, with its
+own `buster-ci-main-unchanged-v1` record and contract in
+[compiler-main-unchanged-skip.md](compiler-main-unchanged-skip.md) (#3923);
+it does not change PR, merge-group or main-push CI policy. Its deterministic
 `buster-ci-no-code-v1` record distinguishes `no-code` from `full`; it is a
 classification decision, never execution or coverage evidence. The PR head,
 event base, actual tested merge and independently trusted policy are separate
