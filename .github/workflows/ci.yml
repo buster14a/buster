@@ -166,6 +166,19 @@ jobs:
           gcc --version
           gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Build and self-test Linux assembly census
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This first-party control exercises only the Linux harness fixtures;
+          # it reads no upstream tree and starts no external project workload.
+          for compiler in clang gcc; do
+            "$compiler" --version
+            "$compiler" -O2 -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror \
+              -fwrapv -fno-strict-aliasing -funsigned-char \
+              tools/linux-kernel/frontier.c -o "$RUNNER_TEMP/linux-frontier-$compiler"
+            "$RUNNER_TEMP/linux-frontier-$compiler" self-test
+          done
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
@@ -325,6 +338,19 @@ jobs:
           gcc --version
           gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Build and self-test Linux assembly census
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This first-party control exercises only the Linux harness fixtures;
+          # it reads no upstream tree and starts no external project workload.
+          for compiler in clang gcc; do
+            "$compiler" --version
+            "$compiler" -O2 -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror \
+              -fwrapv -fno-strict-aliasing -funsigned-char \
+              tools/linux-kernel/frontier.c -o "$RUNNER_TEMP/linux-frontier-$compiler"
+            "$RUNNER_TEMP/linux-frontier-$compiler" self-test
+          done
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
