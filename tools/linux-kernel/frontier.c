@@ -315,6 +315,55 @@ BUSTER_GLOBAL_LOCAL bool kernel_action_metadata(char const* cwd, char* const* ar
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool kernel_record_output(char const* cwd, char const* output,
+                                                    char* expected, size_t expected_size)
+{
+    bool valid = cwd && output && expected && expected_size > 0 &&
+                 cwd[0] == '/' && !strpbrk(cwd, "\t\r\n") &&
+                 !strpbrk(output, "\t\r\n");
+    if (valid && output[0] == 0)
+    {
+        expected[0] = 0;
+    }
+    else if (valid)
+    {
+        int bytes = output[0] == '/'
+                        ? snprintf(expected, expected_size, "%s", output)
+                        : snprintf(expected, expected_size, "%s/%s", cwd, output);
+        valid = bytes > 0 && (size_t)bytes < expected_size;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool kernel_artifact_identity_valid(char const* identity)
+{
+    bool valid = strcmp(identity, "missing") == 0;
+    if (!valid && strncmp(identity, "stat:", 5) == 0)
+    {
+        char const* cursor = identity + 5;
+        valid = true;
+        for (unsigned field = 0; field < 3 && valid; ++field)
+        {
+            char const* first = cursor;
+            while (*cursor >= '0' && *cursor <= '9')
+            {
+                ++cursor;
+            }
+            valid = cursor != first;
+            if (field < 2)
+            {
+                valid = valid && *cursor == ':';
+                if (valid)
+                {
+                    ++cursor;
+                }
+            }
+        }
+        valid = valid && *cursor == 0;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool kernel_result_write(char const* path, int status, char const* role,
                                                char const* tool_path, char const* output,
                                                char const* artifact_identity)
@@ -401,10 +450,11 @@ BUSTER_GLOBAL_LOCAL bool kernel_result_read(char const* path, KernelActionResult
                                    ? strcmp(result->tool_identity, "unresolved") == 0
                                    : result->tool_path[0] == '/' &&
                                      strcmp(result->tool_identity, "resolved-path-only") == 0;
-    bool output_valid = strcmp(result->output, "-") == 0 || result->output[0] == '/';
-    bool artifact_valid = strcmp(result->artifact_identity, "missing") == 0 ||
-                          strncmp(result->artifact_identity, "stat:", 5) == 0;
-    valid = valid && path_identity_valid && output_valid && artifact_valid;
+    bool output_valid = strcmp(result->output, "-") == 0 ||
+                        (result->output[0] == '/' && !strpbrk(result->output, "\t\r\n"));
+    bool tool_path_valid = !strpbrk(result->tool_path, "\t\r\n");
+    bool artifact_valid = kernel_artifact_identity_valid(result->artifact_identity);
+    valid = valid && path_identity_valid && output_valid && tool_path_valid && artifact_valid;
     return valid;
 }
 
@@ -528,7 +578,7 @@ BUSTER_GLOBAL_LOCAL char const* kernel_action_name(KernelActionKind kind)
     char const* name = "non-source";
     switch (kind)
     {
-        case KERNEL_ACTION_OTHER_SOURCE: name = "other-source"; break;
+        case KERNEL_ACTION_OTHER_SOURCE: name = "other-source-or-input"; break;
         case KERNEL_ACTION_C_PROBE: name = "c-probe"; break;
         case KERNEL_ACTION_C_OBJECT: name = "c-object"; break;
         case KERNEL_ACTION_C_ASSEMBLY: name = "c-generated-assembly"; break;
@@ -540,30 +590,45 @@ BUSTER_GLOBAL_LOCAL char const* kernel_action_name(KernelActionKind kind)
     return name;
 }
 
+BUSTER_GLOBAL_LOCAL bool kernel_non_source_operand(char const* argument)
+{
+    static char const* suffixes[] = {
+        ".o", ".obj", ".a", ".so", ".ko", ".mod", ".cmd", ".d", ".lds", ".ld",
+        ".map", ".symvers", ".order", ".bin", ".elf"
+    };
+    bool known = false;
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]) && !known; ++i)
+    {
+        known = kernel_suffix(argument, suffixes[i]);
+    }
+    return known;
+}
+
 BUSTER_GLOBAL_LOCAL KernelAction kernel_classify_action(size_t count)
 {
     enum { KERNEL_MODE_NONE, KERNEL_MODE_OBJECT, KERNEL_MODE_ASSEMBLY, KERNEL_MODE_PREPROCESS };
-    int mode = KERNEL_MODE_NONE;
-    bool syntax_probe = false;
+    bool compile_only = false, stop_after_assembly = false, preprocess_only = false;
+    bool syntax_probe = false, response_input = false;
     char const* language = 0;
-    char const* inferred_language = 0;
+    char const* action_language = 0;
     char const* input = 0;
     char const* output = 0;
-    size_t source_count = 0;
-    for (size_t i = 2; i < count; ++i)
+    size_t source_count = 0, unknown_input_count = 0;
+    size_t first_argument = count > 2 && strcmp(kernel_arguments[2], "cc") == 0 ? 3 : 2;
+    for (size_t i = first_argument; i < count; ++i)
     {
         char const* argument = kernel_arguments[i];
         if (strcmp(argument, "-c") == 0)
         {
-            mode = KERNEL_MODE_OBJECT;
+            compile_only = true;
         }
         else if (strcmp(argument, "-S") == 0)
         {
-            mode = KERNEL_MODE_ASSEMBLY;
+            stop_after_assembly = true;
         }
         else if (strcmp(argument, "-E") == 0)
         {
-            mode = KERNEL_MODE_PREPROCESS;
+            preprocess_only = true;
         }
         else if (strcmp(argument, "-fsyntax-only") == 0 || strcmp(argument, "-M") == 0 ||
                  strcmp(argument, "-MM") == 0)
@@ -572,7 +637,12 @@ BUSTER_GLOBAL_LOCAL KernelAction kernel_classify_action(size_t count)
         }
         else if (strcmp(argument, "-x") == 0 && i + 1 < count)
         {
-            language = strcmp(kernel_arguments[++i], "none") == 0 ? 0 : kernel_arguments[i];
+            char const* selected_language = kernel_arguments[++i];
+            language = strcmp(selected_language, "none") == 0 ? 0 : selected_language;
+        }
+        else if (strncmp(argument, "-x", 2) == 0 && argument[2] != 0)
+        {
+            language = strcmp(argument + 2, "none") == 0 ? 0 : argument + 2;
         }
         else if (strcmp(argument, "-o") == 0 && i + 1 < count)
         {
@@ -591,49 +661,70 @@ BUSTER_GLOBAL_LOCAL KernelAction kernel_classify_action(size_t count)
         {
             ++i;
         }
-        else if (argument[0] != '-' && strstr(argument, ".tmp") == 0)
+        else if (argument[0] == '@')
         {
-            bool suffix_c = kernel_suffix(argument, ".c");
-            bool suffix_preprocessed_assembly = kernel_suffix(argument, ".S");
-            bool suffix_raw_assembly = kernel_suffix(argument, ".s");
-            bool recognized = suffix_c || suffix_preprocessed_assembly || suffix_raw_assembly;
-            if (recognized)
+            response_input = true;
+            if (!input)
             {
                 input = argument;
+            }
+        }
+        else if ((argument[0] != '-' || strcmp(argument, "-") == 0) && !kernel_non_source_operand(argument))
+        {
+            bool suffix_c = kernel_suffix(argument, ".c");
+            bool suffix_preprocessed_c = kernel_suffix(argument, ".i");
+            bool suffix_preprocessed_assembly = kernel_suffix(argument, ".S");
+            bool suffix_raw_assembly = kernel_suffix(argument, ".s");
+            bool recognized_suffix = suffix_c || suffix_preprocessed_c ||
+                                     suffix_preprocessed_assembly || suffix_raw_assembly;
+            bool recognized_language = language &&
+                (strcmp(language, "c") == 0 || strcmp(language, "cpp-output") == 0 ||
+                 strcmp(language, "assembler-with-cpp") == 0 || strcmp(language, "assembler") == 0);
+            if (recognized_suffix || recognized_language)
+            {
                 ++source_count;
-                if (!inferred_language)
+                if (source_count == 1)
                 {
-                    inferred_language = suffix_c ? "c" :
-                                       suffix_preprocessed_assembly ? "assembler-with-cpp" : "assembler";
+                    input = argument;
+                    action_language = language ? language :
+                                      suffix_c ? "c" :
+                                      suffix_preprocessed_c ? "cpp-output" :
+                                      suffix_preprocessed_assembly ? "assembler-with-cpp" : "assembler";
                 }
             }
             else
             {
-                // Non-source operands such as linker scripts and response files do not
-                // participate in suffix-based source classification.
+                ++unknown_input_count;
+                if (!input)
+                {
+                    input = argument;
+                }
             }
         }
     }
-    char const* effective_language = language ? language : inferred_language;
+    int mode = preprocess_only ? KERNEL_MODE_PREPROCESS :
+               stop_after_assembly ? KERNEL_MODE_ASSEMBLY :
+               compile_only ? KERNEL_MODE_OBJECT : KERNEL_MODE_NONE;
     KernelAction action = {KERNEL_ACTION_NON_SOURCE, input ? input : "", output ? output : ""};
-    if (source_count > 1)
+    if (response_input || source_count > 1 || unknown_input_count > 1 ||
+        (source_count > 0 && unknown_input_count > 0))
     {
         action.kind = KERNEL_ACTION_AMBIGUOUS;
     }
     else if (source_count == 1)
     {
-        if (!effective_language || strcmp(effective_language, "c") == 0 || strcmp(effective_language, "cpp-output") == 0)
+        if (strcmp(action_language, "c") == 0 || strcmp(action_language, "cpp-output") == 0)
         {
             action.kind = mode == KERNEL_MODE_PREPROCESS || syntax_probe || mode == KERNEL_MODE_NONE
                               ? KERNEL_ACTION_C_PROBE
                               : mode == KERNEL_MODE_OBJECT ? KERNEL_ACTION_C_OBJECT : KERNEL_ACTION_C_ASSEMBLY;
         }
-        else if (strcmp(effective_language, "assembler-with-cpp") == 0)
+        else if (strcmp(action_language, "assembler-with-cpp") == 0)
         {
             action.kind = mode == KERNEL_MODE_PREPROCESS || syntax_probe || mode == KERNEL_MODE_NONE
                               ? KERNEL_ACTION_OTHER_SOURCE : KERNEL_ACTION_CPP_ASSEMBLY;
         }
-        else if (strcmp(effective_language, "assembler") == 0)
+        else if (strcmp(action_language, "assembler") == 0)
         {
             action.kind = mode == KERNEL_MODE_PREPROCESS || syntax_probe || mode == KERNEL_MODE_NONE
                               ? KERNEL_ACTION_OTHER_SOURCE : KERNEL_ACTION_RAW_ASSEMBLY;
@@ -642,6 +733,10 @@ BUSTER_GLOBAL_LOCAL KernelAction kernel_classify_action(size_t count)
         {
             action.kind = KERNEL_ACTION_OTHER_SOURCE;
         }
+    }
+    else if (unknown_input_count == 1)
+    {
+        action.kind = KERNEL_ACTION_OTHER_SOURCE;
     }
     return action;
 }
@@ -679,8 +774,12 @@ BUSTER_GLOBAL_LOCAL bool kernel_action_census(void)
     DIR* directory = index ? opendir(kernel_context.records) : 0;
     char* names[KERNEL_MAX_ACTION_RECORDS];
     size_t name_count = 0;
-    unsigned reference_c = 0, reference_assembly = 0, candidate_c = 0, candidate_assembly = 0;
-    unsigned host_assembly = 0, result_unknown = 0, artifact_identity_count = 0, malformed_records = 0;
+    unsigned classes[8] = {0};
+    unsigned reference_records = 0, host_records = 0, candidate_records = 0;
+    unsigned reference_c = 0, reference_generated_assembly = 0, reference_assembly_inputs = 0;
+    unsigned candidate_c = 0, candidate_generated_assembly = 0, candidate_assembly_inputs = 0;
+    unsigned host_assembly_inputs = 0, successful_results = 0, failed_results = 0;
+    unsigned result_unknown = 0, artifact_identity_count = 0, malformed_records = 0;
     if (index)
     {
         valid = fprintf(index, "record\tscope\tclass\tinput\targv_output\tresult_output\tresult\ttool_path\ttool_identity\tartifact_identity\n") > 0;
@@ -726,6 +825,7 @@ BUSTER_GLOBAL_LOCAL bool kernel_action_census(void)
         for (size_t row = 0; row < name_count && valid; ++row)
         {
             char record_path[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES];
+            char expected_output[KERNEL_PATH_BYTES];
             size_t count = 0, length = strlen(names[row]);
             KernelAction action = {KERNEL_ACTION_NON_SOURCE, "", ""};
             KernelActionResult result;
@@ -735,6 +835,12 @@ BUSTER_GLOBAL_LOCAL bool kernel_action_census(void)
             if (record_valid)
             {
                 action = kernel_classify_action(count);
+                record_valid = !strpbrk(action.input, "\t\r\n") &&
+                               !strpbrk(action.output, "\t\r\n");
+                if (!record_valid)
+                {
+                    ++malformed_records;
+                }
             }
             else
             {
@@ -745,40 +851,74 @@ BUSTER_GLOBAL_LOCAL bool kernel_action_census(void)
             {
                 strcpy(result_path + length - 5, ".result");
             }
-            bool result_valid = record_valid &&
-                                kernel_path(record_path, kernel_context.records, result_path) &&
-                                kernel_result_read(record_path, &result);
             char const* expected_role = strncmp(names[row], "target-", 7) == 0 ? "trusted-target" :
                                         strncmp(names[row], "host-", 5) == 0 ? "trusted-host" : "buster-target";
-            result_valid = result_valid && strcmp(result.role, expected_role) == 0;
+            if (strcmp(expected_role, "trusted-target") == 0)
+            {
+                ++reference_records;
+            }
+            else if (strcmp(expected_role, "trusted-host") == 0)
+            {
+                ++host_records;
+            }
+            else
+            {
+                ++candidate_records;
+            }
+            bool expected_output_valid = record_valid &&
+                kernel_record_output(kernel_arguments[0], action.output,
+                                     expected_output, sizeof(expected_output));
+            bool result_valid = record_valid && expected_output_valid &&
+                                kernel_path(record_path, kernel_context.records, result_path) &&
+                                kernel_result_read(record_path, &result);
+            result_valid = result_valid && strcmp(result.role, expected_role) == 0 &&
+                           strcmp(result.output, expected_output[0] ? expected_output : "-") == 0;
             if (!result_valid)
             {
                 ++result_unknown;
             }
-            else if (strcmp(result.artifact_identity, "missing") != 0)
+            else
             {
-                ++artifact_identity_count;
+                if (result.status == 0)
+                {
+                    ++successful_results;
+                }
+                else
+                {
+                    ++failed_results;
+                }
+                if (strcmp(result.artifact_identity, "missing") != 0)
+                {
+                    ++artifact_identity_count;
+                }
             }
             char const* scope = result_valid ? result.role : expected_role;
             if (record_valid)
             {
+                unsigned kind = (unsigned)action.kind;
+                if (kind < sizeof(classes) / sizeof(classes[0]))
+                {
+                    ++classes[kind];
+                }
                 bool c_action = action.kind == KERNEL_ACTION_C_OBJECT ||
                                 action.kind == KERNEL_ACTION_C_ASSEMBLY;
-                bool assembly_action = action.kind == KERNEL_ACTION_CPP_ASSEMBLY ||
-                                       action.kind == KERNEL_ACTION_RAW_ASSEMBLY;
+                bool assembly_input = action.kind == KERNEL_ACTION_CPP_ASSEMBLY ||
+                                      action.kind == KERNEL_ACTION_RAW_ASSEMBLY;
                 if (strcmp(scope, "trusted-target") == 0)
                 {
                     reference_c += c_action ? 1u : 0u;
-                    reference_assembly += assembly_action ? 1u : 0u;
+                    reference_generated_assembly += action.kind == KERNEL_ACTION_C_ASSEMBLY ? 1u : 0u;
+                    reference_assembly_inputs += assembly_input ? 1u : 0u;
                 }
                 else if (strcmp(scope, "buster-target") == 0)
                 {
                     candidate_c += c_action ? 1u : 0u;
-                    candidate_assembly += assembly_action ? 1u : 0u;
+                    candidate_generated_assembly += action.kind == KERNEL_ACTION_C_ASSEMBLY ? 1u : 0u;
+                    candidate_assembly_inputs += assembly_input ? 1u : 0u;
                 }
                 else
                 {
-                    host_assembly += assembly_action ? 1u : 0u;
+                    host_assembly_inputs += assembly_input ? 1u : 0u;
                 }
             }
             const char* result_output = result_valid ? result.output : "unobserved";
@@ -804,16 +944,36 @@ BUSTER_GLOBAL_LOCAL bool kernel_action_census(void)
     {
         valid = fclose(index) == 0 && valid;
     }
-    char summary[768];
+    char summary[1536];
     int bytes = snprintf(summary, sizeof(summary),
-                         "trusted_reference_c_actions=%u\ntrusted_reference_assembly_actions=%u\n"
-                         "candidate_c_actions=%u\ncandidate_assembly_actions=%u\n"
-                         "host_assembly_actions_excluded=%u\nrecords_with_artifact_stat_identity=%u\n"
+                         "wrapped_action_records=%zu\ntrusted_reference_wrapped_actions=%u\n"
+                         "trusted_host_wrapped_actions=%u\nbuster_candidate_wrapped_actions=%u\n"
+                         "classified_non_source_actions=%u\nclassified_other_source_or_input_actions=%u\n"
+                         "classified_c_probe_actions=%u\nclassified_c_object_actions=%u\n"
+                         "classified_c_generated_assembly_actions=%u\nclassified_preprocessed_assembly_actions=%u\n"
+                         "classified_raw_assembly_actions=%u\nclassified_ambiguous_actions=%u\n"
+                         "trusted_reference_wrapped_c_actions=%u\n"
+                         "trusted_reference_wrapped_c_generated_assembly_actions=%u\n"
+                         "trusted_reference_wrapped_assembly_inputs=%u\n"
+                         "buster_candidate_wrapped_c_actions=%u\n"
+                         "buster_candidate_wrapped_c_generated_assembly_actions=%u\n"
+                         "buster_candidate_wrapped_assembly_inputs=%u\n"
+                         "trusted_host_wrapped_assembly_inputs_excluded=%u\n"
+                         "successful_wrapper_results=%u\nfailed_wrapper_results=%u\n"
+                         "records_with_artifact_stat_identity=%u\n"
                          "missing_or_malformed_results=%u\nmalformed_argv_records=%u\n"
+                         "replayed_reference_c_actions=recorded-separately-in-target-c.tsv\n"
                          "candidate_generated_inputs=unqualified\nfinal_image_membership=unobserved\n"
                          "content_hashes=not-computed\n",
-                         reference_c, reference_assembly, candidate_c, candidate_assembly, host_assembly,
-                         artifact_identity_count, result_unknown, malformed_records);
+                         name_count, reference_records, host_records, candidate_records,
+                         classes[KERNEL_ACTION_NON_SOURCE], classes[KERNEL_ACTION_OTHER_SOURCE],
+                         classes[KERNEL_ACTION_C_PROBE], classes[KERNEL_ACTION_C_OBJECT],
+                         classes[KERNEL_ACTION_C_ASSEMBLY], classes[KERNEL_ACTION_CPP_ASSEMBLY],
+                         classes[KERNEL_ACTION_RAW_ASSEMBLY], classes[KERNEL_ACTION_AMBIGUOUS],
+                         reference_c, reference_generated_assembly, reference_assembly_inputs,
+                         candidate_c, candidate_generated_assembly, candidate_assembly_inputs,
+                         host_assembly_inputs, successful_results, failed_results, artifact_identity_count,
+                         result_unknown, malformed_records);
     valid = bytes > 0 && bytes < (int)sizeof(summary) &&
             kernel_path(summary_path, kernel_context.output, "action-census.txt") &&
             kernel_write(summary_path, summary, (size_t)bytes) && valid;
@@ -828,6 +988,73 @@ typedef struct KernelSelection
 } KernelSelection;
 
 BUSTER_GLOBAL_LOCAL KernelSelection kernel_selection[KERNEL_REPLAY_LIMIT];
+
+BUSTER_GLOBAL_LOCAL bool kernel_replay_command(size_t count, char* const* recorded,
+                                                        char const* destination, char const* dependency,
+                                                        char* joined_output, size_t joined_size,
+                                                        char** arguments, size_t argument_capacity,
+                                                        size_t* argument_count)
+{
+    bool valid = count >= 2 && recorded && destination && dependency && joined_output &&
+                 joined_size > 0 && arguments && argument_capacity >= 3 &&
+                 argument_count && !strpbrk(destination, "\t\r\n") &&
+                 !strpbrk(dependency, "\t\r\n");
+    size_t n = 0;
+    if (valid)
+    {
+        arguments[n++] = kernel_context.compiler;
+        arguments[n++] = "cc";
+    }
+    for (size_t i = 2; i < count && valid; ++i)
+    {
+        char const* argument = recorded[i];
+        if (strcmp(argument, "-o") == 0)
+        {
+            valid = i + 1 < count && n + 2 < argument_capacity;
+            if (valid)
+            {
+                arguments[n++] = "-o";
+                arguments[n++] = (char*)destination;
+                ++i;
+            }
+        }
+        else if (strncmp(argument, "-o", 2) == 0 && argument[2] != 0)
+        {
+            int bytes = snprintf(joined_output, joined_size, "-o%s", destination);
+            valid = bytes > 0 && (size_t)bytes < joined_size && n + 1 < argument_capacity;
+            if (valid)
+            {
+                arguments[n++] = joined_output;
+            }
+        }
+        else if (strncmp(argument, "-Wp,-MMD,", 9) == 0)
+        {
+            valid = n + 1 < argument_capacity;
+            if (valid)
+            {
+                arguments[n++] = (char*)dependency;
+            }
+        }
+        else
+        {
+            valid = n + 1 < argument_capacity;
+            if (valid)
+            {
+                arguments[n++] = recorded[i];
+            }
+        }
+    }
+    if (valid && n < argument_capacity)
+    {
+        arguments[n] = 0;
+        *argument_count = n;
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
 
 BUSTER_GLOBAL_LOCAL int kernel_replay(void)
 {
@@ -858,14 +1085,8 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
                 else if (kernel_target_c(count))
                 {
                     ++required;
-                    char const* original_output = "";
-                    for (size_t i = 2; i + 1 < count; ++i)
-                    {
-                        if (strcmp(kernel_arguments[i], "-o") == 0)
-                        {
-                            original_output = kernel_arguments[i + 1];
-                        }
-                    }
+                    KernelAction action = kernel_classify_action(count);
+                    char const* original_output = action.output;
                     // Stable selection by original object path, independent
                     // of filesystem enumeration and compiler process IDs.
                     unsigned slot = 0;
@@ -904,37 +1125,33 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
         if (valid)
         {
             char name[64], destination[KERNEL_PATH_BYTES], dependency[KERNEL_PATH_BYTES + 32], leaf[64];
+            char joined_output[KERNEL_PATH_BYTES + 2];
             snprintf(name, sizeof(name), "replay-%u", row);
             size_t size = strlen(kernel_selection[row].output);
-            snprintf(leaf, sizeof(leaf), "replay-%u.%c", row, kernel_selection[row].output[size - 1]);
-            valid = kernel_path(destination, kernel_context.output, leaf);
+            valid = size > 0 && size < sizeof(kernel_selection[row].output);
+            int leaf_bytes = valid
+                                 ? snprintf(leaf, sizeof(leaf), "replay-%u.%c", row,
+                                            kernel_selection[row].output[size - 1])
+                                 : -1;
+            valid = leaf_bytes > 0 && leaf_bytes < (int)sizeof(leaf) &&
+                    kernel_path(destination, kernel_context.output, leaf) && valid;
             int bytes = snprintf(dependency, sizeof(dependency), "-Wp,-MMD,%s/replay-%u.d", kernel_context.output, row);
             valid = bytes > 0 && bytes < (int)sizeof(dependency) && valid;
             if (valid)
             {
                 char* arguments[KERNEL_MAX_ARGUMENTS] = {0};
                 size_t n = 0;
-                arguments[n++] = kernel_context.compiler;
-                arguments[n++] = "cc";
-                for (size_t i = 2; i < count; ++i)
+                valid = kernel_replay_command(count, kernel_arguments, destination, dependency,
+                                              joined_output, sizeof(joined_output), arguments,
+                                              KERNEL_MAX_ARGUMENTS, &n);
+                if (valid)
                 {
-                    if (i > 2 && strcmp(kernel_arguments[i - 1], "-o") == 0)
-                    {
-                        arguments[n++] = destination;
-                    }
-                    else if (strncmp(kernel_arguments[i], "-Wp,-MMD,", 9) == 0)
-                    {
-                        arguments[n++] = dependency;
-                    }
-                    else
-                    {
-                        arguments[n++] = kernel_arguments[i];
-                    }
+                    int status = kernel_run(name, kernel_arguments[0], arguments, 15);
+                    ++attempted;
+                    passed += status == 0 ? 1u : 0u;
+                    valid = kernel_index_row(index, kernel_selection[row].record,
+                                             kernel_selection[row].output, true, status) && valid;
                 }
-                int status = kernel_run(name, kernel_arguments[0], arguments, 15);
-                ++attempted;
-                passed += status == 0 ? 1u : 0u;
-                valid = kernel_index_row(index, kernel_selection[row].record, kernel_selection[row].output, true, status) && valid;
             }
         }
     }
@@ -1295,11 +1512,12 @@ BUSTER_GLOBAL_LOCAL bool kernel_mechanism_census(void)
         {"CONFIG_HAVE_STATIC_CALL", "capability only; static-call use unknown"},
         {"CONFIG_HAVE_STATIC_CALL_INLINE", "capability only; inline static-call use unknown"},
         {"CONFIG_HAVE_OBJTOOL", "capability only; tool invocation not established"},
+        {"CONFIG_OBJTOOL", "tool configuration only; invocation remains unobserved"},
         {"CONFIG_STACK_VALIDATION", "configuration only; post-link validation unattempted"},
         {"CONFIG_UNWINDER_ORC", "configured unwind path only; runtime unattempted"},
-        {"CONFIG_RETPOLINE", "mitigation configuration only; runtime unattempted"},
-        {"CONFIG_RETHUNK", "mitigation configuration only; runtime unattempted"},
-        {"CONFIG_SLS", "mitigation configuration only; runtime unattempted"},
+        {"CONFIG_MITIGATION_RETPOLINE", "mitigation configuration only; runtime unattempted"},
+        {"CONFIG_MITIGATION_RETHUNK", "mitigation configuration only; runtime unattempted"},
+        {"CONFIG_MITIGATION_SLS", "mitigation configuration only; runtime unattempted"},
         {"CONFIG_X86_KERNEL_IBT", "mitigation configuration only; runtime unattempted"},
         {"CONFIG_KPROBES", "dynamic patching configuration only; runtime unattempted"},
         {"CONFIG_FUNCTION_TRACER", "patching configuration only; runtime unattempted"},
@@ -1393,6 +1611,15 @@ BUSTER_GLOBAL_LOCAL bool kernel_config_expect(char const* path, char const* symb
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool kernel_config_not_enabled(char const* path, char const* symbol)
+{
+    char status[16];
+    bool contradictory = false;
+    bool found = kernel_config_symbol(path, symbol, status, sizeof(status), &contradictory);
+    bool valid = !contradictory && (!found || strcmp(status, "disabled") == 0);
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool kernel_config_matches(void)
 {
     char path[KERNEL_PATH_BYTES];
@@ -1403,7 +1630,7 @@ BUSTER_GLOBAL_LOCAL bool kernel_config_matches(void)
         "CONFIG_INET", "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE", "CONFIG_RELOCATABLE",
         "CONFIG_PCI", "CONFIG_ACPI"
     };
-    char const* disabled[] = {"CONFIG_RUST", "CONFIG_MODULES", "CONFIG_RANDOMIZE_BASE"};
+    char const* disabled[] = {"CONFIG_MODULES", "CONFIG_RANDOMIZE_BASE"};
     for (size_t i = 0; i < sizeof(enabled) / sizeof(enabled[0]) && valid; ++i)
     {
         valid = kernel_config_expect(path, enabled[i], "enabled");
@@ -1412,6 +1639,7 @@ BUSTER_GLOBAL_LOCAL bool kernel_config_matches(void)
     {
         valid = kernel_config_expect(path, disabled[i], "disabled");
     }
+    valid = kernel_config_not_enabled(path, "CONFIG_RUST") && valid;
     return valid;
 }
 
@@ -1427,12 +1655,31 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
                  setenv("LC_ALL", "C", 1) == 0 && setenv("TZ", "UTC", 1) == 0;
     char cc[KERNEL_PATH_BYTES + 64], host[KERNEL_PATH_BYTES + 64], buster[KERNEL_PATH_BYTES + 64];
     char reference[KERNEL_PATH_BYTES + 8], candidate[KERNEL_PATH_BYTES + 8], config[KERNEL_PATH_BYTES + 32];
-    snprintf(cc, sizeof(cc), "CC=%s record-cc", context->self);
-    snprintf(host, sizeof(host), "HOSTCC=%s record-host", context->self);
-    snprintf(buster, sizeof(buster), "CC=%s buster-cc", context->self);
-    snprintf(reference, sizeof(reference), "O=%s", context->reference);
-    snprintf(candidate, sizeof(candidate), "O=%s", context->candidate);
-    snprintf(config, sizeof(config), "KCONFIG_ALLCONFIG=%s", fragment);
+    size_t self_length = strnlen(context->self, sizeof(context->self));
+    size_t reference_length = strnlen(context->reference, sizeof(context->reference));
+    size_t candidate_length = strnlen(context->candidate, sizeof(context->candidate));
+    size_t fragment_length = strnlen(fragment, KERNEL_PATH_BYTES);
+    int cc_bytes = snprintf(cc, sizeof(cc), "CC=%.*s record-cc",
+                            (int)sizeof(context->self) - 1, context->self);
+    int host_bytes = snprintf(host, sizeof(host), "HOSTCC=%.*s record-host",
+                              (int)sizeof(context->self) - 1, context->self);
+    int buster_bytes = snprintf(buster, sizeof(buster), "CC=%.*s buster-cc",
+                                (int)sizeof(context->self) - 1, context->self);
+    int reference_bytes = snprintf(reference, sizeof(reference), "O=%.*s",
+                                   (int)sizeof(context->reference) - 1, context->reference);
+    int candidate_bytes = snprintf(candidate, sizeof(candidate), "O=%.*s",
+                                   (int)sizeof(context->candidate) - 1, context->candidate);
+    int config_bytes = snprintf(config, sizeof(config), "KCONFIG_ALLCONFIG=%.*s",
+                                KERNEL_PATH_BYTES - 1, fragment);
+    valid = valid && self_length < sizeof(context->self) &&
+            reference_length < sizeof(context->reference) &&
+            candidate_length < sizeof(context->candidate) && fragment_length < KERNEL_PATH_BYTES &&
+            cc_bytes > 0 && cc_bytes < (int)sizeof(cc) &&
+            host_bytes > 0 && host_bytes < (int)sizeof(host) &&
+            buster_bytes > 0 && buster_bytes < (int)sizeof(buster) &&
+            reference_bytes > 0 && reference_bytes < (int)sizeof(reference) &&
+            candidate_bytes > 0 && candidate_bytes < (int)sizeof(candidate) &&
+            config_bytes > 0 && config_bytes < (int)sizeof(config);
     // Before any compiler runs, the source must be the pin's exact bytes.
     valid = valid && kernel_source_verify(context->source, KERNEL_PIN, "source-before");
     char log[KERNEL_PATH_BYTES];
@@ -1639,19 +1886,32 @@ BUSTER_GLOBAL_LOCAL bool kernel_classifier_controls(char const* temporary)
         {"gcc", "-x", "assembler", "-c", "-o", "forced.o", "kernel.c", 0},
         {"gcc", "-x", "assembler-with-cpp", "-c", "-o", "forced.o", "kernel.s", 0},
         {"gcc", "-x", "c", "-c", "-o", "forced.o", "kernel.S", 0},
-        {"gcc", "-x", "assembler", "-x", "none", "-c", "-o", "reset.o", "kernel.c", 0},
+        {"gcc", "-x", "assembler", "-x", "none", "-c", "reset.c", "-o", "reset.o", 0},
         {"gcc", "-c", "-S", "-o", "last.s", "kernel.c", 0},
-        {"gcc", "-S", "-c", "-o", "last.o", "kernel.c", 0},
-        {"gcc", "-E", "-o", "preprocessed.i", "kernel.c", 0},
-        {"gcc", "-fsyntax-only", "-c", "-o", "probe.o", "kernel.c", 0}
+        {"gcc", "-S", "-c", "-o", "last.s", "kernel.c", 0},
+        {"gcc", "-E", "-c", "-o", "preprocessed.i", "kernel.c", 0},
+        {"gcc", "-fsyntax-only", "-c", "-o", "probe.o", "kernel.c", 0},
+        {"gcc", "-c", "kernel.S", "-x", "c", "-o", "late.o", 0},
+        {"gcc", "-x", "c", "-c", "-o", "extensionless.o", "extensionless", 0},
+        {"gcc", "-xc", "-c", "-o", "preprocessed.o", "preprocessed.i", 0},
+        {"gcc", "-c", "-okernel.o", "kernel.c", 0},
+        {"gcc", "-S", "-E", "-o", "probe.i", "kernel.c", 0},
+        {"gcc", "-c", "-x", "c", "-o", "stdin.o", "-", 0},
+        {"gcc", "-c", "-o", "response.o", "@compile.rsp", 0}
     };
     KernelActionKind expected[] = {
         KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_ASSEMBLY, KERNEL_ACTION_CPP_ASSEMBLY,
         KERNEL_ACTION_RAW_ASSEMBLY, KERNEL_ACTION_RAW_ASSEMBLY, KERNEL_ACTION_CPP_ASSEMBLY,
         KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_ASSEMBLY,
-        KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_PROBE, KERNEL_ACTION_C_PROBE
+        KERNEL_ACTION_C_ASSEMBLY, KERNEL_ACTION_C_PROBE, KERNEL_ACTION_C_PROBE,
+        KERNEL_ACTION_CPP_ASSEMBLY, KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_OBJECT,
+        KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_PROBE, KERNEL_ACTION_C_OBJECT,
+        KERNEL_ACTION_AMBIGUOUS
     };
-    bool expected_target[] = {true, true, false, false, false, false, true, true, true, true, false, false};
+    bool expected_target[] = {
+        true, true, false, false, false, false, true, true, true, true, false, false,
+        false, true, true, true, false, true, false
+    };
     bool valid = kernel_path(path, temporary, "classify.argv");
     for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]) && valid; ++i)
     {
@@ -1660,7 +1920,42 @@ BUSTER_GLOBAL_LOCAL bool kernel_classifier_controls(char const* temporary)
         KernelAction action = valid ? kernel_classify_action(count) :
                                       (KernelAction){KERNEL_ACTION_AMBIGUOUS, "", ""};
         valid = valid && action.kind == expected[i] && kernel_target_c(count) == expected_target[i];
+        if (valid && i == 15)
+        {
+            valid = strcmp(action.output, "kernel.o") == 0;
+        }
     }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool kernel_replay_controls(void)
+{
+    char joined_output[KERNEL_PATH_BYTES + 2];
+    char* arguments[KERNEL_MAX_ARGUMENTS] = {0};
+    size_t count = 0;
+    char* split[] = {
+        "/tmp/control", "/usr/bin/gcc", "-o", "original.o",
+        "-Wp,-MMD,original.d", "-c", "source.c", 0
+    };
+    char* joined[] = {
+        "/tmp/control", "/usr/bin/gcc", "-ooriginal.o",
+        "-Wp,-MMD,original.d", "-c", "source.c", 0
+    };
+    strcpy(kernel_context.compiler, "/usr/bin/test-compiler");
+    bool valid = kernel_replay_command(7, split, "/tmp/replay.o", "-Wp,-MMD,/tmp/replay.d",
+                                       joined_output, sizeof(joined_output), arguments,
+                                       KERNEL_MAX_ARGUMENTS, &count) &&
+                 count == 7 && strcmp(arguments[0], "/usr/bin/test-compiler") == 0 &&
+                 strcmp(arguments[1], "cc") == 0 && strcmp(arguments[2], "-o") == 0 &&
+                 strcmp(arguments[3], "/tmp/replay.o") == 0 &&
+                 strcmp(arguments[4], "-Wp,-MMD,/tmp/replay.d") == 0 &&
+                 strcmp(arguments[5], "-c") == 0 && strcmp(arguments[6], "source.c") == 0;
+    valid = kernel_replay_command(6, joined, "/tmp/replay.s", "-Wp,-MMD,/tmp/replay.d",
+                                  joined_output, sizeof(joined_output), arguments,
+                                  KERNEL_MAX_ARGUMENTS, &count) &&
+            count == 6 && strcmp(arguments[2], "-o/tmp/replay.s") == 0 &&
+            strcmp(arguments[3], "-Wp,-MMD,/tmp/replay.d") == 0 &&
+            strcmp(arguments[4], "-c") == 0 && strcmp(arguments[5], "source.c") == 0 && valid;
     return valid;
 }
 
@@ -1674,6 +1969,10 @@ BUSTER_GLOBAL_LOCAL bool kernel_result_controls(char const* temporary)
                  kernel_result_read(path, &result) && result.status == 0 &&
                  strcmp(result.role, "trusted-target") == 0 &&
                  strcmp(result.tool_identity, "resolved-path-only") == 0;
+    valid = kernel_path(path, temporary, "invalid-identity.result") &&
+            kernel_result_write(path, 0, "trusted-target", "/usr/bin/gcc",
+                                "/tmp/kernel.o", "stat:1:bad:3") &&
+            !kernel_result_read(path, &result) && valid;
     valid = kernel_path(path, temporary, "truncated.result") &&
             kernel_write(path, "exit=0\nrole=trusted-target\n", 27) &&
             !kernel_result_read(path, &result) && valid;
@@ -1699,6 +1998,10 @@ BUSTER_GLOBAL_LOCAL bool kernel_config_controls(char const* temporary)
     bool found_missing = kernel_config_symbol(path, "CONFIG_JUMP_LABEL_MISSING", status,
                                               sizeof(status), &contradictory);
     valid = !found_missing && strcmp(status, "unknown") == 0 && !contradictory && valid;
+    valid = kernel_config_not_enabled(path, "CONFIG_RUST") && valid;
+    char const* rust_enabled = "CONFIG_RUST=y\n";
+    valid = kernel_write(path, rust_enabled, strlen(rust_enabled)) && valid;
+    valid = !kernel_config_not_enabled(path, "CONFIG_RUST") && valid;
     char const* conflict = "# CONFIG_JUMP_LABEL is not set\nCONFIG_HAVE_STATIC_CALL=y\n"
                            "CONFIG_HAVE_STATIC_CALL=n\nCONFIG_JUMP_LABEL_EXTRA=y\nCONFIG_X86_64=y\n";
     valid = kernel_write(path, conflict, strlen(conflict)) && valid;
@@ -1708,41 +2011,90 @@ BUSTER_GLOBAL_LOCAL bool kernel_config_controls(char const* temporary)
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool kernel_mechanism_controls(char const* temporary)
+{
+    char reference[KERNEL_PATH_BYTES], candidate[KERNEL_PATH_BYTES];
+    char config[KERNEL_PATH_BYTES], mechanisms[KERNEL_PATH_BYTES];
+    bool valid = kernel_path(reference, temporary, "mechanism-reference") &&
+                 kernel_path(candidate, temporary, "mechanism-candidate") &&
+                 mkdir(reference, 0700) == 0 && mkdir(candidate, 0700) == 0;
+    if (valid)
+    {
+        strcpy(kernel_context.reference, reference);
+        strcpy(kernel_context.candidate, candidate);
+        valid = kernel_path(config, reference, ".config") &&
+                kernel_write(config,
+                             "CONFIG_X86_64=y\nCONFIG_HAVE_OBJTOOL=y\nCONFIG_OBJTOOL=y\n"
+                             "CONFIG_MITIGATION_RETPOLINE=y\nCONFIG_MITIGATION_RETHUNK=y\n"
+                             "CONFIG_MITIGATION_SLS=y\n",
+                             sizeof("CONFIG_X86_64=y\nCONFIG_HAVE_OBJTOOL=y\nCONFIG_OBJTOOL=y\n"
+                                    "CONFIG_MITIGATION_RETPOLINE=y\nCONFIG_MITIGATION_RETHUNK=y\n"
+                                    "CONFIG_MITIGATION_SLS=y\n") - 1);
+    }
+    valid = valid && kernel_mechanism_census() &&
+            kernel_path(mechanisms, kernel_context.output, "mechanisms.tsv") &&
+            kernel_contains(mechanisms, "trusted-reference\tCONFIG_OBJTOOL\tenabled\t") &&
+            kernel_contains(mechanisms, "trusted-reference\tCONFIG_MITIGATION_RETPOLINE\tenabled\t") &&
+            kernel_contains(mechanisms, "buster-candidate\tCONFIG_OBJTOOL\tunknown\t") &&
+            kernel_contains(mechanisms, "buster-candidate\tCONFIG_MITIGATION_SLS\tunknown\t");
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool kernel_census_controls(char const* temporary)
 {
     char records[KERNEL_PATH_BYTES], record[KERNEL_PATH_BYTES], result[KERNEL_PATH_BYTES];
-    char summary[KERNEL_PATH_BYTES], candidate_path[KERNEL_PATH_BYTES];
+    char summary[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES], expected_output[3][KERNEL_PATH_BYTES];
     char* reference_argv[] = {"gcc", "-c", "-o", "reference.o", "reference.c", 0};
     char* host_argv[] = {"gcc", "-c", "-o", "host.o", "host.S", 0};
     char* candidate_argv[] = {"ide", "cc", "-c", "-o", "candidate.o", "candidate.s", 0};
     bool valid = kernel_path(records, temporary, "commands-control") &&
-                 mkdir(records, 0700) == 0;
+                 mkdir(records, 0700) == 0 &&
+                 kernel_path(summary, temporary, "action-census.txt");
     char const* names[] = {"target-fixture.argv", "host-fixture.argv", "buster-fixture.argv"};
     char** commands[] = {reference_argv, host_argv, candidate_argv};
     char const* roles[] = {"trusted-target", "trusted-host", "buster-target"};
+    char const* outputs[] = {"reference.o", "host.o", "candidate.o"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]) && valid; ++i)
     {
         valid = kernel_path(record, records, names[i]) &&
-                kernel_argv(record, temporary, commands[i]);
+                kernel_argv(record, temporary, commands[i]) &&
+                kernel_record_output(temporary, outputs[i], expected_output[i],
+                                     sizeof(expected_output[i]));
         size_t length = strlen(names[i]);
         valid = valid && length < sizeof(result);
         if (valid)
         {
             strcpy(result, names[i]);
             strcpy(result + length - 5, ".result");
-            valid = kernel_path(candidate_path, records, result) &&
-                    kernel_result_write(candidate_path, 0, roles[i], "/usr/bin/test-tool",
-                                        "/tmp/fixture.o", "stat:1:2:3");
+            valid = kernel_path(result_path, records, result) &&
+                    kernel_result_write(result_path, 0, roles[i], "/usr/bin/test-tool",
+                                        expected_output[i], "stat:1:2:3");
         }
     }
     strcpy(kernel_context.records, records);
     valid = valid && kernel_action_census() &&
-            kernel_path(summary, temporary, "action-census.txt") &&
-            kernel_contains(summary, "trusted_reference_c_actions=1\n") &&
-            kernel_contains(summary, "candidate_assembly_actions=1\n") &&
-            kernel_contains(summary, "host_assembly_actions_excluded=1\n");
-    valid = kernel_path(candidate_path, records, "host-fixture.result") &&
-            unlink(candidate_path) == 0 && valid;
+            kernel_contains(summary, "wrapped_action_records=3\n") &&
+            kernel_contains(summary, "trusted_reference_wrapped_c_actions=1\n") &&
+            kernel_contains(summary, "buster_candidate_wrapped_assembly_inputs=1\n") &&
+            kernel_contains(summary, "trusted_host_wrapped_assembly_inputs_excluded=1\n") &&
+            kernel_contains(summary, "successful_wrapper_results=3\n") &&
+            kernel_contains(summary, "classified_c_object_actions=1\n") &&
+            kernel_contains(summary, "replayed_reference_c_actions=recorded-separately-in-target-c.tsv\n");
+    valid = kernel_path(result_path, records, "buster-fixture.result") &&
+            kernel_result_write(result_path, 0, "buster-target", "/usr/bin/test-tool",
+                                "/tmp/unrelated.o", "stat:1:2:3") && valid;
+    bool mismatched_output_rejected = !kernel_action_census() &&
+                                     kernel_contains(summary, "missing_or_malformed_results=1\n");
+    valid = mismatched_output_rejected && valid;
+    valid = kernel_result_write(result_path, 0, "buster-target", "/usr/bin/test-tool",
+                                expected_output[2], "stat:1:bad:3") && valid;
+    bool invalid_identity_rejected = !kernel_action_census() &&
+                                     kernel_contains(summary, "missing_or_malformed_results=1\n");
+    valid = invalid_identity_rejected && valid;
+    valid = kernel_result_write(result_path, 0, "buster-target", "/usr/bin/test-tool",
+                                expected_output[2], "stat:1:2:3") && valid;
+    valid = kernel_path(result_path, records, "host-fixture.result") &&
+            unlink(result_path) == 0 && valid;
     bool missing_result_rejected = !kernel_action_census() &&
                                    kernel_contains(summary, "missing_or_malformed_results=1\n");
     valid = missing_result_rejected && valid;
@@ -1790,8 +2142,9 @@ BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
             valid = valid && kernel_reserve(temporary, "target", first, result_path) &&
                     kernel_reserve(temporary, "target", second, result_path) && strcmp(first, second) != 0;
             valid = valid && kernel_classifier_controls(temporary) &&
-                    kernel_result_controls(temporary) && kernel_config_controls(temporary) &&
-                    kernel_census_controls(temporary) && kernel_source_controls(temporary);
+                    kernel_replay_controls() && kernel_result_controls(temporary) && kernel_config_controls(temporary) &&
+                    kernel_mechanism_controls(temporary) && kernel_census_controls(temporary) &&
+                    kernel_source_controls(temporary);
         }
     }
     printf("LINUX_HARNESS_CONTROLS result=%s directory=%s\n", valid ? "pass" : "fail", temporary);

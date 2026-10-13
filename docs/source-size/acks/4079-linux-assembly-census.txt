@@ -1,4 +1,4 @@
 # Source-size acknowledgement; see docs/source-size.md.
 schema buster-source-size-ack-v1
-build 39796
-reason Extend the Linux frontier with assembly, provenance and mechanism censuses plus bounded first-party compiler controls (#4079).
+build 56884
+reason Extend the Linux frontier with verified assembly classification, bound action provenance, mechanism accounting and hosted first-party controls (#4079).

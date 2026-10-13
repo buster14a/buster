@@ -21,7 +21,9 @@ The upstream source stays pristine and outside Buster's tracked source.
 `tools/linux-kernel/minimal.config` is an allnoconfig input fragment, not the
 resolved configuration. The tool retains and checks the resolved x86-64
 configuration, serial console, initramfs, tmpfs, ELF userspace, timers, futex,
-IPv4, optimization, and disabled Rust/modules. The selected GCC flags keep
+IPv4, optimization, and disabled modules. `CONFIG_RUST` is required to be
+unselected if visible, while an omitted symbol remains unknown because its
+Kconfig availability depends on the toolchain. The selected GCC flags keep
 the kernel's required optimization; no `-O0` substitution is made.
 
 GCC 14 builds the reference kernel and HOSTCC utilities. The pin's x86
@@ -47,7 +49,8 @@ a future main-only recipe must retain the same records.
 Their full component license inventory and supply-chain qualification remain
 incomplete; this tool does not authorize redistribution of built binaries.
 Buster's first-party license remains undecided as documented in
-[LICENSES/README.md](../../../LICENSES/README.md).
+[LICENSES/README.md](../../../LICENSES/README.md); issue #621 remains
+unselected. No license selection is made for external assembler/linker tools.
 
 ## Execution and scheduling
 
@@ -129,22 +132,32 @@ fixture.
 `*.argv` files use NUL-delimited fields: working directory followed by the
 actual command argv. `commands/target-*.argv` and
 `commands/host-*.argv` separate trusted CC from HOSTCC; `buster-*.argv`
-records are candidate-only. Each action result is parsed fail-closed and records
-the exit status, role, resolved executable path (path identity only), output
-path, and a local device/inode/size tuple when that output exists. This tuple is
-not a content hash or a cross-run identity.
+records are candidate-only. Each action result is parsed fail-closed, bound to the output named by its
+recorded argv, and records the exit status, role, resolved executable path
+(path identity only), output path, and a local device/inode/size tuple when
+that output exists. The tuple is syntax-checked metadata, not a content hash
+or a cross-run identity.
 
-`actions.tsv` inventories recorded target, host, and candidate CC actions.
-Its classifier honors the actual `-x` language override and last compile-mode
-option: C `-S` is generated assembly, `.S` is preprocessed assembly, and
-`.s` is raw assembly. Host assembly is kept outside target totals.
-`action-census.txt` reconciles those classes and result states.
+`actions.tsv` inventories recorded target, host, and candidate CC-wrapper
+invocations. Its classifier applies each `-x` setting only to following inputs,
+including joined `-xc`, and recognizes C `.c`/`.i`, preprocessed `.S`, and
+raw `.s`. GCC stop-stage precedence is preprocessing (`-E`), assembly
+generation (`-S`), then object compilation (`-c`), independent of argument
+order. Joined and split `-o` outputs are captured; response files are recorded
+as ambiguous because their contents are not expanded. Unknown inputs remain
+visible as other-input rows, and host assembly stays outside target counters.
+`action-census.txt` reconciles wrapper record totals, all classifier classes,
+and success/failure/missing-result totals. Reference C replays use the separate
+`target-c.tsv` ledger and are explicitly excluded from wrapper totals.
 `mechanisms.tsv` reports exact-line values from the resolved trusted and
 candidate configurations as enabled, disabled, or unknown. Missing symbols stay
 unknown; contradictory duplicates make the census fail. `HAVE_*` entries are capabilities, not proof of callsite use. Alternative
 callsite use, exception-table use, and static-call callsites remain unknown.
 The permanent static-call trampoline obligation is retained when inline support
-is unavailable. Every row keeps runtime execution unattempted.
+is unavailable. The ledger checks configured `CONFIG_MITIGATION_RETPOLINE`,
+`CONFIG_MITIGATION_RETHUNK`, `CONFIG_MITIGATION_SLS`, and `CONFIG_OBJTOOL`
+when those symbols are present; missing symbols remain unknown. Every row
+keeps runtime execution unattempted.
 
 `tool-coverage.tsv` leaves direct assembler, linker, archive, objcopy,
 objdump, objtool, post-link and nested compiler-child identities unobserved
@@ -203,7 +216,7 @@ actually satisfied.
 
 The original frontier growth is acknowledged in
 [`docs/source-size/acks/3186-linux-kernel-frontier.txt`](../../source-size/acks/3186-linux-kernel-frontier.txt).
-This assembly-census change adds 39,796 build-category bytes including its
+This assembly-census change adds 56,884 build-category bytes including its
 bounded first-party lint control; that incremental growth is acknowledged in
 [`docs/source-size/acks/4079-linux-assembly-census.txt`](../../source-size/acks/4079-linux-assembly-census.txt).
 The harness changes no compiler behavior or native-retirement identity
