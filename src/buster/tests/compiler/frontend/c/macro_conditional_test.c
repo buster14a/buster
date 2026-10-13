@@ -1861,6 +1861,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_rlimit_tests(UnitTestArgume
     UnitTestResult result = {0};
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
+    CLexResult normal_expected_tokens = c_lex(arena, S8("int value = (7+1);"));
+    CLexResult unexpanded_normal_tokens = c_lex(arena, S8("int value = F(7);"));
+    CLexResult whitespace_normal_tokens = c_lex(arena, S8(" \nint\tvalue = ( 7 + 1 ) ;\n"));
+    BUSTER_TEST(arguments, c_macro_conditional_semantic_tokens_equal(whitespace_normal_tokens, normal_expected_tokens));
+    BUSTER_TEST(arguments, !c_macro_conditional_semantic_tokens_equal(unexpanded_normal_tokens, normal_expected_tokens));
     String8 normal_path = buster_test_temporary_path(arena, S8("macro-reservation-rlimit-normal"), S8(".i"));
     String8 limited_path = buster_test_temporary_path(arena, S8("macro-reservation-rlimit-limited"), S8(".i"));
     FileReadResult normal_before = file_read_checked(arena, normal_path, (FileReadOptions){0});
@@ -1876,9 +1881,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_rlimit_tests(UnitTestArgume
     }
     FileReadResult normal_output = file_read_checked(arena, normal_path, (FileReadOptions){0});
     String8 normal_text = {.pointer = (char8*)normal_output.bytes.pointer, .length = normal_output.bytes.length};
-    BUSTER_TEST(arguments, normal_output.bytes.pointer && normal_output.bytes.length &&
-                           c_macro_expansion_rlimit_contains(normal_text, S8("int value")) &&
-                           c_macro_expansion_rlimit_contains(normal_text, S8("7")));
+    CLexResult normal_tokens = c_lex(arena, normal_text);
+    BUSTER_TEST(arguments, normal_output.bytes.pointer && normal_output.bytes.length);
+    BUSTER_TEST(arguments, c_macro_conditional_semantic_tokens_equal(normal_tokens, normal_expected_tokens));
     if (normal_output.bytes.pointer)
     {
         BUSTER_TEST(arguments, os_file_delete(normal_path));
