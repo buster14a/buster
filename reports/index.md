@@ -2,13 +2,13 @@
 
 Operational Actions observations; advisory. Compiler performance acceptance and the qualified 9700X dashboard are separate.
 
-Collected at 2026-10-13T14:42:59Z. Policy hosted-ci-cohort-v1. 118 active observations, 1748 unknown hardware, 1 API/ingestion gaps, 0 incomplete runs, 70 aliases, 1168 unresolved cost intervals.
+Collected at 2026-10-13T15:01:52Z. Policy hosted-ci-cohort-v1. 155 active observations, 1786 unknown hardware, 2 API/ingestion gaps, 1 incomplete runs, 70 aliases, 1179 unresolved cost intervals.
 
-Observed hosted runner-seconds: 292663; observed unsuccessful-job runner-seconds: 25094 (96 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
+Observed hosted runner-seconds: 306333; observed unsuccessful-job runner-seconds: 25094 (96 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
 
-Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 2806 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
+Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 2895 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
 
-Bounded view omitted 0 older shards and 2923 older loaded rows; their raw records remain on the data branch.
+Bounded view omitted 0 older shards and 2978 older loaded rows; their raw records remain on the data branch.
 
 [JSON export](recent.jsonl) · [CSV export](recent.csv) · [Collector policy](https://github.com/buster14a/buster/blob/main/docs/ci-timing-history.md)
 
@@ -21,9 +21,9 @@ Default view: trusted main push observations only. [All events, PRs and queues](
 | Windows x86-64 inventory &#40;qualification pending&#41; / non-matrix | Windows Server 2025 Datacenter / AMD EPYC 7763 64-Core Processor | push / main | 3 | 3 | [series](series-bc4c14f60a362e5e.md) |
 | Linux x86-64 bootstrap evidence / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-45419f71ad96fa6a.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 1 | 1 | [series](series-659dd9bdc8513655.md) |
-| Record the compiler benchmark request / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 2 | 2 | [series](series-14061ff422275937.md) |
+| Record the compiler benchmark request / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 3 | 3 | [series](series-14061ff422275937.md) |
 | Show the queued compiler benchmark check / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | push / main | 1 | 1 | [series](series-cae1070a29eec6c4.md) |
-| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 3 | 3 | [series](series-33e938f1f4be6999.md) |
+| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-33e938f1f4be6999.md) |
 
 ## Largest observed main time changes
 
@@ -32,4 +32,4 @@ Ordered by absolute median seconds per physical execution; candidate frequency i
 | Series | Median change s | Change % | Candidate executions | State |
 |---|---:|---:|---:|---|
 
-Last selected execution completed: 2026-10-13T14:44:04Z; collection lag unavailable. Pending runs: 5; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
+Last selected execution completed: 2026-10-13T15:02:47Z; collection lag unavailable. Pending runs: 45; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.

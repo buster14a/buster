@@ -11,11 +11,11 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Windows x86-64 inventory &#40;qualification pending&#41; / non-matrix | Windows Server 2025 Datacenter / AMD EPYC 7763 64-Core Processor | push / main | 3 | 3 | [series](series-bc4c14f60a362e5e.md) |
 | Linux x86-64 bootstrap evidence / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-45419f71ad96fa6a.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 1 | 1 | [series](series-659dd9bdc8513655.md) |
-| Record the compiler benchmark request / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 2 | 2 | [series](series-14061ff422275937.md) |
+| Record the compiler benchmark request / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 3 | 3 | [series](series-14061ff422275937.md) |
 | Show the queued compiler benchmark check / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | push / main | 1 | 1 | [series](series-cae1070a29eec6c4.md) |
-| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 3 | 3 | [series](series-33e938f1f4be6999.md) |
+| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-33e938f1f4be6999.md) |
 | Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 8 | 8 | [series](series-949519260b5e186d.md) |
-| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 16 | [series](series-310307db3edca5aa.md) |
+| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 17 | [series](series-310307db3edca5aa.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/3718-linear-assignment-chains | 0 | 1 | [series](series-b6ab01d48adccc95.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | pull&#95;request / codex/3718-linear-assignment-chains | 1 | 1 | [series](series-14737ec93a7921d1.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 14 | [series](series-11db6938aa621425.md) |
