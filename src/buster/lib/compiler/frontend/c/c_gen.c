@@ -44432,8 +44432,10 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
 
 #if BUSTER_INCLUDE_TESTS
 // Slot visits plus array rows compared by c_ir_label_find, for the growth
-// regression c_test_label_lookup_work_growth.
-BUSTER_GLOBAL_LOCAL u64 c_ir_label_find_probe_total;
+// regression c_test_label_lookup_work_growth. Thread-local because
+// -fcompile-jobs lowers translation units on concurrent lanes (#3948); the
+// test lowers and reads on one thread, and lowering itself never fans out.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_label_find_probe_total;
 #define C_IR_LABEL_FIND_PROBE() (c_ir_label_find_probe_total += 1)
 #else
 #define C_IR_LABEL_FIND_PROBE() ((void)0)
