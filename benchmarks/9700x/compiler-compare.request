@@ -178,3 +178,5 @@ request: issue #3011 owner-requested constant-reuse comparison, retried after PR
 profile: constant-reuse-acceptance-v1
 request: issue #58 owner-approved 9700X comparison ("i approve", 2026-10-13), retry after the #3969 harness fix; variant A helper-based register-load selection vs production C on main db42293b; fresh exact-head compiler-compare-v1 and self-host-inline-compare-v1
 profile: self-host-inline-compare-v1
+request: issue #58 owner-approved 9700X comparison ("i approve", 2026-10-13), second arm after variant A's run 38374996162; variant B branched register-load selection vs production C on main db42293b; fresh exact-head compiler-compare-v1 and self-host-inline-compare-v1
+profile: self-host-inline-compare-v1
