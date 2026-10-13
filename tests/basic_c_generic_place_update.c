@@ -48,7 +48,7 @@ int main(void)
     int nested = _Generic(0,
                           int: _Generic(1, int: values[selected_index()], default: values[discarded_index()]),
                           default: values[discarded_index()])++;
-    int called = _Generic(0, int (*)(void): selected_callee, default: discarded_callee)();
+    int called = _Generic(0, int: selected_callee, default: discarded_callee)();
     return !(prefix == 5 && postfix == 8 && argument == 6 && nested == 7 && values[0] == 8 &&
              selected_index_calls == 4 && discarded_index_calls == 0 && sibling_calls == 1 &&
              selected_callee_calls == 1 && discarded_callee_calls == 0 && called == 7);
