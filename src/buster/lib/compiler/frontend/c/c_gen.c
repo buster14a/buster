@@ -35248,6 +35248,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
     bool ok = true;
     u32 ternary_depth = 0;
     bool previous_is_operand = false;
+    bool size_operator_operand = false;
     for (u32 index = start; ok && index < end && operators->first[stop] == UINT32_MAX; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
@@ -35266,7 +35267,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             // the pointer and predicted the whole conditional arm as one.
             // The type-name test runs only when the next token is
             // sign-ambiguous, so ordinary grouped operands pay one compare.
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
+            if (!size_operator_operand && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
             {
                 u32 following = builder->preprocess.tokens[index + 1].punctuator;
                 if ((following == C_PUNCTUATOR_STAR || following == C_PUNCTUATOR_AMPERSAND || following == C_PUNCTUATOR_PLUS ||
@@ -35276,6 +35277,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
                     previous_is_operand = false;
                 }
             }
+            size_operator_operand = false;
         }
         else if (scan == C_IR_GROUP_SCAN_UNCLOSED)
         {
@@ -35286,15 +35288,27 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             // The sizeof/alignof words and __real__/__imag__ are prefix
             // operators, so a `*` after one dereferences rather than multiplies.
             CConditionalOperator complex_part = C_CONDITIONAL_REAL_PART;
-            previous_is_operand =
-                token.kind != C_TOKEN_IDENTIFIER || (!c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) &&
-                                                     !c_ir_complex_part_operator(builder, token, &complex_part));
+            bool size_operator = token.kind == C_TOKEN_IDENTIFIER &&
+                                 c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
+            bool extension = token.kind == C_TOKEN_IDENTIFIER &&
+                             c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_EXTENSION);
+            bool complex_operator = c_ir_complex_part_operator(builder, token, &complex_part);
+            previous_is_operand = token.kind != C_TOKEN_IDENTIFIER || (!size_operator && !extension && !complex_operator);
+            if (size_operator)
+            {
+                size_operator_operand = true;
+            }
+            else if (!extension)
+            {
+                size_operator_operand = false;
+            }
         }
         else if (punctuator == C_PUNCTUATOR_QUESTION)
         {
             tier = ternary_depth ? C_IR_SIZEOF_TIER_NONE : C_IR_SIZEOF_TIER_QUESTION;
             ternary_depth += 1;
             previous_is_operand = false;
+            size_operator_operand = false;
         }
         else if (punctuator == C_PUNCTUATOR_COLON)
         {
@@ -35302,12 +35316,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             ternary_depth -= ok ? 1 : 0;
             tier = ok && !ternary_depth ? C_IR_SIZEOF_TIER_COLON : C_IR_SIZEOF_TIER_NONE;
             previous_is_operand = false;
+            size_operator_operand = false;
         }
         else if (punctuator != C_PUNCTUATOR_PLUS_PLUS && punctuator != C_PUNCTUATOR_MINUS_MINUS)
         {
             // A postfix `++`/`--` after an operand or a prefix one before it carries the operand state over.
             bool binary_allowed = previous_is_operand;
             previous_is_operand = false;
+            size_operator_operand = false;
             switch (ternary_depth ? C_PUNCTUATOR_NONE : punctuator)
             {
             case C_PUNCTUATOR_NONE: break;
@@ -35350,6 +35366,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             case C_PUNCTUATOR_DOT:
             case C_PUNCTUATOR_ARROW: break;
             default: ok = false; break;
+            }
+        }
+        else
+        {
+            // A prefix increment/decrement consumes the unary operand after a
+            // size operator; a postfix form follows an operand already seen.
+            if (!previous_is_operand)
+            {
+                size_operator_operand = false;
             }
         }
         if (ok && tier != C_IR_SIZEOF_TIER_NONE)
@@ -36827,17 +36852,30 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
 {
     u32 index = start;
     bool need_primary = true;
+    bool size_operator_operand = false;
     while (need_primary)
     {
         while (index < end)
         {
             CToken token = builder->preprocess.tokens[index];
             CConditionalOperator complex_part = C_CONDITIONAL_OPERATOR_COUNT;
+            bool size_operator = token.kind == C_TOKEN_IDENTIFIER &&
+                                 c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
+            bool extension = token.kind == C_TOKEN_IDENTIFIER &&
+                             c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_EXTENSION);
             bool prefix = c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND) ||
                           c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS) ||
                           c_token_is_punctuator(&token, C_PUNCTUATOR_EXCLAMATION) || c_token_is_punctuator(&token, C_PUNCTUATOR_TILDE) ||
                           c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS) ||
-                          c_ir_complex_part_operator(builder, token, &complex_part);
+                          c_ir_complex_part_operator(builder, token, &complex_part) || size_operator || extension;
+            if (size_operator)
+            {
+                size_operator_operand = true;
+            }
+            else if (prefix && !extension)
+            {
+                size_operator_operand = false;
+            }
             if (!prefix)
             {
                 break;
@@ -36857,7 +36895,9 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
                 return start;
             }
             IrTypeId cast_type = c_ir_group_type_name(builder, index, close);
-            if (cast_type.value != IR_ID_UNDERLYING_INVALID && close + 1 < end)
+            bool compound_literal = close + 1 < end &&
+                                    c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE);
+            if (cast_type.value != IR_ID_UNDERLYING_INVALID && close + 1 < end && (!size_operator_operand || compound_literal))
             {
                 if (c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE))
                 {

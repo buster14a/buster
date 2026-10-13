@@ -35311,6 +35311,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             u32 precedence = UINT32_MAX;
             u32 conditional_depth = 0;
             bool operand = false;
+            bool size_operator_operand = false;
             for (u32 cursor = begin; cursor < limit; cursor += 1)
             {
                 CToken token = preprocess.tokens[cursor];
@@ -35323,7 +35324,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
                     bool cast = false;
-                    if (!operand && close < limit && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    if (!operand && !size_operator_operand && close < limit && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
                         u32 type_cursor = cursor + 1;
                         CTypeId type = c_parse_constant_type_name(machine, result, preprocess, scope, type_cursor, close, &type_cursor);
@@ -35335,6 +35336,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     }
                     cursor = close < limit ? close : limit;
                     operand = !cast;
+                    size_operator_operand = false;
                 }
                 else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
                 {
@@ -35365,7 +35367,23 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                         split = cursor;
                         precedence = priority;
                     }
-                    operand = c_parse_expression_token_ends_operand(token);
+                    if (token.kind == C_TOKEN_IDENTIFIER &&
+                        c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS))
+                    {
+                        // sizeof and _Alignof introduce a unary operand; their
+                        // following punctuation is not a binary split until
+                        // that operand has been consumed.
+                        operand = false;
+                        size_operator_operand = true;
+                    }
+                    else
+                    {
+                        operand = c_parse_expression_token_ends_operand(token);
+                        if (operand)
+                        {
+                            size_operator_operand = false;
+                        }
+                    }
                 }
             }
             if (split != UINT32_MAX)
