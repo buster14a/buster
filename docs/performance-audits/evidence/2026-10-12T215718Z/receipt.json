@@ -1,0 +1,731 @@
+{
+  "binaries": {
+    "baseline": {
+      "revision": "a4ea18116d1dd5d03ecf7287234fe61f4fb40267",
+      "sha256": "50af0f945313eb316f23d408ebfc2da4002437b53595c46beb7ae30c555b445a",
+      "size_bytes": 34892776
+    },
+    "candidate": {
+      "revision": "1d75b2fa7626d50d60c3d7386dde5c0484ba879a",
+      "sha256": "2aa12de1add834a926908e7cdc504d65a32494a8813c65f118bf58f9d93d6625",
+      "size_bytes": 34888584
+    }
+  },
+  "host": {
+    "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+    "hostname": "benchpress"
+  },
+  "identity": {
+    "base": "a4ea18116d1dd5d03ecf7287234fe61f4fb40267",
+    "base_tree": "57b78a56321c77eccdb1896e13ac4684e38e83f6",
+    "head": "1d75b2fa7626d50d60c3d7386dde5c0484ba879a",
+    "head_tree": "5410e6f677f10ff6566532548f1b0d3605944359",
+    "mode": "pull",
+    "pull": "3874",
+    "pull_head": "1d75b2fa7626d50d60c3d7386dde5c0484ba879a",
+    "ref": "refs/pull/3874/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "38298043781",
+    "run_attempt": "1",
+    "run_id": "38298072681",
+    "trusted_revision": "a4ea18116d1dd5d03ecf7287234fe61f4fb40267"
+  },
+  "inline_acceptance": {
+    "errors": [],
+    "evidence_omissions": [],
+    "exit": 0,
+    "profile": {
+      "compiler_modes": {
+        "a": "default; -fcanonical-inline omitted",
+        "b": "-fcanonical-inline"
+      },
+      "correctness": "each mode's stage-2 output must byte-match its stage-1 compiler",
+      "measurements": [
+        "wall",
+        "instructions:u",
+        "peak RSS",
+        "executable-section code bytes"
+      ],
+      "pairing": "ABBA",
+      "pairs": 12,
+      "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers",
+      "stages": [
+        "stage-1 compiler construction",
+        "generated stage-2 self-host compile"
+      ],
+      "warmups": 1
+    },
+    "request_line": "canonical-inline-self-host-v1",
+    "requested": true,
+    "status": "complete",
+    "summary": {
+      "candidate_compiler": {
+        "sha256": "2aa12de1add834a926908e7cdc504d65a32494a8813c65f118bf58f9d93d6625",
+        "size_bytes": 34888584
+      },
+      "elapsed_seconds": 328.909,
+      "fixed_point": {
+        "off": true,
+        "on": true
+      },
+      "frozen_input_tree": {
+        "build/generated": {
+          "bytes": 703,
+          "files": 1,
+          "sha256": "227a27ea5fb19f3d3fbd27e7c979aa204dac8fcff6ea73428f2b9a374ad9819b"
+        },
+        "src": {
+          "bytes": 92979195,
+          "files": 582,
+          "sha256": "e8ce973b0ee4825a8501dd3ca24bdca207cc64f82198423997dfc764a0b1591d"
+        }
+      },
+      "profile": {
+        "compiler_modes": {
+          "a": "default; -fcanonical-inline omitted",
+          "b": "-fcanonical-inline"
+        },
+        "correctness": "each mode's stage-2 output must byte-match its stage-1 compiler",
+        "cpu": 2,
+        "measurements": [
+          "wall",
+          "instructions:u",
+          "peak RSS",
+          "executable-section code bytes"
+        ],
+        "pairing": "ABBA",
+        "pairs": 12,
+        "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers",
+        "source_sha256": "b15207abd855400abf62dfd23ff11da3d2b12abf109806589f11e4c762366264",
+        "stages": [
+          "stage-1 compiler construction",
+          "generated stage-2 self-host compile"
+        ],
+        "warmups": 1
+      },
+      "schema": "buster-inline-self-host-acceptance-v1",
+      "selfhost_runtime": {
+        "metrics": {
+          "code_bytes": {
+            "a_file_bytes": 42672904,
+            "a_format": "elf64",
+            "a_sections": [
+              {
+                "name": ".text",
+                "size": 15216958
+              },
+              {
+                "name": ".plt",
+                "size": 1856
+              }
+            ],
+            "a_value": 15218814,
+            "b_file_bytes": 43205416,
+            "b_format": "elf64",
+            "b_sections": [
+              {
+                "name": ".text",
+                "size": 15332446
+              },
+              {
+                "name": ".plt",
+                "size": 1856
+              }
+            ],
+            "b_value": 15334302,
+            "note": null,
+            "ratio": 1.0075885019686817
+          },
+          "counter_availability": {
+            "perf_stat": true,
+            "reason": "perf stat counts task-clock"
+          },
+          "instructions": {
+            "a_mad": 60.0,
+            "a_median": 140179856272.5,
+            "a_min": 140179856184.0,
+            "b_mad": 38.0,
+            "b_median": 138546063091.0,
+            "b_min": 138546063037.0,
+            "bootstrap_ci_high": 0.9883450383896368,
+            "bootstrap_ci_low": 0.9883450209099773,
+            "change_percent": -1.1654977894878016,
+            "ci_coverage": 0.96142578125,
+            "ci_high": 0.9883450223636228,
+            "ci_low": 0.9883450213786077,
+            "delta": -1633793181.5,
+            "direction": "lower",
+            "geomean_ratio": 0.988345027039837,
+            "label": "instructions:u",
+            "min_ratio": 0.9883450219491202,
+            "n": 12,
+            "note": null,
+            "outcome": "lower",
+            "ratio": 0.988345022105122,
+            "ratio_of_medians": 0.988345021710366,
+            "unit": "count"
+          },
+          "peak_rss": {
+            "a_mad": 4096.0,
+            "a_median": 1129148416.0,
+            "a_min": 1129033728,
+            "b_mad": 2048.0,
+            "b_median": 1169229824.0,
+            "b_min": 1169182720,
+            "bootstrap_ci_high": 1.035527540945497,
+            "bootstrap_ci_low": 1.0354993883119925,
+            "change_percent": 3.5500715524966697,
+            "ci_coverage": 0.96142578125,
+            "ci_high": 1.035521504440188,
+            "ci_low": 1.0354914536115383,
+            "delta": 40081408.0,
+            "direction": "lower",
+            "geomean_ratio": 1.035511573770663,
+            "label": "peak RSS (wait4 ru_maxrss)",
+            "min_ratio": 1.0355604894737034,
+            "n": 12,
+            "note": null,
+            "outcome": "higher",
+            "ratio": 1.0355007155249667,
+            "ratio_of_medians": 1.035497023625989,
+            "unit": "bytes"
+          },
+          "wall": {
+            "a_mad": 0.012230499999999367,
+            "a_median": 9.2654845,
+            "a_min": 9.244803,
+            "b_mad": 0.008785500000000113,
+            "b_median": 9.2022535,
+            "b_min": 9.181696,
+            "bootstrap_ci_high": 0.9941025877765669,
+            "bootstrap_ci_low": 0.990271173305768,
+            "change_percent": -0.8218709678523561,
+            "ci_coverage": 0.96142578125,
+            "ci_high": 0.995559559246422,
+            "ci_low": 0.9886645811118935,
+            "delta": -0.06323100000000004,
+            "direction": "lower",
+            "geomean_ratio": 0.9922294137772948,
+            "label": "wall time (harness span)",
+            "min_ratio": 0.9931737863965302,
+            "n": 12,
+            "note": null,
+            "outcome": "below-floor",
+            "ratio": 0.9917812903214764,
+            "ratio_of_medians": 0.9931756401945305,
+            "unit": "s"
+          }
+        },
+        "outputs_identical": false
+      },
+      "source_revision": "1d75b2fa7626d50d60c3d7386dde5c0484ba879a",
+      "stage1": {
+        "metrics": {
+          "code_bytes": {
+            "a_file_bytes": 42672904,
+            "a_format": "elf64",
+            "a_sections": [
+              {
+                "name": ".text",
+                "size": 15216958
+              },
+              {
+                "name": ".plt",
+                "size": 1856
+              }
+            ],
+            "a_value": 15218814,
+            "b_file_bytes": 43205416,
+            "b_format": "elf64",
+            "b_sections": [
+              {
+                "name": ".text",
+                "size": 15332446
+              },
+              {
+                "name": ".plt",
+                "size": 1856
+              }
+            ],
+            "b_value": 15334302,
+            "note": null,
+            "ratio": 1.0075885019686817
+          },
+          "counter_availability": {
+            "perf_stat": true,
+            "reason": "perf stat counts task-clock"
+          },
+          "instructions": {
+            "a_mad": 265.0,
+            "a_median": 23802103403.0,
+            "a_min": 23802072677.0,
+            "b_mad": 363.0,
+            "b_median": 24271330058.0,
+            "b_min": 24271300060.0,
+            "bootstrap_ci_high": 1.019714013377739,
+            "bootstrap_ci_low": 1.019713360046128,
+            "change_percent": 1.9713680519450438,
+            "ci_coverage": 0.96142578125,
+            "ci_high": 1.0197137086330526,
+            "ci_low": 1.0197136489073726,
+            "delta": 469226655.0,
+            "direction": "lower",
+            "geomean_ratio": 1.0197136833557905,
+            "label": "instructions:u",
+            "min_ratio": 1.0197137194465176,
+            "n": 12,
+            "note": null,
+            "outcome": "higher",
+            "ratio": 1.0197136805194504,
+            "ratio_of_medians": 1.019713663412657,
+            "unit": "count"
+          },
+          "peak_rss": {
+            "a_mad": 165888.0,
+            "a_median": 1123397632.0,
+            "a_min": 1123127296,
+            "b_mad": 221184.0,
+            "b_median": 1165879296.0,
+            "b_min": 1165152256,
+            "bootstrap_ci_high": 1.0377319131358562,
+            "bootstrap_ci_low": 1.0371881914510863,
+            "change_percent": 3.744406239901532,
+            "ci_coverage": 0.96142578125,
+            "ci_high": 1.0380225502494238,
+            "ci_low": 1.0371757242083386,
+            "delta": 42481664.0,
+            "direction": "lower",
+            "geomean_ratio": 1.0374682156103312,
+            "label": "peak RSS (wait4 ru_maxrss)",
+            "min_ratio": 1.03741780664549,
+            "n": 12,
+            "note": null,
+            "outcome": "higher",
+            "ratio": 1.0374440623990153,
+            "ratio_of_medians": 1.037815340525838,
+            "unit": "bytes"
+          },
+          "wall": {
+            "a_mad": 0.0011219999999999564,
+            "a_median": 1.5742720000000001,
+            "a_min": 1.567826,
+            "b_mad": 0.0012799999999998368,
+            "b_median": 1.618027,
+            "b_min": 1.613626,
+            "bootstrap_ci_high": 1.029217157513987,
+            "bootstrap_ci_low": 1.024943620476514,
+            "change_percent": 2.8332732223610213,
+            "ci_coverage": 0.96142578125,
+            "ci_high": 1.029274126654057,
+            "ci_low": 1.0253624451270404,
+            "delta": 0.04375499999999999,
+            "direction": "lower",
+            "geomean_ratio": 1.0273233105039026,
+            "label": "wall time (harness span)",
+            "min_ratio": 1.0292124253584263,
+            "n": 12,
+            "note": null,
+            "outcome": "slower",
+            "ratio": 1.0283327322236102,
+            "ratio_of_medians": 1.0277937992926254,
+            "unit": "s"
+          }
+        },
+        "outputs_identical": false
+      },
+      "stage1_compilers": {
+        "off": {
+          "sha256": "b712817ba6806459acb1be2a6925fce01d92c4a246171db6790701637cc7a14d",
+          "size_bytes": 42672904
+        },
+        "on": {
+          "sha256": "9a5e5152ab972442e5a0f7856d0da54689f46d3138ba05fde10e990d4204fe99",
+          "size_bytes": 43205416
+        }
+      },
+      "status": "complete"
+    }
+  },
+  "lab": {
+    "complete_pairs": 186,
+    "exit": 0,
+    "schema": "buster-uarch-lab-compare-v2",
+    "verdict": {
+      "bound_percent": 0.05807425516279885,
+      "change_percent": -0.017654001563016664,
+      "ci_coverage": 0.9525588725136491,
+      "ci_high": 1.00047079421712,
+      "ci_low": 0.999419257448372,
+      "explanation": "instructions +0.01%; branch MPKI -0.11% (below floor); phases preprocess -0.2 ms (below floor), emit +0.0 ms (below floor)",
+      "metric": "wall",
+      "min_effect_percent": 0.5,
+      "n": 186,
+      "outcome": "no detectable difference",
+      "ratio": 0.9998234599843698,
+      "text": "NO DETECTABLE DIFFERENCE: wall time B/A 0.9998, 95% CI [0.9994, 1.0005] includes 1.0 over 186 pairs; any real change is within about +/-0.06%. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.01%; branch MPKI -0.11% (below floor); phases preprocess -0.2 ms (below floor), emit +0.0 ms (below floor)."
+    }
+  },
+  "link_tls": {
+    "cells": [
+      {
+        "baseline_ns": 3409813.5,
+        "candidate_faster": 0,
+        "candidate_ns": 12535899.0,
+        "image_sha256": "a52f9641bfeb342dd2ed8287a3b174e8c68d8848b4451da1fe4d0f070912b2ff",
+        "name": "tls-gd-2048",
+        "ratio": 3.651881529979388,
+        "ratio_high": 3.970302270345529,
+        "ratio_low": 3.5987727383691253
+      },
+      {
+        "baseline_ns": 4919422.5,
+        "candidate_faster": 0,
+        "candidate_ns": 151960758.5,
+        "image_sha256": "19af1a2bb777d1dbbc10a080d5d55dd051340710c280fabdb9c4f3eb2ba6f278",
+        "name": "tls-gd-8192",
+        "ratio": 31.491942517772948,
+        "ratio_high": 33.07013809312889,
+        "ratio_low": 30.40264567263279
+      },
+      {
+        "baseline_ns": 10016845.0,
+        "candidate_faster": 0,
+        "candidate_ns": 2392108015.0,
+        "image_sha256": "5010029ea54636bc9319323dca8050dd6564e339f3e0feefa5d509c9d7df5803",
+        "name": "tls-gd-32768",
+        "ratio": 238.96424098009433,
+        "ratio_high": 243.45855302168468,
+        "ratio_low": 236.15210679992785
+      },
+      {
+        "baseline_ns": 9689484.5,
+        "candidate_faster": 0,
+        "candidate_ns": 1601855396.5,
+        "image_sha256": "67b72fd28675502719749a4369e77e3ee907b6265215a20b2c545dea82904613",
+        "name": "tls-gd-32768-pie",
+        "ratio": 165.4443761683808,
+        "ratio_high": 169.94972799491302,
+        "ratio_low": 164.0256543056134
+      },
+      {
+        "baseline_ns": 9989996.0,
+        "candidate_faster": 0,
+        "candidate_ns": 2401316979.0,
+        "image_sha256": "c911268269ef8adacf56ccf1d757c639a3f55e2482079c59e64ccd6b2450ae49",
+        "name": "tls-gd-32768-no-plt",
+        "ratio": 240.5569289092586,
+        "ratio_high": 249.95889727705878,
+        "ratio_low": 236.58227532191376
+      },
+      {
+        "baseline_ns": 11100298.0,
+        "candidate_faster": 0,
+        "candidate_ns": 2397514730.5,
+        "image_sha256": "5010029ea54636bc9319323dca8050dd6564e339f3e0feefa5d509c9d7df5803",
+        "name": "tls-gd-32768-archive",
+        "ratio": 216.33776284312228,
+        "ratio_high": 217.40034472317754,
+        "ratio_low": 211.4692168035093
+      },
+      {
+        "baseline_ns": 6783078.0,
+        "candidate_faster": 8,
+        "candidate_ns": 6775969.0,
+        "image_sha256": "c586752992ea115c96349cf0f170e53ed3a219093fd01e8599a5f75a79a91185",
+        "name": "no-tls-control",
+        "ratio": 1.0040199370992426,
+        "ratio_high": 1.0176049859440819,
+        "ratio_low": 0.9479570784182922
+      }
+    ],
+    "errors": [],
+    "evidence_omissions": [],
+    "exit": 0,
+    "harness_sha256": "a9f119152b37524a6e5c8407caa9fc86310960c71c8098fb231ed558cb6d9cd2",
+    "profile": {
+      "cells": [
+        {
+          "arguments": [
+            "cc",
+            "-no-pie",
+            "main.o",
+            "m1024.o"
+          ],
+          "name": "tls-gd-2048",
+          "stdout": "523776 524800\n"
+        },
+        {
+          "arguments": [
+            "cc",
+            "-no-pie",
+            "main.o",
+            "m4096.o"
+          ],
+          "name": "tls-gd-8192",
+          "stdout": "8386560 8390656\n"
+        },
+        {
+          "arguments": [
+            "cc",
+            "-no-pie",
+            "main.o",
+            "m16384.o"
+          ],
+          "name": "tls-gd-32768",
+          "stdout": "134209536 134225920\n"
+        },
+        {
+          "arguments": [
+            "cc",
+            "-pie",
+            "main.o",
+            "m16384.o"
+          ],
+          "name": "tls-gd-32768-pie",
+          "stdout": "134209536 134225920\n"
+        },
+        {
+          "arguments": [
+            "cc",
+            "-no-pie",
+            "main.o",
+            "n16384.o"
+          ],
+          "name": "tls-gd-32768-no-plt",
+          "stdout": "134209536 134225920\n"
+        },
+        {
+          "arguments": [
+            "cc",
+            "-no-pie",
+            "main.o",
+            "m16384.a"
+          ],
+          "name": "tls-gd-32768-archive",
+          "stdout": "134209536 134225920\n"
+        },
+        {
+          "arguments": [
+            "cc",
+            "-no-pie",
+            "main.o",
+            "plain.o"
+          ],
+          "name": "no-tls-control",
+          "stdout": "8386560 8386560\n"
+        }
+      ],
+      "compiler": "clang",
+      "correctness": "each binary links every cell once before timing; both images are byte-identical, exit 0 and print the frozen output, and every timed link exits 0",
+      "cpu": 2,
+      "decision": "report-only: ratios and intervals are reported and never gate",
+      "harness": "tools/link_tls_bench.py at the trusted revision, run by compiler_compare after the corpus leg on the matched baseline/candidate ide binaries",
+      "inputs": {
+        "m1024.o": {
+          "arguments": [
+            "-O0",
+            "-fPIC",
+            "-g0",
+            "-c"
+          ],
+          "source": "tls:1024"
+        },
+        "m16384.a": {
+          "archive": [
+            "m16384.o"
+          ]
+        },
+        "m16384.o": {
+          "arguments": [
+            "-O0",
+            "-fPIC",
+            "-g0",
+            "-c"
+          ],
+          "source": "tls:16384"
+        },
+        "m4096.o": {
+          "arguments": [
+            "-O0",
+            "-fPIC",
+            "-g0",
+            "-c"
+          ],
+          "source": "tls:4096"
+        },
+        "main.o": {
+          "arguments": [
+            "-O0",
+            "-g0",
+            "-c"
+          ],
+          "source": "main"
+        },
+        "n16384.o": {
+          "arguments": [
+            "-fno-plt",
+            "-O0",
+            "-fPIC",
+            "-g0",
+            "-c"
+          ],
+          "source": "tls:16384"
+        },
+        "plain.o": {
+          "arguments": [
+            "-O0",
+            "-fPIC",
+            "-g0",
+            "-c"
+          ],
+          "source": "plain"
+        }
+      },
+      "issue": "#1915",
+      "name": "link-tls-v1",
+      "order": "warmups alternate baseline, candidate; even pairs run baseline first, odd pairs candidate first",
+      "pairs": 20,
+      "report_only": true,
+      "statistic": "per pair candidate/baseline wall time; per cell the median pair ratio with a distribution-free 95% order-statistic interval",
+      "stopping": "fixed: exactly warmups + pairs invocations per binary and cell, no early stop or extension",
+      "timing": "wall nanoseconds of one fresh `taskset -c CPU ide ARGUMENTS -o OUTPUT` process from spawn to wait, with its user plus system CPU; startup, argument parsing, input reads, linking and publication included",
+      "warmups": 2
+    },
+    "request_line": "profile: link-tls-v1",
+    "requested": true,
+    "status": "complete"
+  },
+  "mode": "pull",
+  "preparation_policy": "legacy-rebuild",
+  "profile": {
+    "build": "./build.sh generate --cc clang --no-include-tests; ./build.sh build --config Release -t ide",
+    "corpus": "not included in compiler-compare-v1",
+    "cpu": 2,
+    "frozen_source": "the base revision: a main commit's first parent or a pull request's merge base",
+    "name": "compiler-compare-v1",
+    "profile_steps": [],
+    "target_minutes": 10,
+    "warmups": 1,
+    "workload": "uarch_lab compare default: stage-1 self-host compile of the unity src/buster/apps/ide/ide.c on the configured base tree"
+  },
+  "reasons": [],
+  "schema": "buster-9700x-compiler-receipt-v1",
+  "state": "measured",
+  "throughput": {
+    "cases": [
+      {
+        "decision": "no substantial regression detected",
+        "name": "tiny_startup/fast"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "tiny_startup/quality"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "large_function/fast"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "large_function/quality"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "many_functions/fast"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "many_functions/quality"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "symbol_table/fast"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "symbol_table/quality"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "control_flow/fast"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "control_flow/quality"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "backend_pressure/fast"
+      },
+      {
+        "decision": "no substantial regression detected",
+        "name": "backend_pressure/quality"
+      }
+    ],
+    "confirmed_regressions": 0,
+    "exit": 0,
+    "exit_policy": "corpus-report-only-v1",
+    "inconclusive_cases": 0,
+    "valid": true
+  },
+  "throughput_profile": {
+    "arguments": [
+      "--profile",
+      "ci",
+      "--mode",
+      "all",
+      "--pairs",
+      "20",
+      "--warmups",
+      "2",
+      "--timeout",
+      "120",
+      "--cpu",
+      "2"
+    ],
+    "cpu": 2,
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "modes": [
+      "fast",
+      "quality"
+    ],
+    "name": "throughput-corpus-v2",
+    "pairs_per_round": 20,
+    "rounds": 2,
+    "warmups": 2,
+    "workload": "bench_throughput run: the predeclared default CI corpus under both retained FAST/QUALITY modes, paired, two rounds, with its regression guard",
+    "workloads": [
+      "tiny_startup",
+      "large_function",
+      "many_functions",
+      "symbol_table",
+      "control_flow",
+      "backend_pressure"
+    ]
+  },
+  "timings": {
+    "build_seconds": {
+      "baseline": 72.462,
+      "candidate": 72.288,
+      "closure": 72.095
+    },
+    "finished_at": "2026-10-12T21:20:54Z",
+    "inline_acceptance_seconds": 329.054,
+    "link_tls_seconds": 209.474,
+    "measurement_seconds": 613.449,
+    "started_at": "2026-10-12T20:57:44Z",
+    "throughput_seconds": 20.335,
+    "total_seconds": 1389.937
+  },
+  "toolchain": {
+    "clang": "clang version 23.1.1",
+    "cmake": "cmake version 4.4.4",
+    "git": "git version 2.56.0",
+    "kernel": "6.18.50-2-lts",
+    "ninja": "1.13.2",
+    "perf": "perf version 7.2.9-1",
+    "python": "3.14.7",
+    "taskset": "taskset from util-linux 2.42.4",
+    "tcc": "tcc version 0.9.28rc 2026-01-17 makepkg@b39cbc70 (x86_64 Linux)"
+  }
+}

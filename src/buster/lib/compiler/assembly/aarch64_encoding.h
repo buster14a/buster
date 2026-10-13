@@ -681,6 +681,8 @@ BUSTER_CT_CHECK(sizeof(BusterAarch64CanonicalFieldInfo) == 8);
 BUSTER_F_DECL void buster_aarch64_prewarm(void);
 BUSTER_F_DECL u32 buster_aarch64_canonical_form_count(void);
 BUSTER_F_DECL bool buster_aarch64_canonical_form(u32 form_index, BusterAarch64CanonicalFormInfo* result);
+/* The unique canonical form whose Arm row digest is `digest`; `result` is optional. */
+BUSTER_F_DECL bool buster_aarch64_canonical_form_by_digest(u64 digest, u32* form_index, BusterAarch64CanonicalFormInfo* result);
 BUSTER_F_DECL bool buster_aarch64_canonical_field(u32 form_index, u32 field_index, BusterAarch64CanonicalFieldInfo* result);
 BUSTER_F_DECL bool buster_aarch64_canonical_field_segment(u32 form_index, u32 field_index, u32 segment_index,
                                                            BusterAarch64MetadataSegment* result);

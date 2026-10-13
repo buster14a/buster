@@ -798,6 +798,11 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         result.error = JIT_ERROR_INVALID_INPUT;
         return result;
     }
+    if (object->requires_executable_stack)
+    {
+        result.error = JIT_ERROR_EXECUTABLE_STACK;
+        return result;
+    }
     if (object->target.cpu_arch != target_native.cpu_arch || object->target.os != target_native.os ||
         !target_cpu_features_are_valid(object->target) || !target_cpu_features_are_valid(target_native) ||
         !target_cpu_features_subset(target_cpu_features_effective(object->target), target_cpu_features_effective(target_native)))
@@ -1296,6 +1301,9 @@ String8 jit_error_string(JitError error)
             break;
         case JIT_ERROR_INIT_FINI_UNSUPPORTED:
             result = S8("runtime initializer/finalizer arrays are not supported by the JIT");
+            break;
+        case JIT_ERROR_EXECUTABLE_STACK:
+            result = S8("objects requiring an executable stack are not supported by the JIT");
             break;
         default:
             result = S8("unknown JIT error");
