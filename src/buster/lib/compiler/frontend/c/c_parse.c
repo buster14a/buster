@@ -43130,16 +43130,39 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                     pending[storage_half_pending_count++] = type_index;
                 }
             }
-            for (u32 cursor = 0; valid && cursor < storage_half_pending_count; cursor += 1)
+            // A zero-edge graph keeps its storage-half seeds and needs no reverse walk.
+            if (valid && parent_edge_count)
             {
-                u32 child = pending[cursor];
-                for (u32 edge = parent_heads ? parent_heads[child] : UINT32_MAX; edge != UINT32_MAX; edge = parent_edges[edge].next)
+                valid = parent_heads && parent_edges;
+                for (u32 cursor = 0; valid && cursor < storage_half_pending_count; cursor += 1)
                 {
-                    u32 parent = parent_edges[edge].parent;
-                    if (!marked[parent])
+                    u32 child = pending[cursor];
+                    if (parent_heads && parent_edges && child < result->type_count)
                     {
-                        marked[parent] = 1;
-                        pending[storage_half_pending_count++] = parent;
+                        u32 edge = parent_heads[child];
+                        while (valid && edge != UINT32_MAX)
+                        {
+                            if (parent_edges && edge < parent_edge_count)
+                            {
+                                CTypeStorageHalfParentEdge parent_edge = parent_edges[edge];
+                                u32 parent = parent_edge.parent;
+                                edge = parent_edge.next;
+                                valid = parent < result->type_count;
+                                if (valid && !marked[parent])
+                                {
+                                    marked[parent] = 1;
+                                    pending[storage_half_pending_count++] = parent;
+                                }
+                            }
+                            else
+                            {
+                                valid = false;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        valid = false;
                     }
                 }
             }
