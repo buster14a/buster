@@ -186,8 +186,9 @@
 //   c_parse_validate_one_switch                  per-switch label and range validation
 //   c_parse_validate_bit_field_addresses         unary address member constraints
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
-//   c_parse_assignment_conversion_classify,      assignment-conversion admission and the
-//   c_parse_pointer_sign_warning                 -Wpointer-sign warning class (#4051)
+//   c_parse_assignment_conversion_classify       assignment-conversion admission
+//   c_parse_pointer_sign_warning,                -Wpointer-sign warning class (#4051)
+//   c_parse_signed_overflow_warning              -Woverflow from typed folding
 //   c_parse_region_facts,                        the retained facts' completion
 //   c_parse_region_facts_sound                   run at a typed region's end
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
@@ -34807,6 +34808,43 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
     return value;
 }
 
+// Publish signed-overflow warnings once per operator token. Constant folding
+// can revisit an expression while checking a declaration, so the token sidecar
+// keeps that replay from duplicating a warning.
+BUSTER_C_INTERNAL void c_parse_signed_overflow_warning(CParseResult* result, CPreprocessResult preprocess, u32 operator_token)
+{
+    bool seen = false;
+    for (u32 index = 0; index < result->warning_count && !seen; index += 1)
+    {
+        seen = result->warning_tokens[index] == operator_token;
+    }
+    if (!seen && operator_token < preprocess.token_count)
+    {
+        if (result->warning_count == result->warning_capacity)
+        {
+            u32 capacity = result->warning_capacity ? result->warning_capacity * 2 : 8;
+            CDiagnostic* warnings = arena_allocate(result->arena, CDiagnostic, capacity);
+            u32* tokens = arena_allocate(result->arena, u32, capacity);
+            if (result->warning_count)
+            {
+                memcpy(warnings, result->warnings, sizeof(CDiagnostic) * result->warning_count);
+                memcpy(tokens, result->warning_tokens, sizeof(u32) * result->warning_count);
+            }
+            result->warnings = warnings;
+            result->warning_tokens = tokens;
+            result->warning_capacity = capacity;
+        }
+        result->warning_tokens[result->warning_count] = operator_token;
+        result->warnings[result->warning_count] = (CDiagnostic){
+            .message = S8("integer overflow in expression"),
+            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[operator_token]),
+            .kind = C_DIAGNOSTIC_SIGNED_OVERFLOW,
+            .severity = C_DIAGNOSTIC_WARNING,
+        };
+        result->warning_count += 1;
+    }
+}
+
 // One binary operator of an integer constant expression, after C's
 // conversions: the usual arithmetic conversions for most operators, and for
 // a shift the left and right operands promoted separately (C17 6.5.7p3), so
@@ -34814,8 +34852,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
 // Integer arithmetic is c_integer_constant_binary's, shared with
 // preprocessing and lowering; only the floating operators remain here.
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                          CParseResult* result, Target target, CToken token, CParseConstant left, CParseConstant right,
-                                                          CConstantEvaluationMode mode)
+                                                          CParseResult* result, Target target, CToken token, u32 operator_token,
+                                                          CParseConstant left, CParseConstant right, CConstantEvaluationMode mode)
 {
     CParseConstant value = {.valid = left.valid && right.valid, .type = C_TYPE_ID_INVALID, .faulted = left.faulted || right.faulted};
     u32 precedence = c_parse_expression_operator_precedence(token);
@@ -34941,6 +34979,15 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
             bool reject_overflow = scalar.is_signed &&
                                    (mode == C_CONSTANT_EVALUATION_TYPE || (mode == C_CONSTANT_EVALUATION_NORMAL && machine->reject_signed_constant_overflow)) &&
                                    (computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW);
+            bool signed_arithmetic = token.punctuator == C_PUNCTUATOR_PLUS || token.punctuator == C_PUNCTUATOR_MINUS ||
+                                     token.punctuator == C_PUNCTUATOR_STAR || token.punctuator == C_PUNCTUATOR_SLASH ||
+                                     token.punctuator == C_PUNCTUATOR_PERCENT;
+            if (value.valid && scalar.is_signed && !reject_overflow && signed_arithmetic &&
+                (mode == C_CONSTANT_EVALUATION_NORMAL || mode == C_CONSTANT_EVALUATION_ENUM) &&
+                (computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW))
+            {
+                c_parse_signed_overflow_warning(result, preprocess, operator_token);
+            }
             value.valid &= !reject_overflow;
             value.faulted |= reject_overflow;
             if (mode == C_CONSTANT_EVALUATION_TYPE && scalar.is_signed)
@@ -35853,8 +35900,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
         {
             if (task->state == 2)
             {
-                last = c_parse_constant_binary(machine, arena, preprocess, result, preprocess.target, preprocess.tokens[task->split], task->left, last,
-                                               machine->constant_evaluation_mode);
+                last = c_parse_constant_binary(machine, arena, preprocess, result, preprocess.target, preprocess.tokens[task->split], task->split,
+                                               task->left, last, machine->constant_evaluation_mode);
             }
             else if (task->state == 3)
             {
@@ -35933,6 +35980,13 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                             (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ||
                              (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->reject_signed_constant_overflow)) &&
                             (computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW);
+                        if (last.valid && minus && scalar.is_signed && !reject_overflow &&
+                            (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL ||
+                             machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM) &&
+                            (computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW))
+                        {
+                            c_parse_signed_overflow_warning(result, preprocess, task->start);
+                        }
                         last.valid &= !reject_overflow;
                         last.faulted |= reject_overflow;
                         last.integer = computed.bits.low;

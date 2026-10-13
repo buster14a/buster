@@ -201,6 +201,8 @@ typedef enum CompilerDriverWarningGroup
     // Implicit pointer conversions whose pointees differ only in integer
     // signedness (GCC/Clang -Wpointer-sign), published by semantic analysis.
     COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN,
+    // Evaluated signed arithmetic overflow with the wrapped value retained.
+    COMPILER_DRIVER_WARNING_GROUP_OVERFLOW,
     COMPILER_DRIVER_WARNING_GROUP_COUNT,
 } CompilerDriverWarningGroup;
 
@@ -691,9 +693,9 @@ struct CompilerDriverResult
     u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;
     u32 analysis_diagnostic_count;
-    // Published semantic-analysis warnings (-Wpointer-sign), less any that
-    // -Werror promoted; like tokenizer_warning_count it still counts one -w
-    // or -Wno-pointer-sign dropped.
+    // Published semantic-analysis warnings (-Wpointer-sign and -Woverflow),
+    // less any that -Werror promoted; like tokenizer_warning_count it still
+    // counts one -w or per-group-disabled warning dropped.
     u32 analysis_warning_count;
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.

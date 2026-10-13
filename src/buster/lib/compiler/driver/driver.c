@@ -296,6 +296,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_warning_group_find(String8 name)
         {S8_INITIALIZER("gnu-designator"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
         {S8_INITIALIZER("gnu"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
         {S8_INITIALIZER("pointer-sign"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN)},
+        {S8_INITIALIZER("overflow"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_OVERFLOW)},
         {S8_INITIALIZER("everything"), COMPILER_DRIVER_WARNING_GROUP_MASK_ALL},
     };
     u32 result = 0;
@@ -316,6 +317,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_group_name(CompilerDriverWar
         [COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] = S8_INITIALIZER("extra-tokens"),
         [COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR] = S8_INITIALIZER("gnu-designator"),
         [COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN] = S8_INITIALIZER("pointer-sign"),
+        [COMPILER_DRIVER_WARNING_GROUP_OVERFLOW] = S8_INITIALIZER("overflow"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_WARNING_GROUP_COUNT);
     return (u32)group < (u32)BUSTER_ARRAY_LENGTH(names) ? names[group] : S8("");
@@ -340,6 +342,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_of_
         break;
     case C_DIAGNOSTIC_POINTER_SIGN:
         result = COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN;
+        break;
+    case C_DIAGNOSTIC_SIGNED_OVERFLOW:
+        result = COMPILER_DRIVER_WARNING_GROUP_OVERFLOW;
         break;
     default:
         break;
@@ -8954,8 +8959,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         c_ast_facts_release(&pilot_facts);
     }
     result.analysis_diagnostic_count = lowered.diagnostic_count;
-    // Semantic warnings (-Wpointer-sign) publish ahead of any error; one that
-    // -Werror promotes fails the unit as an analysis error.
+    // Semantic warnings (-Wpointer-sign and -Woverflow) publish ahead of any
+    // error; one that -Werror promotes fails the unit as an analysis error.
     u64 promoted_analysis_warnings = 0;
     String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.warnings,
                                                                              lowered.warning_count, invocation.input_paths[0],
