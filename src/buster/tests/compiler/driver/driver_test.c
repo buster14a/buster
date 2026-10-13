@@ -29,6 +29,8 @@
 // compiler_driver_test_cached_plan_lanes owns prepared-key reuse across gangs;
 // compiler_driver_test_unit_batches owns failed-cohort recovery and exact output.
 // compiler_driver_test_lane_first_fills owns concurrent first fills of the x86 caches.
+// compiler_driver_test_cold_x86_source_selection pins source-assembly selection
+// and its diagnostics on first-touch form normalization.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
@@ -1376,6 +1378,92 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_run_cc(UnitTestArguments* argument
     return succeeded;
 }
 #endif
+
+// The source selector normalizes each candidate form on its first touch.  A
+// fresh `cc` child starts with no form normalized, while this process has
+// already touched most of them, so the child takes the first-touch path for
+// every candidate it considers.  Valid Intel-syntax source must assemble to
+// the same object bytes in both.  Each invalid line must report its pinned
+// message in both: the selector reports the first failing candidate in
+// candidate order (the AVX-512 line names avx, the first VADDPS candidate's
+// feature), so a first-touch row that differed from the warm one would change
+// a message or the bytes.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_cold_x86_source_selection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 const valid = S8("\t.intel_syntax noprefix\n\t.text\nf:\n"
+                             "\tadd rax, rbx\n\tmov ecx, 7\n\txor eax, eax\n\tpush rbp\n\tlea rdx, [rsi + rdi*8 + 16]\n"
+                             "\tmovnti qword ptr [rdi], rax\n\tmov byte ptr [rax], 1\n\tshl eax, 1\n\tnop dword ptr [rax]\n"
+                             "\tmovsb\n\tloop f\n\tret\n");
+    struct
+    {
+        String8 line;
+        String8 message;
+    } const invalid[] = {
+        {S8("add rax, ebx"), S8("metadata instruction form is not encodable")},
+        {S8("frobnicate rax"), S8("unknown instruction")},
+        {S8("add rax"), S8("invalid instruction operands")},
+        {S8("vaddps zmm0, zmm1, zmm2"), S8("instruction requires the avx target feature")},
+        {S8("add al, 300"), S8("x86 immediate is out of range")},
+        {S8("mov [rax], 1"), S8("metadata instruction form is not encodable")},
+        {S8("movnti dword ptr [rdi], rax"), S8("metadata instruction form is not encodable")},
+        {S8("cmpxchg16b xmmword ptr [rdi]"), S8("instruction requires the cx16 target feature")},
+    };
+    String8 input = buster_test_temporary_path(arena, S8("cold-x86-source-selection"), S8(".s"));
+    String8 local_output = buster_test_temporary_path(arena, S8("cold-x86-source-selection-local"), S8(".o"));
+    String8 child_output = buster_test_temporary_path(arena, S8("cold-x86-source-selection-child"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(valid))))
+    {
+        String8 local_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), S8("-o"), local_output, input};
+        CompilerDriverResult local = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_command)));
+        BUSTER_TEST_RAW(arguments, local.error == COMPILER_DRIVER_ERROR_NONE, local.diagnostic);
+        String8 child_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), S8("-o"), child_output, input};
+        String8 output = {0};
+        String8 error = {0};
+        BUSTER_TEST_RAW(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(child_command), &output, &error),
+                        error);
+        String8 local_bytes = BYTE_SLICE_TO_STRING(8, file_read(arena, local_output, (FileReadOptions){0}));
+        String8 child_bytes = BYTE_SLICE_TO_STRING(8, file_read(arena, child_output, (FileReadOptions){0}));
+        BUSTER_TEST_RAW(arguments, local_bytes.length != 0 && string_equal(local_bytes, child_bytes),
+                        string_format(arena, S8("local={u64} child={u64}"), local_bytes.length, child_bytes.length));
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        u64 case_position = arena->position;
+        String8 source = string_format(arena, S8("\t.intel_syntax noprefix\n\t.text\nf:\n\t{S8}\n"), invalid[index].line);
+        // Line 4, column 2: the instruction follows the directives, the label and a tab.
+        String8 expected = string_format(arena, S8("{S8}:4:2: {S8}"), input, invalid[index].message);
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 local_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), S8("-o"), local_output, input};
+            CompilerDriverResult local = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_command)));
+            BUSTER_TEST_RAW(arguments, local.error != COMPILER_DRIVER_ERROR_NONE &&
+                                           string_first_sequence(local.diagnostic, expected) != BUSTER_STRING_NO_MATCH,
+                            string_format(arena, S8("line=\"{S8}\" local=\"{S8}\""), invalid[index].line, local.diagnostic));
+            String8 child_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), S8("-o"), child_output, input};
+            String8 output = {0};
+            String8 error = {0};
+            bool succeeded = compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(child_command), &output, &error);
+            BUSTER_TEST_RAW(arguments, !succeeded && string_first_sequence(error, expected) != BUSTER_STRING_NO_MATCH,
+                            string_format(arena, S8("line=\"{S8}\" child=\"{S8}\""), invalid[index].line, error));
+        }
+        arena_set_position(arena, case_position);
+    }
+    (void)os_file_delete(input);
+    (void)os_file_delete(local_output);
+    (void)os_file_delete(child_output);
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Whether `text` holds `needle`; keeps the -include assertions one line each.
@@ -35877,6 +35965,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lane_first_fills);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cold_x86_source_selection);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_runtime_path_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_default_arguments);
