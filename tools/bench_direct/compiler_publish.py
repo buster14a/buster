@@ -4594,9 +4594,50 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
             "control_failures": controls, "authenticated_attempt_history": history, "problems": []}
 
 
+PREPARATION_FAILURE_TAIL_BYTES = 512
+
+
+def preparation_failure_problems(files: dict[str, bytes]) -> list[str]:
+    """Diagnostics only (#3960): name the retained failed controller phase.
+
+    Reads the artifact's raw controller.tsv, preparation.tsv and the failed
+    phase's stderr log as data. Never raises and never changes the packet
+    state, qualification or publication refusal."""
+    def clean(raw: bytes) -> str:
+        return "".join(chr(byte) if 32 <= byte <= 126 else " " if byte in (9, 10, 13) else "?" for byte in raw)
+    problems = []
+    try:
+        rows = sampling_tsv(files.get("controller.tsv", b""), True)
+    except (ValueError, UnicodeError, TypeError):
+        rows = None
+        problems.append("controller phase table is missing or malformed in the retained artifact")
+    for row in (rows or [])[:32]:
+        if row.get("state") != "failed":
+            continue
+        stem = f"controller-{row.get('stage')}-{row.get('phase')}"
+        error = files.get(stem + ".stderr.log", b"")
+        error = error if isinstance(error, bytes) else b""
+        problems.append(("failed controller phase " + " ".join(
+            f"{key}={clean(str(row.get(key, '')).encode('ascii', 'replace'))}" for key in
+            ("stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled")) +
+            f" stderr_bytes={len(error)} stderr_tail=\"" +
+            clean(error[-PREPARATION_FAILURE_TAIL_BYTES:]).replace('"', "?") + "\"")[:1000])
+    try:
+        terminal = sampling_tsv(files.get("preparation.tsv", b""))
+    except (ValueError, UnicodeError, TypeError):
+        terminal = None
+        problems.append("worker preparation.tsv is missing or malformed in the retained artifact")
+    if terminal is not None and terminal.get("process_state") != "complete":
+        problems.append(("worker preparation.tsv " + " ".join(
+            f"{key}={clean(str(terminal[key]).encode('ascii', 'replace'))}" for key in
+            ("process_state", "reason", "cleanup_proven", "tools_before", "tools_after", "exported")
+            if key in terminal))[:1000])
+    return problems
+
+
 def preparation_publish(environment: dict) -> int:
     api, authority = preparation_authority(environment)
-    files, artifact = {}, {}
+    files, artifact, diagnostics = {}, {}, []
     result = {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "incomplete",
               "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
               "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
@@ -4604,11 +4645,13 @@ def preparation_publish(environment: dict) -> int:
     try:
         files, artifact = preparation_read_artifact(api, authority)
         if environment.get("BQ_PREPARATION_RESULT") != "success":
+            diagnostics = preparation_failure_problems(files)
             raise ValueError("preparation physical job is failed, cancelled, skipped or unavailable")
         result = preparation_validate(api, authority, files)
     except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
             urllib.error.URLError, TimeoutError) as error:
         result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["problems"].extend(diagnostics)
         result["accounting"] = preparation_observed_costs(api, authority, files)
         result["authenticated_attempt_history"] = list(authority["history"]) + [{
             "phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],

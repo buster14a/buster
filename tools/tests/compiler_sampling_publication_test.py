@@ -1003,6 +1003,48 @@ class PreparationPublicationOutcomes(unittest.TestCase):
             if not available:
                 self.assertIn('"native_owner_wall_us": null', body["output"]["text"])
 
+    def test_failed_job_check_names_the_failed_controller_phase(self):
+        api, authority, files = preparation_publication_fixture()
+        rows = [line.split(b"\t") for line in files["controller.tsv"].splitlines()]
+        header = [cell.decode() for cell in rows[0]]
+        phases = [dict(zip(header, (cell.decode() for cell in row))) for row in rows[1:]]
+        for row in phases:
+            stage = int(row["stage"])
+            if stage >= 2:
+                row.update(state="failed" if stage == 2 else "not_run", wall_us="900" if stage == 2 else "0",
+                           exit_status="128" if stage == 2 else "0")
+        files["controller.tsv"] = table_bytes(phases)
+        files["controller-2-clone-preparation-source.stderr.log"] = \
+            b"Cloning into '/source'...\n" + b"x" * 600 + b"\nfatal: unable to access \"origin\"\n"
+        files["preparation.tsv"] = files["preparation.tsv"].replace(b"process_state\tcomplete", b"process_state\tfailed")
+        with mock.patch.object(publisher, "preparation_authority", return_value=(api, authority)), \
+                mock.patch.object(publisher, "preparation_read_artifact", return_value=(files, {})), \
+                mock.patch.object(publisher, "preparation_write",
+                    side_effect=lambda api, authority, body: dict(body, id=303)) as write:
+            code = publisher.preparation_publish({"BQ_PREPARATION_RESULT": "failure"})
+        self.assertEqual(code, 1)
+        body = write.call_args[0][2]
+        self.assertEqual(body["conclusion"], "failure")
+        self.assertEqual(body["output"]["title"], "Incomplete unqualified preparation packet")
+        report = json.loads(body["output"]["text"].split("\n", 1)[1].rsplit("\n", 1)[0])
+        self.assertEqual(report["packet_state"], "incomplete")
+        self.assertEqual(report["qualification_state"], "unqualified")
+        self.assertEqual(report["problems"][0], "evidence validation failed: ValueError: "
+                         "preparation physical job is failed, cancelled, skipped or unavailable")
+        phase = report["problems"][1]
+        self.assertTrue(phase.startswith("failed controller phase stage=2 phase=clone-preparation-source wall_us=900 "
+                                         "exit_status=128 timed_out=0 cleanup_failed=0 cancelled=0 stderr_bytes=660 "))
+        self.assertTrue(phase.endswith(" fatal: unable to access ?origin? \""))
+        self.assertLessEqual(len(phase), 1000)
+        self.assertEqual(report["problems"][2], "worker preparation.tsv process_state=failed cleanup_proven=true "
+                         "tools_before=true tools_after=true exported=true")
+        self.assertEqual(len(report["problems"]), 3)
+        self.assertIn("- failed controller phase stage=2 phase=clone-preparation-source", body["output"]["summary"])
+        # Diagnostics never raise, even when the retained raw data is absent.
+        self.assertEqual(publisher.preparation_failure_problems({}), [
+            "controller phase table is missing or malformed in the retained artifact",
+            "worker preparation.tsv is missing or malformed in the retained artifact"])
+
     def test_preparation_check_does_not_share_sampling_authority(self):
         unused_api, authority, unused_files = preparation_publication_fixture()
         row = {"id": 303, "name": publisher.PREPARATION_CHECK_NAME, "head_sha": authority["head"],
