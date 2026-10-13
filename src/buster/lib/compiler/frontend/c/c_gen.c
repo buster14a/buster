@@ -38419,7 +38419,11 @@ c_ir_expression_core_loop:
                         IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
                         bool address_va_list = local_type && local_type->kind == IR_TYPE_VA_LIST &&
                                                (builder->va_list_builtin_operand || c_ir_va_list_parameter_decays(builder->target));
-                        value = local_type && (local_type->kind == IR_TYPE_ARRAY || (local_type->is_atomic && c_ir_postfix_update_at(builder, index, end)))
+                        // A wide runtime load is a CALL that address-of cannot recover as a place.
+                        bool address_of_atomic = local_type && local_type->is_atomic && operation_count &&
+                                                 operations[operation_count - 1] == C_CONDITIONAL_ADDRESS_OF;
+                        value = local_type && (local_type->kind == IR_TYPE_ARRAY || address_of_atomic ||
+                                               (local_type->is_atomic && c_ir_postfix_update_at(builder, index, end)))
                                     ? local->place
                                 : address_va_list ? c_ir_emit_address_of_place(builder, local->place, local->type, source)
                                       : c_ir_emit_load(builder, local, token);
