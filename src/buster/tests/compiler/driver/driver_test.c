@@ -2704,6 +2704,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
         {3, {S8("-Wno-overflow"), none, none}, false, false, none},
         {3, {S8("-Werror"), none, none}, true, false, overflow_tag},
         {3, {S8("-Werror=overflow"), none, none}, true, false, overflow_tag},
+        {3, {S8("-w"), S8("-Werror"), none}, false, false, none},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {

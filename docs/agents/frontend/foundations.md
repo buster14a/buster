@@ -687,8 +687,12 @@ without facts for identical bitcode and diagnostics.
   `c_ir_constant_apply_binary`) are not constant on a division by zero or a
   shift count outside `[0, width)` of the separately promoted left operand,
   and keep the wrapped value on signed overflow (the value GCC and Clang
-  fold to; the C17 6.6p4 diagnostic needs a warning channel the frontend
-  does not have). Lowering's value queries (`c_ir_value_integer_constant_evaluate`)
+  fold to). Evaluated signed `+`, `-`, `*`, `/`, `%`, and unary `-` emit
+  `-Woverflow` at the operator token in NORMAL and ENUM folding when the valid
+  wrapped result is retained. TYPE evaluation and C23 `constexpr`'s forced
+  NORMAL evaluation keep their existing overflow rejection; signed shifts and
+  static-initializer folding remain outside this warning path. Lowering's value
+  queries (`c_ir_value_integer_constant_evaluate`)
   read conversions by their canonical operation, so a signed widening
   sign-extends (GitHub #1347). `ir_integer_test.c` checks every operation
   exhaustively at widths 1..8 and against the host's 128-bit type at wider

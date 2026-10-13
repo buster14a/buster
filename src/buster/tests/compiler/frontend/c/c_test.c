@@ -38026,7 +38026,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_signed_overflow_warnings(UnitTestArgum
                         "};\n"
                         "enum { safe_signed = 20 + 22, safe_unsigned = 0xffffffffu + 1u,\n"
                         "       skipped_and = 0 && (2147483647 + 1), skipped_or = 1 || (2147483647 + 1),\n"
-                        "       skipped_conditional = 1 ? 7 : (2147483647 + 1) };\n");
+                        "       skipped_conditional = 1 ? 7 : (2147483647 + 1) };\n"
+                        "_Static_assert((2147483647 + 1) < 0, \"wrapped result\");\n");
     CPreprocessOptions options = {.source_path = S8("signed-overflow-warning.c"), .target = target_native,
                                   .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17};
     CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
@@ -38034,7 +38035,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_signed_overflow_warnings(UnitTestArgum
     CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
     BUSTER_TEST_RAW(arguments, preprocess.error_count == 0 && syntax.diagnostic_count == 0, source);
     BUSTER_TEST_RAW(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0, source);
-    BUSTER_TEST_RAW(arguments, analysis.warning_count == 7, source);
+    BUSTER_TEST_RAW(arguments, analysis.warning_count == 8, source);
     u32 plus_count = 0;
     u32 multiply_count = 0;
     u32 subtract_count = 0;
@@ -38076,12 +38077,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_signed_overflow_warnings(UnitTestArgum
     {
         BUSTER_TEST_RAW(arguments, false, S8("semantic warnings must retain their operator token"));
     }
-    BUSTER_TEST(arguments, plus_count == 1 && multiply_count == 1 && subtract_count == 2 &&
+    BUSTER_TEST(arguments, plus_count == 2 && multiply_count == 1 && subtract_count == 2 &&
                            divide_count == 2 && remainder_count == 1);
     c_preprocess_release(&preprocess);
     c_test_scratch_end(temporary);
     String8 required[] = {
-        S8("_Static_assert((2147483647 + 1) < 0, \"required ICE\");"),
         S8("int required_array[2147483647 + 1];"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(required); index += 1)
@@ -38093,6 +38093,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_signed_overflow_warnings(UnitTestArgum
         BUSTER_TEST_RAW(arguments, required_preprocess.error_count == 0 && required_syntax.diagnostic_count == 0, required[index]);
         BUSTER_TEST_RAW(arguments, required_analysis.analysis_complete && required_analysis.diagnostic_count != 0 &&
                                    required_analysis.warning_count == 0, required[index]);
+        c_preprocess_release(&required_preprocess);
+        c_test_scratch_end(attempt);
+    }
+    String8 constexpr_required[] = {
+        S8("constexpr int value = 2147483647 + 1;"),
+        S8("constexpr int value = -(-2147483647 - 1);"),
+    };
+    CPreprocessOptions constexpr_options = options;
+    constexpr_options.source_path = S8("signed-overflow-constexpr.c");
+    constexpr_options.dialect = C_PREPROCESS_DIALECT_GNU23;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(constexpr_required); index += 1)
+    {
+        TemporalArena attempt = scratch_begin(0, 0);
+        CPreprocessResult required_preprocess = c_preprocess(attempt.arena, constexpr_required[index], constexpr_options);
+        CParserResult required_syntax = c_parse_ast(attempt.arena, required_preprocess);
+        CAnalysisResult required_analysis = c_analyze_semantics_only(attempt.arena, required_preprocess, required_syntax);
+        BUSTER_TEST_RAW(arguments, required_preprocess.error_count == 0 && required_syntax.diagnostic_count == 0,
+                        constexpr_required[index]);
+        BUSTER_TEST_RAW(arguments, required_analysis.analysis_complete && required_analysis.diagnostic_count != 0 &&
+                                   required_analysis.warning_count == 0, constexpr_required[index]);
         c_preprocess_release(&required_preprocess);
         c_test_scratch_end(attempt);
     }
