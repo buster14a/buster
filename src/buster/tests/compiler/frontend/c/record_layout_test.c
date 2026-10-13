@@ -23,7 +23,9 @@
 // the canonical object, record_layout_test_clang_corpus compiles the corpus
 // for every target through the real driver and compares every probe, and
 // record_layout_test_rule_selection checks which rule each target selects,
-// including targets Buster writes no object for.
+// including targets Buster writes no object for. Both end every scratch that
+// holds a unit with c_test_scratch_end, and C_TEST_BOUNDED_FIXTURE checks that
+// each returned every reservation it made (GitHub #3431).
 //
 // Regenerate the expectations with `tools/record_layout_oracle.py generate`
 // and a Clang that knows every target triple; never from Buster's output.
@@ -217,8 +219,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArg
 UnitTestResult record_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, record_layout_test_clang_corpus);
-    BUSTER_TEST_FIXTURE(arguments, record_layout_test_rule_selection);
+    // The thread's unit registry reserves its own arena at its first unit;
+    // reserve it before the first fixture's reading.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+        c_test_scratch_end(temporary);
+    }
+    C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_clang_corpus);
+    C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_rule_selection);
     return result;
 }
 #endif
