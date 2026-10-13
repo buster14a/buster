@@ -62,8 +62,9 @@ The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
-With --request-attempt, an ordinary (not owned, analyzer or snapshot) attempt
-also exports the v1 raw inventory as required (#2918), writes
+With --request-attempt, an ordinary (not owned, MAIN-owned or analyzer) attempt,
+legacy-rebuild or pull snapshot-v1 (whose closure records and owned phases join
+the snapshot inventory), also exports the v1 raw inventory as required (#2918), writes
 evidence-omissions.json and, once measured, seals the retained bundle last with
 the trusted `./build.sh compiler_evidence seal`; the receipt's evidence_bundle
 names that seal, and a refused seal fails the attempt.
@@ -136,9 +137,9 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
-from compiler_receipt import (EVIDENCE_INVENTORY, EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
+from compiler_receipt import (EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
                               EVIDENCE_OMISSION_REASONS, EVIDENCE_OMISSION_EXAMPLES, EVIDENCE_SEAL,
-                              evidence_lab_required, evidence_corpus_required, evidence_identity)
+                              evidence_lab_required, evidence_corpus_required, evidence_identity, evidence_inventory)
 import throughput_real_source
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 
@@ -1821,9 +1822,10 @@ def seal_evidence(receipt: dict, evidence: Path, work: Path, request_attempt: st
             problem = f"evidence seal unreadable after sealing: {error}"
     if not problem and not all(seal.get(key, "").isdigit() for key in ("manifest_bytes", "members", "payload_bytes")):
         problem = "evidence seal is malformed after sealing"
-    bundle = {"inventory": EVIDENCE_INVENTORY, "state": "failed", "reason": problem}
+    inventory = evidence_inventory(receipt)
+    bundle = {"inventory": inventory, "state": "failed", "reason": problem}
     if not problem:
-        bundle = {"inventory": EVIDENCE_INVENTORY, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
+        bundle = {"inventory": inventory, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
                   "manifest_bytes": int(seal["manifest_bytes"]), "members": int(seal["members"]),
                   "payload_bytes": int(seal["payload_bytes"]), "omissions": len(EVIDENCE_OMISSION_LEDGER)}
     receipt["evidence_bundle"] = bundle
@@ -2890,9 +2892,10 @@ def main(argv: list[str] | None = None) -> int:
     main_owned = getattr(arguments, "main_owned_phases", False)
     selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
     early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
-    # Contract v1 (#2918) seals the ordinary lab and corpus: not owned, analyzer or snapshot routes.
+    # Contract v1 (#2918) seals the ordinary lab and corpus, on the legacy-rebuild and the pull
+    # snapshot-v1 route alike (#3211); the owned, MAIN-owned and analyzer routes keep their own contracts.
     arguments.evidence_seal = getattr(arguments, "request_attempt", None) is not None and not early_owned and \
-        not analyzer_requested and arguments.closure_policy == "legacy-rebuild"
+        not analyzer_requested and arguments.closure_policy in ("legacy-rebuild", "snapshot-v1")
     EVIDENCE_OMISSION_LEDGER.clear()
     EVIDENCE_DEFERRED_OPTIONAL.clear()
     EVIDENCE_DEFER_ALL = arguments.evidence_seal

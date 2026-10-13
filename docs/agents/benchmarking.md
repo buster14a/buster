@@ -565,6 +565,8 @@ captures (#2741).
   being published. Sealed raw evidence for this route (#2918) follows
   [compiler-evidence-v1.md](../compiler-evidence-v1.md): an ordinary attempt
   seals its lab and corpus last, and the publisher verifies the seal natively.
+  A pull `snapshot-v1` attempt also seals its closure records and owned-phase
+  population.
   An artifact without a seal is `legacy-unsealed`, and its raw bytes are
   reported unverified.
   Optional facts keep the collector's own `unknown` or
