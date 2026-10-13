@@ -67,6 +67,17 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   public TLS symbol distinguishes demand export from `-rdynamic`; a hidden
   definition stays absent in both modes. Linux AArch64 covers its supported
   fixed-address routes; other image writers retain their existing TLS scope.
+  Android AArch64 PIEs with nonempty TLS raise PT_TLS `p_align` to at least
+  64 bytes and use that same alignment for local-exec TPREL. Current
+  [Bionic slot definitions](https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/platform/bionic/tls_defines.h)
+  set AArch64 `MAX_TLS_SLOT` to 7, and its
+  [static TLS layout](https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/bionic/bionic_elf_tls.cpp)
+  checks that the ABI two-word TP offset and post-TP TCB-slot offset agree
+  after PT_TLS alignment and skew; this writer emits a zero-skew segment.
+  The registered `link_test_aarch64_android_tls_alignment` checks raw PT_TLS
+  and `.tdata`/`.tbss` layout, relocated local-exec offsets, a Linux
+  AArch64 natural-alignment control, and empty Android TLS. These are
+  source/link checks only; Bionic runtime execution remains gated on #2660.
 - **Linux x86-64 executables keep imported TLS loader-resolved.** An undefined
   `STT_TLS` reference remains an undefined TLS dynamic symbol and never gets an
   ordinary data copy slot. Fixed-address and PIE executables support
