@@ -208,6 +208,40 @@ inconclusive hosted result cannot enable the default. Self-hosting fixed point,
 all pass subsets, native mode matrix and non-native consumers remain correctness
 gates independently of performance acceptance.
 
+### Construction-time fold census (#3010)
+
+`BUSTER_BENCH_ALLOCATIONS` builds report under `ir_construction` in
+`-fsource-metrics` whether FAST's scalar folds could have happened when a row
+was first built. `ir_fast_fold_rule` is the only rule authority. The fold pass
+calls it, and `ir_construction_fold_census` also calls it with no replacement
+map on every row the C builder commits through `c_ir_append_instruction`:
+
+- `fold_birth_scalar_rows`: committed `CAST`, `UNARY` and `BINARY` rows probed.
+- `fold_birth_<rule>`: rows a rule already folds from the operands committed
+  before them. `fold_birth_metadata_mismatches` counts identities rejected by
+  the replacement metadata check. `fold_birth_avoidable_bytes` is logical
+  row/value/operand/source storage: an identity needs none of it, while a
+  constant still needs its row and immediate. This is not an arena-call or RSS
+  figure.
+- `fold_late_<rule>`: folds FAST actually applied. `fold_late_replaced_roots`
+  counts the folds whose operand had to be followed through the replacement map
+  (an earlier identity or a parameter sweep).
+
+The rules are `cast_identity`, `cast_constant`, `unary_constant`,
+`binary_constant`, `binary_right_identity` and `binary_left_identity`. Probes
+suppress `ir_semantics` recording, so those counters keep measuring only the
+compiler's own semantic work. Rows that SSA construction inserts behind a commit
+(`ir_block_insert_instruction_after`) are not probed, and neither is
+inlined-callee output.
+
+`fold_birth_*` and `fold_late_*` count independent populations. Birth counts
+include functions that FAST later skips or does not run (`-fno-canonical-fast`,
+budget and provenance skips) and rows that later passes delete. Late counts
+include rows that SSA insertion, promotion and inlining add after commit. No
+per-row birth classification reaches FAST, so neither a birth/late ratio nor
+late minus birth attributes or bounds the late folds that were available at
+commit; that needs a matched per-row association.
+
 ## Opt-in block-local CSE (#3011)
 
 `ir_fast_cse` is an experiment, outside every optimization level and outside
@@ -298,15 +332,103 @@ arm to byte-identical output. What the data show:
 So this census answers the recurrence question and makes the cost comparison
 diagnostically. It does not complete #3011's first gate, which needs the
 matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
-constants, a construction-time constant cache (#3010) remains a cheaper
-candidate that neither arm measures. The pass stays opt-in. Adopting either
-arm, or that alternative, also needs allocation, spill and runtime data.
+constants, the next section measures a construction-time constant cache
+against the late pass.
+
+## Opt-in construction-time constant interning (#3011)
+
+`-fcanonical-intern-constants` (cleared by `-fno-canonical-intern-constants`,
+the last one given winning) asks C lowering to reuse an integer constant
+already built earlier in the current block instead of building another one.
+It is independent of every `-O` level and FAST control, and off by default.
+`c_ir_emit_integer_value_at` looks up a 64-slot direct-mapped table shared by
+one lowering. Each function builder takes a fresh generation, so no entry
+crosses a function and none is cleared. The key is the canonical type, the
+canonicalized immediate bits and the sign flag.
+
+An entry is only a hint. Lowering can retract a row
+(`ir_block_retract_tail`) or truncate a block's tail
+(`ir_block_truncate_after`) and then reuse the freed row and value IDs. So a
+hit must re-prove all of the following:
+
+- the cached value is still defined by its cached row;
+- the row is still the same `CONSTANT_INTEGER`;
+- the row lies in the builder's current block.
+
+A hit allocates no row, value or immediate. A failed proof builds the row as
+before and is counted as `stale`. Global initializers and the test hooks have
+no table. `-v` prints `C_CONSTANT_INTERN lookups hits stale`.
+
+### Four-arm comparison (diagnostic, not performance evidence)
+
+Measured on a hosted 4-vCPU container with a Clang-built Release `ide`
+(production code as in the commit that adds this section). The compile is
+self-host `ide.c` with tests off, `-g -march=native`, the default four FAST
+passes and `-v`. Compile wall time and peak RSS are medians of 7 interleaved
+runs per arm. Spill, reload and push counts come from `-v` and
+`llvm-objdump` of each object.
+
+| Arm | Wall s (min-max) | Peak RSS KiB | Rows into FAST | Rows after FAST | `.text` bytes | Spills | Reloads | Remats | `pushq` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| None | 5.299 (5.177-5.603) | 854,084 | 2,026,447 | 1,822,939 | 28,520,268 | 30,135 | 53,991 | 49,886 | 116,050 |
+| Interning | 5.292 (5.118-5.911) | 835,708 | 1,859,956 | 1,740,671 | 28,298,232 | 30,040 | 53,191 | 29,619 | 116,504 |
+| CSE table | 5.302 (5.130-5.692) | 852,412 | 2,026,447 | 1,729,373 | 28,265,508 | 31,786 | 54,829 | 35,302 | 116,720 |
+| Interning + table | 5.298 (5.143-5.396) | 835,256 | 1,859,956 | 1,716,648 | 28,259,145 | 31,938 | 54,973 | 33,319 | 116,811 |
+
+Interning reports 421,116 lookups, 166,402 hits and 75 stale entries. With
+interning, CSE still finds 25,384 hits, 25,347 of them constants that only
+become equal after folding. The CSE pass costs about 20 ms per compile;
+interning has no separate pass.
+
+Generated-code runtime: each arm's object was linked into a compiler. Each
+compiler then compiled the same input with default flags, 5 interleaved
+runs per arm.
+
+| Compiler built with | Wall s (min-max) | Peak RSS KiB |
+| --- | ---: | ---: |
+| None | 24.308 (23.678-25.540) | 860,524 |
+| Interning | 24.103 (22.971-25.238) | 860,248 |
+| CSE table | 23.551 (23.546-25.524) | 860,080 |
+| Interning + table | 24.330 (23.656-25.816) | 859,976 |
+
+All four compilers produced byte-identical objects. The compilers built with
+interning, and with interning plus CSE, each recompile themselves with the
+same flags to byte-identical output.
+
+What the data show:
+
+- **Rows and memory:** interning removes 8.2% of the rows entering FAST
+  before they are allocated. Peak RSS falls by about 18 MiB (2.2%), against
+  about 2 MiB for the late CSE pass.
+- **Code size:** after FAST, interning leaves 4.5% fewer rows and 0.78% less
+  `.text`. The late table gets 5.1% and 0.89%, because folding exposes about
+  25k further equal constants.
+- **Spills:** the late table raises spills by 5.5% and reloads by 1.6%.
+  Interning leaves both slightly lower. Both extend constant live ranges
+  across calls in the same block. That shows as more callee-saved pushes:
+  +0.4% with interning and +0.6% with the table. In a small Windows module
+  that change shows up directly in hand-checked frames.
+- **Time:** compile-time and generated-runtime differences are inside the
+  hosted run-to-run range. Neither is established here.
+
+Interning is therefore the cheaper way to obtain most of the constant reuse,
+with less memory and without the spill growth. Both stay opt-in. Adopting
+either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
+peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
+measures both flags on the 9700X; its method is in
+[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
+expect today's default, so enabling interning by default would also update
+those expectations.
 
 ## Tests
 
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
+`ir_fast_intern_tests` checks that interning shares a repeated constant
+within a block, never across blocks, types or signs, and that each hit is
+one row and one value never built. The driver test runs the shared fixture
+with interning and CSE on every backend.
 `ir_fast_cse_tests` runs each case under both strategies and checks the
 window boundary for distinct rows and for repeated hits. The cases cover
 commuted and ordered pairs, duplicate operands, block boundaries, excluded

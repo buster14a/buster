@@ -1866,6 +1866,12 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // Natural expression endpoints, built backwards for one validated body.
+    // A query with an earlier bound clamps the endpoint to that bound.
+    CToken const* body_expression_tokens;
+    u32* body_expression_ends;
+    u32 body_expression_start;
+    u32 body_expression_count;
     // c_parse_scope_for_token's answer for every token of one function body
     // under one root scope (c_parse_body_scopes_build), installed while that
     // body's lowering constraints are checked so each query inside it is one
@@ -2114,6 +2120,10 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    // -fcanonical-intern-constants (#3011): reuse an integer constant already
+    // built earlier in the current block instead of building another row.
+    // Opt-in construction-time arm of the CSE census; off emits as before.
+    bool intern_block_constants;
     // Resolve every pending SSA parameter of a local initialized only at its
     // declaration through the general predecessor walk. The output must not
     // change; tests use it as the differential reference for the shortcut.
@@ -2157,10 +2167,23 @@ struct CIRDirectSsaStatistics
     u64 temporaries;
 };
 
+// Construction-time integer-constant interning (#3011). Lookups are integer
+// constants requested while interning was on; hits reused a constant built
+// earlier in the same block and allocated no row, value or immediate; stale
+// counts key matches whose row was retracted, truncated or rebound.
+typedef struct CIRConstantInternStatistics CIRConstantInternStatistics;
+struct CIRConstantInternStatistics
+{
+    u64 lookups;
+    u64 hits;
+    u64 stale;
+};
+
 typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
     CTypeLayoutStatistics type_layout;
     // Attempts the lowering's type-mapping passes made, retries included, so
     // a test can pin them to the unit's size (#3312).

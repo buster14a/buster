@@ -31,7 +31,9 @@ import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
 import ast_pilot_acceptance  # noqa: E402
+import constant_reuse_acceptance  # noqa: E402
 import throughput_real_source  # noqa: E402
+import selfhost_inline_compare  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
 
@@ -1786,7 +1788,7 @@ class FrozenClosureTest(unittest.TestCase):
     def test_preparation_selection_defaults_rollback_and_unadmitted_fallbacks(self):
         flags = ("analyzer_profile_requested", "historical_requested", "real_source_requested",
                  "production_profile_requested", "compiler_probes_requested", "frontend_selector_requested",
-                 "wild_linker_requested", "link_tls_requested")
+                 "wild_linker_requested", "link_tls_requested", "selfhost_inline_requested")
 
         def select(mode="pull", policy=None, driver=Path("/trusted/driver"), **selected):
             arguments = argparse.Namespace(mode=mode, closure_policy=policy, closure_driver=driver,
@@ -3072,6 +3074,18 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
+    def test_native_evidence_inventory_matches_the_receipt_contract(self) -> None:
+        # tools/compiler_evidence.c derives required raw members from the same admitted profiles (#2918).
+        import re
+        source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
+        table = re.search(r"compiler_evidence_workloads\[\] = \{(.*?)\};", source, re.S)
+        self.assertIsNotNone(table)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', table.group(1)), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
+        for name in (compiler_receipt.PROFILE["name"], compiler_receipt.THROUGHPUT_PROFILE["name"],
+                     compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE["name"]):
+            self.assertIn(f'S8("{name}")', source)
+
     def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
         """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
 
@@ -3970,6 +3984,279 @@ class AstPilotAcceptanceTest(unittest.TestCase):
         self.assertIn("Issue #3397 -fc-ast-pilot adoption budget: complete, verdict pass", report)
         self.assertIn("| syntax-only | 0.9000", report)
 
+
+
+def constant_reuse_raw_cell(cell: str, binary: str = "c" * 64, wall: float = 0.99, instructions: object = 0.98) -> dict:
+    """One synthetic, complete raw uarch_lab cell of the #3011 constant-reuse profile."""
+    pairs = compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_PROFILE["pairs"]
+    argv = constant_reuse_acceptance.cell_command(cell)
+    extra_by_variant = constant_reuse_acceptance.extra_by_variant(cell)
+    labs = {}
+    for key, extra in extra_by_variant.items():
+        command = ["/bin/ide"] + argv[:-2] + extra + argv[-2:]
+        labs[key] = {"config": {"extra": list(extra), "cpu": 2, "constant_reuse_cell": cell, "ide": "/bin/ide",
+                                "command": " ".join(command)}}
+    insn = {"ratio": instructions, "a_median": 1e10 if instructions is not None else None,
+            "b_median": 1e10 * instructions if instructions is not None else None}
+    summary = {"schema": constant_reuse_acceptance.UARCH_SCHEMA,
+               "plan": {"pairs": pairs, "complete_pairs": pairs, "order": "ABBA", "fresh_copy": True},
+               "baseline": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "candidate": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "metrics": {"wall": {"a_median": 2.0, "b_median": 2.0 * wall, "ratio": wall,
+                                    "ci_low": wall - 0.01, "ci_high": wall + 0.005},
+                           "instructions": insn, "peak_rss": {"a_median": 1e9, "b_median": 0.98e9, "ratio": 0.98}},
+               "code_bytes": {"a_value": 28520268, "b_value": 28298232},
+               "counters": {"perf_stat": instructions is not None,
+                            "reason": "usable" if instructions is not None else "perf_event_paranoid"},
+               "outputs_identical": False, "diagnostics_identical": True}
+    meta = {"config": {"constant_reuse_pair": cell, "extra_by_variant": extra_by_variant, "ast_pilot_pair": None,
+                       "canonical_inline_pair": False, "command": " ".join(["IDE"] + argv), "pairs": pairs,
+                       "warmups": 1, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True}}
+    return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+
+def constant_reuse_evidence(head: str = "a" * 40, binary: str = "c" * 64) -> tuple[dict, dict, dict]:
+    """(receipt record, raw bundle, acceptance) built through the helper's own record code."""
+    raw = {cell: constant_reuse_raw_cell(cell, binary) for cell in compiler_receipt.CONSTANT_REUSE_CELLS}
+    cells = {cell: constant_reuse_acceptance.cell_record(raw[cell]["summary"]) for cell in raw}
+    acceptance = {"schema": compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_SCHEMA, "status": "complete",
+                  "source_revision": head,
+                  "profile": {**compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_PROFILE, "source_sha256": "e" * 64},
+                  "candidate_compiler": {"sha256": binary, "size_bytes": 10}, "cells": cells}
+    bundle = {"acceptance": acceptance}
+    for cell, documents in raw.items():
+        for key, value in documents.items():
+            bundle[f"{cell}_{key}"] = value
+    record = {"requested": True, "request_line": compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+              "profile": compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_PROFILE, "summary": acceptance,
+              "status": "complete", "exit": 0}
+    return json.loads(json.dumps(record)), json.loads(json.dumps(bundle)), acceptance
+
+
+class ConstantReuseAcceptanceTest(unittest.TestCase):
+    def test_publisher_revalidates_raw_cells(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        record, bundle, unused_acceptance = constant_reuse_evidence(head, binary)
+        self.assertEqual(compiler_publish.validate_constant_reuse_bundle(record, bundle, head, binary), [])
+
+        def broken(change) -> list[str]:
+            changed = copy.deepcopy(bundle)
+            change(changed)
+            return compiler_publish.validate_constant_reuse_bundle(record, changed, head, binary)
+        cases = {
+            "wrong flag": lambda value: value["intern_meta"]["config"].update(
+                extra_by_variant={"a": [], "b": ["-fcanonical-fast-cse"]}),
+            "flag on A": lambda value: value["cse_a"]["config"].update(extra=["-fcanonical-fast-cse"]),
+            "lab command": lambda value: value["intern_b"]["config"].update(
+                command=value["intern_a"]["config"]["command"]),
+            "syntax-only command": lambda value: value["cse_meta"]["config"].update(
+                command=" ".join(["IDE"] + compiler_receipt.AST_PILOT_COMPILE + ["-fsyntax-only"])),
+            "cell swap": lambda value: value["cse_meta"]["config"].update(constant_reuse_pair="intern"),
+            "ast pilot pair": lambda value: value["cse_meta"]["config"].update(ast_pilot_pair="object"),
+            "wrong binary": lambda value: value["intern_summary"]["candidate"].update(sha256="d" * 64),
+            "cpu": lambda value: value["cse_meta"]["config"].update(cpu=3),
+            "pair count": lambda value: value["cse_summary"]["plan"].update(pairs=12, complete_pairs=12),
+            "missing cell": lambda value: [value.pop(f"cse_{key}") for key in ("summary", "meta", "a", "b")],
+            "metrics": lambda value: value["cse_summary"]["metrics"]["wall"].update(ratio=1.2),
+            "code bytes": lambda value: value["intern_summary"].update(code_bytes={}),
+            "diagnostics": lambda value: value["intern_summary"].update(diagnostics_identical=False),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broken(change))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(dict(record, status="failed"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(
+            dict(record, request_line="constant-reuse"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, None, head, binary))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, bundle, head, "d" * 64))
+        self.assertEqual(compiler_publish.validate_constant_reuse_bundle(None, None, head, binary), [])
+
+    def test_receipt_validator_needs_both_cells_and_frozen_profile(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        unused_record, unused_bundle, acceptance = constant_reuse_evidence(head, binary)
+        self.assertEqual(compiler_receipt.validate_constant_reuse_acceptance(acceptance, head, binary), [])
+        for name, change in {
+            "profile": lambda value: value["profile"].update(pairs=2),
+            "extra profile key": lambda value: value["profile"].update(flags=["-O3"]),
+            "missing cell": lambda value: value["cells"].pop("cse"),
+            "revision": lambda value: value.update(source_revision="b" * 40),
+            "binary": lambda value: value["candidate_compiler"].update(sha256="d" * 64),
+            "code bytes": lambda value: value["cells"]["intern"]["metrics"].update(code_bytes={"a_value": 1}),
+            "diagnostics": lambda value: value["cells"]["cse"].update(diagnostics_identical=False),
+        }.items():
+            changed = copy.deepcopy(acceptance)
+            change(changed)
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_constant_reuse_acceptance(changed, head, binary))
+
+    def test_out_of_range_numbers_fail_closed(self) -> None:
+        huge, head, binary = 10 ** 309, "a" * 40, "c" * 64
+        self.assertFalse(constant_reuse_acceptance._positive_number(huge))
+        self.assertTrue(constant_reuse_acceptance._positive_number(1))
+        record, bundle, acceptance = constant_reuse_evidence(head, binary)
+        for metric, key in (("wall", "ci_high"), ("peak_rss", "b_median"), ("instructions", "a_median"),
+                            ("code_bytes", "b_value")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["cse"]["metrics"][metric][key] = huge
+            with self.subTest(metric=metric):
+                self.assertTrue(compiler_receipt.validate_constant_reuse_acceptance(changed, head, binary))
+                raw = copy.deepcopy(bundle)
+                target = raw["cse_summary"] if metric == "code_bytes" else raw["cse_summary"]["metrics"]
+                target[metric][key] = huge
+                self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, raw, head, binary))
+                pull = receipt()
+                pull["constant_reuse_acceptance"] = dict(record, summary=changed)
+                self.assertIn("Issue #3011 constant-reuse arms", compiler_receipt.render(pull, summary(), "failure", []))
+
+    def test_raw_cell_loader_refuses_wrong_flags_binaries_and_unexplained_na(self) -> None:
+        binary = "c" * 64
+        for cell in compiler_receipt.CONSTANT_REUSE_CELLS:
+            raw = constant_reuse_raw_cell(cell, binary)
+            documents = (raw["summary"], raw["meta"], {"a": raw["a"], "b": raw["b"]})
+            constant_reuse_acceptance.validate_documents(cell, *documents, binary)
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "frozen candidate-HEAD"):
+                constant_reuse_acceptance.validate_documents(cell, *documents, "d" * 64)
+            other = "cse" if cell == "intern" else "intern"
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "fixed constant-reuse"):
+                constant_reuse_acceptance.validate_documents(other, *documents, binary)
+            na = constant_reuse_raw_cell(cell, binary, instructions=None)
+            na_documents = (na["summary"], na["meta"], {"a": na["a"], "b": na["b"]})
+            constant_reuse_acceptance.validate_documents(cell, *na_documents, binary)
+            na["summary"]["counters"] = {"perf_stat": True, "reason": "usable"}
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "NA without"):
+                constant_reuse_acceptance.validate_documents(cell, *na_documents, binary)
+        with self.assertRaisesRegex(RuntimeError, "unknown"):
+            constant_reuse_acceptance.validate_documents("table", *documents, binary)
+
+    def test_compare_command_is_fixed_and_uses_one_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for cell in compiler_receipt.CONSTANT_REUSE_CELLS:
+                with mock.patch.object(constant_reuse_acceptance.subprocess, "run") as run:
+                    constant_reuse_acceptance.run_compare(root / "uarch_lab.py", root / "ide", root, 2, root / cell,
+                                                          "perf", cell)
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--constant-reuse-pair") + 1], cell)
+                self.assertEqual(argv[argv.index("--baseline") + 1], argv[argv.index("--candidate") + 1])
+                self.assertEqual(argv[argv.index("--pairs") + 1], "20")
+                self.assertNotIn("--", argv)
+                self.assertNotIn("--ast-pilot-pair", argv)
+
+    def test_profile_runs_both_cells_on_candidate_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            source = repo / "src/buster/apps/ide/ide.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int frozen_unity_source;\n")
+            (repo / "build/generated").mkdir(parents=True)
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            binary = hashlib.sha256(b"candidate compiler").hexdigest()
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate, output=root / "profile",
+                                      head_revision="a" * 40, cpu=2, perf="perf")
+            cells = []
+            with mock.patch.object(constant_reuse_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(constant_reuse_acceptance, "run_compare",
+                                   side_effect=lambda *values: cells.append(values[-1])), \
+                 mock.patch.object(constant_reuse_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: constant_reuse_raw_cell(cell, sha)["summary"]):
+                result = constant_reuse_acceptance.execute(args)
+            self.assertEqual(cells, ["intern", "cse"])
+            self.assertEqual(result["cells"]["intern"]["metrics"]["code_bytes"]["b_value"], 28298232)
+            self.assertEqual(compiler_receipt.validate_constant_reuse_acceptance(result, "a" * 40, binary), [])
+            args.cpu = 3
+            args.output = root / "other"
+            with mock.patch.object(constant_reuse_acceptance, "git", return_value="a" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "pins CPU 2"):
+                constant_reuse_acceptance.execute(args)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Constant Reuse Test")
+            git("config", "user.email", "constant-reuse@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "seed")
+            line = compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                git("commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.constant_reuse_request_selection(repo, git("rev-parse", "HEAD")),
+                                     expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            git("commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.constant_reuse_request_selection(repo, git("rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", constant_reuse_acceptance=constant_reuse_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("constant_reuse_acceptance")
+        self.assertIn("no constant-reuse acceptance record",
+                      compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, plain, {}))
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, plain, {}), "")
+
+    def test_decision_needs_pull_mode_the_9700x_and_the_complete_bundle(self) -> None:
+        record, bundle, unused_acceptance = constant_reuse_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["constant_reuse_acceptance"] = record
+        expected = dict(EXPECTED, mode="pull")
+        values = {"expected": expected, "authorized": True, "compare_result": "success", "receipt": pull,
+                  "summary": summary(), "policy_value": "", "throughput": dict(corpus(), constant_reuse_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        both = copy.deepcopy(pull)
+        both["ast_pilot_acceptance"] = ast_pilot_evidence("a" * 40, B256)[0]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "missing cell": {"throughput": dict(corpus(), constant_reuse_bundle={
+                key: value for key, value in bundle.items() if not key.startswith("cse_")})},
+            "with ast pilot": {"receipt": both},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Issue #3011 constant-reuse arms: complete", report)
+        self.assertIn("| intern (-fcanonical-intern-constants) | 0.9900", report)
 
 def real_source_evidence() -> tuple[dict, dict]:
     """A complete synthetic throughput-real-source-v1 record and its exported bundle on BINARIES."""
@@ -6588,6 +6875,450 @@ class LinkTlsTest(unittest.TestCase):
             self.assertEqual((status, written["status"]), (1, "failed"))
             self.assertTrue(all(cell["pairs"] == [] for cell in written["cells"]))
             self.assertTrue(any("images differ" in error for error in written["errors"]), written["errors"])
+
+
+SELFHOST_INLINE_TOOL = Path(__file__).resolve().with_name("selfhost_inline_compare.py")
+SELFHOST_BINARIES = {"baseline": {"sha256": A256, "revision": EXPECTED["base"]},
+                     "candidate": {"sha256": B256, "revision": EXPECTED["head"]}}
+SELFHOST_STAGE1 = {"baseline": "c" * 64, "candidate": "f" * 64}
+
+
+def selfhost_inline_metric(a: float, b: float) -> dict:
+    return {"a_median": a, "b_median": b, "ratio": b / a, "ci_low": b / a - 0.01, "ci_high": b / a + 0.01,
+            "outcome": "below-floor"}
+
+
+def selfhost_inline_evidence(binaries: dict | None = None) -> tuple[dict, dict]:
+    """A complete synthetic self-host-inline-compare-v1 record and bundle: head 2% faster, outputs identical."""
+    profile = compiler_receipt.SELFHOST_INLINE_PROFILE
+    binaries = copy.deepcopy(SELFHOST_BINARIES) if binaries is None else binaries
+    flags = list(profile["compile_flags"])
+    stage1 = {role: {"schema": compiler_receipt.SELFHOST_INLINE_STAGE1_SCHEMA, "status": "complete",
+                     "revision": binaries[role]["revision"],
+                     "compiler": {"sha256": binaries[role]["sha256"], "size_bytes": 1000},
+                     "stage1": {"sha256": SELFHOST_STAGE1[role], "size_bytes": 2000},
+                     "source_sha256": "3" * 64, "frozen_input_tree": {}, "command": list(profile["stage1_command"]),
+                     "elapsed_seconds": 2.0} for role in ("baseline", "candidate")}
+    result = {"schema": compiler_receipt.SELFHOST_INLINE_SCHEMA, "status": "complete", "profile": profile["name"],
+              "base_revision": binaries["baseline"]["revision"], "frozen_input_tree": {},
+              "stage1_compilers": {role: {"sha256": SELFHOST_STAGE1[role]} for role in ("baseline", "candidate")},
+              "elapsed_seconds": 600.0}
+    lab = {"schema": selfhost_inline_compare.UARCH_SCHEMA,
+           "plan": {"pairs": profile["pairs"], "complete_pairs": profile["pairs"], "order": "ABBA", "fresh_copy": True},
+           "baseline": {"sha256": SELFHOST_STAGE1["baseline"], "runs": profile["pairs"], "failed": 0,
+                        "deterministic": True},
+           "candidate": {"sha256": SELFHOST_STAGE1["candidate"], "runs": profile["pairs"], "failed": 0,
+                         "deterministic": True},
+           "outputs_identical": True, "counters": {"perf_stat": True},
+           "metrics": {"wall": selfhost_inline_metric(5.0, 4.9), "task_clock": selfhost_inline_metric(5.0, 4.9),
+                       "instructions": selfhost_inline_metric(4.0e10, 3.9e10), "cycles": selfhost_inline_metric(2.5e10, 2.45e10),
+                       "ipc": selfhost_inline_metric(1.6, 1.59), "branch_misses": selfhost_inline_metric(1.0e8, 0.99e8),
+                       "peak_rss": selfhost_inline_metric(1.0e9, 1.0e9)},
+           "code_bytes": {"a_value": 9000, "b_value": 8900, "ratio": 8900 / 9000},
+           "profile": {"topdown": {"status": "ok", "metrics": [
+               {"group": "PipelineL1", "metric": "frontend_bound", "unit": "%", "a": 20.0, "b": 19.0, "delta": -1.0,
+                "relative_change_percent": -5.0},
+               {"group": "cache", "metric": "l2_hit_rate", "unit": "%", "a": 90.0, "b": 90.0, "delta": 0.0,
+                "relative_change_percent": 0.0}]}},
+           "verdict": {"text": "below-floor"}, "warnings": []}
+    meta = {"config": {"extra": flags, "extra_by_variant": {"a": flags, "b": flags}, "canonical_inline_pair": False,
+                       "pairs": profile["pairs"], "warmups": profile["warmups"], "cpu": profile["cpu"],
+                       "profile_steps": list(profile["profile_steps"]), "require_identical_output": True,
+                       "min_effect_percent": profile["min_effect_percent"], "fresh_copy": True},
+            "outputs_identical": True,
+            "steps": {step: {"status": "ok"} for step in ("prepare", "timed", *profile["profile_steps"])}}
+    labs = {key: {"config": {"extra": flags, "cpu": profile["cpu"]}} for key in ("a", "b")}
+    bundle = {"stage1-baseline/stage1.json": stage1["baseline"], "stage1-candidate/stage1.json": stage1["candidate"],
+              "compare/result.json": result, "compare/lab/summary.json": lab, "compare/lab/compare.json": meta,
+              "compare/lab/a/lab.json": labs["a"], "compare/lab/b/lab.json": labs["b"]}
+    bundle = json.loads(json.dumps(bundle))
+    record = {"requested": True, "request_line": compiler_receipt.SELFHOST_INLINE_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "errors": [],
+              "stage1_exit": {"baseline": 0, "candidate": 0}, "harness_sha256": "6" * 64,
+              "digest": compiler_receipt.selfhost_inline_digest(bundle["compare/lab/summary.json"])}
+    return record, bundle
+
+
+def selfhost_inline_problems(bundle: dict, binaries: dict | None = None) -> list[str]:
+    binaries = SELFHOST_BINARIES if binaries is None else binaries
+    stage1 = {role: bundle[f"stage1-{role}/stage1.json"] for role in ("baseline", "candidate")}
+    expected = {role: (stage1[role].get("stage1") or {}).get("sha256") if isinstance(stage1[role], dict) else None
+                for role in stage1}
+    return [*compiler_receipt.validate_selfhost_inline(stage1, bundle["compare/result.json"], binaries),
+            *selfhost_inline_compare.validate_compare_documents(
+                bundle["compare/lab/summary.json"], bundle["compare/lab/compare.json"],
+                {"a": bundle["compare/lab/a/lab.json"], "b": bundle["compare/lab/b/lab.json"]}, expected)]
+
+
+def selfhost_pull_receipt(record: dict) -> dict:
+    pull = receipt()
+    pull["mode"] = "pull"
+    pull["identity"].update(mode="pull")
+    pull["binaries"] = copy.deepcopy(SELFHOST_BINARIES)
+    pull["selfhost_inline"] = record
+    return pull
+
+
+class SelfHostInlineCompareTest(unittest.TestCase):
+    """#58: the fixed self-host-inline-compare-v1 base/head self-built inline-mode profile."""
+
+    def test_profile_is_frozen_report_only_and_printed_by_the_helper(self) -> None:
+        profile = compiler_receipt.SELFHOST_INLINE_PROFILE
+        self.assertEqual(profile["name"], "self-host-inline-compare-v1")
+        self.assertEqual(compiler_receipt.SELFHOST_INLINE_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"], profile["order"]), (2, 1, 30, "ABBA"))
+        self.assertEqual(profile["compile_flags"], ["-fcanonical-inline"])
+        self.assertEqual(profile["stage1_command"][-1], "-fcanonical-inline")
+        self.assertEqual(profile["profile_steps"], ["topdown", "sampling"])
+        self.assertLessEqual(compiler_compare.SELFHOST_INLINE_TIMEOUT_SECONDS, 45 * 60)
+        printed = subprocess.run([sys.executable, "-B", str(SELFHOST_INLINE_TOOL), "profile"], capture_output=True,
+                                 text=True, check=True, cwd=SELFHOST_INLINE_TOOL.parent).stdout
+        self.assertEqual(json.loads(printed), json.loads(json.dumps(profile)))
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = selfhost_inline_evidence()
+        self.assertEqual(selfhost_inline_problems(bundle), [])
+        digest = record["digest"]
+        self.assertAlmostEqual(digest["metrics"]["wall"]["ratio"], 0.98)
+        self.assertEqual([row["metric"] for row in digest["frontend"]], ["frontend_bound"])
+
+        def changed(member: str, edit) -> dict:
+            value = copy.deepcopy(bundle)
+            edit(value[member])
+            return value
+
+        lab, meta, result = "compare/lab/summary.json", "compare/lab/compare.json", "compare/result.json"
+        base, head = "stage1-baseline/stage1.json", "stage1-candidate/stage1.json"
+        cases = {
+            "incomplete stage 1": changed(head, lambda value: value.update(status="failed")),
+            "stage 1 from the wrong revision": changed(head, lambda value: value.update(revision=EXPECTED["base"])),
+            "stage 1 by another compiler": changed(base, lambda value: value["compiler"].update(sha256=B256)),
+            "stage 1 command changed": changed(base, lambda value: value.update(command=["cc", "-O2"])),
+            "malformed stage-1 identity": changed(head, lambda value: value["stage1"].update(sha256="x")),
+            "result schema": changed(result, lambda value: value.update(schema="other")),
+            "result incomplete": changed(result, lambda value: value.update(status="failed")),
+            "result for another profile": changed(result, lambda value: value.update(profile="other")),
+            "timed another tree": changed(result, lambda value: value.update(base_revision=EXPECTED["head"])),
+            "timed other compilers": changed(result, lambda value: value["stage1_compilers"]["candidate"].update(
+                sha256="e" * 64)),
+            "uarch schema": changed(lab, lambda value: value.update(schema="other")),
+            "missing pairs": changed(lab, lambda value: value["plan"].update(complete_pairs=29)),
+            "not fresh copies": changed(lab, lambda value: value["plan"].update(fresh_copy=False)),
+            "timed binary differs": changed(lab, lambda value: value["candidate"].update(sha256=SELFHOST_STAGE1["baseline"])),
+            "nondeterministic output": changed(lab, lambda value: value["baseline"].update(deterministic=False)),
+            "failed runs": changed(lab, lambda value: value["candidate"].update(failed=1)),
+            "no wall interval": changed(lab, lambda value: value["metrics"]["wall"].update(ci_low=None)),
+            "no hardware counters": changed(lab, lambda value: value.update(counters={"perf_stat": False,
+                                                                                       "reason": "perf missing"})),
+            "no cycles": changed(lab, lambda value: value["metrics"]["cycles"].update(a_median=None)),
+            "no topdown": changed(lab, lambda value: value["profile"].update(topdown={"status": "failed", "metrics": []})),
+            "cache-only topdown": changed(lab, lambda value: value["profile"]["topdown"]["metrics"].pop(0)),
+            "malformed topdown row": changed(lab, lambda value: value["profile"]["topdown"]["metrics"].append({})),
+            "front end without values": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(
+                a=None, b=None)),
+            "one-sided front end": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(b=None)),
+            "non-finite front end": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(
+                a=float("nan"))),
+            "only a level-2 front-end metric": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(
+                group="PipelineL2", metric="frontend_bound_by_latency")),
+            "an unavailable extra front-end group": changed(lab, lambda value: value["profile"]["topdown"]["metrics"].append(
+                {"group": "decoder", "metric": "op_cache_hit_rate", "unit": "%", "a": 80.0, "b": None})),
+            "other flags": changed(meta, lambda value: value["config"].update(extra=[])),
+            "fixed inline pair": changed(meta, lambda value: value["config"].update(canonical_inline_pair=True)),
+            "other pair count": changed(meta, lambda value: value["config"].update(pairs=12)),
+            "other CPU": changed(meta, lambda value: value["config"].update(cpu=3)),
+            "no profile steps": changed(meta, lambda value: value["config"].update(profile_steps=[])),
+            "outputs not required identical": changed(meta, lambda value: value["config"].update(
+                require_identical_output=False)),
+            "outputs differ": changed(meta, lambda value: value.update(outputs_identical=False)),
+            "failed sampling": changed(meta, lambda value: value["steps"]["sampling"].update(status="failed")),
+            "variant flags": changed("compare/lab/b/lab.json", lambda value: value["config"].update(extra=[])),
+        }
+        for name, value in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(selfhost_inline_problems(value), name)
+        for name, binaries in {"no revisions": BINARIES,
+                               "other baseline binary": dict(SELFHOST_BINARIES, baseline={"sha256": B256,
+                                                                                          "revision": EXPECTED["base"]})
+                               }.items():
+            with self.subTest(case=name):
+                self.assertTrue(selfhost_inline_problems(bundle, binaries))
+        for value in (None, [], {"metrics": []}):
+            self.assertIsNone(compiler_receipt.selfhost_inline_digest(value))
+        self.assertTrue(compiler_receipt.validate_selfhost_inline(None, None, SELFHOST_BINARIES))
+        self.assertTrue(selfhost_inline_compare.validate_compare_documents(None, None, None, {}))
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = selfhost_inline_evidence()
+        pull = selfhost_pull_receipt(record)
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), selfhost_inline_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["digest"]["metrics"]["wall"]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        for name, change in {
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), selfhost_inline_bundle={})},
+            "failed run": {"receipt": dict(pull, selfhost_inline=dict(record, status="failed", exit=1))},
+            "stale digest": {"receipt": dict(pull, selfhost_inline=stale)},
+            "changed profile": {"receipt": dict(pull, selfhost_inline=widened)},
+            "other selector": {"receipt": dict(pull, selfhost_inline=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, selfhost_inline=dict(record, requested=False))},
+            "other binaries": {"receipt": dict(pull, binaries=dict(SELFHOST_BINARIES, candidate={
+                "sha256": A256, "revision": EXPECTED["head"]}))},
+            "with the link-tls leg": {"receipt": dict(pull, link_tls=link_tls_evidence()[0]),
+                                      "throughput": dict(corpus(), selfhost_inline_bundle=bundle,
+                                                         link_tls_bundle=link_tls_evidence()[1])},
+            "with the #48 inline profile": {"receipt": dict(pull, inline_acceptance={"requested": True})},
+            "with the scaling leg": {"receipt": dict(pull, scaling_profile=copy.deepcopy(compiler_receipt.SCALING_PROFILE)),
+                                     "throughput": dict(corpus(), selfhost_inline_bundle=bundle, scaling=scaling())},
+            "with constant-reuse acceptance": {
+                "receipt": dict(pull, constant_reuse_acceptance=constant_reuse_evidence(EXPECTED["head"], B256)[0]),
+                "throughput": dict(corpus(), selfhost_inline_bundle=bundle,
+                                   constant_reuse_bundle=constant_reuse_evidence(EXPECTED["head"], B256)[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Self-built inline-mode compilers (self-host-inline-compare-v1): complete", report)
+        self.assertIn("| wall | 5 | 4.9 | 0.9800 [0.9700, 0.9900] |", report)
+        self.assertIn("| PipelineL1 frontend_bound | 20 | 19 | -5.00% |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        record, bundle = selfhost_inline_evidence()
+        pull = selfhost_pull_receipt(record)
+
+        def decided(replace: dict | None = None, drop: str = "") -> tuple:
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            for name, value in bundle.items():
+                if name != drop:
+                    members[f"selfhost_inline/{name}"] = json.dumps(value)
+            members.update(replace or {})
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        self.assertEqual(decided()[::2], ("success", []))
+        slower = copy.deepcopy(bundle["compare/lab/summary.json"])
+        slower["metrics"]["wall"]["ratio"] = 1.2
+        for name, (replace, drop) in {
+            "missing member": (None, "compare/lab/compare.json"),
+            "malformed member": ({"selfhost_inline/compare/result.json": "{"}, ""),
+            "duplicate key": ({"selfhost_inline/compare/result.json": '{"schema": 1, "schema": 2}'}, ""),
+            "summary that disagrees with the receipt": ({"selfhost_inline/compare/lab/summary.json": json.dumps(slower)}, ""),
+        }.items():
+            with self.subTest(case=name):
+                self.assertEqual(decided(replace, drop)[0], "failure")
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Self Host Inline Test")
+            fixture_git(repo, "config", "user.email", "selfhost-inline@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.SELFHOST_INLINE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.selfhost_inline_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.selfhost_inline_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.SELFHOST_INLINE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = selfhost_pull_receipt(selfhost_inline_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("selfhost_inline")
+        self.assertIn("no self-host inline record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_request_with_another_opt_in_leg_or_scaling_fails_before_any_build(self) -> None:
+        for name, patches in {"scaling": {"scaling_requested": True},
+                              "link-tls": {"scaling_requested": False},
+                              "constant-reuse": {"scaling_requested": False}}.items():
+            with self.subTest(combined=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                candidate, work, evidence, bins = root / "candidate", root / "work", root / "evidence", root / "bins"
+                for directory in (candidate, work, evidence, bins):
+                    directory.mkdir()
+                current = {"state": "pending", "reasons": [], "timings": {}, "binaries": {}, "lab": {}}
+                args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40, selfhost_inline_requested=True,
+                                          link_tls_requested=name == "link-tls",
+                                          constant_reuse_requested=name == "constant-reuse", lab=root / "uarch_lab.py")
+                with mock.patch.object(compiler_compare, "scaling_requested", return_value=patches["scaling_requested"]), \
+                        mock.patch.object(compiler_compare, "build") as build, \
+                        mock.patch.object(compiler_compare, "run") as run:
+                    compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+                self.assertTrue(any("self-host-inline-compare-v1 cannot be combined" in reason
+                                    for reason in current["reasons"]), current["reasons"])
+                self.assertEqual(current["selfhost_inline"]["status"], "failed")
+                build.assert_not_called()
+                run.assert_not_called()
+
+    def test_leg_exports_and_reads_each_part_s_mandatory_documents_when_optional_files_are_deferred(self) -> None:
+        """A deferred export copies only a part's required members before measure returns; the leg must name them."""
+        record_value, bundle = selfhost_inline_evidence()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            for name, value in bundle.items():
+                path = root / "work/selfhost-inline" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value), encoding="utf-8")
+            (root / "work/selfhost-inline/compare/lab/a/report.md").write_text("optional\n", encoding="utf-8")
+            pull = {"timings": {}, "binaries": copy.deepcopy(SELFHOST_BINARIES),
+                    "selfhost_inline": {"requested": True, "status": "pending",
+                                        "stage1_exit": {"baseline": 0, "candidate": 0}}}
+            arguments = argparse.Namespace(lab=root / "uarch_lab.py", base=EXPECTED["base"])
+            exported_required = []
+
+            def deferred_export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple):
+                exported_required.append(required)
+                for name in required:
+                    target = destination / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source / name, target)
+                return [], []
+
+            with mock.patch.object(compiler_compare, "run", return_value=0), \
+                    mock.patch.object(compiler_compare, "export_tree", side_effect=deferred_export):
+                compiler_compare.measure_selfhost_inline(arguments, root / "candidate", root / "work",
+                                                         root / "evidence", pull)
+            record = pull["selfhost_inline"]
+            self.assertEqual((record["status"], record["errors"]), ("complete", []))
+            self.assertEqual(sorted(name for names in exported_required for name in names),
+                             sorted(["stage1.json", "stage1.json", "result.json", "lab/summary.json",
+                                     "lab/compare.json", "lab/a/lab.json", "lab/b/lab.json"]))
+            self.assertFalse((root / "evidence/selfhost_inline/compare/lab/a/report.md").exists())
+            self.assertEqual(record["digest"], record_value["digest"])
+
+    def test_leg_runs_the_trusted_helper_and_refuses_missing_stage1(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            pull = {"timings": {}, "binaries": copy.deepcopy(SELFHOST_BINARIES),
+                    "selfhost_inline": {"requested": True, "status": "pending"}}
+            arguments = argparse.Namespace(lab=root / "uarch_lab.py", base=EXPECTED["base"])
+            with mock.patch.object(compiler_compare, "run", return_value=2) as run:
+                compiler_compare.build_selfhost_inline_stage1("candidate", root / "ide-cand", root / "candidate",
+                                                              EXPECTED["head"], root / "work", root / "evidence", pull)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1:4], ["-B", str(SELFHOST_INLINE_TOOL), "stage1"])
+            self.assertEqual(argv[argv.index("--revision") + 1], EXPECTED["head"])
+            self.assertEqual(pull["selfhost_inline"]["stage1_exit"], {"candidate": 2})
+            with mock.patch.object(compiler_compare, "run", return_value=0) as run:
+                compiler_compare.measure_selfhost_inline(arguments, root / "candidate", root / "work",
+                                                         root / "evidence", pull)
+            # The candidate stage 1 failed and the baseline never ran, so nothing is timed and the leg fails.
+            run.assert_not_called()
+            record = pull["selfhost_inline"]
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["harness_sha256"], hashlib.sha256(SELFHOST_INLINE_TOOL.read_bytes()).hexdigest())
+            self.assertTrue(any("candidate stage-1 build exited 2" in error for error in record["errors"]),
+                            record["errors"])
+
+    def test_helper_builds_stage1_and_runs_the_fixed_comparison(self) -> None:
+        """The real helper and uarch_lab on a fake compiler: stage 1, fixed compare argv, documents validated."""
+        lab = Path(__file__).resolve().parents[1] / "uarch_lab.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tree = root / "tree"
+            (tree / "src/buster/apps/ide").mkdir(parents=True)
+            (tree / "build/generated").mkdir(parents=True)
+            (tree / "src/buster/apps/ide/ide.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (tree / "build/generated/header.h").write_text("#define GENERATED 1\n", encoding="utf-8")
+            fixture_git(tree, "init", "-q")
+            fixture_git(tree, "config", "user.name", "Self Host Inline Test")
+            fixture_git(tree, "config", "user.email", "selfhost-inline@example.invalid")
+            fixture_git(tree, "add", "src")
+            fixture_git(tree, "commit", "-qm", "tree")
+            revision = fixture_git(tree, "rev-parse", "HEAD")
+            ide = root / "ide"
+            # A fake compiler: its stage-1 output is a copy of itself, so the stage-1 compiler is runnable too.
+            ide.write_text("#!/bin/sh\nself=$0\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = \"-o\" ] && out=$2; shift; done\n"
+                           "[ -n \"$out\" ] && cp \"$self\" \"$out\" && chmod +x \"$out\"\nexit 0\n", encoding="utf-8")
+            ide.chmod(0o755)
+            for role in ("baseline", "candidate"):
+                self.assertEqual(selfhost_inline_compare.main(["stage1", "--ide", str(ide), "--repo-root", str(tree),
+                                                               "--revision", revision,
+                                                               "--output", str(root / f"stage1-{role}")]), 0)
+            record = json.loads((root / "stage1-baseline/stage1.json").read_text(encoding="utf-8"))
+            self.assertEqual((record["status"], record["revision"]), ("complete", revision))
+            self.assertEqual(record["stage1"]["sha256"], hashlib.sha256(ide.read_bytes()).hexdigest())
+            self.assertEqual(selfhost_inline_compare.main(["stage1", "--ide", str(ide), "--repo-root", str(tree),
+                                                           "--revision", "0" * 40, "--output", str(root / "wrong")]), 1)
+            profile = dict(compiler_receipt.SELFHOST_INLINE_PROFILE, pairs=6, profile_steps=[])
+            with mock.patch.object(selfhost_inline_compare, "PROFILE", profile), \
+                    mock.patch.object(selfhost_inline_compare.subprocess, "run",
+                                      wraps=selfhost_inline_compare.subprocess.run) as spawned:
+                status = selfhost_inline_compare.main([
+                    "compare", "--lab", str(lab), "--baseline-stage1", str(root / "stage1-baseline/stage1.json"),
+                    "--candidate-stage1", str(root / "stage1-candidate/stage1.json"), "--repo-root", str(tree),
+                    "--base-revision", revision, "--perf", "buster-no-such-perf", "--output", str(root / "compare")])
+            argv = next(call.args[0] for call in spawned.call_args_list if str(lab) in call.args[0])
+            self.assertEqual(argv[argv.index("--pairs") + 1], "6")
+            self.assertEqual(argv[-2:], ["--", "-fcanonical-inline"])
+            self.assertIn("--require-identical-output", argv)
+            # Without a working perf the timed series completes but its required PMU evidence is missing.
+            self.assertEqual(status, 1)
+            summary_value = json.loads((root / "compare/lab/summary.json").read_text(encoding="utf-8"))
+            meta = json.loads((root / "compare/lab/compare.json").read_text(encoding="utf-8"))
+            labs = {key: json.loads((root / f"compare/lab/{key}/lab.json").read_text(encoding="utf-8"))
+                    for key in ("a", "b")}
+            sha = record["stage1"]["sha256"]
+            with mock.patch.object(selfhost_inline_compare, "PROFILE", profile):
+                problems = selfhost_inline_compare.validate_compare_documents(
+                    summary_value, meta, labs, {"baseline": sha, "candidate": sha})
+            self.assertEqual(summary_value["plan"]["complete_pairs"], 6)
+            self.assertTrue(problems)
+            self.assertTrue(all("counts are missing" in problem or "hardware counters" in problem or
+                                "topdown metrics" in problem for problem in problems), problems)
+            self.assertFalse((root / "compare/result.json").exists())
 
 
 if __name__ == "__main__":

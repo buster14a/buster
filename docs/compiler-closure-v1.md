@@ -153,8 +153,9 @@ An explicit policy is never changed by the harness.
 fixed snapshot plan cannot run. That happens when no trusted driver is supplied,
 or when the request selects an analyzer profile, the historical corpus recipe,
 real-source throughput, the PGO/LTO production profile, compiler-probes-v1, the
-frontend-selector probes, wild-linker-v1 or link-tls-v1. Inline self-host
-acceptance, the ast-pilot leg and scaling are admitted by the snapshot plan.
+frontend-selector probes, wild-linker-v1, link-tls-v1 or
+self-host-inline-compare-v1. Inline self-host acceptance, the ast-pilot and
+constant-reuse acceptance legs and scaling are admitted by the snapshot plan.
 
 A snapshot, restore or verify that fails never falls back. The attempt fails
 closed with the native `failed_step`, and nothing is rebuilt or repaired.

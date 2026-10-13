@@ -57,6 +57,11 @@ A fresh exact LINK_TLS_REQUEST_LINE adds the TLS companion link leg (#1915):
 the trusted revision's tools/link_tls_bench.py builds frozen TLS-heavy inputs
 and times fresh `ide cc` links of both binaries, after requiring byte-identical
 images that print the frozen output.
+A fresh exact SELFHOST_INLINE_REQUEST_LINE adds the self-built inline-mode leg
+(#58): after each role's build its ide builds that revision's stage-1
+compiler with -fcanonical-inline, and after the ordinary comparison the
+trusted selfhost_inline_compare.py times the two stage-1 compilers on the
+frozen merge-base tree with topdown and sampling profiles.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -69,12 +74,14 @@ throughput_harness_problem (#3714 base-harness admission), historical_request_se
 prepare_historical_harness (#3714 named historical corpus), measure_throughput (corpus leg),
 scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
+constant_reuse_request_selection and measure_constant_reuse (#3011 opt-in flag pairs),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
 frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
 wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg),
-link_tls_request_selection and measure_link_tls (#1915 TLS link leg), main. Validity rules live in compiler_receipt.classify.
+link_tls_request_selection and measure_link_tls (#1915 TLS link leg),
+selfhost_inline_request_selection, build_selfhost_inline_stage1 and measure_selfhost_inline (#58), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -101,6 +108,8 @@ from pathlib import Path
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
                               AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
+                              CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                              validate_constant_reuse_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -114,6 +123,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               WILD_LINKER_LINKERS,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, LINK_TLS_HARNESS, link_tls_digest,
                               validate_link_tls,
+                              SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, SELFHOST_INLINE_HARNESS,
+                              selfhost_inline_digest, validate_selfhost_inline,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
@@ -126,6 +137,7 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
 import throughput_real_source
+from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
@@ -133,6 +145,8 @@ THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
 AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+# Two -c cells of 20 ABBA pairs each, the size of the ast-pilot object cell.
+CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
 # Measured: the whole leg (42 passes over its six cells) took 508 s on a hosted
 # 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 REAL_SOURCE_TIMEOUT_SECONDS = 1800
@@ -163,6 +177,10 @@ WILD_LINKER_PROBE_TIMEOUT_SECONDS = 30
 # is slowest: building the inputs and the seven cells of 2 warmups + 20 pairs took
 # 248 s. The bound stays inside the unchanged compare-pull job with its ordinary comparison.
 LINK_TLS_TIMEOUT_SECONDS = 20 * 60
+# One untimed stage-1 build per role, then 30 pairs and both profile steps of
+# two self-built compilers: about 120 compiles of roughly 5 s each on the 9700X.
+SELFHOST_INLINE_STAGE1_TIMEOUT_SECONDS = 15 * 60
+SELFHOST_INLINE_TIMEOUT_SECONDS = 45 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -192,6 +210,9 @@ FRONTEND_SCALING_REQUIRED = ("provenance.json", "results.json")
 SELECTION_REQUIRED = ("report.json",)
 WILD_LINKER_REQUIRED = tuple(wild_linker_bundle_files().values())
 LINK_TLS_REQUIRED = ("summary.json",)
+SELFHOST_INLINE_REQUIRED = ("stage1-baseline/stage1.json", "stage1-candidate/stage1.json", "compare/result.json",
+                            "compare/lab/summary.json", "compare/lab/compare.json", "compare/lab/a/lab.json",
+                            "compare/lab/b/lab.json")
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
 # A scaling bundle keeps its reports, raw samples and per-sample logs; its
@@ -1035,6 +1056,18 @@ def ast_pilot_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     return True, ""
 
 
+def constant_reuse_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #3011's fixed profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the constant-reuse acceptance selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the constant-reuse acceptance selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def real_source_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #2761's real-source profile only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
@@ -1149,6 +1182,18 @@ def link_tls_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
         return False, ""
     if any(delta != 1 for delta in deltas):
         return False, "the link-tls selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def selfhost_inline_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #58's self-built inline-mode leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, SELFHOST_INLINE_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the self-host inline selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the self-host inline selector must be added exactly once relative to every head parent"
     return True, ""
 
 
@@ -1373,6 +1418,11 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append(ast_problem)
     elif getattr(arguments, "ast_pilot_requested", False):
         reasons.append(f"{selected_profile['name']} cannot be combined with the ast-pilot acceptance selector")
+    reuse_problem = getattr(arguments, "constant_reuse_request_problem", "")
+    if reuse_problem:
+        reasons.append(reuse_problem)
+    elif getattr(arguments, "constant_reuse_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the constant-reuse acceptance selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
@@ -1540,7 +1590,8 @@ def select_preparation(arguments: argparse.Namespace) -> dict:
             ("compiler-probes-v1", arguments.compiler_probes_requested),
             ("the frontend-selector probes", arguments.frontend_selector_requested),
             ("wild-linker-v1", arguments.wild_linker_requested),
-            ("link-tls-v1", arguments.link_tls_requested)) if selected]
+            ("link-tls-v1", arguments.link_tls_requested),
+            (SELFHOST_INLINE_PROFILE["name"], arguments.selfhost_inline_requested)) if selected]
         if arguments.closure_driver is None:
             reason = "no trusted native --closure-driver was supplied"
         elif unsupported:
@@ -1650,6 +1701,41 @@ def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Pa
         errors.extend(validate_ast_pilot_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
     if status != 0:
         errors.append(f"issue #3397 ast-pilot acceptance exited {status}")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+CONSTANT_REUSE_REQUIRED = ("acceptance.json",
+                           *(f"{cell}/{name}" for cell in CONSTANT_REUSE_ACCEPTANCE_PROFILE["cells"]
+                             for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+
+def measure_constant_reuse(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
+                           receipt: dict) -> None:
+    """Run #3011's fixed constant-reuse profile on the frozen candidate build and record it in the receipt."""
+    mark(receipt, evidence, "constant-reuse-acceptance")
+    output = work / "constant-reuse-acceptance"
+    helper = Path(__file__).with_name("constant_reuse_acceptance.py").resolve()
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(helper),
+                  "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                  "--repo-root", str(candidate), "--head-revision", arguments.head,
+                  "--cpu", str(CONSTANT_REUSE_ACCEPTANCE_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "constant-reuse-acceptance.log", CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS)
+    receipt["timings"]["constant_reuse_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["constant_reuse_acceptance"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "constant_reuse_acceptance", evidence, EVIDENCE_IGNORE,
+                                    CONSTANT_REUSE_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "constant_reuse_acceptance" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #3011 constant-reuse acceptance receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_constant_reuse_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
+    if status != 0:
+        errors.append(f"issue #3011 constant-reuse acceptance exited {status}")
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
 
@@ -2081,6 +2167,77 @@ def measure_link_tls(bins: Path, work: Path, evidence: Path, receipt: dict) -> N
     record["status"] = "complete" if not errors else "failed"
 
 
+def selfhost_inline_helper() -> Path:
+    """The trusted revision's #58 helper, never the candidate's."""
+    return Path(__file__).resolve().with_name(SELFHOST_INLINE_HARNESS)
+
+
+def build_selfhost_inline_stage1(role: str, binary: Path, candidate: Path, revision: str, work: Path, evidence: Path,
+                                 receipt: dict) -> None:
+    """Build one role's stage-1 compiler with -fcanonical-inline while its revision is checked out (#58)."""
+    record = receipt["selfhost_inline"]
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(selfhost_inline_helper()), "stage1", "--ide", str(binary),
+                  "--repo-root", str(candidate), "--revision", revision,
+                  "--output", str(work / "selfhost-inline" / f"stage1-{role}")],
+                 candidate, evidence / f"selfhost-inline-stage1-{role}.log", SELFHOST_INLINE_STAGE1_TIMEOUT_SECONDS)
+    receipt["timings"][f"selfhost_inline_stage1_{role}_seconds"] = round(time.monotonic() - measured, 3)
+    record.setdefault("stage1_exit", {})[role] = status
+    if status != 0:
+        record.setdefault("errors", []).append(f"self-host inline {role} stage-1 build exited {status}")
+
+
+def measure_selfhost_inline(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
+                            receipt: dict) -> None:
+    """Time both stage-1 compilers on the frozen merge-base tree and record the validated result (#58)."""
+    record = receipt["selfhost_inline"]
+    root = work / "selfhost-inline"
+    exported = evidence / "selfhost_inline"
+    errors = list(record.get("errors", []))
+    helper = selfhost_inline_helper()
+    record["harness_sha256"] = sha256(helper) if helper.is_file() else None
+    status = None
+    if not errors and all(record.get("stage1_exit", {}).get(role) == 0 for role in ("baseline", "candidate")):
+        measured = time.monotonic()
+        status = run([sys.executable, "-B", str(helper), "compare", "--lab", str(arguments.lab.resolve()),
+                      "--baseline-stage1", str(root / "stage1-baseline/stage1.json"),
+                      "--candidate-stage1", str(root / "stage1-candidate/stage1.json"),
+                      "--repo-root", str(candidate), "--base-revision", arguments.base, "--output", str(root / "compare")],
+                     candidate, evidence / "selfhost-inline.log", SELFHOST_INLINE_TIMEOUT_SECONDS)
+        receipt["timings"]["selfhost_inline_seconds"] = round(time.monotonic() - measured, 3)
+        if status != 0:
+            errors.append(f"self-host inline comparison exited {status}")
+    elif not errors:
+        errors.append("self-host inline stage-1 compilers were not both built")
+    documents = {}
+    if root.is_dir():
+        record["evidence_omissions"] = []
+        # Each part has its own destination: an export replaces its destination directory. Each part
+        # names its mandatory documents, so they are exported now even when optional files are deferred.
+        for part in ("stage1-baseline", "stage1-candidate", "compare"):
+            if (root / part).is_dir():
+                required = tuple(name[len(part) + 1:] for name in SELFHOST_INLINE_REQUIRED
+                                 if name.startswith(part + "/"))
+                problems, omissions = export_tree(root / part, exported / part, evidence, EVIDENCE_IGNORE, required)
+                errors.extend(problems)
+                record["evidence_omissions"].extend(omissions)
+        for name in SELFHOST_INLINE_REQUIRED:
+            documents[name], problem = read_exported_json(exported / name)
+            if problem:
+                errors.append(f"exported evidence selfhost_inline/{name} unreadable: {problem}")
+    if status == 0 and len(documents) == len(SELFHOST_INLINE_REQUIRED) and all(documents.values()):
+        stage1 = {role: documents[f"stage1-{role}/stage1.json"] for role in ("baseline", "candidate")}
+        errors.extend(validate_selfhost_inline(stage1, documents["compare/result.json"], receipt["binaries"]))
+        expected = {role: (stage1[role].get("stage1") or {}).get("sha256") for role in ("baseline", "candidate")}
+        errors.extend(validate_selfhost_inline_documents(
+            documents["compare/lab/summary.json"], documents["compare/lab/compare.json"],
+            {"a": documents["compare/lab/a/lab.json"], "b": documents["compare/lab/b/lab.json"]}, expected))
+        record["digest"] = selfhost_inline_digest(documents["compare/lab/summary.json"])
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -2116,6 +2273,16 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if ast_requested:
         receipt["ast_pilot_acceptance"] = {"requested": True, "request_line": AST_PILOT_ACCEPTANCE_REQUEST_LINE,
                                            "profile": AST_PILOT_ACCEPTANCE_PROFILE, "status": "pending"}
+    reuse_requested = arguments.mode == "pull" and getattr(arguments, "constant_reuse_requested", False)
+    problem = getattr(arguments, "constant_reuse_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if reuse_requested:
+        receipt["constant_reuse_acceptance"] = {"requested": True, "request_line": CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                                                "profile": CONSTANT_REUSE_ACCEPTANCE_PROFILE, "status": "pending"}
+        # One long opt-in leg per compare-pull job keeps the unchanged compare-pull budget provable.
+        if ast_requested or inline_requested:
+            reasons.append("constant-reuse-acceptance-v1 cannot be combined with the inline or ast-pilot acceptance profile")
     real_requested = arguments.mode == "pull" and getattr(arguments, "real_source_requested", False)
     problem = getattr(arguments, "real_source_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2123,6 +2290,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if real_requested:
         receipt["throughput_real_source"] = {"requested": True, "request_line": THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                                              "profile": THROUGHPUT_REAL_SOURCE_PROFILE, "status": "pending"}
+        if reuse_requested:
+            reasons.append("constant-reuse-acceptance-v1 cannot be combined with real-source throughput")
     production_requested = arguments.mode == "pull" and getattr(arguments, "production_profile_requested", False)
     problem = getattr(arguments, "production_profile_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2131,8 +2300,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["production_profile"] = {"requested": True, "request_line": PRODUCTION_PROFILE_REQUEST_LINE,
                                          "profile": PRODUCTION_PROFILE_PROFILE, "status": "pending"}
         # Its build leg and the other long opt-in legs together would not fit the compare-pull job.
-        if real_requested or ast_requested:
-            reasons.append("production-profile-v1 cannot be combined with real-source throughput or ast-pilot acceptance")
+        if real_requested or ast_requested or reuse_requested:
+            reasons.append("production-profile-v1 cannot be combined with real-source throughput, ast-pilot or "
+                           "constant-reuse acceptance")
     probes_requested = arguments.mode == "pull" and getattr(arguments, "compiler_probes_requested", False)
     problem = getattr(arguments, "compiler_probes_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2141,9 +2311,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["compiler_probes"] = {"requested": True, "request_line": COMPILER_PROBES_REQUEST_LINE,
                                       "profile": COMPILER_PROBES_PROFILE, "status": "pending"}
         # One long opt-in leg per compare-pull job keeps the unchanged 90-minute budget provable.
-        if real_requested or ast_requested or production_requested:
-            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot acceptance "
-                           "or the PGO/LTO production profile")
+        if real_requested or ast_requested or production_requested or reuse_requested:
+            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot or "
+                           "constant-reuse acceptance or the PGO/LTO production profile")
     selector_requested = arguments.mode == "pull" and getattr(arguments, "frontend_selector_requested", False)
     problem = getattr(arguments, "frontend_selector_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2152,9 +2322,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["frontend_selector"] = {"requested": True, "request_line": FRONTEND_SELECTOR_REQUEST_LINE,
                                         "profile": FRONTEND_SELECTOR_PROFILE, "status": "pending"}
         # One long opt-in leg per compare-pull job keeps the leg's measured cost inside its unchanged budget.
-        if real_requested or ast_requested or production_requested or probes_requested:
-            reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot "
-                           "acceptance, the PGO/LTO production profile or compiler-probes-v1")
+        if real_requested or ast_requested or production_requested or probes_requested or reuse_requested:
+            reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot or "
+                           "constant-reuse acceptance, the PGO/LTO production profile or compiler-probes-v1")
     linker_requested = arguments.mode == "pull" and getattr(arguments, "wild_linker_requested", False)
     problem = getattr(arguments, "wild_linker_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2164,9 +2334,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                   "profile": WILD_LINKER_PROFILE, "status": "pending"}
         # The long opt-in legs and its input builds together would not fit the compare-pull job, and one
         # opt-in leg per attempt keeps a report from being shared between two profiles.
-        if real_requested or ast_requested or production_requested or probes_requested or selector_requested:
-            reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot acceptance, "
-                           "the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                reuse_requested:
+            reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot or constant-reuse "
+                           "acceptance, the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
     link_tls_requested = arguments.mode == "pull" and getattr(arguments, "link_tls_requested", False)
     problem = getattr(arguments, "link_tls_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2176,16 +2347,32 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                "status": "pending"}
         # One opt-in leg per attempt keeps a report from being shared between two profiles.
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
-                linker_requested:
-            reasons.append("link-tls-v1 cannot be combined with real-source throughput, ast-pilot acceptance, the "
-                           "PGO/LTO production profile, compiler-probes-v1, the frontend-selector probes or wild-linker-v1")
+                linker_requested or reuse_requested:
+            reasons.append("link-tls-v1 cannot be combined with real-source throughput, ast-pilot or constant-reuse "
+                           "acceptance, the PGO/LTO production profile, compiler-probes-v1, the frontend-selector probes "
+                           "or wild-linker-v1")
+    selfhost_requested = arguments.mode == "pull" and getattr(arguments, "selfhost_inline_requested", False)
+    problem = getattr(arguments, "selfhost_inline_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if selfhost_requested:
+        receipt["selfhost_inline"] = {"requested": True, "request_line": SELFHOST_INLINE_REQUEST_LINE,
+                                      "profile": SELFHOST_INLINE_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles; the
+        # scaling leg also runs before this one and would share its budget.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or inline_requested or reuse_requested or \
+                scaling_requested(candidate, arguments.base, arguments.head):
+            reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg, the scaling "
+                           "leg included")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
     historical_root = None
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
-                  or inline_requested or linker_requested or link_tls_requested
+                  or inline_requested or linker_requested or link_tls_requested or reuse_requested
+                  or selfhost_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2258,6 +2445,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     inline["status"] = "complete" if not errors else "failed"
                 if role == "candidate" and ast_requested:
                     measure_ast_pilot(arguments, candidate, binary, work, evidence, receipt)
+                if role == "candidate" and reuse_requested:
+                    measure_constant_reuse(arguments, candidate, binary, work, evidence, receipt)
+                if selfhost_requested:
+                    mark(receipt, evidence, f"selfhost-inline-stage1-{role}")
+                    build_selfhost_inline_stage1(role, binary, candidate, commit, work, evidence, receipt)
 
     if not reasons:
         lab = work / "lab"
@@ -2325,6 +2517,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if link_tls_requested:
             mark(receipt, evidence, "link-tls")
             measure_link_tls(bins, work, evidence, receipt)
+        if selfhost_requested:
+            mark(receipt, evidence, "selfhost-inline")
+            measure_selfhost_inline(arguments, candidate, work, evidence, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -2390,6 +2585,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("issue #3397 ast-pilot acceptance was requested but did not reach its candidate-build phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if reuse_requested:
+        record = receipt["constant_reuse_acceptance"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #3011 constant-reuse acceptance was requested but did not reach its candidate-build phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
     if real_requested:
         record = receipt["throughput_real_source"]
         reasons.extend(record.get("errors", []))
@@ -2438,6 +2641,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the link-tls leg was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if selfhost_requested:
+        record = receipt["selfhost_inline"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the self-host inline leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -2463,6 +2674,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     arguments.ast_pilot_requested, arguments.ast_pilot_request_problem = (
         ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.constant_reuse_requested, arguments.constant_reuse_request_problem = (
+        constant_reuse_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.real_source_requested, arguments.real_source_request_problem = (
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.historical_requested, arguments.historical_request_problem = (
@@ -2477,6 +2690,8 @@ def main(argv: list[str] | None = None) -> int:
         wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.link_tls_requested, arguments.link_tls_request_problem = (
         link_tls_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.selfhost_inline_requested, arguments.selfhost_inline_request_problem = (
+        selfhost_inline_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     preparation = select_preparation(arguments)
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
