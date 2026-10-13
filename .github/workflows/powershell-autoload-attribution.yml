@@ -1,8 +1,8 @@
 name: PowerShell autoload attribution
 
 # Temporary #3979 diagnostic. Branch-only; removed before the fix merges.
-# Attributes the ~23 s Windows PowerShell 5.1 module-autoload cost on hosted
-# Windows ARM64 against a windows-2025 control. Defender is observed only.
+# Attributes the ~23 s Windows PowerShell 5.1 command-discovery cost on hosted
+# Windows ARM64 against a windows-2025 control. Policy is observed only.
 on:
   push:
     branches: ['claude/festive-fermi-i37ej5']
@@ -28,11 +28,9 @@ jobs:
             sample: arm-2
           - os: windows-2025
             sample: x64-control
-    name: autoload (${{ matrix.sample }})
+    name: discovery (${{ matrix.sample }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
-    env:
-      BUSTER_CI_PYTHON: python
+    timeout-minutes: 45
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -55,274 +53,105 @@ jobs:
           source-directory: .
           source-repository: ${{ github.repository }}
 
-      - name: Runner-launched Windows PowerShell step, no cmdlet
+      # First PowerShell step in the job: the image's cache state is untouched.
+      - name: Trace first command discovery
         shell: powershell
         run: |
-          [Console]::Out.WriteLine('RUNNER_STEP arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' clr=' + [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory())
-      - name: Runner-launched Windows PowerShell step, Write-Output
+          $Cache = $env:PSModuleAnalysisCachePath
+          if ([IO.File]::Exists($Cache)) { $Info = [IO.FileInfo]::new($Cache); [Console]::Out.WriteLine('IMAGE_CACHE bytes=' + $Info.Length + ' mtime=' + $Info.LastWriteTimeUtc.ToString('o')) } else { [Console]::Out.WriteLine('IMAGE_CACHE missing ' + $Cache) }
+          [Console]::Out.WriteLine('ARCH=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' LANGUAGE_MODE=' + $ExecutionContext.SessionState.LanguageMode)
+          try { [Console]::Out.WriteLine('SYSTEM_LOCKDOWN=' + [System.Management.Automation.Security.SystemPolicy]::GetSystemLockdownPolicy()) } catch { [Console]::Out.WriteLine('SYSTEM_LOCKDOWN_ERROR=' + $_.Exception.Message) }
+          $Trace = [IO.Path]::Combine($env:RUNNER_TEMP, 'discovery-trace.log')
+          $Watch = [Diagnostics.Stopwatch]::StartNew()
+          Microsoft.PowerShell.Utility\Trace-Command -Name CommandDiscovery, '*Module*' -Expression { $null = Write-Output probe } -FilePath $Trace -ListenerOption Timestamp
+          [Console]::Out.WriteLine('TRACED_WRITE_OUTPUT_MS=' + $Watch.ElapsedMilliseconds)
+          $Lines = [IO.File]::ReadAllLines($Trace)
+          [Console]::Out.WriteLine('TRACE_LINES=' + $Lines.Length)
+          $Frequency = [double][Diagnostics.Stopwatch]::Frequency
+          $Previous = $null
+          $Message = ''
+          $PreviousMessage = ''
+          $Gaps = [Collections.Generic.List[string]]::new()
+          foreach ($Line in $Lines) {
+            if ($Line -match '^\s+Timestamp=(\d+)') {
+              $Stamp = [long]$Matches[1]
+              if ($null -ne $Previous) { $Gaps.Add(('{0,10:F1} ms after: {1}' -f (($Stamp - $Previous) * 1000.0 / $Frequency), $PreviousMessage)) }
+              $Previous = $Stamp
+              $PreviousMessage = $Message
+            } elseif ($Line -notmatch '^\s') {
+              $Message = $Line
+            }
+          }
+          [Console]::Out.WriteLine('== largest gaps')
+          foreach ($Gap in ($Gaps | Microsoft.PowerShell.Utility\Sort-Object -Descending | Microsoft.PowerShell.Utility\Select-Object -First 40)) { [Console]::Out.WriteLine('GAP ' + $Gap) }
+          [Console]::Out.WriteLine('== distinct messages')
+          $Lines | Microsoft.PowerShell.Core\Where-Object { $_ -notmatch '^\s' } | ForEach-Object { ($_ -replace '[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}', 'GUID') -replace '\d+', 'N' } |
+            Microsoft.PowerShell.Utility\Group-Object | Microsoft.PowerShell.Utility\Sort-Object Count -Descending |
+            Microsoft.PowerShell.Utility\Select-Object -First 60 | ForEach-Object { [Console]::Out.WriteLine(('{0,6} {1}' -f $_.Count, $_.Name)) }
+          [Console]::Out.WriteLine('== first trace lines')
+          $Lines | Microsoft.PowerShell.Utility\Select-Object -First 120 | ForEach-Object { [Console]::Out.WriteLine($_) }
+          if ([IO.File]::Exists($Cache)) { $Info = [IO.FileInfo]::new($Cache); [Console]::Out.WriteLine('CACHE_AFTER_TRACE bytes=' + $Info.Length + ' mtime=' + $Info.LastWriteTimeUtc.ToString('o')) }
+
+      - name: Policy state (observed only)
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Continue'
+          [Console]::Out.WriteLine('PSLockdownPolicy=' + $env:__PSLockdownPolicy)
+          $Path = [IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psm1')
+          try {
+            $Watch = [Diagnostics.Stopwatch]::StartNew()
+            for ($Index = 0; $Index -lt 50; $Index += 1) { $Mode = [System.Management.Automation.Security.SystemPolicy]::GetLockdownPolicy($Path, $null) }
+            [Console]::Out.WriteLine('FILE_LOCKDOWN=' + $Mode + ' x50_ms=' + $Watch.ElapsedMilliseconds)
+          } catch { [Console]::Out.WriteLine('FILE_LOCKDOWN_ERROR=' + $_.Exception.Message) }
+          Get-ExecutionPolicy -List | Format-Table -AutoSize | Out-String -Width 200
+          Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -ErrorAction SilentlyContinue | Format-List | Out-String -Width 200
+          Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers' -ErrorAction SilentlyContinue | Format-List | Out-String -Width 200
+          Get-Service AppIDSvc -ErrorAction SilentlyContinue | Format-List Name, Status, StartType | Out-String
+          try { (Get-AppLockerPolicy -Effective -Xml) } catch { 'APPLOCKER_ERROR ' + $_.Exception.Message }
+          try { Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard | Format-List CodeIntegrityPolicyEnforcementStatus, UsermodeCodeIntegrityPolicyEnforcementStatus, SecurityServicesRunning, VirtualizationBasedSecurityStatus | Out-String } catch { 'DEVICEGUARD_ERROR ' + $_.Exception.Message }
+          $CiTool = [IO.Path]::Combine($env:SystemRoot, 'System32\CiTool.exe')
+          if ([IO.File]::Exists($CiTool)) { & $CiTool --list-policies 2>&1 | Select-Object -First 80 } else { 'CITOOL missing' }
+          foreach ($Root in $env:PSModulePath.Split(';')) {
+            if ($Root -and [IO.Directory]::Exists($Root)) {
+              $Files = [IO.Directory]::GetFiles($Root, '*', [IO.SearchOption]::AllDirectories)
+              $Script = @($Files | Where-Object { $_ -match '\.(psd1|psm1|ps1|ps1xml|cdxml)$' }).Count
+              [Console]::Out.WriteLine('MODULE_ROOT ' + $Root + ' modules=' + [IO.Directory]::GetDirectories($Root).Length + ' files=' + $Files.Length + ' script_files=' + $Script)
+            }
+          }
+
+      - name: Analysis-cache persistence across ARM64-native children
+        shell: powershell
+        run: |
+          $Child = [IO.Path]::Combine($env:RUNNER_TEMP, 'child.ps1')
+          [IO.File]::WriteAllText($Child, @'
           $Watch = [Diagnostics.Stopwatch]::StartNew()
           $null = Write-Output probe
-          [Console]::Out.WriteLine('RUNNER_STEP write_output_ms=' + $Watch.ElapsedMilliseconds + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
-
-      - name: Write probe scripts
-        shell: bash
-        run: |
-          set -euo pipefail
-          probes="$RUNNER_TEMP/ps-probes"
-          mkdir -p "$probes"
-          # Every probe uses only .NET calls around one statement so the
-          # statement is the only command PowerShell may need to autoload.
-          cat > "$probes/suffix.ps1.txt" <<'EOF'
-          $__p = [Diagnostics.Process]::GetCurrentProcess()
-          [Console]::Out.WriteLine('PROBE_INTERNAL stmt_ms=' + $__sw.ElapsedMilliseconds + ' cpu_ms=' + [int]$__p.TotalProcessorTime.TotalMilliseconds + ' threads=' + $__p.Threads.Count + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
-          try { $__c = [Diagnostics.PerformanceCounter]::new('.NET CLR Jit', '# of Methods Jitted', $__p.ProcessName, $true); [Console]::Out.WriteLine('JIT_METHODS=' + $__c.RawValue) } catch { [Console]::Out.WriteLine('JIT_COUNTER_ERROR=' + $_.Exception.Message) }
-          EOF
-          write_probe() {
-            printf '%s\n%s\n' '$__sw = [Diagnostics.Stopwatch]::StartNew()' "$2" > "$probes/$1.ps1"
-            cat "$probes/suffix.ps1.txt" >> "$probes/$1.ps1"
+          $Elapsed = $Watch.ElapsedMilliseconds
+          if ($env:CHILD_LINGER_MS) { [Threading.Thread]::Sleep([int]$env:CHILD_LINGER_MS) }
+          [Console]::Out.WriteLine('stmt_ms=' + $Elapsed + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
+          '@)
+          function Show-Cache([string]$Label) {
+            $Path = $env:PSModuleAnalysisCachePath
+            if ([IO.File]::Exists($Path)) { $Info = [IO.FileInfo]::new($Path); [Console]::Out.WriteLine('CACHE ' + $Label + ' bytes=' + $Info.Length + ' mtime=' + $Info.LastWriteTimeUtc.ToString('o')) } else { [Console]::Out.WriteLine('CACHE ' + $Label + ' missing') }
           }
-          write_probe none '$null = 1'
-          write_probe write_output '$null = Write-Output probe'
-          write_probe write_output_qualified '$null = Microsoft.PowerShell.Utility\Write-Output probe'
-          write_probe join_path '$null = Join-Path a b'
-          write_probe import_utility 'Import-Module Microsoft.PowerShell.Utility'
-          write_probe exit_zero 'exit 0'
-          write_probe throw 'throw "probe"'
-          write_probe environment_exit '[Environment]::Exit(0)'
-          write_probe module_path '[Console]::Out.WriteLine("PSMODULEPATH=" + $env:PSModulePath); $null = Write-Output probe'
-          cat > "$probes/modules.ps1" <<'EOF'
-          $null = Write-Output probe
-          $null = Join-Path a b
-          [Console]::Out.WriteLine('ARCH ' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
-          foreach ($m in [Diagnostics.Process]::GetCurrentProcess().Modules) { [Console]::Out.WriteLine('MODULE ' + $m.FileName) }
-          foreach ($a in [AppDomain]::CurrentDomain.GetAssemblies()) { if (-not $a.IsDynamic) { [Console]::Out.WriteLine('ASSEMBLY ' + $a.FullName + ' | ' + $a.Location + ' | gac=' + $a.GlobalAssemblyCache) } }
-          EOF
-          cat > "$probes/report.ps1" <<'EOF'
-          [Console]::Out.WriteLine('PS_VERSION=' + $PSVersionTable.PSVersion + ' BUILD=' + $PSVersionTable.BuildVersion + ' PROCESSOR_ARCHITECTURE=' + $env:PROCESSOR_ARCHITECTURE + ' PROCESS_ARCH=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' CLR_DIR=' + [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory())
-          [Console]::Out.WriteLine('PSMODULEPATH=' + $env:PSModulePath)
-          [Console]::Out.WriteLine('ANALYSIS_CACHE_ENV=' + $env:PSModuleAnalysisCachePath)
-          if ($env:PSModuleAnalysisCachePath -and [IO.File]::Exists($env:PSModuleAnalysisCachePath)) { $i = [IO.FileInfo]::new($env:PSModuleAnalysisCachePath); [Console]::Out.WriteLine('ANALYSIS_CACHE bytes=' + $i.Length + ' mtime=' + $i.LastWriteTimeUtc.ToString('o')) } else { [Console]::Out.WriteLine('ANALYSIS_CACHE missing') }
-          EOF
-          # The CI harness copies build.ps1; a runner-local receipt records the
-          # architecture each real wrapper launch receives. Never committed.
-          cat > "$probes/arch-receipt.ps1.txt" <<'EOF'
-          [IO.File]::AppendAllText([IO.Path]::Combine($env:RUNNER_TEMP, 'ps-arch.log'), 'WRAPPER_ARCH ' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + [Environment]::NewLine)
-          EOF
-          cat > "$probes/defender.ps1" <<'EOF'
-          Get-MpComputerStatus | Format-List AMProductVersion,AMRunningMode,RealTimeProtectionEnabled,IsTamperProtected
-          'ExclusionPath=' + ((Get-MpPreference).ExclusionPath -join ';')
-          EOF
-
-      - name: Runtime, launcher architecture and native-image state
-        shell: bash
-        run: |
-          set +e -u
-          probes="$RUNNER_TEMP/ps-probes"
-          pe_machine() {
-            local offset
-            offset=$(od -An -t u4 -j 60 -N 4 "$1" | tr -d ' ')
-            printf 'PE_MACHINE %s 0x%s\n' "$1" "$(od -An -t x2 -j $((offset + 4)) -N 2 "$1" | tr -d ' ')"
+          function Invoke-Child([string]$Label, [string]$Linger) {
+            $env:CHILD_LINGER_MS = $Linger
+            $Watch = [Diagnostics.Stopwatch]::StartNew()
+            $Output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Child
+            [Console]::Out.WriteLine('RUN ' + $Label + ' linger_ms=' + $Linger + ' wall_ms=' + $Watch.ElapsedMilliseconds + ' ' + ($Output -join ' '))
+            Show-Cache $Label
           }
-          printf 'BASH uname_m=%s\n' "$(uname -m)"
-          for exe in "$(command -v bash)" "$(command -v python)" /c/Windows/System32/cmd.exe \
-                     /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "$(command -v pwsh)"; do
-            [[ -f "$exe" ]] && pe_machine "$exe"
-          done
-          report=$(cygpath -w "$probes/report.ps1")
-          printf 'LAUNCHER bash\n'
-          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$report" | tr -d '\r'
-          printf 'LAUNCHER cmd\n'
-          MSYS_NO_PATHCONV=1 cmd.exe /d /c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$report" | tr -d '\r'
-          for d in /c/Windows/assembly/NativeImages_*; do
-            printf 'NATIVE_IMAGE_DIR %s ni_dlls=%s\n' "$d" "$(find "$d" -iname '*.ni.dll' 2>/dev/null | wc -l)"
-          done
-          for ngen in /c/Windows/Microsoft.NET/Framework64/v4.0.30319/ngen.exe /c/Windows/Microsoft.NET/FrameworkArm64/v4.0.30319/ngen.exe; do
-            [[ -f "$ngen" ]] || continue
-            printf 'NGEN_QUEUE %s\n' "$ngen"
-            MSYS_NO_PATHCONV=1 "$ngen" queue status /nologo 2>&1 | tr -d '\r' | head -10
-          done
-          exit 0
-
-      - name: Autoload probes before intervention
-        shell: bash
-        run: |
-          set +e -u
-          probes="$RUNNER_TEMP/ps-probes"
-          ps=(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File)
-          cmdps=(env MSYS_NO_PATHCONV=1 cmd.exe /d /c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File)
-          probe() {
-            local label=$1 script=$2
-            shift 2
-            local log="$probes/before-$label.log" start end status
-            start=$(date +%s%N)
-            "$@" "$(cygpath -w "$probes/$script.ps1")" > "$log" 2>&1
-            status=$?
-            end=$(date +%s%N)
-            printf 'PS_PROBE phase=before label=%s status=%s wall_ms=%s %s\n' "$label" "$status" \
-              "$(( (end - start) / 1000000 ))" "$(grep -h -E '^(PROBE_INTERNAL|JIT_|PSMODULEPATH)' "$log" | tr -d '\r' | tr '\n' ' ')"
-          }
-          for launcher in bash cmd; do
-            if [[ $launcher == bash ]]; then run=("${ps[@]}"); else run=("${cmdps[@]}"); fi
-            for round in 1 2; do
-              probe "$launcher-none-$round" none "${run[@]}"
-              probe "$launcher-write_output-$round" write_output "${run[@]}"
-              probe "$launcher-join_path-$round" join_path "${run[@]}"
-              probe "$launcher-write_output_qualified-$round" write_output_qualified "${run[@]}"
-            done
-            probe "$launcher-import_utility" import_utility "${run[@]}"
-            probe "$launcher-restricted_module_path" module_path env "PSModulePath=C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules" "${run[@]}"
-            "${run[@]}" "$(cygpath -w "$probes/modules.ps1")" 2>&1 | tr -d '\r' > "$probes/modules-$launcher-before.log"
-            printf 'MODULES_BEFORE launcher=%s %s modules=%s ni=%s\n' "$launcher" "$(grep '^ARCH ' "$probes/modules-$launcher-before.log")" \
-              "$(grep -c '^MODULE ' "$probes/modules-$launcher-before.log")" "$(grep -c -i '\.ni\.dll$' "$probes/modules-$launcher-before.log")"
-          done
-          probe exit_zero exit_zero "${ps[@]}"
-          probe throw throw "${ps[@]}"
-          probe environment_exit environment_exit "${ps[@]}"
-          if command -v pwsh > /dev/null; then
-            probe pwsh_none none pwsh -NoProfile -NonInteractive -File
-            probe pwsh_write_output write_output pwsh -NoProfile -NonInteractive -File
-          fi
-          for launcher in bash cmd; do
-            printf '== modules (%s)\n' "$launcher"
-            grep -E '^(ARCH|MODULE|ASSEMBLY) ' "$probes/modules-$launcher-before.log"
-          done
-          exit 0
-
-      - name: Bootstrap wrapper cases before intervention
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          set +e -u
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          # Checkout may convert this file to CRLF; match either ending.
-          sed -i '/^\$ErrorActionPreference = "Stop"\r\?$/r '"$RUNNER_TEMP/ps-probes/arch-receipt.ps1.txt" build.ps1
-          git diff --stat
-          grep -c 'WRAPPER_ARCH' build.ps1
-          process_owner_driver="$RUNNER_TEMP/buster-ci/bootstrap-wrapper-build.exe"
-          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -Wall -Werror \
-            -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -lws2_32 \
-            -o "$process_owner_driver"
-          "$process_owner_driver" bootstrap_process_owner_test > "$RUNNER_TEMP/buster-ci/owner-before.log" 2>&1
-          printf 'OWNER_TEST status=%s\n' "$?"
-          while IFS= read -r line; do
-            line=${line%$'\r'}
-            case "$line" in
-              'BOOTSTRAP_PROCESS_OWNER '*) export BUSTER_WINDOWS_PROCESS_TREE="${line#BOOTSTRAP_PROCESS_OWNER }" ;;
-            esac
-          done < "$RUNNER_TEMP/buster-ci/owner-before.log"
-          rm -f "$RUNNER_TEMP/ps-arch.log"
-          start=$(date +%s%N)
-          "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 > "$RUNNER_TEMP/buster-ci/cases-before.log" 2>&1
-          status=$?
-          end=$(date +%s%N)
-          grep -E 'BOOTSTRAP_PROCESS .*finish|BOOTSTRAP_CASE_SUMMARY' "$RUNNER_TEMP/buster-ci/cases-before.log" | cut -c1-300
-          sort "$RUNNER_TEMP/ps-arch.log" | uniq -c
-          printf 'WRAPPER_CASES phase=before status=%s wall_ms=%s\n' "$status" "$(( (end - start) / 1000000 ))"
-          exit 0
-
-      - name: Native-image intervention for autoloaded GAC assemblies
-        timeout-minutes: 20
-        shell: bash
-        run: |
-          set +e -u
-          probes="$RUNNER_TEMP/ps-probes"
-          total_start=$(date +%s%N)
-          count=0
-          for launcher in bash cmd; do
-            log="$probes/modules-$launcher-before.log"
-            arch=$(sed -n 's/^ARCH //p' "$log")
-            case "$arch" in
-              X64) ngen=/c/Windows/Microsoft.NET/Framework64/v4.0.30319/ngen.exe ;;
-              Arm64) ngen=/c/Windows/Microsoft.NET/FrameworkArm64/v4.0.30319/ngen.exe ;;
-              *) printf 'UNKNOWN_ARCH launcher=%s arch=%s\n' "$launcher" "$arch"; continue ;;
-            esac
-            while IFS= read -r full; do
-              name=${full%%,*}
-              if grep -i -q -F "\\$name.ni.dll" "$log"; then
-                continue
-              fi
-              if grep -q -x -F "$arch|$full" "$probes/ngen-done.txt" 2>/dev/null; then
-                continue
-              fi
-              printf '%s|%s\n' "$arch" "$full" >> "$probes/ngen-done.txt"
-              start=$(date +%s%N)
-              MSYS_NO_PATHCONV=1 "$ngen" install "$full" /nologo > "$probes/ngen.log" 2>&1
-              status=$?
-              end=$(date +%s%N)
-              count=$((count + 1))
-              printf 'NGEN_INSTALL arch=%s status=%s wall_ms=%s %s\n' "$arch" "$status" "$(( (end - start) / 1000000 ))" "$full"
-              tr -d '\r' < "$probes/ngen.log" | grep -v '^$' | tail -4
-            done < <(grep '^ASSEMBLY ' "$log" | grep 'gac=True' | sed -E 's/^ASSEMBLY ([^|]*) \| .*$/\1/' | sed -E 's/ +$//')
-          done
-          total_end=$(date +%s%N)
-          printf 'NGEN_INSTALL_TOTAL installs=%s wall_ms=%s\n' "$count" "$(( (total_end - total_start) / 1000000 ))"
-          exit 0
-
-      - name: Autoload probes after intervention
-        shell: bash
-        run: |
-          set +e -u
-          probes="$RUNNER_TEMP/ps-probes"
-          ps=(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File)
-          cmdps=(env MSYS_NO_PATHCONV=1 cmd.exe /d /c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File)
-          probe() {
-            local label=$1 script=$2
-            shift 2
-            local log="$probes/after-$label.log" start end status
-            start=$(date +%s%N)
-            "$@" "$(cygpath -w "$probes/$script.ps1")" > "$log" 2>&1
-            status=$?
-            end=$(date +%s%N)
-            printf 'PS_PROBE phase=after label=%s status=%s wall_ms=%s %s\n' "$label" "$status" \
-              "$(( (end - start) / 1000000 ))" "$(grep -h -E '^(PROBE_INTERNAL|JIT_|PSMODULEPATH)' "$log" | tr -d '\r' | tr '\n' ' ')"
-          }
-          for launcher in bash cmd; do
-            if [[ $launcher == bash ]]; then run=("${ps[@]}"); else run=("${cmdps[@]}"); fi
-            for round in 1 2; do
-              probe "$launcher-none-$round" none "${run[@]}"
-              probe "$launcher-write_output-$round" write_output "${run[@]}"
-              probe "$launcher-join_path-$round" join_path "${run[@]}"
-            done
-            "${run[@]}" "$(cygpath -w "$probes/modules.ps1")" 2>&1 | tr -d '\r' > "$probes/modules-$launcher-after.log"
-            printf 'MODULES_AFTER launcher=%s %s modules=%s ni=%s\n' "$launcher" "$(grep '^ARCH ' "$probes/modules-$launcher-after.log")" \
-              "$(grep -c '^MODULE ' "$probes/modules-$launcher-after.log")" "$(grep -c -i '\.ni\.dll$' "$probes/modules-$launcher-after.log")"
-          done
-          exit 0
-
-      - name: Runner-launched Windows PowerShell step after intervention
-        shell: powershell
-        run: |
-          $Watch = [Diagnostics.Stopwatch]::StartNew()
-          $null = Write-Output probe
-          [Console]::Out.WriteLine('RUNNER_STEP_AFTER write_output_ms=' + $Watch.ElapsedMilliseconds + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
-
-      - name: Bootstrap wrapper cases after intervention
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          set +e -u
-          while IFS= read -r line; do
-            line=${line%$'\r'}
-            case "$line" in
-              'BOOTSTRAP_PROCESS_OWNER '*) export BUSTER_WINDOWS_PROCESS_TREE="${line#BOOTSTRAP_PROCESS_OWNER }" ;;
-            esac
-          done < "$RUNNER_TEMP/buster-ci/owner-before.log"
-          rm -f "$RUNNER_TEMP/ps-arch.log"
-          start=$(date +%s%N)
-          "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 > "$RUNNER_TEMP/buster-ci/cases-after.log" 2>&1
-          status=$?
-          end=$(date +%s%N)
-          grep -E 'BOOTSTRAP_PROCESS .*finish|BOOTSTRAP_CASE_SUMMARY' "$RUNNER_TEMP/buster-ci/cases-after.log" | cut -c1-300
-          sort "$RUNNER_TEMP/ps-arch.log" | uniq -c
-          printf 'WRAPPER_CASES phase=after status=%s wall_ms=%s\n' "$status" "$(( (end - start) / 1000000 ))"
-          exit 0
-
-      - name: Observe Defender state
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set +e
-          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$RUNNER_TEMP/ps-probes/defender.ps1")" 2>&1 | tr -d '\r'
-          exit 0
+          Show-Cache 'machine-start'
+          Invoke-Child 'machine-1' '0'
+          Invoke-Child 'machine-2' '0'
+          Invoke-Child 'machine-3-linger' '25000'
+          Invoke-Child 'machine-4' '0'
+          Invoke-Child 'machine-5' '0'
+          $Fresh = [IO.Path]::Combine($env:RUNNER_TEMP, 'fresh-cache')
+          $null = [IO.Directory]::CreateDirectory($Fresh)
+          $env:PSModuleAnalysisCachePath = [IO.Path]::Combine($Fresh, 'ModuleAnalysisCache')
+          Show-Cache 'fresh-start'
+          Invoke-Child 'fresh-1' '0'
+          Invoke-Child 'fresh-2-linger' '25000'
+          Invoke-Child 'fresh-3' '0'
+          Invoke-Child 'fresh-4' '0'
