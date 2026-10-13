@@ -43116,6 +43116,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting(UnitTestArguments* argum
             scratch_end(temporary);
         }
     }
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
