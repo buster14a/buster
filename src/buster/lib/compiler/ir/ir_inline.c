@@ -744,11 +744,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // to total_work and visits once after the scan.
                         u64 scan_budget = IR_FAST_WORK_BUDGET - BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET);
                         u64 scan_used = 0;
+                        IrInstruction const* scan_rows = caller->instructions;
                         for (u32 block = 0; block < caller->block_count && !possible_tiny_call && !caller_scan_exhausted; block += 1)
                         {
-                            for (u32 row = caller->blocks[block].first_instruction.value;
-                                 row != IR_INLINE_NONE && !possible_tiny_call && !caller_scan_exhausted;
-                                 row = caller->instructions[row].next.value)
+                            for (u32 row = caller->blocks[block].first_instruction.value; row != IR_INLINE_NONE;
+                                 row = scan_rows[row].next.value)
                             {
                                 scan_used += 1;
                                 if (scan_used > scan_budget)
@@ -756,10 +756,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                     caller_scan_exhausted = true;
                                     break;
                                 }
+                                if (scan_rows[row].opcode != IR_OPCODE_CALL) continue;
                                 IrInstruction* call = caller->instructions + row;
-                                u8 facts = call->opcode == IR_OPCODE_CALL && call->symbol.value < program->symbols.count
-                                               ? plan.callee_facts[call->symbol.value]
-                                               : 0u;
+                                u8 facts = call->symbol.value < program->symbols.count ? plan.callee_facts[call->symbol.value] : 0u;
                                 if ((facts & (IR_INLINE_FACT_REQUIRED | IR_INLINE_FACT_NOINLINE | IR_INLINE_FACT_LINKAGE)) ==
                                         IR_INLINE_FACT_LINKAGE &&
                                     ir_inline_direct_call(caller, call))
@@ -785,6 +784,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                         break;
                                     }
                                     possible_tiny_call = (facts & IR_INLINE_FACT_TINY) != 0;
+                                    if (possible_tiny_call) break;
                                 }
                             }
                         }
