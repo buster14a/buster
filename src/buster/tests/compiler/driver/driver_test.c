@@ -28,6 +28,7 @@
 // initial-exec object whose pairs are non-adjacent the same way (#2582).
 // compiler_driver_test_cached_plan_lanes owns prepared-key reuse across gangs;
 // compiler_driver_test_unit_batches owns failed-cohort recovery and exact output.
+// compiler_driver_test_lane_first_fills owns concurrent first fills of the x86 caches.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
@@ -1134,9 +1135,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 // flag materialization) and for pointer loads and stores at zero, disp8 and
 // disp32 offsets, under every machine allocator.  -fno-machine-fallback turns
 // an unresolved shape into a failed compile instead of a silent canonical
-// fallback.  A child running the opt-in unit gang must resolve every shape
-// before its workers start, or its first worker lookup aborts; its linked
-// output must match the serial child's.
+// fallback.  A child running the opt-in unit gang resolves shapes on its
+// workers' first lookups; its linked output must match the serial child's.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1219,6 +1219,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
         }
     }
     BUSTER_TEST(arguments, linked[0].length != 0 && string_equal(linked[0], linked[1]));
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Lanes fill the x86 caches they reach on first use, under once-claims, with
+// no complete prewarm (#53).  Eight translation units spell the same bodies
+// under their own names, so the lanes of a fresh `cc` child reach the same
+// cold forms, opcode rows, exact plans, shapes, dense tables, variable-memory
+// cells and template rows at once: x87, division, atomics, conversions, flag
+// materialization, near and far field offsets, a loop and inline assembly.
+// Every worker count must link the bytes the one-worker child links, under
+// both machine allocators, with -fno-machine-fallback so an unresolved shape
+// fails the compile instead of falling back.  A fill that ran twice, raced a
+// reader or aborted on a serial check would show up as a failed child or a
+// byte difference.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lane_first_fills(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 body =
+        S8("typedef long long i64;\n"
+           "typedef unsigned long long u64;\n"
+           "long double FN(ld_mix)(long double a, long double b) { return a * b + a / b - (a < b ? a : -b); }\n"
+           "int FN(ld_compare)(long double a, long double b) { return (a < b) + (a == b) * 2 + (a >= b) * 4; }\n"
+           "i64 FN(ld_to_integer)(long double a) { return (i64)a; }\n"
+           "long double FN(integer_to_ld)(i64 a) { return (long double)a; }\n"
+           "u64 FN(unsigned_divide)(u64 a, u64 b) { return a / b + a % b; }\n"
+           "int FN(signed_divide)(int a, int b) { return a / b + a % b; }\n"
+           "int FN(fetch_nand)(int* p, int v) { return __atomic_fetch_nand(p, v, __ATOMIC_SEQ_CST); }\n"
+           "i64 FN(compare_exchange)(i64* p, i64 e, i64 d)\n"
+           "{ __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }\n"
+           "float FN(integer_to_float)(int x) { return (float)x; }\n"
+           "double FN(unsigned_to_double)(u64 x) { return (double)x; }\n"
+           "int FN(double_less)(double a, double b) { return a < b; }\n"
+           "unsigned char FN(nonzero)(unsigned x) { return (unsigned char)(x != 0); }\n"
+           "struct FN(fields) { char c; short s; int i; i64 l; char pad[300]; i64 far; };\n"
+           "i64 FN(copy_fields)(struct FN(fields)* from, struct FN(fields)* to)\n"
+           "{ to->c = from->c; to->s = from->s; to->i = from->i; to->far = from->l + from->far; return to->l + from->c; }\n"
+           "int FN(scaled_sum)(int* v, int n) { int s = 0; for (int i = 0; i < n; i += 1) s += v[i] * (i + 3) - (v[i] >> 2); return s; }\n"
+           "int FN(asm_add)(int a, int b) { __asm__(\"addl %1, %0\" : \"+r\"(a) : \"r\"(b)); return a; }\n"
+           "u64 FN(rotate)(u64 x, int k) { return (x << (k & 63)) | (x >> ((64 - k) & 63)); }\n");
+    enum
+    {
+        COMPILER_DRIVER_TEST_LANE_FILL_UNITS = 8,
+    };
+    String8 inputs[COMPILER_DRIVER_TEST_LANE_FILL_UNITS];
+    bool written = true;
+    for (u32 unit = 0; unit < COMPILER_DRIVER_TEST_LANE_FILL_UNITS; unit += 1)
+    {
+        inputs[unit] = buster_test_temporary_path(arena, string_format(arena, S8("lane-first-fills-{u32}"), unit), S8(".c"));
+        String8 source = string_format(arena, S8("#define FN(name) name##_{u32}\n{S8}{S8}"), unit, body,
+                                       unit == 0 ? S8("int main(void) { return 0; }\n") : S8(""));
+        written = written && file_write(inputs[unit], BUSTER_SLICE_TO_BYTE_SLICE(source));
+    }
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 jobs[] = {S8("-fcompile-jobs=1"), S8("-fcompile-jobs=2"), S8("-fcompile-jobs=4"), S8("-fcompile-jobs=8")};
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            String8 serial = {0};
+            for (u32 job = 0; job < BUSTER_ARRAY_LENGTH(jobs); job += 1)
+            {
+                String8 program = buster_test_temporary_path(arena, string_format(arena, S8("lane-first-fills-{u32}-{u32}"), mode, job), S8(".out"));
+                String8 command[13 + COMPILER_DRIVER_TEST_LANE_FILL_UNITS];
+                u32 count = 0;
+                command[count++] = program_state->input.arguments.pointer[0];
+                command[count++] = S8("cc");
+                command[count++] = S8("-target");
+                command[count++] = S8("x86_64-unknown-linux");
+                command[count++] = allocators[mode];
+                command[count++] = S8("-fno-machine-fallback");
+                command[count++] = S8("-nostdinc");
+                command[count++] = S8("-g0");
+                command[count++] = jobs[job];
+                command[count++] = S8("-o");
+                command[count++] = program;
+                for (u32 unit = 0; unit < COMPILER_DRIVER_TEST_LANE_FILL_UNITS; unit += 1)
+                {
+                    command[count++] = inputs[unit];
+                }
+                ProcessSpawnResult child = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0},
+                                                            (SliceString8){0}, capture);
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult waited = os_process_wait_deadline(arena, child, 60000000);
+                    BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                                    BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                    String8 linked = BYTE_SLICE_TO_STRING(8, file_read(arena, program, (FileReadOptions){0}));
+                    serial = job == 0 ? linked : serial;
+                    BUSTER_TEST_RAW(arguments, linked.length != 0 && string_equal(linked, serial),
+                                    string_format(arena, S8("allocator={S8} jobs={S8} serial={u64} lanes={u64}"), allocators[mode], jobs[job],
+                                                  serial.length, linked.length));
+                    (void)os_file_delete(program);
+                }
+            }
+        }
+    }
+    for (u32 unit = 0; unit < COMPILER_DRIVER_TEST_LANE_FILL_UNITS; unit += 1)
+    {
+        (void)os_file_delete(inputs[unit]);
+    }
     arena_set_position(arena, position);
 #else
     BUSTER_UNUSED(arguments);
@@ -35767,6 +35876,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lane_first_fills);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_runtime_path_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_default_arguments);

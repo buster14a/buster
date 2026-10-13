@@ -124,7 +124,13 @@ parameters, refused past ~2000 levels (#3723). The walk only looks slots up;
 it inserts one where it ends unresolved and caches its answer on the path
 within a budget of twice the other slots (plus a constant), since caching every
 walk past N nested `do` loops for each of their N variables needed N^2 slots
-(#3771). A skipped cache entry costs a later walk, never a different value. Trivial
+(#3771). A skipped cache entry costs a later walk, never a different value. A
+read whose only predecessor lies in such a closed loop it leaves, a loop that
+neither writes nor reads the local, passes to the loop's entry in one step when
+the predecessor's forward links climb to that loop's header (preorder intervals
+of the forward-link forest answer this). Otherwise each of N nested `do`
+conditions climbed through every inner condition and exit block: N^2 steps
+(#3894). Trivial
 parameters and unused parameter cycles are removed; a replaced parameter hands
 its user rows on without those that can no longer requeue, so a chain of
 trivial parameters stays linear. A parameter is trivial
@@ -631,9 +637,14 @@ without facts for identical bitcode and diagnostics.
   adjacent literal runs; the C23 message-less form reports
   `static assertion failed`. Nonconstant assertions quote the complete expression
   using source adjacency with comments/line breaks folded to spaces.
-  Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
-  deferred loop owns the remaining checks at every scope. Function-body walks
-  consume their declarations without evaluating or diagnosing them again.
+  Immediate assertions belong to parsing. Deferred ones at every scope are
+  decided by the semantic typer: `c_parse_validate_deferred_assertions` stores
+  one `CStaticAssertVerdict` per row, and `c_lower_to_ir`'s translation-unit
+  deferred loop reports from those verdicts without evaluating again. A row
+  that validation left unchecked (the model-building entry points) is answered
+  by `c_semantic_static_assert_verdict`, the same evaluator, never by
+  lowering's constant evaluator (#2531). Function-body walks consume their
+  declarations without evaluating or diagnosing them again.
   `c_test_deferred_assert_diagnostic_ownership` pins one source-located
   diagnostic per failed assertion, including nonconstant controls, nested
   blocks and multiple failures, through both frontend SSA forms (GitHub #1783).

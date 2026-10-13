@@ -520,7 +520,27 @@ struct IrInstruction
     bool volatile_access;
     // An IrSimdOperation, narrowed like the rest of the enum tail.
     u8 simd_operation;
+#if BUSTER_BENCH_ALLOCATIONS
+    // Diagnostic-only #3010 birth tag (IR_FAST_BIRTH_* in ir_fast.c), held in
+    // the row's one padding byte so the 64-byte layout is unchanged. Whole-row
+    // copies (compaction, promotion, CFG publication, inlining) carry it;
+    // every row initializer leaves it zero.
+    u8 fold_birth;
+#endif
 };
+
+#if BUSTER_BENCH_ALLOCATIONS
+// IrInstruction.fold_birth: the low three bits are the IrFastFoldRule the
+// commit probe found (NONE when none), PROBED marks a row the C builder
+// committed, CASCADE a rule that needed earlier birth folds, CLONE a copy the
+// inliner made (the callee's verdict is kept), and LATE_FOLDED, cleared on
+// each FAST entry, a row that FAST's fold pass folded in the current run.
+#define IR_FAST_BIRTH_RULE_MASK 0x07u
+#define IR_FAST_BIRTH_LATE_FOLDED 0x10u
+#define IR_FAST_BIRTH_CLONE 0x20u
+#define IR_FAST_BIRTH_CASCADE 0x40u
+#define IR_FAST_BIRTH_PROBED 0x80u
+#endif
 
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT <= UINT8_MAX);

@@ -44278,6 +44278,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
         "    return x;\n"
         "}\n"));
     BUSTER_TEST_RAW(arguments, labelled == 1, string_format(arguments->arena, S8("a labelled body made {u64} typedef probes"), labelled));
+    // A type keyword names no entity, so a declaration it begins is a type
+    // start without the lookup, which climbed every enclosing block (#3894).
+    u64 declarations = c_test_statement_keyword_typedef_probe_count(S8(
+        "int k(int x)\n"
+        "{\n"
+        "    int y = x;\n"
+        "    { unsigned z = (unsigned)y; { const int w = (int)z; x += w; } }\n"
+        "    return x;\n"
+        "}\n"));
+    BUSTER_TEST_RAW(arguments, declarations == 0,
+                    string_format(arguments->arena, S8("keyword-led declarations made {u64} typedef probes"), declarations));
     u64 typedefs = c_test_statement_keyword_typedef_probe_count(S8(
         "typedef int T;\n"
         "int g(int x)\n"
@@ -44976,6 +44987,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
         }
         c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// Lowering takes a deferred _Static_assert's verdict from the semantic typer
+// instead of evaluating it again with its own (GitHub #2531). Every source
+// here is deferred (an enumerator, _Generic, offsetof, a compatibility
+// builtin or an initializer-inferred array). Routes: 0 lowers c_parse's
+// model, which validation never checked, so lowering asks
+// c_semantic_static_assert_verdict; 1 is c_analyze_with_options (-c), whose
+// validation stored every verdict; 2 is semantic-only analysis
+// (-fsyntax-only). All three must agree on each case, on three data layouts
+// and both frontend forms. Before this, route 1 rejected the first case,
+// which route 2 accepted.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_semantic_verdict(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestStaticAssertVerdictCase
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } CTestStaticAssertVerdictCase;
+    CTestStaticAssertVerdictCase const cases[] = {
+        {S8("int f(int i) { _Static_assert(__builtin_choose_expr(1, 1, 0) && _Generic(i, int: 1), \"choice\"); return i; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("#define T4(x) x + x + x + x\n"
+            "#define T16(x) T4(x) + T4(x) + T4(x) + T4(x)\n"
+            "#define T64(x) T16(x) + T16(x) + T16(x) + T16(x)\n"
+            "int f(int i, unsigned long u) {\n"
+            "    _Static_assert(sizeof(T64(i) + (int)u) == sizeof(int) && _Generic(T64(i) + (int)u, int: 1), \"tall\");\n"
+            "    return i;\n"
+            "}\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(void) {\n"
+            "    int x = 0;\n"
+            "    { long x = 0; _Static_assert(sizeof x == sizeof(long) && _Generic(x, long: 1), \"inner\"); }\n"
+            "    _Static_assert(sizeof x == sizeof(int) && _Generic(x, int: 1), \"outer\");\n"
+            "    return x;\n"
+            "}\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(void) { const volatile short s = 0; _Static_assert(sizeof s == sizeof(short) && _Generic(s + 0, int: 1), \"qualified\"); return s; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("struct B { unsigned bf : 3; };\n"
+            "int f(struct B v) { _Static_assert(sizeof(v.bf + 0) == sizeof(int) && _Generic(v.bf + 0, int: 1), \"promoted\"); return v.bf; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("struct M { int a; _Static_assert(_Generic(0, int: 1), \"member\"); };\nint f(struct M m) { return m.a; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("enum { E = 3 };\n_Static_assert(E == 3, \"enumerator\");\n"
+            "struct O { char c; long l; };\n_Static_assert(__builtin_offsetof(struct O, l) == sizeof(long), \"offset\");\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(long l) { _Static_assert(__builtin_types_compatible_p(__typeof__(l), long), \"compatible\"); return 0; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int a[] = {1, 2, 3};\n"
+            "int f(void) { int l[] = {1, 2}; _Static_assert(sizeof a == 3 * sizeof(int) && sizeof l == 2 * sizeof(int), \"inferred\"); return a[0] + l[0]; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(int i) { _Static_assert(__builtin_choose_expr(1, 0, 1) && _Generic(i, int: 1), \"false choice\"); return i; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(int i) { _Static_assert(_Generic(i, int: 0, default: 1), \"false generic\"); return i; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(int n) { enum { L = 1 }; _Static_assert(L + n, \"runtime\"); return n; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+    };
+    Target const targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            for (u32 route = 0; route < 3; route += 1)
+            {
+                u32 form_count = route == 2 ? 1 : 2;
+                for (u32 form = 0; form < form_count; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    Target target = targets[target_index];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
+                    CIRLowerOptions options = {.disable_direct_ssa = form != 0};
+                    CDiagnostic* diagnostics = 0;
+                    u32 diagnostic_count = 0;
+                    if (route == 0)
+                    {
+                        CParseResult parse = c_parse(temporary.arena, tokens);
+                        // The model-building entry point validates nothing,
+                        // so every deferred row reaches lowering unchecked.
+                        BUSTER_TEST(arguments, parse.deferred_static_assert_count && !parse.deferred_static_assert_verdicts);
+                        diagnostics = parse.diagnostics;
+                        diagnostic_count = parse.diagnostic_count;
+                        if (!diagnostic_count)
+                        {
+                            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("static-assert-verdict.c"), tokens, parse, target, options);
+                            diagnostics = lowered.diagnostics;
+                            diagnostic_count = lowered.diagnostic_count;
+                        }
+                    }
+                    else
+                    {
+                        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                        BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0, cases[case_index].source);
+                        if (route == 1)
+                        {
+                            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("static-assert-verdict.c"), tokens, syntax, target, options);
+                            diagnostics = analyzed.diagnostics;
+                            diagnostic_count = analyzed.diagnostic_count;
+                            if (!diagnostic_count && BUSTER_REQUIRE(arguments, analyzed.program && analyzed.program->module_count == 1))
+                            {
+                                BUSTER_TEST(arguments, ir_validate_canonical_module(analyzed.program, analyzed.program->modules).error == IR_VALIDATION_NONE);
+                            }
+                        }
+                        else
+                        {
+                            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                            diagnostics = semantic.diagnostics;
+                            diagnostic_count = semantic.diagnostic_count;
+                            // Validation stored one verdict per deferred row.
+                            bool stored = semantic.deferred_static_assert_count && semantic.deferred_static_assert_verdicts;
+                            for (u32 row = 0; stored && row < semantic.deferred_static_assert_count; row += 1)
+                            {
+                                stored = semantic.deferred_static_assert_verdicts[row] != C_STATIC_ASSERT_UNCHECKED;
+                            }
+                            BUSTER_TEST_RAW(arguments, stored, cases[case_index].source);
+                        }
+                    }
+                    u32 expected_count = cases[case_index].kind == C_DIAGNOSTIC_KIND_COUNT ? 0 : 1;
+                    BUSTER_TEST_RAW(arguments, diagnostic_count == expected_count && (!expected_count || diagnostics[0].kind == cases[case_index].kind),
+                        string_format(temporary.arena, S8("target={u32} route={u32} form={u32}: {S8} source={S8}"), target_index, route, form,
+                            diagnostic_count ? diagnostics[0].message : S8("no diagnostic"), cases[case_index].source));
+                    scratch_end(temporary);
+                }
+            }
+        }
     }
     return result;
 }
@@ -56876,6 +57022,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
     return result;
 }
 
+// The work for `{int i=x;do ` D times, `x--;`, then D closers
+// `while(--i>0);}`: `scope_levels` takes the scope levels semantic analysis
+// descends and `ssa_steps` the direct SSA read walk's steps in lowering, each
+// UINT64_MAX when its stage did not finish cleanly.
+BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, u64* scope_levels)
+{
+    *ssa_steps = UINT64_MAX;
+    *scope_levels = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = (u64)depth * 32 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int tall(int x){"));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("{int i=x;do "));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("x--;"));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("while(--i>0);}"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("return x;}"));
+    CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+    u64 levels_before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+    if (length < capacity && !tokens.diagnostic_count && !syntax.diagnostic_count && !analysis.diagnostic_count && analysis.analysis_complete)
+    {
+        *scope_levels = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) - levels_before;
+    }
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    u64 steps_before = c_test_ir_ssa_forward_steps();
+    CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("nested-do-while.c"), tokens, parse, target_native);
+    if (!tokens.diagnostic_count && !parse.diagnostic_count && !direct.diagnostic_count && direct.program &&
+        ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE)
+    {
+        *ssa_steps = c_test_ir_ssa_forward_steps() - steps_before;
+    }
+    c_test_scratch_end(temporary);
+}
+
+// Each nested do-while reads its variable in its condition block, whose
+// forward links climb through every inner loop's condition and exit block
+// back to its own header: D^2 read-walk steps, and the const-assignment check
+// of each `--i` descended the scope tree from the file scope: D^2 levels
+// (#3894). A read now passes an inner loop that never names its local in one
+// step, and the check reuses the use's recorded entity, so both grow with the
+// depth.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_do_while_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 250, DEEP = 1000 };
+    u64 shallow_steps;
+    u64 shallow_levels;
+    u64 deep_steps;
+    u64 deep_levels;
+    c_test_nested_do_while_work(SHALLOW, &shallow_steps, &shallow_levels);
+    c_test_nested_do_while_work(DEEP, &deep_steps, &deep_levels);
+    BUSTER_TEST_RAW(arguments, shallow_steps != UINT64_MAX && deep_steps != UINT64_MAX && shallow_steps >= SHALLOW &&
+                                   deep_steps <= shallow_steps * 5 && deep_steps <= (u64)DEEP * 16,
+                    string_format(arguments->arena, S8("SSA read-walk steps shallow={u64} deep={u64}"), shallow_steps, deep_steps));
+    BUSTER_TEST_RAW(arguments, shallow_levels != UINT64_MAX && deep_levels != UINT64_MAX && deep_levels <= shallow_levels * 5 + DEEP &&
+                                   deep_levels <= (u64)DEEP * 32,
+                    string_format(arguments->arena, S8("scope levels shallow={u64} deep={u64}"), shallow_levels, deep_levels));
+    return result;
+}
+
 // The loop-header shortcut of #3723 holds only for a loop entered through its
 // header. Each function here also enters a loop past it -- a goto into the
 // body, a case label inside a do-while, a goto back before the loop -- with a
@@ -65690,6 +65904,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_loop_parameters);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_do_while_work);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_loop_entry_runtime);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_storage_class_contexts);
@@ -65876,6 +66091,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
+    C_TEST_FIXTURE(arguments, c_test_static_assert_semantic_verdict);
     C_TEST_FIXTURE(arguments, c_test_sizeof_semantic_handoff);
     C_TEST_FIXTURE(arguments, c_test_untyped_operand_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_builtin_result_types);

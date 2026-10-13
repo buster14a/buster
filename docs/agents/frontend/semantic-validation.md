@@ -404,11 +404,13 @@ slot's hint without a search.
 
 Lowering follows the same `__builtin_choose_expr` row through
 `c_ir_selection_answer`, as it does for `_Generic` (#3860). Prepared-call
-lowering, `c_ir_constant_evaluate` (deferred `_Static_assert`, static-storage
-array bounds) and the strict sizeof walk take the retained arm, so a choice
-whose condition is another choice needs no folding in lowering. They fold the
-condition themselves only when the parser recorded no row, which happens for a
-`__builtin_constant_p` condition. `c_test_builtin_operand_types` lowers and
+lowering, `c_ir_constant_evaluate` (static-storage array bounds) and the strict
+sizeof walk take the retained arm, so a choice whose condition is another
+choice needs no folding in lowering. They fold the condition themselves only
+when the parser recorded no row, which happens for a `__builtin_constant_p`
+condition. A deferred `_Static_assert` does not reach lowering's evaluator at
+all: lowering consumes the stored verdict (see the static-assertion entry in
+[foundations](foundations.md)). `c_test_builtin_operand_types` lowers and
 runs those forms in both frontend forms. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
