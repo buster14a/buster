@@ -4982,7 +4982,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
                         {
                             String8 expected_message = cases[row].expected_message.length ? cases[row].expected_message
                                                                                        : S8("cannot take address of bit-field");
-                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, expected_message);
+                            String8 message_description = string_format(arena,
+                                S8("selected place diagnostic row={u32} dialect={S8} form={S8} target={S8} expected={S8} actual={S8}"),
+                                row, dialects[dialect], forms[form], targets[target], expected_message, syntax.diagnostics[0].message);
+                            BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostics[0].message, expected_message), message_description);
                             BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, object.diagnostics[0].code);
                             if (!cases[row].expected_message.length)
                             {
