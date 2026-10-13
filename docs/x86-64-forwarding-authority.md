@@ -12,10 +12,16 @@ The two raw x86 arrays previously encoded XOR ESI/ESI, XOR EDX/EDX and JMP
 rel32 independently of the XED-derived metadata encoder. They are removed.
 
 `buster_x86_metadata_emit_forwarding` now owns a prepared ABI recipe. Its
-first serial use asks the checked metadata encoder to emit typed 32-bit XOR
-operands and a symbolic 32-bit relative JMP. There are no copied opcode
-constants, generated form IDs, or independent register/ModRM packing rules.
-The symbolic target is essential: numeric zero could allow a short branch.
+first serial use asks the metadata encoder to emit typed 32-bit XOR operands
+and a symbolic 32-bit relative JMP. Each instruction is emitted exactly in the
+form the selector picks for it, named by that form's durable key
+(`{form_id, stable_hash}`), so preparation does not run the generic selector
+(#1125). A stale key fails closed in the key lookup and so fails the recipe;
+`buster_x86_metadata_test_recipe_pins` runs the selector over the zero idiom
+in every register, the symbolic branch and the padding NOP, and requires the
+pinned form, bytes and relocation. There are no copied opcode constants or
+independent register/ModRM packing rules. The symbolic target is essential:
+numeric zero could allow a short branch.
 
 Preparation validates both XOR lengths, the total and branch lengths, one
 PC32 relocation, a four-byte field ending at the branch's end, and addend -4.

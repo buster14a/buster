@@ -361,8 +361,8 @@ struct CompilerDriverInvocation
     // Accepted only for I386, where native artifact generation is refused.
     bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
-    // -fcanonical-intern-constants: CIRLowerOptions.intern_block_constants.
-    bool intern_block_constants;
+    // -fno-canonical-intern-constants: CIRLowerOptions.disable_block_constant_interning.
+    bool disable_block_constant_interning;
     // -fcanonical-construction-fold: CIRLowerOptions.construction_fold.
     bool construction_fold;
     bool disable_local_promotion;

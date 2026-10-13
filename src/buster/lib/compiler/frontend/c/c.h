@@ -971,6 +971,8 @@ struct CArrayBound
     // Bounds made while parsing a parameter (nested prototypes included).
     // Definition parameters receive the additional signature-scope check.
     bool is_parameter_declarator;
+    // Captured before later tag or array completion can erase the constraint.
+    bool has_invalid_element_type;
 };
 
 typedef struct CType CType;
@@ -2184,10 +2186,11 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
-    // -fcanonical-intern-constants (#3011): reuse an integer constant already
-    // built earlier in the current block instead of building another row.
-    // Opt-in construction-time arm of the CSE census; off emits as before.
-    bool intern_block_constants;
+    // -fno-canonical-intern-constants (#3011): by default an integer constant
+    // already built earlier in the current block is reused instead of building
+    // another row (measured on Zen 5: -0.7% wall, -1.8% peak RSS on the
+    // self-host compile). Set to build every constant row afresh.
+    bool disable_block_constant_interning;
     // -fcanonical-construction-fold (#3010): when c_ir_emit_cast or
     // c_ir_truth_value receives a committed single-limb integer constant,
     // build the constant FAST's fold rule gives instead of the CAST or BINARY

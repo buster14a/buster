@@ -5314,6 +5314,7 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
     [C_SYMBOL_WELL_KNOWN_REGISTER] = S8_INITIALIZER("register"),
     [C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF] = S8_INITIALIZER("__builtin_offsetof"),
     [C_SYMBOL_WELL_KNOWN_VOLATILE] = S8_INITIALIZER("volatile"),
+    [C_SYMBOL_WELL_KNOWN_VOLATILE_GNU] = S8_INITIALIZER("__volatile"),
     [C_SYMBOL_WELL_KNOWN_VOLATILE_GNU_ALT] = S8_INITIALIZER("__volatile__"),
     [C_SYMBOL_WELL_KNOWN_CONSTEXPR] = S8_INITIALIZER("constexpr"),
     [C_SYMBOL_WELL_KNOWN_CONST] = S8_INITIALIZER("const"),
@@ -12310,7 +12311,9 @@ BUSTER_C_INTERNAL void c_preprocess_rename_local_labels(Arena* arena, CSpellingS
                         if (index >= list_end && c_local_label_word(base, token, 0, S8("goto")) &&
                             (c_local_label_word(base, tokens[index - 1], 0, S8("asm")) || c_local_label_word(base, tokens[index - 1], 0, S8("__asm")) ||
                              c_local_label_word(base, tokens[index - 1], 0, S8("__asm__")) || c_local_label_word(base, tokens[index - 1], 0, S8("volatile")) ||
-                             c_local_label_word(base, tokens[index - 1], 0, S8("__volatile__")) || c_local_label_word(base, tokens[index - 1], 0, S8("inline"))))
+                             c_local_label_word(base, tokens[index - 1], 0, S8("__volatile")) || c_local_label_word(base, tokens[index - 1], 0, S8("__volatile__")) ||
+                             c_local_label_word(base, tokens[index - 1], 0, S8("inline")) || c_local_label_word(base, tokens[index - 1], 0, S8("__inline")) ||
+                             c_local_label_word(base, tokens[index - 1], 0, S8("__inline__"))))
                         {
                             list_end = c_local_label_asm_goto_list(tokens, index, end, &list_start);
                         }

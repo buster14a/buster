@@ -16,10 +16,14 @@ Answer three independent questions in the issue/PR handoff:
 1. **Correctness CI:** which required correctness and policy checks passed on
    the submitted revision? `Benchmark service workflow policy` validates
    access/routing policy; it is not physical benchmark execution.
-2. **Performance claim:** is there complete actual Ryzen 7 9700X evidence for
-   the candidate, baseline, workload and configuration being claimed?
-   Without it, report performance validation as **incomplete/unvalidated**
-   (#2761). Hosted timing, static analysis and green policy checks are diagnostic.
+2. **Performance claim:** which claim is it (`work-reduction`,
+   `native-runtime`, `uarch` or `zen5`), and is there complete evidence of the
+   class it requires for the candidate, baseline, workload and configuration?
+   A `uarch` or `zen5` claim needs actual Ryzen 7 9700X evidence; the other two
+   may complete through the [alternative evidence routes](#alternative-evidence-routes)
+   (#4013). Without the required evidence, report that claim as
+   **incomplete/unvalidated**. Static analysis, simulated caches and green
+   policy checks are never performance evidence.
 3. **Task acceptance:** does the owner's request or owning issue explicitly
    require applicable measurements before acceptance or merge? Record that
    reference and the outstanding cells. A real hold remains in force even
@@ -513,13 +517,15 @@ captures (#2741).
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
-- **Performance validation needs Zen 5 execution evidence (#2761).** Every
-  performance-validation test requires actual execution of its relevant
-  workload on the approved Zen 5 benchmark host. Without complete evidence
-  matching the candidate, workload and configuration, report performance
-  validation as incomplete. Cloud-only and static evidence is diagnostic, not
-  a substitute: hosted timing, static instruction counts, a `znver5` target, a
-  request or policy check, or an unrelated self-host benchmark. Correctness and
+- **Zen 5 and microarchitecture claims need Zen 5 execution evidence (#2761,
+  narrowed by #4013).** A `uarch` or `zen5` claim requires actual execution of
+  its relevant workload on the approved Zen 5 benchmark host. Without complete
+  evidence matching the candidate, workload and configuration, report that
+  claim as incomplete. Nothing measured elsewhere substitutes for it: hosted
+  timing, instrumented counts, static instruction counts, a `znver5` target, a
+  request or policy check, or an unrelated self-host benchmark. Work-reduction
+  and native-runtime claims use the
+  [alternative evidence routes](#alternative-evidence-routes) instead. Correctness and
   native-platform CI stay on their current infrastructure. The comparison
   routes below cover the stage-1 self-host compile and, as profile
   `throughput-corpus-v2`, the default `bench_throughput` corpus under both
@@ -787,6 +793,121 @@ captures (#2741).
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
 
+## Alternative evidence routes
+
+Issue #4013 replaces #2761's universal Zen 5 requirement for claims whose
+benefit does not depend on the 9700X's microarchitecture, and keeps the
+scarce physical host for the questions only it can answer. Classify the
+claim by mechanism, not by the files a change touches.
+`docs/performance-validation-v1.json` records the classes (`evidence_classes`)
+and the claim map (`claims`), and `performance_inventory_test.py` keeps that
+map equal to the `pe_claims` table of `tools/performance_evidence.c`.
+
+| Claim | Class | Sufficient evidence | Does not establish |
+|---|---|---|---|
+| `work-reduction`: removed traversals, queries, initialization, copies or allocations; better asymptotic work; fewer processes or operations | `work-count` | Repeatable Callgrind or Cachegrind counts (or perf `instructions`) of both arms in one environment, at relevant input sizes, plus existing work counters and correctness checks | Lower elapsed time; hardware constants; Zen 5 behavior |
+| `native-runtime`: end-to-end compiler, build, test, memory or I/O change that no particular CPU mechanism decides | `native-host` | Paired uninstrumented wall/CPU/resource observations (`time`, or `perf-stat` where counting is permitted) on an appropriate non-9700X host | Transfer to Zen 5 or another CPU, OS, filesystem or concurrency level |
+| `uarch`: SIMD width or intrinsics, branched versus branchless, scheduling, latency or ports, store forwarding, alignment, prefetch, cache or TLB tuning | `zen5-native` | The existing 9700X routes (`pull-compare`, `direct-workload`) | Anything about another CPU |
+| `zen5`: an explicit Zen 5 speed claim | `zen5-native` | The existing 9700X routes | Anything about another CPU |
+
+A change with mixed mechanisms is split into separate claims, each measured
+by its own route; record why any part escalates to the physical host.
+Neither "all scalar code is portable" nor "every change affects a CPU" is a
+valid classifier. Reducing allocated bytes and tuning their cache-line
+placement are two claims even in one patch. A counter-only result is
+reported as exactly what it proves, for example **work reduction validated;
+native runtime not measured**. It is not rejected for lacking Zen 5 data
+when the agreed criterion is work or scaling. Valid native A/B evidence on a
+non-9700X host completes a `native-runtime` claim for that host and workload
+and does not stay "diagnostic only".
+
+### Running a comparison
+
+Build the tool once, then check capabilities before an expensive session:
+
+```sh
+clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char \
+    tools/performance_evidence.c -lm -o build/performance-evidence
+build/performance-evidence classify work-reduction
+build/performance-evidence preflight --tool callgrind -- BASELINE_IDE cc -w -c input.c -o /dev/null
+build/performance-evidence compare --claim work-reduction --tool callgrind \
+    --baseline BASELINE_IDE --candidate CANDIDATE_IDE --out NEW_DIR -- cc -w -c input.c -o /dev/null
+```
+
+`compare` runs both arms on the same host, alternating which goes first. It
+retains each run's stdout, stderr and per-process profiles under the new
+directory, and writes `summary.json` (schema `buster-performance-evidence-v1`).
+The summary binds the binary paths and SHA-256 hashes, optional
+`--baseline-revision`/`--candidate-revision`, the arguments, the tool version,
+the observed CPU, OS and kernel, the selected events, the cache model lines
+and every raw observation. Its `zen5` field always says it is not Zen 5
+evidence. Exit 0 is a complete comparison whatever its verdict; exit 2 is
+incomplete or refused; `preflight` exits 3 when the tool cannot run here.
+
+- **Callgrind and Cachegrind (`work-count`)** default to two runs per arm. An
+  arm whose counts vary by more than 0.1% is `nonrepeatable`. A verdict needs
+  separated arms and at least the minimum effect (`--min-effect-percent`,
+  default 1). Children run with `--trace-children=yes`, one profile per
+  process; the process counts per run are recorded. A child that forks
+  without `exec` inherits its parent's counters, so check the counts before
+  summing such a workload. `Ir` is an instrumented executed-instruction count,
+  not the PMU retired-instruction count. `--cache-sim` and `--branch-sim`
+  enable Valgrind's simplified models, record the model lines and make those
+  events required; they are not a model of any real CPU, the 9700X included.
+- **Valgrind and `-march=native`.** Valgrind cannot execute EVEX (AVX-512)
+  instructions. A binary built for a host that has them fails with an explicit
+  ISA reason, never with a zero count (#4009). Build *both* arms with a
+  declared profiling-compatible ISA, for example
+  `tools/work_ledger/build_subject.sh` (`-march=x86-64-v3`). Keep those
+  results separate from native-build identities. Never transfer a
+  scalar-fallback result to a production SIMD path.
+- **`time` and `perf-stat` (`native-host`)** default to one warmup and ten
+  pairs, with at least six. Each metric uses an exact two-sided sign test over
+  paired differences (p ≤ 0.05) plus the minimum effect. A significant change
+  below the effect is `within-effect`, and anything else is `inconclusive`.
+  `time` records wall, user and system time, peak RSS, faults and context
+  switches through `wait4`, which includes reaped descendants. `perf-stat`
+  records each event's scope, and refuses an event that is unsupported, not
+  counted, or ran less than 50% of the time. A multiplexed event is marked.
+  Denied counters are reported as denied; do not weaken host security to
+  get them.
+- **A/A control.** Passing the same binary as both arms is reported as an A/A
+  noise control. Run one on a new host before trusting a small native effect.
+- **Scope.** Valgrind results say nothing about native parallel scaling.
+  A multithreaded change needs native measurements at its declared worker
+  budget. Report compile time, generated-program runtime, code size,
+  allocation bytes and RSS separately. A noisy hosted result stays
+  `inconclusive`: do not rerun until it turns green.
+
+### Rollout state
+
+This first slice (#4013) supplies the policy, the classes, the inventory
+contract and the tool. The trusted planners do not consume these receipts
+yet. The routine `main-compare` route still measures every compiler commit
+after it lands, as report-only. Until request planning can classify
+before allocating, an eligible `work-reduction` or `native-runtime` claim
+completes through this route without a `compiler-compare.request` line. Do
+not add a 9700X request line just to validate it. A `uarch` or `zen5` claim,
+an explicitly requested Zen 5 experiment, and physical-host qualification
+keep their existing contracts.
+
+### Optional tools by question
+
+These are optional and purpose-specific. None of them is a dependency or a
+CI job.
+
+| Question | Tools | Limit |
+|---|---|---|
+| Allocation churn, lifetime, unused memory | Valgrind DHAT and Massif, heaptrack, Buster's arena and work counters | A malloc-level profiler does not see arena suballocations; profiler heap is not native RSS |
+| System calls, startup, I/O, off-CPU time | strace, perf sched/lock, ftrace, approved bpftrace probes | Tracing changes elapsed time; it is never the timing baseline |
+| Cost of building Buster | Clang `-ftime-trace` (`generate --time-trace`), CMake/Ninja/build-driver timing | Keep the host compiler building Buster separate from Buster compiling inputs |
+| Native Windows or macOS | ETW with WPR/WPA, Apple Instruments | Validate an OS-specific change on that OS; see [Native hosted timing](#native-hosted-timing) |
+| Deeper hardware attribution | AMD uProf (IBS), Intel VTune, `tools/cache_miss_survey.py`, `tools/branch_miss_survey.py` | Complements native execution on the target; never makes a target claim portable |
+| Instruction-model hypotheses | llvm-mca, disassembly and code size, FlameGraph | Predictions and visualizations explain evidence; they are not measurements |
+
+The licenses and installed provenance of these external executables have not
+been audited here. Record them when admitting any one as a backend.
+
 ## Native hosted timing
 
 **These results are not Zen 5 evidence.** They never satisfy, replace or
@@ -1012,7 +1133,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    tree. It times the one candidate binary as both A (default) and B with
    `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity
    `-c` compile. The `intern` cell passes `-fcanonical-intern-constants` to B
-   and the `cse` cell passes `-fcanonical-fast-cse`. Each cell is 20 ABBA
+   and the `cse` cell passes `-fcanonical-fast-cse`. Interning has been on by
+   default since its measurement, so the `intern` cell now compares two
+   interning compiles; its recorded result is the 9700X run in
+   `docs/canonical-fast-pipeline.md`. Each cell is 20 ABBA
    pairs after one warmup on CPU 2 with fresh copies. It records:
    - wall time with its 95% CI;
    - retired instructions when perf can count them (NA needs a recorded

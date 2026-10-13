@@ -3929,6 +3929,11 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     arguments->show(arguments, S8("X86_METADATA_BASE64 selected={S8} direct_vbmi_test={S8}\n"), decoder_name, vbmi_test_name);
     BUSTER_TEST(arguments, buster_x86_metadata_test_nul_distances_match_reference());
     BUSTER_TEST(arguments, buster_x86_metadata_test_unprepared_after_prewarm_all() == 0);
+    // The forwarding and padding recipes pin the forms the selector picks
+    // (#1125): sixteen zero idioms, the symbolic branch and the NOP.
+    u32 recipe_pin_queries = 0;
+    BUSTER_TEST(arguments, buster_x86_metadata_test_recipe_pins(&recipe_pin_queries) == 0);
+    BUSTER_TEST(arguments, recipe_pin_queries == 18);
     BUSTER_TEST(arguments, x86_64_metadata_test_conditions(arguments));
 
 #if BUSTER_CPU_ARCH_X86_64
