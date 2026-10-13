@@ -716,10 +716,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_promotion_proof_tests(UnitTestArgumen
     {
         TemporalArena temporary = arena_begin_temporal(arguments->arena);
         String8 source = variant & 1u
-            ? S8("int broken(int c){return c+0;}int kept(int c){return c*3+0;}"
+            ? S8("void inspect(int*);int broken(int c){return c+0;}int kept(int c){inspect(&c);return c*3+0;}"
                  "int promoted(int c){int x=3;if(c)x=7;return x+0;}")
-            : S8("int promoted(int c){int x=3;if(c)x=7;return x+0;}"
-                 "int kept(int c){return c*3+0;}int broken(int c){return c+0;}");
+            : S8("void inspect(int*);int promoted(int c){int x=3;if(c)x=7;return x+0;}"
+                 "int kept(int c){inspect(&c);return c*3+0;}int broken(int c){return c+0;}");
         CIRLowerResult lowered = ir_promotion_lower(arguments->arena, source, target_native);
         BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
         if (lowered.program && !lowered.diagnostic_count)
@@ -757,6 +757,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_promotion_proof_tests(UnitTestArgumen
 #if BUSTER_BENCH_ALLOCATIONS
                 IrConstructionCounters after = ir_construction_counters();
                 BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_INPUT_PROOFS_REUSED] -
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_INPUT_PROOFS_REUSED] == (promotion ? 1u : 0u));
                 BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] -
                                        before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] == (promotion ? 2u : 0u));
 #endif

@@ -1407,6 +1407,7 @@ IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 #define IR_PROMOTION_INPUT_INVALID 1u
 #define IR_PROMOTION_CHANGED 2u
 #define IR_PROMOTION_OUTPUT_VALID 4u
+#define IR_PROMOTION_INPUT_VALID 8u
 
 // The promotion-output check for certified input in a checked build. It skips
 // functions that failed the strict validator before promotion, and a function
@@ -1423,6 +1424,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_promotion_output(IrProgram* p
             if (attribution[index] & IR_PROMOTION_INPUT_INVALID)
             {
                 *excluded += 1;
+            }
+            else if ((attribution[index] & (IR_PROMOTION_INPUT_VALID | IR_PROMOTION_CHANGED)) == IR_PROMOTION_INPUT_VALID)
+            {
+                // Promotion examined this body but left it unchanged. Its
+                // strict input proof therefore also proves the output.
+                attribution[index] |= IR_PROMOTION_OUTPUT_VALID;
+                IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_INPUT_PROOFS_REUSED, 1);
             }
             else
             {
@@ -1532,10 +1540,10 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 {
                     // Function validation carries its own ownership proof, so
                     // one function attributes without a module-wide scan.
-                    if (attribution && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)) &&
-                        ir_validate_canonical_function(program, function).error != IR_VALIDATION_NONE)
+                    if (attribution && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)))
                     {
-                        attribution[index] |= IR_PROMOTION_INPUT_INVALID;
+                        IrValidationResult input = ir_validate_canonical_function(program, function);
+                        attribution[index] |= input.error == IR_VALIDATION_NONE ? IR_PROMOTION_INPUT_VALID : IR_PROMOTION_INPUT_INVALID;
                     }
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
                     u64 promoted_before = module->local_promotion.promoted_locals;
