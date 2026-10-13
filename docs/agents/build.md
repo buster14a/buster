@@ -335,7 +335,7 @@ toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
 Mach-O, 12 legs. Where `test_self_host` is deep on one mode and one target,
 this matrix is wide: each leg links a small self-checking fixture corpus
 (`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
-`basic_c_vector_register_pressure`, `basic_c_machine_alias`,
+`basic_c_vector_register_pressure`, `basic_c_wide_vector_joins`, `basic_c_machine_alias`,
 `basic_c_fast_ra_cfg`) at the default CPU model and then takes
 the strongest verification avenue the host offers — native execution when
 host and target agree, `qemu-aarch64` for AArch64 ELF, `wine` for x86-64 PE,

@@ -236,7 +236,7 @@ struct MachineX64Selector
     MachineBuilderStream inline_assembly_relocations;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
-    MachineCanonicalPair* value_pairs;
+    MachineCanonicalParts* value_parts;
     u32* value_stack_slots;
     // Per IrValue: the padded raw-storage slot of an over-aligned local, or
     // UINT32_MAX. Such a local mirrors the canonical frame layout: its
@@ -8199,30 +8199,31 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
             MachineTypeClass parameter_class = machine_x64_type_class(&selector, parameter->canonical_type);
             bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&program->types, parameter->canonical_type), target);
+            bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
             bool wide = (parameter_class.flags & MACHINE_TYPE_CLASS_INTEGER128) != 0 ||
                         machine_x64_type_is_f80(&selector, parameter->canonical_type) ||
                         machine_x64_type_is_f128(program, target, parameter->canonical_type) ||
                         (parameter_class.kind == IR_TYPE_VECTOR && (parameter_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
-                         parameter_class.size_log2 <= 4);
-            bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
+                         parameter_class.size_log2 <= 6 && !vector);
             if (parameter->value.value >= function->value_count ||
                 (!wide && !vector && !windows_va_list &&
                  !(parameter_class.flags & (MACHINE_TYPE_CLASS_SCALAR_REGISTER | MACHINE_TYPE_CLASS_FLOAT_SCALAR))))
             {
                 return result;
             }
-            parameter_count += wide ? 2u : 1u;
+            u32 part_count = wide ? (parameter_class.kind == IR_TYPE_VECTOR ? BUSTER_MAX(2u, (1u << parameter_class.size_log2) / 8u) : 2u) : 1u;
+            parameter_count += part_count;
             if (parameter_count > UINT16_MAX)
             {
                 return result;
             }
             if (wide)
             {
-                if (!machine_builder_canonical_pair_parameter(&selector.builder, function, published_block, parameter_index, &selector.value_pairs))
+                if (!machine_builder_canonical_parts_parameter(&selector.builder, function, published_block, parameter_index, part_count, &selector.value_parts))
                 {
                     return result;
                 }
-                selector.value_stack_slots[parameter->value.value] = machine_x64_append_slot(&selector, 16, 16);
+                selector.value_stack_slots[parameter->value.value] = machine_x64_append_slot(&selector, part_count * 8u, 16);
             }
             else
             {
@@ -8826,7 +8827,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     selector.value_stack_slots[instruction->result.value] =
                         machine_x64_append_slot(&selector,
                             (u32)BUSTER_MAX((value_type->layout.size + 7) & ~(u64)7,
-                                selector.value_pairs && selector.value_pairs[instruction->result.value].registers[0] != UINT32_MAX ? 16u : 8u), 8);
+                                selector.value_parts && selector.value_parts[instruction->result.value].count != 0 ? 16u : 8u), 8);
                 }
             }
         }
@@ -9117,15 +9118,15 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         {
             IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
             u32 value = parameter->value.value;
-            bool wide = selector.value_pairs && selector.value_pairs[value].registers[0] != UINT32_MAX;
-            u32 count = wide ? 2u : 1u;
-            u32 const* registers = wide ? selector.value_pairs[value].registers : selector.value_virtual_registers + value;
+            bool wide = selector.value_parts && selector.value_parts[value].count != 0;
+            u32 count = wide ? selector.value_parts[value].count : 1u;
             for (u32 part = 0; part < count; part += 1)
             {
-                machine_builder_block_parameter(&selector.builder, (MachineBlockParameter){.virtual_register = registers[part]});
+                u32 reg = wide ? selector.value_parts[value].first_register + part : selector.value_virtual_registers[value];
+                machine_builder_block_parameter(&selector.builder, (MachineBlockParameter){.virtual_register = reg});
                 if (wide)
                 {
-                    machine_x64_select_frame_store64(&selector, selector.value_stack_slots[value], part * 8u, registers[part]);
+                    machine_x64_select_frame_store64(&selector, selector.value_stack_slots[value], part * 8u, reg);
                 }
             }
         }
@@ -9800,7 +9801,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 break;
             }
             u32 value = instruction->result.value;
-            if (selector.value_pairs && value < function->value_count && selector.value_pairs[value].registers[0] != UINT32_MAX)
+            if (selector.value_parts && value < function->value_count && selector.value_parts[value].count != 0)
             {
                 u32 slot = selector.value_stack_slots[value];
                 if (slot == UINT32_MAX)
@@ -9808,9 +9809,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     machine_x64_reject(&selector, instruction->opcode);
                     break;
                 }
-                for (u32 part = 0; part < 2; part += 1)
+                for (u32 part = 0; part < selector.value_parts[value].count; part += 1)
                 {
-                    u32 reg = selector.value_pairs[value].registers[part];
+                    u32 reg = selector.value_parts[value].first_register + part;
                     u32 row = machine_x64_select_row(&selector, (MachineInstruction){
                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, reg), machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
                         .payload = part * 8u, .opcode = MACHINE_X64_LOAD_FRAME});
@@ -9827,7 +9828,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         return result;
     }
     u32 canonical_edge_offset = selector.builder.edges.total_count;
-    if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_pairs))
+    if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }

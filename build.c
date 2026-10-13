@@ -18893,6 +18893,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
         S8("tests/basic_c_x86_64_i128_stack_abi.c"),
         S8("tests/basic_c_float_abi.c"),
         S8("tests/basic_c_vector_register_pressure.c"),
+        S8("tests/basic_c_wide_vector_joins.c"),
         S8("tests/basic_c_machine_alias.c"),
         S8("tests/basic_c_fast_ra_cfg.c"),
     };
