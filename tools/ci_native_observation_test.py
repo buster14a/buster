@@ -866,6 +866,31 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("retention-days: 7", upload)
         self.assertNotIn("uses: actions/upload-artifact@", upload)
         self.assertNotRegex(desktop, r"(?m)^\s*continue-on-error:")
+        # Backend capability evidence retries one transient upload failure
+        # (#3944); its report step already requires a successful checkout.
+        for platform, report_id in (
+            ("Linux, macOS", "backend_capability_report_unix"),
+            ("Windows", "backend_capability_report_windows"),
+        ):
+            with self.subTest(backend_capability=platform):
+                report = steps[f"Report backend capability evidence ({platform})"]
+                evidence = steps[f"Upload backend capability evidence report ({platform})"]
+                self.assertIn(f"id: {report_id}", report)
+                self.assertIn("steps.checkout.outcome == 'success'", report)
+                self.assertIn(f"if: ${{{{ always() && steps.{report_id}.outcome == 'success' }}}}", evidence)
+                self.assertIn("uses: ./.github/actions/native-artifact-upload", evidence)
+                self.assertIn("label: backend-capability", evidence)
+                self.assertIn("label_title: Backend capability", evidence)
+                self.assertIn(
+                    "name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-"
+                    "${{ github.run_id }}-${{ github.run_attempt }}",
+                    evidence,
+                )
+                self.assertIn("path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md", evidence)
+                self.assertIn("compression-level: 6", evidence)
+                self.assertIn("if-no-files-found: error", evidence)
+                self.assertIn("retention-days: 7", evidence)
+                self.assertNotIn("uses: actions/upload-artifact@", evidence)
         # The caller runs after failed builds, but never loads a local action
         # without checkout or retries after cancellation.
         condition = re.search(r"(?m)^        if: \$\{\{ (.+) \}\}$", upload)

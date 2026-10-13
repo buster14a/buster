@@ -387,11 +387,23 @@ class NativePartitionTests(unittest.TestCase):
 
 class WorkflowSetupTests(unittest.TestCase):
     """Run the actual step bodies with controlled tools and empty log roots."""
+    # Both release steps qualify the native process owner, then tee this log.
+    OWNER_LOGS = {"Workflow tool regression tests": "workflow-tools-process-owner.log",
+                  "Bootstrap wrapper regression tests": "bootstrap-wrapper-process-owner.log"}
+    OWNER_INVOCATION = '"$process_owner_driver" bootstrap_process_owner_test |'
+    # The helper command's input and discovery closure, besides the driver.
+    OWNER_SOURCES = ("tools/windows_process_tree.c", "tools/windows_process_tree_test.c",
+                     "src/buster/lib/base.h", "src/buster/lib/system_headers.h", "tests/build_compiler_identity.h")
+    # The Windows child deadline of the wrapper harness. The real step bounds
+    # this command only by its step timeout; uncontended it takes about 23 s,
+    # but here it shares the CPUs with the other two suite lanes and exceeded
+    # the 30 s replay deadline on a slower hosted Windows x64 runner (#3912).
+    OWNER_QUALIFICATION_TIMEOUT_SECONDS = 120
+
     @classmethod
     def setUpClass(cls):
         # Compile one real native authority. The replay copies this binary for
-        # the shell bootstrap only; its helper command still qualifies and
-        # invokes the real compiler against the isolated source fixture.
+        # the shell bootstrap only.
         cls.driver_temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=os.name == "nt")
         cls.driver = Path(cls.driver_temporary.name).resolve() / "build.exe"
         compiler = shutil.which("clang")
@@ -402,6 +414,41 @@ class WorkflowSetupTests(unittest.TestCase):
         if os.name == "nt":
             command += ["-Wno-microsoft-enum-forward-reference", "-lws2_32"]
         subprocess.run(command, cwd=ROOT, check=True, timeout=120)
+        cls.owner_record = cls.driver.parent / "process-owner.out"
+        cls.qualify_process_owner()
+
+    @classmethod
+    def process_owner_inputs(cls, root=ROOT):
+        clang = shutil.which("clang")
+        status = os.stat(clang)
+        paths = (cls.driver,) + tuple(root / relative for relative in cls.OWNER_SOURCES)
+        return (clang, status.st_size, status.st_mtime_ns) + tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in paths)
+
+    @classmethod
+    def qualify_process_owner(cls):
+        # Each replay used to rerun this identical qualification: two helper
+        # compiles, the Windows selftest and 306 native controls, about 20 s
+        # per replay on hosted Windows (#3912). Run the step's exact command
+        # once on the real closure and replay its verified output. Changed
+        # inputs requalify before the next replay.
+        for relative in cls.OWNER_SOURCES:
+            (cls.driver.parent / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, cls.driver.parent / relative)
+        inputs = cls.process_owner_inputs(cls.driver.parent)
+        command = [str(cls.driver), "bootstrap_process_owner_test"]
+        try:
+            completed = subprocess.run(command, cwd=cls.driver.parent, capture_output=True,
+                                       timeout=cls.OWNER_QUALIFICATION_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"{command} timed out after {cls.OWNER_QUALIFICATION_TIMEOUT_SECONDS} s: "
+                               f"{error.stdout!r} {error.stderr!r}") from error
+        prefix = b"BOOTSTRAP_PROCESS_OWNER "
+        helpers = [line[len(prefix):].rstrip(b"\r").decode() for line in completed.stdout.splitlines() if line.startswith(prefix)]
+        if completed.returncode or len(helpers) != 1 or not Path(helpers[0]).is_file():
+            output = (completed.stdout + completed.stderr).decode(errors="replace")
+            raise RuntimeError(f"{command} failed with status {completed.returncode}:\n{output}")
+        cls.owner_record.write_bytes(completed.stdout)
+        cls.owner_inputs, cls.owner_helper = inputs, helpers[0]
 
     @classmethod
     def tearDownClass(cls):
@@ -425,27 +472,26 @@ class WorkflowSetupTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
-        self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
+        # The enclosing real step exports its own helper; replays must export theirs.
+        self.environment = {key: value for key, value in os.environ.items() if key != "BUSTER_WINDOWS_PROCESS_TREE"}
+        self.environment.update(BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
                                 RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
                                 ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux",
-                                MATRIX_WORKFLOW_DRIVER=self.driver.as_posix())
-
-    def copy_process_tree_source(self):
-        # These are the actual helper command's input and discovery closure.
-        # The build driver itself was compiled once from the real source above.
-        for relative in ("tools/windows_process_tree.c", "tools/windows_process_tree_test.c",
-                         "src/buster/lib/base.h", "src/buster/lib/system_headers.h", "tests/build_compiler_identity.h"):
-            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / relative, self.root / relative)
+                                MATRIX_WORKFLOW_DRIVER=self.driver.as_posix(),
+                                MATRIX_PROCESS_OWNER_RECORD=self.owner_record.as_posix())
 
     def run_step(self, name):
         body = self.steps[name].split("        run: |\n", 1)[1]
         script = "\n".join(line[10:] for line in body.splitlines() if line.startswith("          "))
-        if name in ("Workflow tool regression tests", "Bootstrap wrapper regression tests"):
-            # Intercept only the hosted driver bootstrap in the replay shell.
-            # Native os_process_spawn does not inherit shell functions, so
-            # bootstrap_process_owner still compiles and tests the real helper.
+        if name in self.OWNER_LOGS:
+            # Intercept only the hosted driver bootstrap and, for the exact
+            # qualified command, its native process-owner qualification; the
+            # step still tees, parses and exports the verified output.
             script = 'clang() { cp "$MATRIX_WORKFLOW_DRIVER" "${@: -1}"; }\n' + script
+            if self.OWNER_INVOCATION in script:
+                if self.process_owner_inputs() != self.owner_inputs:
+                    self.qualify_process_owner()
+                script = script.replace(self.OWNER_INVOCATION, 'cat "$MATRIX_PROCESS_OWNER_RECORD" |')
         try:
             result = subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
                                     cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
@@ -463,8 +509,7 @@ class WorkflowSetupTests(unittest.TestCase):
                     if len(text) > limit:
                         text = (text[:limit // 2] + f"\n[truncated {len(text) - limit} characters]\n" + text[-limit // 2:])
                     print(f"WORKFLOW_STEP_TIMEOUT {label}:\n{text or '[empty]'}", file=sys.stderr)
-                owner_log = {"Workflow tool regression tests": "workflow-tools-process-owner.log",
-                             "Bootstrap wrapper regression tests": "bootstrap-wrapper-process-owner.log"}.get(name)
+                owner_log = self.OWNER_LOGS.get(name)
                 if owner_log:
                     try:
                         with (self.root / "buster-ci" / owner_log).open("rb") as stream:
@@ -518,11 +563,11 @@ class WorkflowSetupTests(unittest.TestCase):
         runner = self.root / "tools/ci_workflow_tools.py"
         runner.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "tools/ci_workflow_tools.py", runner)
-        self.copy_process_tree_source()
         for suite, _ in expected:
             path = self.root / suite
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("import os, sys\nprint('SUITE fixture')\n"
+            # Every suite receives the helper path the step exported.
+            path.write_text("import os, sys\nprint('SUITE fixture', os.environ.get('BUSTER_WINDOWS_PROCESS_TREE'))\n"
                             "sys.exit(int(os.environ['FIXTURE_EXIT']) if __file__.endswith('ci_admission_test.py') else 0)\n",
                             encoding="utf-8")
         for code in (0, 7):
@@ -537,7 +582,7 @@ class WorkflowSetupTests(unittest.TestCase):
                 for suite, log in expected:
                     status = "failure status=7" if code and suite.endswith("ci_admission_test.py") else "success"
                     self.assertIn(f"SUITE_END path={suite} result={status} ", result.stdout)
-                    self.assertIn("SUITE fixture", (self.root / "buster-ci" / log).read_text())
+                    self.assertIn(f"SUITE fixture {self.owner_helper}\n", (self.root / "buster-ci" / log).read_text())
                 self.assertEqual("WORKFLOW_TOOLS_END result=success" in result.stdout, code == 0)
                 self.assertEqual("WORKFLOW_TOOLS_END result=failure failed=tools/ci_admission_test.py " in result.stdout,
                                  code != 0)
@@ -559,13 +604,15 @@ class WorkflowSetupTests(unittest.TestCase):
         tests.mkdir()
         tools = self.root / "tools"
         tools.mkdir()
+        # Like Windows case execution, refuse to start without the exported helper.
         fixture = (
-            "import os, pathlib, sys\npathlib.Path('wrapper-called').touch()\n"
+            "import os, pathlib, sys\nhelper = os.environ.get('BUSTER_WINDOWS_PROCESS_TREE', '')\n"
+            "print('BOOTSTRAP_TEST helper', helper)\nos.path.isfile(helper) or sys.exit(125)\n"
+            "pathlib.Path('wrapper-called').touch()\n"
             "print('BOOTSTRAP_TEST fixture', pathlib.Path(__file__).name, sys.argv[1:])\n"
             "sys.exit(int(os.environ['FIXTURE_EXIT']))\n")
         (tests / "bootstrap_wrapper_test.py").write_text(fixture)
         (tools / "bootstrap_wrapper_cases.py").write_text(fixture)
-        self.copy_process_tree_source()
         selections = (("Linux", "bootstrap_wrapper_test.py", "BootstrapWrapperTests"),
                       ("Windows", "bootstrap_wrapper_cases.py", "--jobs"))
         for platform, entry, argument in selections:
@@ -586,9 +633,42 @@ class WorkflowSetupTests(unittest.TestCase):
                         self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
                     else:
                         log = (self.root / "buster-ci/bootstrap-wrapper.log").read_text()
+                        self.assertIn(f"BOOTSTRAP_TEST helper {self.owner_helper}\n", log)
                         self.assertIn(f"BOOTSTRAP_TEST fixture {entry}", log)
                         self.assertIn(argument, log)
-                        self.assertIn("'2'" if platform == "Windows" else "'-v'", log)
+                        self.assertIn("'4'" if platform == "Windows" else "'-v'", log)
+
+    def test_process_owner_record_is_bound_to_its_inputs_and_fails_closed(self):
+        name = "Bootstrap wrapper regression tests"
+        self.assertEqual([self.steps[step].count(self.OWNER_INVOCATION) for step in self.OWNER_LOGS], [1, 1])
+        # A changed invocation runs for real; changed inputs requalify first.
+        changed = self.steps[name].replace("bootstrap_process_owner_test |", "bootstrap_process_owner_test --changed |")
+        with mock.patch.dict(self.steps, {name: changed}), mock.patch.object(subprocess, "run") as run:
+            self.run_step(name)
+        self.assertIn("bootstrap_process_owner_test --changed |", run.call_args.args[0][-1])
+        self.assertNotIn("MATRIX_PROCESS_OWNER_RECORD", run.call_args.args[0][-1])
+        with mock.patch.object(type(self), "owner_inputs", ()), mock.patch.object(type(self), "qualify_process_owner") as qualify, \
+             mock.patch.object(subprocess, "run") as run:
+            self.run_step(name)
+        qualify.assert_called_once_with()
+        self.assertIn('cat "$MATRIX_PROCESS_OWNER_RECORD" |', run.call_args.args[0][-1])
+        # Only the verified record exports an existing helper to the suite.
+        (self.root / "tests").mkdir()
+        (self.root / "tests/bootstrap_wrapper_test.py").write_text(
+            "import os, sys\nsys.exit(0 if os.path.isfile(os.environ.get('BUSTER_WINDOWS_PROCESS_TREE', '')) else 125)\n")
+        self.environment.update(BUSTER_MATRIX_SHARD="release", RUNNER_OS="Linux")
+        valid = self.owner_record.read_bytes()
+        records = {"valid": (valid, 0), "missing": (None, 1),
+                   "corrupt": (b"".join(line for line in valid.splitlines(True) if not line.startswith(b"BOOTSTRAP_PROCESS_OWNER ")), 125),
+                   "stale": (valid.replace(self.owner_helper.encode(), str(self.root / "deleted-helper").encode()), 125)}
+        for kind, (content, status) in records.items():
+            with self.subTest(record=kind):
+                record = self.root / f"{kind}.out"
+                if content is not None:
+                    record.write_bytes(content)
+                self.environment["MATRIX_PROCESS_OWNER_RECORD"] = record.as_posix()
+                result = self.run_step(name)
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
 
 
 class WorkflowStepTimeoutEvidenceTests(unittest.TestCase):
@@ -1701,11 +1781,9 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 self.assertIn(f"    runs-on: ${{{{ {self.PREDICATE} && 'ubuntu-26.04' || matrix.runner }}}}\n", text)
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
-                if job == "test":
-                    self.assertIn("\n    needs: [queue_lint, reuse, no_code_plan]\n", text)
-                else:
-                    # Only main-push reuse and trusted no-code planning gate these lanes.
-                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: [reuse, no_code_plan]"])
+                # Only main-push reuse and trusted no-code planning gate these
+                # lanes; merge-group lint runs beside desktop (#3912).
+                self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: [reuse, no_code_plan]"])
                 step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
                 self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
                 self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "

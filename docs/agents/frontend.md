@@ -274,6 +274,26 @@ rather than given a guessed class: `nullptr_t` (Clang answers -1), `va_list`
 frontend does not model. `c_test_builtin_classify_type` covers every class,
 the static contexts, arity and unevaluated operands at run time.
 
+`__builtin_LINE()`, `__builtin_FILE()` and `__builtin_FUNCTION()` (#3897) take
+no argument and need no entity (`c_semantic_source_location_builtin`). LINE is
+an `int` integer constant: the parser records it as a type-identity answer
+(`c_parse_source_line_builtin`), like `__builtin_classify_type`, so
+`_Static_assert`, array bounds, `case` labels and static initializers fold it.
+FILE and FUNCTION are `const char *` (`c_semantic_source_name_type`) and point
+to a string literal: the presumed file name of the call, or the enclosing
+function's shared `__func__` object, which is `""` at file scope
+(`c_ir_source_name_object`). That literal is also an address constant for
+static initializers. Positions come from the token's source map
+(`c_semantic_source_line`, `c_semantic_source_file`), so a macro-produced call
+reports its invocation and `#line` renumbers and renames it. In a macro
+invocation spanning lines, the reported line is the line of `__LINE__` there,
+which matches GCC; Clang reports the closing line. The
+result types follow GCC; Clang 18 answers `unsigned int` and `char *`.
+Every use with an argument is diagnosed. `-fmacro-prefix-map` does not apply
+to the FILE spelling yet (#3917). `c_test_source_location_builtins` checks types, constant
+contexts and invalid arity on three targets in both SSA forms. It also runs the
+program in every allocator and form, with GCC and Clang as oracles.
+
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
 `unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower
