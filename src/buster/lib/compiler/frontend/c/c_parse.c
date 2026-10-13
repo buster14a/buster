@@ -9836,10 +9836,28 @@ BUSTER_C_SHARED u32 c_semantic_source_line(CPreprocessResult const* preprocess, 
 }
 
 // The presumed file name of that expansion point, which `#line` can rename.
-BUSTER_C_SHARED String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index)
+BUSTER_C_SHARED String8 c_semantic_source_file(Arena* arena, CPreprocessResult const* preprocess, u32 token_index)
 {
+    String8 result = {0};
     u32 file = c_preprocess_token_location(preprocess, preprocess->tokens[token_index]).file;
-    return file < preprocess->file_count ? preprocess->files[file] : (String8){0};
+    if (file < preprocess->file_count)
+    {
+        result = preprocess->files[file];
+        // Successful preprocessing retains option maps in detail. A hand-built
+        // result has no command-line maps; a no-arena result has no tokens to lower.
+        CPreprocessDetail const* detail = preprocess->detail;
+        u32 mapping_count = detail ? detail->macro_prefix_map_count : 0;
+        CMacroPrefixMap const* mappings = detail ? detail->macro_prefix_maps : 0;
+        u32 mapping_index =
+            c_macro_prefix_map_index(result, mappings, mapping_count);
+        if (mapping_index < mapping_count)
+        {
+            CMacroPrefixMap mapping = mappings[mapping_index];
+            String8 suffix = string_slice(result, mapping.old_prefix.length, result.length);
+            result = string_format(arena, S8("{S8}{S8}"), mapping.new_prefix, suffix);
+        }
+    }
+    return result;
 }
 
 // __builtin_FILE() and __builtin_FUNCTION() answer `const char *`.
