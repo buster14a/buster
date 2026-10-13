@@ -3073,7 +3073,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
     // Module-relative row growth remains saturating for impossible demands.
     BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
 
-    enum { required_call_sites = 600, excessive_call_sites = 5000, required_statements = 16 };
+    // Keep this required-inline witness inside the independent retained-storage cap.
+    // The IR-derived old-charge floor below must still exceed the unchanged work cap.
+    enum { required_call_sites = 400, excessive_call_sites = 5000, required_statements = 16 };
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
     String8 source = ir_test_inline_required_work_source(arena, required_call_sites, required_statements);
@@ -3104,6 +3106,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
             u64 copied_rows_floor = callee->instruction_count >= argument_rows
                                         ? (u64)callee->instruction_count - argument_rows : 0;
             u64 prior_site_pairs = (u64)required_call_sites * (required_call_sites - 1u) / 2u;
+            // With constant interning disabled, each assignment contributes at least two
+            // literal rows and two integer-binary rows: 16 * 4 * 79,800 = 5,107,200.
             u64 old_repeated_projection_floor = copied_rows_floor * prior_site_pairs;
             // Before the fix, function_projected_units was charged again at
             // every later call. Even the copied-row component alone exceeds
@@ -3114,7 +3118,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
             if (prepared.error != IR_VALIDATION_NONE)
             {
                 arguments->show(arguments,
-                    S8("required-work 600 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64} growth={u64}\n"),
+                    S8("required-work 400 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64} growth={u64}\n"),
                     (u32)prepared.error, (u32)module->inlining.required_budget_reason,
                     module->inlining.required_budget_demand, module->inlining.required_budget_limit,
                     module->inlining.budget_skips, module->inlining.always_inlined, module->inlining.growth);
@@ -3150,7 +3154,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
             limited_module->inlining.required_budget_limit != required_call_sites - 1u)
         {
             arguments->show(arguments,
-                S8("required-work 599 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64}\n"),
+                S8("required-work 399 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64}\n"),
                 (u32)refused.error, (u32)limited_module->inlining.required_budget_reason,
                 limited_module->inlining.required_budget_demand, limited_module->inlining.required_budget_limit,
                 limited_module->inlining.budget_skips, limited_module->inlining.always_inlined);
