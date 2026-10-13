@@ -16096,6 +16096,87 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = 
     "}\n");
 #endif
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = BUSTER_KB(128);
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    if (BUSTER_REQUIRE(arguments, source_bytes))
+    {
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("int main(void) { int value = 7; if ("));
+        for (u32 index = 0; index < 1000; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 index % 2 ? S8("(int)") : S8("(signed char)"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("value != 7) return 1; unsigned int unsigned_value = 9; if ("));
+        for (u32 index = 0; index < 1000; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 index % 2 ? S8("(int)") : S8("(unsigned int)"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("unsigned_value != 9u) return 2; int object = 0; void* pointer = &object; if ("));
+        for (u32 index = 0; index < 1000; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 index % 2 ? S8("(void*)") : S8("(char*)"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("pointer != pointer) return 3; if (sizeof("));
+        for (u32 index = 0; index < 1000; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("(int)"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length,
+                             S8("value) != sizeof(int)) return 4; unsigned int sum = 0; "));
+        for (u32 index = 0; index < 512; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("sum += (int)value; "));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("if (sum != 3584u) return 5; return 0; }\n"));
+        BUSTER_TEST_RAW(arguments, source_length < source_capacity, S8("cast-depth fixture fits its input buffer"));
+        UnitTestResult runtime = c_test_run_exit_zero_program(arguments, S8("cast-frame-depth"),
+                                                               (String8){.pointer = source_bytes, .length = source_length});
+        result.test_count += runtime.test_count;
+        result.succeeded_test_count += runtime.succeeded_test_count;
+    }
+    c_test_scratch_end(temporary);
+
+    String8 source = S8("int f(void) { return (int)(int)7; }\n");
+    TemporalArena limited = scratch_begin(&arguments->arena, 1);
+    CPreprocessOptions options = {.source_path = S8("cast-frame-capacity.c"), .target = target_native,
+                                  .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17};
+    CPreprocessResult preprocess = c_preprocess(limited.arena, source, options);
+    CParserResult syntax = c_parse_ast(limited.arena, preprocess);
+    c_test_type_parse_frame_capacity_limit_set(1);
+    CAnalysisResult refused = c_analyze_semantics_only(limited.arena, preprocess, syntax);
+    c_test_type_parse_frame_capacity_limit_set(0);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+    bool capacity_diagnostic = false;
+    for (u32 index = 0; index < refused.diagnostic_count; index += 1)
+    {
+        capacity_diagnostic |= refused.diagnostics[index].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                               string_first_sequence(refused.diagnostics[index].message,
+                                                     S8("C type parsing exceeded its explicit-machine capacity")) != BUSTER_STRING_NO_MATCH;
+    }
+    BUSTER_TEST(arguments, capacity_diagnostic);
+    c_test_scratch_end(limited);
+
+    TemporalArena recovered_arena = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult recovered_preprocess = c_preprocess(recovered_arena.arena, source, options);
+    CParserResult recovered_syntax = c_parse_ast(recovered_arena.arena, recovered_preprocess);
+    CAnalysisResult recovered = c_analyze_semantics_only(recovered_arena.arena, recovered_preprocess, recovered_syntax);
+    BUSTER_TEST(arguments, recovered_preprocess.diagnostic_count == 0 && recovered_syntax.diagnostic_count == 0 &&
+                            recovered.analysis_complete && recovered.diagnostic_count == 0);
+    c_test_scratch_end(recovered_arena);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_incomplete_array_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -67564,6 +67645,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_call_assignment_values);
     C_TEST_FIXTURE(arguments, c_test_call_result_callees);
     C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
+    C_TEST_FIXTURE(arguments, c_test_cast_frame_depth_runtime);
     C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
     C_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
     C_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
