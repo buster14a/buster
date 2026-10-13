@@ -13930,7 +13930,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
 
 #if BUSTER_INCLUDE_TESTS
 // The generic selector and one pinned recipe emission must agree on a query:
-// the same form, bytes and relocation.
+// the same form, bytes and relocation, which names the query's own symbol.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_recipe_pin_agrees(BusterX86MetadataPhysicalQuery physical, BusterX86MetadataFormKey key)
 {
     u8 selected_bytes[16] = {0};
@@ -13950,7 +13950,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_recipe_pin_agrees(BusterX86Met
                   memcmp(selected_bytes, pinned_bytes, selected.byte_count) == 0 && selected.relocation_count == pinned.relocation_count &&
                   selected_relocation.offset == pinned_relocation.offset && selected_relocation.width == pinned_relocation.width &&
                   selected_relocation.kind == pinned_relocation.kind && selected_relocation.addend == pinned_relocation.addend &&
-                  string_equal(selected_relocation.symbol, pinned_relocation.symbol);
+                  selected_relocation.symbol.pointer == pinned_relocation.symbol.pointer &&
+                  selected_relocation.symbol.length == pinned_relocation.symbol.length;
     return result;
 }
 
