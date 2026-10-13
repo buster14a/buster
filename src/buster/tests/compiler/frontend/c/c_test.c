@@ -16097,6 +16097,8 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = 
 #endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program);
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArguments* arguments, String8 label, String8 program,
+                                                                      bool disable_ast);
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArguments* arguments)
 {
@@ -16139,10 +16141,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArgum
         }
         c_test_append_source(source_bytes, source_capacity, &source_length, S8("if (sum != 3584u) return 5; return 0; }\n"));
         BUSTER_TEST_RAW(arguments, source_length < source_capacity, S8("cast-depth fixture fits its input buffer"));
-        UnitTestResult runtime = c_test_run_exit_zero_program(arguments, S8("cast-frame-depth"),
-                                                               (String8){.pointer = source_bytes, .length = source_length});
+        String8 cast_program = {.pointer = source_bytes, .length = source_length};
+        UnitTestResult runtime = c_test_run_exit_zero_program(arguments, S8("cast-frame-depth"), cast_program);
         result.test_count += runtime.test_count;
         result.succeeded_test_count += runtime.succeeded_test_count;
+        UnitTestResult token_runtime = c_test_run_exit_zero_program_mode(arguments, S8("cast-frame-depth-no-ast"), cast_program, true);
+        result.test_count += token_runtime.test_count;
+        result.succeeded_test_count += token_runtime.succeeded_test_count;
     }
     c_test_scratch_end(temporary);
 
@@ -16296,7 +16301,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime
 // Compile `program` in every allocator mode and frontend form and require the
 // executable to exit zero: the program folds the answers it checks into its
 // exit status, so a wrong answer names itself by the failing check's number.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArguments* arguments, String8 label, String8 program,
+                                                                      bool disable_ast)
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -16312,7 +16318,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 output = buster_test_temporary_path(temporary.arena, string_format(temporary.arena, S8("{S8}-run"), label), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
-                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                String8 token_command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fno-c-ast-pilot"),
+                                          S8("-fverify-codegen"), S8("-o"), output, source};
+                SliceString8 selected_command = disable_ast ? (SliceString8)BUSTER_ARRAY_TO_SLICE(token_command)
+                                                            : (SliceString8)BUSTER_ARRAY_TO_SLICE(command);
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, selected_command);
                 invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
@@ -16338,8 +16348,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
     BUSTER_UNUSED(arguments);
     BUSTER_UNUSED(label);
     BUSTER_UNUSED(program);
+    BUSTER_UNUSED(disable_ast);
 #endif
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program)
+{
+    return c_test_run_exit_zero_program_mode(arguments, label, program, false);
 }
 
 // Short-circuit order and exactly-once evaluation through parenthesized
