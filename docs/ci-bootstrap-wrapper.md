@@ -213,7 +213,9 @@ Six replays used to rerun this identical native command, about 19–23 s each on
 hosted Windows, so the suite grew from 38 s to about 178 s and sat on the
 critical Windows release path (#3912). The class now runs the step's exact
 `bootstrap_process_owner_test` once, on a copy of its source closure, under the
-replays' 30-second deadline. Each replay substitutes only that invocation with
+120-second Windows child deadline. The replays' 30-second deadline left about
+7 s of margin for this command alone; run beside the other suite lanes on a
+slower hosted x86-64 runner, the single run exceeded it. Each replay substitutes only that invocation with
 the verified output; the step still tees, parses and exports it, and the fixture
 suites require the exported helper path. A changed invocation runs for real. A
 changed driver, Clang or closure requalifies before the next replay, and a

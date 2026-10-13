@@ -394,6 +394,11 @@ class WorkflowSetupTests(unittest.TestCase):
     # The helper command's input and discovery closure, besides the driver.
     OWNER_SOURCES = ("tools/windows_process_tree.c", "tools/windows_process_tree_test.c",
                      "src/buster/lib/base.h", "src/buster/lib/system_headers.h", "tests/build_compiler_identity.h")
+    # The Windows child deadline of the wrapper harness. The real step bounds
+    # this command only by its step timeout; uncontended it takes about 23 s,
+    # but here it shares the CPUs with the other two suite lanes and exceeded
+    # the 30 s replay deadline on a slower hosted Windows x64 runner (#3912).
+    OWNER_QUALIFICATION_TIMEOUT_SECONDS = 120
 
     @classmethod
     def setUpClass(cls):
@@ -424,17 +429,19 @@ class WorkflowSetupTests(unittest.TestCase):
         # Each replay used to rerun this identical qualification: two helper
         # compiles, the Windows selftest and 306 native controls, about 20 s
         # per replay on hosted Windows (#3912). Run the step's exact command
-        # once on the real closure, within the replay deadline, and replay its
-        # verified output. Changed inputs requalify before the next replay.
+        # once on the real closure and replay its verified output. Changed
+        # inputs requalify before the next replay.
         for relative in cls.OWNER_SOURCES:
             (cls.driver.parent / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, cls.driver.parent / relative)
         inputs = cls.process_owner_inputs(cls.driver.parent)
         command = [str(cls.driver), "bootstrap_process_owner_test"]
         try:
-            completed = subprocess.run(command, cwd=cls.driver.parent, capture_output=True, timeout=30)
+            completed = subprocess.run(command, cwd=cls.driver.parent, capture_output=True,
+                                       timeout=cls.OWNER_QUALIFICATION_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError(f"{command} timed out after 30 s: {error.stdout!r} {error.stderr!r}") from error
+            raise RuntimeError(f"{command} timed out after {cls.OWNER_QUALIFICATION_TIMEOUT_SECONDS} s: "
+                               f"{error.stdout!r} {error.stderr!r}") from error
         prefix = b"BOOTSTRAP_PROCESS_OWNER "
         helpers = [line[len(prefix):].rstrip(b"\r").decode() for line in completed.stdout.splitlines() if line.startswith(prefix)]
         if completed.returncode or len(helpers) != 1 or not Path(helpers[0]).is_file():
