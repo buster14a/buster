@@ -43158,24 +43158,118 @@ BUSTER_C_INTERNAL bool c_parse_type_is_complete_object(CParseResult* result, CTy
     return complete;
 }
 
+// Find an earlier initialized, inferred-length array whose type the entity carries into this
+// tentative declaration. Its bound is unknown until c_parse_infer_file_array_bounds.
+BUSTER_C_INTERNAL u32 c_parse_prior_inferred_array_definition_plus_one(CParseResult* result, const CDeclaration* declaration,
+                                                                        const CEntity* entity)
+{
+    u32 prior_declaration_plus_one = 0;
+    if (result && result->declarations && result->entities && declaration && entity &&
+        declaration >= result->declarations && declaration < result->declarations + result->declaration_count &&
+        entity >= result->entities && entity < result->entities + result->entity_count && entity->type.value < result->type_count)
+    {
+        u32 declaration_index = (u32)(declaration - result->declarations);
+        u32 entity_index = (u32)(entity - result->entities);
+        CType const* entity_type = result->types + entity->type.value;
+        bool unresolved_array = entity_type->kind == C_TYPE_ARRAY && entity_type->array_bound < result->array_bound_count;
+        if (unresolved_array)
+        {
+            CArrayBound bound = result->array_bounds[entity_type->array_bound];
+            unresolved_array = !bound.token_count && !bound.has_inferred_count && !bound.is_star &&
+                              c_parse_type_is_complete_object(result, entity_type->element_type);
+        }
+        for (u32 prior_index = declaration_index; unresolved_array && prior_index && !prior_declaration_plus_one;)
+        {
+            prior_index -= 1;
+            CDeclaration const* prior = result->declarations + prior_index;
+            bool candidate = prior->entity.value == entity_index && prior->kind == C_DECLARATION_OBJECT && prior->is_definition &&
+                             prior->type.value < result->type_count;
+            if (candidate)
+            {
+                CType const* prior_type = result->types + prior->type.value;
+                candidate = prior_type->kind == C_TYPE_ARRAY && prior_type->array_bound == entity_type->array_bound &&
+                            prior_type->array_bound < result->array_bound_count &&
+                            prior_type->element_type.value == entity_type->element_type.value;
+                if (candidate)
+                {
+                    CArrayBound prior_bound = result->array_bounds[prior_type->array_bound];
+                    candidate = !prior_bound.token_count && !prior_bound.has_inferred_count && !prior_bound.is_star &&
+                                c_parse_type_is_complete_object(result, prior_type->element_type);
+                }
+                if (candidate)
+                {
+                    prior_declaration_plus_one = prior_index + 1;
+                }
+            }
+        }
+    }
+    return prior_declaration_plus_one;
+}
+
+BUSTER_C_INTERNAL void c_parse_validate_deferred_internal_tentative_array_declarations(CParseResult* result,
+                                                                                       CPreprocessResult preprocess,
+                                                                                       const u32* prior_declaration_plus_one)
+{
+    if (result && prior_declaration_plus_one)
+    {
+        for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
+        {
+            u32 prior_plus_one = prior_declaration_plus_one[declaration_index];
+            bool complete_at_declaration = false;
+            if (prior_plus_one && prior_plus_one - 1 < result->declaration_count)
+            {
+                CDeclaration const* prior = result->declarations + (prior_plus_one - 1);
+                if (prior->kind == C_DECLARATION_OBJECT && prior->is_definition && prior->type.value < result->type_count)
+                {
+                    CType const* prior_type = result->types + prior->type.value;
+                    if (prior_type->kind == C_TYPE_ARRAY && prior_type->array_bound < result->array_bound_count)
+                    {
+                        CArrayBound bound = result->array_bounds[prior_type->array_bound];
+                        complete_at_declaration = bound.has_inferred_count && c_parse_type_is_complete_object(result, prior->type);
+                    }
+                }
+            }
+            if (prior_plus_one && !complete_at_declaration)
+            {
+                CDeclaration const* declaration = result->declarations + declaration_index;
+                String8 message = c_parse_message(
+                    result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location),
+                                   C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+            }
+        }
+    }
+}
+
 // Check an internal tentative declaration against the composite type visible at this point.
 // The declaration row keeps its source-spelled type; the entity carries compatible redeclaration merging.
 BUSTER_C_INTERNAL void c_parse_validate_internal_tentative_object_declaration(CParseResult* result, CPreprocessResult preprocess,
-                                                                              const CDeclaration* declaration, const CEntity* entity)
+                                                                              const CDeclaration* declaration, const CEntity* entity,
+                                                                              u32* prior_declaration_plus_one)
 {
-    bool incomplete_tentative = entity && entity->kind == C_ENTITY_OBJECT && entity->has_internal_linkage &&
+    bool incomplete_tentative = entity && entity->kind == C_ENTITY_OBJECT && entity->has_internal_linkage && declaration &&
                                 !declaration->is_definition &&
                                 !c_parse_declaration_declares_no_storage(preprocess, declaration) &&
                                 c_parse_type_is_incomplete_object(result, entity->type);
     if (incomplete_tentative)
     {
-        String8 message = c_parse_message(
-            result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
-        c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location),
-                           C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+        u32 prior_index_plus_one = c_parse_prior_inferred_array_definition_plus_one(result, declaration, entity);
+        u32 declaration_index = result->declarations && declaration ? (u32)(declaration - result->declarations) : UINT32_MAX;
+        bool deferred = prior_index_plus_one && prior_declaration_plus_one &&
+                        declaration_index < result->declaration_capacity;
+        if (deferred)
+        {
+            prior_declaration_plus_one[declaration_index] = prior_index_plus_one;
+        }
+        else
+        {
+            String8 message = c_parse_message(
+                result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location),
+                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+        }
     }
 }
-
 // Resolve tentative definitions only after every ordinary source expression
 // has been checked. An external incomplete array is completed on a fresh
 // per-object declarator copy; the typedef and declaration-point type stay open.
@@ -43745,6 +43839,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // -fc-ast-pilot; they stay until the analysis ends.
     c_parse_specifier_index_prepare(&machine, phase_arena);
     result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
+    // Deferred until initializer array-bound inference: only a prior initialized
+    // unsized array can make a later internal tentative [] type complete.
+    u32* deferred_tentative_prior_initializer_plus_one = arena_allocate(arena, u32, result.declaration_capacity);
+    if (deferred_tentative_prior_initializer_plus_one)
+    {
+        memset(deferred_tentative_prior_initializer_plus_one, 0, sizeof(*deferred_tentative_prior_initializer_plus_one) * result.declaration_capacity);
+    }
     result.type_capacity = token_count * 2 + 1;
     result.parameter_capacity = comma_count + open_parenthesis_count + 1;
     result.member_capacity = identifier_count + semicolon_count + 1;
@@ -44252,7 +44353,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     }
                 }
             }
-            c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, existing);
+            c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, existing,
+                                                                   deferred_tentative_prior_initializer_plus_one);
             continue;
         }
         if (conflicting && !(kind == C_DECLARATION_FUNCTION && conflicting->kind == C_ENTITY_FUNCTION && overloadable))
@@ -44329,7 +44431,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                      .value = 0,
                                  },
                                  entity, declaration_symbol);
-        c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, result.entities + entity.value);
+        c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, result.entities + entity.value,
+                                                                deferred_tentative_prior_initializer_plus_one);
     }
     if (result.enum_member_count)
     {
@@ -44434,6 +44537,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         }
     }
     c_parse_infer_file_array_bounds(&machine, arena, preprocess, &result);
+    c_parse_validate_deferred_internal_tentative_array_declarations(&result, preprocess,
+                                                                       deferred_tentative_prior_initializer_plus_one);
     for (CParserDeclaration* syntax_declaration = syntax.first_declaration; syntax_declaration; syntax_declaration = syntax_declaration->next)
     {
         if (syntax_declaration->kind != C_PARSER_DECLARATION_STATIC_ASSERT)
