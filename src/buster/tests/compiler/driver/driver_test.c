@@ -4881,6 +4881,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
         {S8("int *f(void){register int x=0; return &_Generic(0,int:x);}"), false,
          S8("in function 'f': address of register variable 'x' requested")},
         {S8("int f(void){int x=0; return _Generic(0,int:x)++;}"), true},
+        {S8("int f(void){int x=0; return ++_Generic(0,int:x);}"), true},
+        {S8("int f(void){int x=0; return ++((_Generic(0,int:x)));}"), true},
+        {S8("int f(void){int x=0; return ((_Generic(0,int:x)))++;}"), true},
+        {S8("int f(void){int x=0; return _Generic(0,int:_Generic(1,int:x))++;}"), true},
+        {S8("struct S{int x;}; int f(void){struct S s={0}; return _Generic(0,int:s.x)++;}"), true},
+        {S8("int f(void){int a[1]={0}; return _Generic(0,int:a[0])++;}"), true},
+        {S8("int f(void){int a[1]={0}; int i=0; return (_Generic(0,int *:a,default:a))[i++]++;}"), true},
+        {S8("int f(void){int x=0; int *p=&x; return (*_Generic(0,int *:p))++;}"), true},
         {S8("int f(void){register int x=0; return _Generic(0,int:x)++;}"), true},
         {S8("int function(void); int (*f(void))(void){return &_Generic(0,int:function);}"), true},
         {S8("int *f(void){register int x=0; return &(_Generic(0,int:x));}"), false,
@@ -5015,6 +5023,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
             }
         }
     }
+    TemporalArena generic_update_temporary = scratch_begin(&arguments->arena, 1);
+    String8 generic_update_output =
+        buster_test_temporary_path(generic_update_temporary.arena, S8("generic-place-update"), S8(""));
+    String8 generic_update_command[] = {
+        S8("-std=c17"), S8("-o"), generic_update_output, S8("tests/basic_c_generic_place_update.c"),
+    };
+    CompilerDriverResult generic_update = compiler_driver_execute_invocation(
+        generic_update_temporary.arena,
+        compiler_driver_parse_arguments(generic_update_temporary.arena,
+                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(generic_update_command)));
+    BUSTER_TEST(arguments, generic_update.error == COMPILER_DRIVER_ERROR_NONE);
+    if (generic_update.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 generic_update_arguments[] = {generic_update_output};
+        ProcessSpawnResult generic_update_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(generic_update_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        BUSTER_TEST(arguments, generic_update_spawn.handle != 0);
+        if (generic_update_spawn.handle)
+        {
+            BUSTER_TEST(arguments,
+                        os_process_wait_sync(generic_update_temporary.arena, generic_update_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    os_file_delete(generic_update_output);
+    scratch_end(generic_update_temporary);
     return result;
 }
 

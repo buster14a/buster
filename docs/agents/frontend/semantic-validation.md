@@ -69,6 +69,11 @@ update/function-address, binary and pointee controls. It checks syntax-only/obje
 object on refusal across four C dialects, three frontend routes and three
 target layouts (#3743, #3758).
 
+For a direct prefix or postfix update of a selected `_Generic` place, C lowering
+defers the selection to its iterative place frames. That path lowers only the
+retained association as a place, preparing selected-arm calls once; ordinary
+Generic values and Generic-selected call callees retain the expression path.
+
 ## Declaration constraints
 
 Before C23, a `for` initializer declaration may introduce only automatic or

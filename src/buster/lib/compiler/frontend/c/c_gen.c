@@ -2798,6 +2798,11 @@ struct CIrPreparedCall
     // The child expression that owns that operand prepares it itself, which
     // needs builder->preparing_calls cleared for the duration.
     bool deferred_calls;
+    // A direct update of a Generic-selected place is consumed by the place
+    // machine, which evaluates only the retained association as a place.
+    bool deferred_place_selection;
+    u32 place_selection_start;
+    u32 place_selection_end;
     // The GNU `__atomic_*` spelling of an operation the `__c11_atomic_*` family
     // also has: an ordinary pointer where the C11 form wants a pointer to an
     // `_Atomic` object, and the argument-count differences that go with it.
@@ -19115,8 +19120,11 @@ struct CIrLowerFrame
             u32 index;
             u32 close;
             u32 dereference_count;
+            u32 selection_start;
+            u32 selection_end;
             u8 continuation;
-            u8 reserved[3];
+            bool selection_context;
+            u8 reserved[2];
         } place;
         struct
         {
@@ -19307,6 +19315,8 @@ typedef enum CIrPlaceContinuation
     C_IR_PLACE_CONTINUATION_EXPRESSION,
     C_IR_PLACE_CONTINUATION_REAL_PART,
     C_IR_PLACE_CONTINUATION_IMAGINARY_PART,
+    C_IR_PLACE_CONTINUATION_GENERIC_PREPARE,
+    C_IR_PLACE_CONTINUATION_GENERIC_PLACE,
 } CIrPlaceContinuation;
 
 typedef enum CIrCompoundContinuation
@@ -19444,6 +19454,11 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start,
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
+BUSTER_C_INTERNAL bool c_ir_selection_answer(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out,
+                                              u32* selected_end_out);
+BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end);
+
 
 // Whether [start, end) is a bare member chain: an identifier followed only by
 // `.name`, `->name`, `[...]` and call `(...)` suffixes. Such a group is lowered as a place
@@ -19482,10 +19497,145 @@ BUSTER_C_INTERNAL bool c_ir_place_group_is_member_chain(CIntegerIrBuilder* build
     return result;
 }
 
+// Whether a Generic selection, possibly surrounded by complete parentheses,
+// is the exact operand of a prefix or postfix update. Calls used as values or
+// callees and selections with an outside suffix stay on the expression path.
+BUSTER_C_INTERNAL bool c_ir_generic_is_direct_update_operand(CIntegerIrBuilder* builder, u32 range_start, u32 range_end,
+                                                              u32 generic_start, u32 generic_close)
+{
+    u32 operand_start = generic_start;
+    u32 operand_end = generic_close + 1;
+    bool expanded = true;
+    while (expanded && operand_start > range_start && operand_end < range_end &&
+           c_token_is_punctuator(&builder->preprocess.tokens[operand_start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, operand_start - 1, range_end,
+                                                    C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        expanded = close == operand_end;
+        if (expanded)
+        {
+            operand_start -= 1;
+            operand_end += 1;
+        }
+    }
+    bool has_postfix_suffix = operand_end < range_end &&
+                              (c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                               c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_LEFT_BRACKET) ||
+                               c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_DOT) ||
+                               c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_ARROW));
+    bool prefix = !has_postfix_suffix && operand_start > range_start &&
+                  (c_token_is_punctuator(&builder->preprocess.tokens[operand_start - 1], C_PUNCTUATOR_PLUS_PLUS) ||
+                   c_token_is_punctuator(&builder->preprocess.tokens[operand_start - 1], C_PUNCTUATOR_MINUS_MINUS));
+    bool postfix = operand_end < range_end &&
+                   (c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_PLUS_PLUS) ||
+                    c_token_is_punctuator(&builder->preprocess.tokens[operand_end], C_PUNCTUATOR_MINUS_MINUS));
+    return prefix || postfix;
+}
+
+// Find a whole Generic selection after stripping complete grouping pairs. The
+// explicit range is used only to choose the selected association; lowering
+// follows it with the existing place-frame stack.
+BUSTER_C_INTERNAL bool c_ir_place_range_is_generic_selection(CIntegerIrBuilder* builder, u32 start, u32 end, u32* generic_start_out,
+                                                              u32* generic_close_out)
+{
+    bool valid = start < end;
+    while (valid && end > start + 1 &&
+           c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                    C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close != end - 1)
+        {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    valid = valid && start + 1 < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+            c_ir_token_builtin_kind(builder, builder->preprocess.tokens[start]) == C_SYMBOL_BUILTIN_GENERIC &&
+            c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    u32 close = valid ? c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                         C_PUNCTUATOR_RIGHT_PARENTHESIS) : end;
+    valid = valid && close + 1 == end;
+    if (valid)
+    {
+        if (generic_start_out) *generic_start_out = start;
+        if (generic_close_out) *generic_close_out = close;
+    }
+    return valid;
+}
+
+// A selected arm may be another complete Generic selection. This helper
+// pushes either that place frame or the one call-preparation pass its arm needs.
+BUSTER_C_INTERNAL bool c_ir_lower_place_try_generic_selection(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    u32 generic_start = 0;
+    u32 generic_close = 0;
+    u32 start = frame->as.place.start;
+    u32 end = frame->as.place.end;
+    bool maybe_generic = start < end && end <= builder->preprocess.token_count &&
+                         (builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
+                              ? c_ir_token_builtin_kind(builder, builder->preprocess.tokens[start]) == C_SYMBOL_BUILTIN_GENERIC
+                              : c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS));
+    bool generic_range = maybe_generic &&
+                         c_ir_place_range_is_generic_selection(builder, start, end, &generic_start, &generic_close);
+    CIrPreparedCall* generic_call = generic_range ? c_ir_prepared_call_find(builder, generic_start) : 0;
+    bool generic_selection = generic_range &&
+                             (frame->as.place.selection_context || (generic_call && generic_call->deferred_place_selection));
+    bool handled = generic_selection;
+    if (generic_selection)
+    {
+        u32 association_start = frame->as.place.selection_start;
+        u32 association_end = frame->as.place.selection_end;
+        bool selection_valid = generic_call && generic_call->deferred_place_selection;
+        if (selection_valid)
+        {
+            selection_valid = association_start < association_end && association_end <= generic_close;
+        }
+        else
+        {
+            selection_valid =
+                c_ir_selection_answer(builder, generic_start, generic_close + 1, &association_start, &association_end);
+        }
+        if (selection_valid)
+        {
+            bool selected_is_generic =
+                c_ir_place_range_is_generic_selection(builder, association_start, association_end, 0, 0);
+            frame->as.place.place = IR_VALUE_ID_INVALID;
+            frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[generic_start]);
+            frame->as.place.selection_start = association_start;
+            frame->as.place.selection_end = association_end;
+            frame->as.place.index = frame->as.place.end;
+            frame->as.place.continuation =
+                selected_is_generic ? C_IR_PLACE_CONTINUATION_GENERIC_PLACE : C_IR_PLACE_CONTINUATION_GENERIC_PREPARE;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            bool child_pushed = selected_is_generic
+                ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                      .kind = C_IR_LOWER_FRAME_PLACE,
+                      .as.place = {.start = association_start, .end = association_end, .selection_context = true},
+                  })
+                : c_ir_prepare_calls_frame_push(builder, association_start, association_end);
+            if (!child_pushed)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+        }
+        else
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+    }
+    return handled;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
-    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    bool skip_place_suffix = frame->stage == C_IR_LOWER_STAGE_BEGIN &&
+                             c_ir_lower_place_try_generic_selection(builder, frame);
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN && !skip_place_suffix)
     {
         u32 start = frame->as.place.start;
         u32 end = frame->as.place.end;
@@ -19907,15 +20057,35 @@ c_ir_place_base_resolved:
         frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
-    else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    else if (frame->stage == C_IR_LOWER_STAGE_CHILD && !skip_place_suffix)
     {
         if (!machine->child_result.success)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_REAL_PART ||
-            frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART)
+        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_GENERIC_PREPARE)
+        {
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_GENERIC_PLACE;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            skip_place_suffix = true;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                    .kind = C_IR_LOWER_FRAME_PLACE,
+                    .as.place = {.start = frame->as.place.selection_start,
+                                 .end = frame->as.place.selection_end,
+                                 .selection_context = true},
+                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_GENERIC_PLACE)
+        {
+            frame->as.place.place = machine->child_result.value;
+            frame->as.place.index = frame->as.place.end;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_REAL_PART ||
+                 frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART)
         {
             IrValueId operand = machine->child_result.value;
             bool imaginary = frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
@@ -20018,11 +20188,14 @@ c_ir_place_base_resolved:
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
-        frame->stage = C_IR_LOWER_STAGE_FINISH;
+        if (!skip_place_suffix)
+        {
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+            frame->stage = C_IR_LOWER_STAGE_FINISH;
+        }
     }
  c_ir_place_suffix_walk:
-    if (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.local && frame->as.place.local->is_variable_length_array &&
+    if (!skip_place_suffix && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.local && frame->as.place.local->is_variable_length_array &&
         frame->as.place.index < frame->as.place.end && c_token_is_punctuator(&builder->preprocess.tokens[frame->as.place.index], C_PUNCTUATOR_LEFT_BRACKET))
     {
         frame->as.place.continuation = C_IR_PLACE_CONTINUATION_VLA;
@@ -20042,7 +20215,7 @@ c_ir_place_base_resolved:
         }
         return;
     }
-    while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.index < frame->as.place.end)
+    while (!skip_place_suffix && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.index < frame->as.place.end)
     {
         u32 index = frame->as.place.index;
         CToken access = builder->preprocess.tokens[index];
@@ -20110,7 +20283,7 @@ c_ir_place_base_resolved:
         }
         frame->as.place.index += 2;
     }
-    while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.dereference_count)
+    while (!skip_place_suffix && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.dereference_count)
     {
         IrTypeId pointer_type = builder->function->values[frame->as.place.place.value].canonical_type;
         IrValueId pointer = builder->function->values[frame->as.place.place.value].category == IR_VALUE_PLACE
@@ -20119,8 +20292,11 @@ c_ir_place_base_resolved:
         frame->as.place.place = c_ir_emit_dereference_place(builder, pointer, frame->as.place.source);
         frame->as.place.dereference_count -= 1;
     }
-    bool success = frame->as.place.index == frame->as.place.end && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
-    c_ir_lower_frame_finish(builder, success, success ? frame->as.place.place : IR_VALUE_ID_INVALID);
+    if (!skip_place_suffix)
+    {
+        bool success = frame->as.place.index == frame->as.place.end && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
+        c_ir_lower_frame_finish(builder, success, success ? frame->as.place.place : IR_VALUE_ID_INVALID);
+    }
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_atomic_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
@@ -25980,6 +26156,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_generic = builtin_generic,
             .deferred_calls = builtin_generic || builtin_choose_expr || builtin_vendor_generic ||
                               (indirect && last_deferred_index != UINT32_MAX && last_deferred_index > callee_start && last_deferred_index < index),
+            .deferred_place_selection = builtin_generic &&
+                                       c_ir_generic_is_direct_update_operand(builder, start, end, callee_start, close),
             .builtin_atomic = builtin_atomic,
             .builtin_memory = builtin_memory,
             .builtin_math_link_name = builtin_math_link_name,
@@ -26854,6 +27032,17 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             if (!selection_valid)
             {
                 return false;
+            }
+            if (selected->deferred_place_selection)
+            {
+                // The update's place consumer evaluates the selected arm
+                // directly as a place, avoiding an unused pre-load.
+                selected->place_selection_start = association_start;
+                selected->place_selection_end = association_end;
+                selected->argument_count = 1;
+                selected->emitted = true;
+                remaining -= 1;
+                continue;
             }
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_GENERIC)
             {
@@ -37509,6 +37698,11 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     bool prefix_update_has_outer_prefix = prefix_place_update && update_operand_start < update_operand_end &&
                                           (c_token_is_punctuator(&builder->preprocess.tokens[update_operand_start], C_PUNCTUATOR_STAR) ||
                                            c_token_is_punctuator(&builder->preprocess.tokens[update_operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS));
+    if (prefix_update_has_outer_prefix &&
+        c_ir_place_range_is_generic_selection(builder, update_operand_start, update_operand_end, 0, 0))
+    {
+        prefix_update_has_outer_prefix = false;
+    }
     if ((prefix_place_update || postfix_place_update) && !update_operand_has_binary && !postfix_update_has_outer_prefix && !prefix_update_has_outer_prefix)
     {
         state->pending_start = prefix_place_update ? start : end - 1;
