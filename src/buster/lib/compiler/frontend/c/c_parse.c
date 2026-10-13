@@ -1546,6 +1546,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machin
 
 BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_fallback_symbol(CParseResult* result, u32 symbol, String8 name);
+BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 token);
 BUSTER_C_SHARED CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
 
 BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
@@ -4681,6 +4682,17 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     }
                     if (token.kind == C_TOKEN_IDENTIFIER)
                     {
+                        // Identity builtins have already been settled by the
+                        // semantic query. Their type operands are not value
+                        // identifiers; consume the retained answer as one leaf.
+                        CTypeIdentityQuery* identity = c_parse_type_identity_find(result, bound.token_start + bound_index);
+                        if (identity && identity->result_start == UINT32_MAX &&
+                            identity->token_end > bound.token_start + bound_index && identity->token_end <= bound.token_start + bound.token_count)
+                        {
+                            bound_tokens[bound_token_count++] = c_parse_space_decimal(&bound_space, identity->result_end);
+                            bound_index = identity->token_end - bound.token_start - 1;
+                            continue;
+                        }
                         CEntity* constant = c_parse_first_constant_entity_token(result, preprocess.spelling_base, token);
                         bool constant_is_negative = false;
                         u64 constant_value = 0;
@@ -5383,7 +5395,6 @@ BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type);
 
 BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id);
 BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type);
-BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 start);
 BUSTER_C_INTERNAL void c_parse_type_identity_settle(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                    CParseResult* result, CScopeId scope, u32 start, u32 end);
 

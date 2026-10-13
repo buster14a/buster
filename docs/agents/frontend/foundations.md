@@ -2136,3 +2136,13 @@ checks that a returned-function call retains the positive reference scan.
 for typeof and qualified-typeof casts plus their interior-conjunction negatives.
 The landed decorated-label runtime controls, original deep lowering and
 runtime-order fixtures remain separate.
+
+## Type identity in array layout constants
+
+The layout bound rewriter consumes retained semantic identity answers as one
+integer leaf, skipping their unevaluated type operands. This lets nested
+`sizeof(char[...__builtin_types_compatible_p(...)...])` retain the same constant
+value as the direct builtin, including Git's ARRAY_SIZE macro. Missing answers
+stay unresolved. `c_test_array_size_identity_layout` covers static initializers,
+member bounds, local initialized arrays, four target layouts and both frontend
+forms; pointer misuse and genuinely variable bounds retain their refusals.
