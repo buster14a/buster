@@ -1,0 +1,22 @@
+# callgrind --tool=callgrind --cache-sim=no --branch-sim=no; Ir totals; tools/work_ledger/build_subject.sh plain builds (-O2 -march=x86-64-v3, tests off)
+# base      subject-base/ide-plain (446f742e) sha256 5f5fd0d511c8dd0481f1e3ccc19de130d67ac4546fadc2f7e21dacb204ae3498
+# candidate subject-cand/ide-plain (b9e347e8; 98d477e4 differs only in c_test.c) sha256 7df06ffaa05b8ca26901b49acbb5616493e4746e6e24067b740a40e5a129a7db
+# workloads (cwd: empty temp dir; inputs from the pinned base tree):
+#   empty_x86_64_c            cc -march=znver3 -c empty.c
+#   empty_aarch64_c           cc --target=aarch64-unknown-linux-gnu -c empty.c
+#   empty_x86_64_E            cc -march=znver3 -E empty.c
+#   observables_compile_link  cc -march=znver3 tests/differential/observables.c -o observables
+#   four_input_c              cc -march=znver3 -c tests/basic_c_aarch64_atomic_pair.c tests/basic_c_aarch64_atomic_update_pair.c tests/basic_c_aarch64_dynamic_calls.c tests/basic_asm_unit_caller.c
+#   sixty_four_empty_c        cc -march=znver3 -c e00.c .. e63.c (64 empty units, one process)
+base empty_x86_64_c=10880281
+base empty_aarch64_c=2700429
+base empty_x86_64_E=2601951
+base observables_compile_link=27146592
+base four_input_c=70155788
+candidate empty_x86_64_c=10467777
+candidate empty_aarch64_c=2294460
+candidate empty_x86_64_E=2189447
+candidate observables_compile_link=26854612
+candidate four_input_c=68987878
+base sixty_four_empty_c=118282950
+candidate sixty_four_empty_c=99476021

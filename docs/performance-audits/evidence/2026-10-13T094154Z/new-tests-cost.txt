@@ -1,0 +1,22 @@
+# Cost of the two new c_frontend_tests fixtures under callgrind (Ir), collected only inside them (--collect-atstart=no --toggle-collect).
+# Binary: head 98d477e4 sources built with tools/work_ledger/build_subject.sh flags but -DBUSTER_INCLUDE_TESTS=1, plus this scratch-only gate so callgrind reaches them (the whole module crashes under valgrind first, #3431):
+--- head/src/buster/tests/compiler/frontend/c/c_test.c	2026-10-13 09:35:19.712521437 +0000
++++ only/src/buster/tests/compiler/frontend/c/c_test.c	2026-10-13 09:50:50.724576779 +0000
+@@ -65940,6 +65940,12 @@
+ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+ {
+     UnitTestResult result = {0};
++    if (os_get_environment_variable(S8("PREDEFINED_ONLY")).length)
++    {
++        C_TEST_FIXTURE(arguments, c_test_predefined_text_direct_tokens);
++        C_TEST_FIXTURE(arguments, c_test_predefined_text_prelude_identity);
++        return result;
++    }
+     BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
+     BUSTER_TEST_FIXTURE(arguments, c_test_generic_large_function);
+     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
+# command: PREDEFINED_ONLY=1 BUSTER_TEST_JOBS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no --collect-atstart=no --toggle-collect=c_test_predefined_text_direct_tokens --toggle-collect=c_test_predefined_text_prelude_identity ide-tests-v3 test --module=c_frontend_tests
+[175/175] Unit tests (1 of 63 modules selected)
+270,225,306 (100.0%)  PROGRAM TOTALS
+225,170,388 (83.33%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_predefined_text_prelude_identity
+ 45,054,918 (16.67%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_predefined_text_direct_tokens
