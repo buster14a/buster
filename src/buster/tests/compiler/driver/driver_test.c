@@ -807,6 +807,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_paths(UnitTestArg
     BUSTER_TEST(arguments, no_inputs_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, no_inputs_result.diagnostic, S8("no input files"));
 
+    CompilerDriverInvocation inputless_dependency_query = {
+        .target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target,
+        .action = COMPILER_DRIVER_ACTION_LINK,
+        .query = COMPILER_DRIVER_QUERY_LINKER_VERSION,
+        .dependency_file = true,
+        .dependency_passthrough = true,
+        .dependency_path = S8("driver-inputless-query.d"),
+        .input_paths = 0,
+        .input_count = 0,
+    };
+    CompilerDriverResult inputless_dependency_query_result =
+        compiler_driver_execute_invocation(arena, inputless_dependency_query);
+    BUSTER_TEST(arguments, inputless_dependency_query_result.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                            inputless_dependency_query_result.output.length == 0);
+    BUSTER_STRING_TEST(arguments, inputless_dependency_query_result.diagnostic,
+                       S8("-Wp dependency files require one C input, one depfile path, no direct dependency modifiers, and named native -S output"));
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
     u64 position = arena->position;
     String8 input = buster_test_temporary_path(arena, S8("output-path-contract"), S8(".c"));

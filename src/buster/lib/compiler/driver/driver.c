@@ -10833,6 +10833,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     if (invocation.dependency_passthrough)
     {
+        if (invocation.input_count != 1 || !invocation.input_paths)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("-Wp dependency files require one C input, one depfile path, no direct dependency modifiers, and named native -S output");
+            goto finish;
+        }
         String8 output = invocation.output_path.length ? invocation.output_path
                                                        : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
         String8 dependency_absolute = compiler_driver_dependency_destination(arena, invocation.dependency_path);
