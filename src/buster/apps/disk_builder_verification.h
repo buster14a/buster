@@ -2,8 +2,10 @@
 
 #include <stddef.h>
 #include <buster/lib/base.h>
+#include <buster/lib/arena.h>
 
 #define DISK_BUILDER_SECTOR_SIZE 512
+#define DISK_BUILDER_IMAGE_SIZE BUSTER_MB(64)
 
 typedef struct MBRPartitionRecord MBRPartitionRecord;
 // Byte fields preserve the MBR wire layout without host bitfield or packing
@@ -56,3 +58,33 @@ BUSTER_F_DECL void disk_builder_mbr_write_u24_le(u8 bytes[3], u32 value);
 BUSTER_F_DECL void disk_builder_mbr_write_u32_le(u8 bytes[4], u32 value);
 BUSTER_F_DECL u32 disk_builder_protective_mbr_size_in_lba(u64 disk_size);
 BUSTER_F_DECL VerificationError verify_disk(u8* disk, u64 disk_size);
+
+typedef enum DiskBuilderReferenceStatus
+{
+    DISK_BUILDER_REFERENCE_OK,
+    DISK_BUILDER_REFERENCE_INVALID_ARGUMENT,
+    DISK_BUILDER_REFERENCE_OPEN_FAILED,
+    DISK_BUILDER_REFERENCE_STATS_FAILED,
+    DISK_BUILDER_REFERENCE_NOT_REGULAR,
+    DISK_BUILDER_REFERENCE_SIZE_MISMATCH,
+    DISK_BUILDER_REFERENCE_ALLOCATION_FAILED,
+    DISK_BUILDER_REFERENCE_READ_FAILED,
+    DISK_BUILDER_REFERENCE_SIZE_CHANGED,
+    DISK_BUILDER_REFERENCE_CLOSE_FAILED,
+} DiskBuilderReferenceStatus;
+
+typedef struct DiskBuilderReferenceResult DiskBuilderReferenceResult;
+struct DiskBuilderReferenceResult
+{
+    ByteSlice bytes;
+    DiskBuilderReferenceStatus status;
+    u64 observed_size;
+    u64 transferred;
+    u32 error;
+    u32 cleanup_error;
+};
+
+BUSTER_F_DECL DiskBuilderReferenceResult disk_builder_reference_read(Arena* arena, String8 path);
+BUSTER_F_DECL bool disk_builder_reference_is_valid(DiskBuilderReferenceResult reference);
+BUSTER_F_DECL bool disk_builder_reference_compare_and_publish(DiskBuilderReferenceResult reference, ByteSlice image,
+                                                               String8 output_path, bool* match_out);
