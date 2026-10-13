@@ -2490,8 +2490,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         CIRLowerResult large_lowered = {0};
         if (!large_preprocessed.error_count && !large_analysis.diagnostic_count)
         {
-            large_lowered = c_lower_to_ir(large_arena, S8("canonical-inline-large-required.c"),
-                large_preprocessed, large_analysis, target_native);
+            // The leaf's size comes from repeated constants; keep each row so it exceeds the budgets.
+            large_lowered = c_lower_to_ir_with_options(large_arena, S8("canonical-inline-large-required.c"),
+                large_preprocessed, large_analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
         }
         BUSTER_TEST(arguments, !large_preprocessed.error_count && !large_analysis.diagnostic_count && !large_lowered.diagnostic_count);
         if (BUSTER_REQUIRE(arguments, large_lowered.program && large_lowered.program->module_count == 1))
@@ -2855,8 +2856,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         CIRLowerResult spread_lowered = {0};
         if (!spread_preprocess.error_count && !spread_analysis.diagnostic_count)
         {
-            spread_lowered = c_lower_to_ir(spread_arena, S8("canonical-inline-spread.c"),
-                spread_preprocess, spread_analysis, target_native);
+            // The callers' sizes come from repeated constants; keep each row so they exceed the storage limit.
+            spread_lowered = c_lower_to_ir_with_options(spread_arena, S8("canonical-inline-spread.c"),
+                spread_preprocess, spread_analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
         }
         BUSTER_TEST(arguments, spread_preprocess.error_count == 0 && spread_analysis.diagnostic_count == 0);
         BUSTER_TEST(arguments, spread_lowered.diagnostic_count == 0 && spread_lowered.program != 0);

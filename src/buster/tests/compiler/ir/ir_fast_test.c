@@ -107,7 +107,8 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_fast_cse_lower(UnitTestArguments* arguments, S
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("fast-cse.c"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){0});
+                                                            // The cases count CSE's own constant hits, so each constant keeps its row.
+                                                            (CIRLowerOptions){.disable_block_constant_interning = true});
         if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
         {
             lowered.program->fast_passes = 0;

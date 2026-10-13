@@ -48784,6 +48784,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-target"),
         S8("x86_64-pc-windows-msvc"),
         S8("-fregister-allocator=quality"),
+        // The prolog decoder below expects `push rbp; mov rbp, rsp; sub rsp, N` with no
+        // callee-saved pushes, which an interned constant live across a call would add.
+        S8("-fno-canonical-intern-constants"),
         S8("-o"),
         c_float_abi_windows_path,
         S8("tests/basic_c_float_abi.c"),
