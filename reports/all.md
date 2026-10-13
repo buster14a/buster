@@ -10,7 +10,7 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Linux x86-64 external projects / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | push / main | 0 | 3 | [series](series-f3f90495a24c9103.md) |
 | Windows x86-64 inventory &#40;qualification pending&#41; / non-matrix | Windows Server 2025 Datacenter / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-bc4c14f60a362e5e.md) |
 | Linux x86-64 bootstrap evidence / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 5 | 5 | [series](series-45419f71ad96fa6a.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 1 | 1 | [series](series-659dd9bdc8513655.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 2 | 2 | [series](series-659dd9bdc8513655.md) |
 | Record the compiler benchmark request / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 3 | 3 | [series](series-14061ff422275937.md) |
 | Show the queued compiler benchmark check / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | push / main | 1 | 1 | [series](series-cae1070a29eec6c4.md) |
 | Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-33e938f1f4be6999.md) |
@@ -18,11 +18,11 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 24 | [series](series-310307db3edca5aa.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/3718-linear-assignment-chains | 0 | 1 | [series](series-b6ab01d48adccc95.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | pull&#95;request / codex/3718-linear-assignment-chains | 1 | 1 | [series](series-14737ec93a7921d1.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 20 | [series](series-11db6938aa621425.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 6 | 6 | [series](series-f4bbd04e90bff00b.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 34 | 34 | [series](series-20369cc20c6b6e85.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 23 | [series](series-11db6938aa621425.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 7 | 7 | [series](series-f4bbd04e90bff00b.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 39 | 39 | [series](series-20369cc20c6b6e85.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 5 | 5 | [series](series-cf913efc1e8c2ba3.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 9 | 9 | [series](series-0571bc9f9540bac0.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 10 | 10 | [series](series-0571bc9f9540bac0.md) |
 | embedding / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-41a200aefd15954a.md) |
 | Linux x86-64 investigation evidence / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-c81ba1e5dd82bceb.md) |
 | Pinned baseline self-host fixed point / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-a373342dfc7e3efe.md) |
@@ -81,9 +81,9 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | CI complete / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-0488214f24f41805.md) |
 | Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 0 | 2 | [series](series-63158f378de5073b.md) |
 | Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 7 | 7 | [series](series-dfba54a0e1caaff7.md) |
-| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 15 | [series](series-f666f9001ca74394.md) |
-| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 15 | [series](series-e460ad260f8a45e8.md) |
-| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 9 | 9 | [series](series-95301a08b54ea662.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 16 | [series](series-f666f9001ca74394.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 16 | [series](series-e460ad260f8a45e8.md) |
+| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 10 | 10 | [series](series-95301a08b54ea662.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3830-f0f8494491686fb8aae18626271abb2089153eba | 0 | 1 | [series](series-3796000dce50f7f8.md) |
 | foundation / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | merge&#95;group / gh-readonly-queue/main/pr-3830-f0f8494491686fb8aae18626271abb2089153eba | 1 | 1 | [series](series-f71cc176300c745d.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3830-f0f8494491686fb8aae18626271abb2089153eba | 0 | 1 | [series](series-680b15bf378b7ade.md) |
