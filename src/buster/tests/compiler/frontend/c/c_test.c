@@ -26409,7 +26409,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
             CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
             String8 expected = string_format(temporary.arena,
-                S8("'{S8}' is not supported on {S8}: the target lowers no long double"), call.name, target_row.name);
+                S8("in function 'long_double_builtin_probe': '{S8}' is not supported on {S8}: the target lowers no long double"), call.name, target_row.name);
             bool diagnosed = parse.diagnostic_count == 1 &&
                 parse.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
                 string_equal(parse.diagnostics[0].message, expected);
@@ -52922,7 +52922,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_libm_rounding_builtins_lowering(UnitTe
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         String8 expected = string_format(temporary.arena,
-            S8("'__builtin_truncl' is not supported on {S8}: the target lowers no long double"), wasm_names[wasm_index]);
+            S8("in function 'f': '__builtin_truncl' is not supported on {S8}: the target lowers no long double"), wasm_names[wasm_index]);
         bool diagnosed = preprocess.diagnostic_count == 0 && analysis.diagnostic_count == 1 &&
             analysis.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
             string_equal(analysis.diagnostics[0].message, expected);
