@@ -10053,7 +10053,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bss_assembly_round_trip(
     String8 listing = buster_test_temporary_path(arena, S8("bss-assembly-listing"), S8(".s"));
     String8 direct = buster_test_temporary_path(arena, S8("bss-assembly-direct"), S8(".o"));
     String8 reassembled = buster_test_temporary_path(arena, S8("bss-assembly-reassembled"), S8(".o"));
-    String8 source_text = S8("int bss_first[4];\nextern int bss_first_alias[4] __attribute__((alias(\"bss_first\")));\nstatic int bss_private[3];\n_Alignas(64) int bss_aligned[2];\nint bss_last;\nint* bss_ref_first(void) { return &bss_first[1]; }\nint* bss_ref_alias(void) { return &bss_first_alias[2]; }\nint* bss_ref_private(void) { return &bss_private[1]; }\nint* bss_ref_aligned(void) { return &bss_aligned[1]; }\nint* bss_ref_last(void) { return &bss_last; }\n");
+    String8 source_text = S8("int bss_first[4] = {0};\nextern int bss_first_alias[4] __attribute__((alias(\"bss_first\")));\nstatic int bss_private[3];\n_Alignas(64) int bss_aligned[2];\nint bss_last;\nint* bss_ref_first(void) { return &bss_first[1]; }\nint* bss_ref_alias(void) { return &bss_first_alias[2]; }\nint* bss_ref_private(void) { return &bss_private[1]; }\nint* bss_ref_aligned(void) { return &bss_aligned[1]; }\nint* bss_ref_last(void) { return &bss_last; }\n");
     String8 triples[] = {
         S8("x86_64-unknown-linux"),
         S8("aarch64-unknown-linux"),
