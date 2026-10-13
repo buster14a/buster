@@ -174,19 +174,34 @@ ProcessResult process_arguments(void)
 
 ProcessResult entry_point(void)
 {
+    ProcessResult process_result = PROCESS_RESULT_FAILED;
     Arena* arena = arena_create((ArenaCreation){0});
-    ByteSlice minimal_gpt = file_read(arena, S8("build/minimal_fat32.img"), (FileReadOptions){0});
-    u8* minimal = (u8*)minimal_gpt.pointer;
+    if (!arena)
+    {
+        printf("Failed to create image-builder arena.\n");
+        goto disk_builder_done;
+    }
+    DiskBuilderReferenceResult reference = disk_builder_reference_read(arena, S8("build/minimal_fat32.img"));
+    if (!disk_builder_reference_is_valid(reference))
+    {
+        printf("Reference image rejected: status=%u size=%llu expected=%llu transferred=%llu error=%u cleanup_error=%u\n",
+               (u32)reference.status, (unsigned long long)reference.observed_size,
+               (unsigned long long)DISK_BUILDER_IMAGE_SIZE, (unsigned long long)reference.transferred,
+               reference.error, reference.cleanup_error);
+        goto disk_builder_done;
+    }
     u64 sector_size = DISK_BUILDER_SECTOR_SIZE;
 
-    if (minimal_gpt.length)
-        BUSTER_CHECK(minimal_gpt.length % sector_size == 0);
-
     u32 gpt_partition_entry_count = 128;
-    u64 expected_size = BUSTER_MB(64);
+    u64 expected_size = DISK_BUILDER_IMAGE_SIZE;
 
     u8* mine = (u8*)arena_allocate_bytes(arena, expected_size, sector_size);
-    FileWriter w = file_writer_init(mine, minimal_gpt.length);
+    if (!mine)
+    {
+        printf("Failed to allocate 64 MiB output image.\n");
+        goto disk_builder_done;
+    }
+    FileWriter w = file_writer_init(mine, expected_size);
     FileWriter* writer = &w;
 
     u64 partition_record_count = 4;
@@ -298,22 +313,12 @@ ProcessResult entry_point(void)
 
     BUSTER_UNUSED(fat32_mbr);
 
-    bool match = true;
-    for (u64 i = 0; i < minimal_gpt.length; i += 1)
-    {
-        u8 mine_ch = mine[i];
-        u8 minimal_ch = minimal[i];
-        if (mine_ch != minimal_ch)
-        {
-            match = false;
-            printf("Failed to match character at [%llu]. Original: %x. Mine: %x\n", (unsigned long long)i, minimal_ch, mine_ch);
-            break;
-        }
-    }
-
+    bool match = false;
+    bool complete = disk_builder_reference_compare_and_publish(
+        reference, (ByteSlice){.pointer = mine, .length = expected_size}, S8("build/mine.img"), &match);
     printf("MATCH: %s\n", match ? "TRUE" : "FALSE");
+    process_result = complete ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 
-    bool written = file_write(S8("build/mine.img"), (ByteSlice){.pointer = mine, .length = minimal_gpt.length});
-
-    return (match && written) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+disk_builder_done:
+    return process_result;
 }

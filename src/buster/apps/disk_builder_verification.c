@@ -1,4 +1,6 @@
 #include <buster/apps/disk_builder_verification.h>
+#include <buster/lib/file.h>
+#include <stdio.h>
 #include <string.h>
 
 // MBR fields are bytes on disk, so read and write their little-endian values
@@ -120,5 +122,137 @@ VerificationError verify_disk(u8* disk, u64 disk_size)
         }
     }
 
+    return result;
+}
+
+DiskBuilderReferenceResult disk_builder_reference_read(Arena* arena, String8 path)
+{
+    DiskBuilderReferenceResult result = {.status = DISK_BUILDER_REFERENCE_INVALID_ARGUMENT};
+    u64 allocation_mark = arena ? arena->position : 0;
+    bool allocation_attempted = false;
+
+    if (arena && path.pointer && path.length)
+    {
+        result.status = DISK_BUILDER_REFERENCE_OPEN_FAILED;
+        OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0},
+                                                       (OsFileShareFlags){.read = 1});
+        if (opened.file)
+        {
+            FileStats before = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1, .identity = 1});
+            if (!before.valid)
+            {
+                result.status = DISK_BUILDER_REFERENCE_STATS_FAILED;
+                result.error = before.error.v;
+            }
+            else
+            {
+                result.observed_size = before.size;
+                if (before.kind != OS_FILE_KIND_REGULAR)
+                {
+                    result.status = DISK_BUILDER_REFERENCE_NOT_REGULAR;
+                }
+                else if (before.size != DISK_BUILDER_IMAGE_SIZE)
+                {
+                    result.status = DISK_BUILDER_REFERENCE_SIZE_MISMATCH;
+                }
+                else
+                {
+                    allocation_attempted = true;
+                    result.status = DISK_BUILDER_REFERENCE_ALLOCATION_FAILED;
+                    u8* bytes = arena_allocate_bytes(arena, DISK_BUILDER_IMAGE_SIZE, DISK_BUILDER_SECTOR_SIZE);
+                    if (bytes)
+                    {
+                        result.status = DISK_BUILDER_REFERENCE_READ_FAILED;
+                        OsFileReadResult read = os_file_read_exact(opened.file, (ByteSlice){.pointer = bytes,
+                                                                                            .length = DISK_BUILDER_IMAGE_SIZE});
+                        result.transferred = read.transferred;
+                        result.error = read.error.v;
+                        if (read.status == OS_FILE_READ_OK && read.transferred == DISK_BUILDER_IMAGE_SIZE)
+                        {
+                            FileStats after = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1, .identity = 1});
+                            result.observed_size = after.size;
+                            if (!after.valid)
+                            {
+                                result.status = DISK_BUILDER_REFERENCE_STATS_FAILED;
+                                result.error = after.error.v;
+                            }
+                            else if (after.kind != OS_FILE_KIND_REGULAR || after.size != DISK_BUILDER_IMAGE_SIZE)
+                            {
+                                result.status = DISK_BUILDER_REFERENCE_SIZE_CHANGED;
+                            }
+                            else
+                            {
+                                result.bytes = (ByteSlice){.pointer = bytes, .length = DISK_BUILDER_IMAGE_SIZE};
+                                result.status = DISK_BUILDER_REFERENCE_OK;
+                                result.error = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            OsError close_error = os_file_close_checked(opened.file);
+            if (close_error.v)
+            {
+                if (result.status == DISK_BUILDER_REFERENCE_OK)
+                {
+                    result.status = DISK_BUILDER_REFERENCE_CLOSE_FAILED;
+                    result.error = close_error.v;
+                }
+                else
+                {
+                    result.cleanup_error = close_error.v;
+                }
+            }
+        }
+        else
+        {
+            result.error = opened.error.v;
+        }
+    }
+
+    if (result.status != DISK_BUILDER_REFERENCE_OK)
+    {
+        result.bytes = (ByteSlice){0};
+        if (arena && allocation_attempted)
+        {
+            arena_set_position(arena, allocation_mark);
+        }
+    }
+    return result;
+}
+
+bool disk_builder_reference_is_valid(DiskBuilderReferenceResult reference)
+{
+    bool result = reference.status == DISK_BUILDER_REFERENCE_OK && reference.bytes.pointer &&
+                 reference.bytes.length == DISK_BUILDER_IMAGE_SIZE && reference.transferred == DISK_BUILDER_IMAGE_SIZE;
+    return result;
+}
+
+bool disk_builder_reference_compare_and_publish(DiskBuilderReferenceResult reference, ByteSlice image, String8 output_path,
+                                                bool* match_out)
+{
+    bool valid = disk_builder_reference_is_valid(reference) && image.pointer && image.length == DISK_BUILDER_IMAGE_SIZE &&
+                 output_path.pointer && output_path.length;
+    bool matches = false;
+    bool written = false;
+    if (valid)
+    {
+        matches = true;
+        u8 const* reference_bytes = (u8 const*)reference.bytes.pointer;
+        u8 const* image_bytes = (u8 const*)image.pointer;
+        for (u64 index = 0; index < DISK_BUILDER_IMAGE_SIZE && matches; index += 1)
+        {
+            if (image_bytes[index] != reference_bytes[index])
+            {
+                matches = false;
+                printf("Failed to match character at [%llu]. Original: %x. Mine: %x\n", (unsigned long long)index,
+                       reference_bytes[index], image_bytes[index]);
+            }
+        }
+        written = file_write(output_path, image);
+    }
+    if (match_out) *match_out = matches;
+    bool result = valid && matches && written;
     return result;
 }
