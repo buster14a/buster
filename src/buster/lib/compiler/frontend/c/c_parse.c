@@ -9860,15 +9860,20 @@ BUSTER_C_SHARED bool c_semantic_type_identity_query(Arena* scratch, CPreprocessR
     return valid;
 }
 
+// A token-only shape check is shared with binding, which must not start a
+// nested type query while it is deciding whether __fp16 names a type here.
+BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CParseResult* result, CPreprocessResult preprocess,
+                                                             u32 token_index, bool* grouped_pointer, u32* group_close_out);
+BUSTER_C_INTERNAL BUSTER_INLINE CTypeInterning* c_parse_type_interning(CParseResult const* result);
+
 // Storage-only __fp16 has no canonical IR type, so lowering cannot size a
 // sizeof/_Alignof operand whose type is __fp16 or is built from __fp16
 // elements by arrays and GNU vectors. The operand is unevaluated, and the C
 // type layout already knows the answer (Clang: 2 for __fp16, the vector's
 // byte size for a vector). Any other type answers false and keeps lowering's
-// own diagnostic. Scratch machine storage as in c_semantic_type_identity_query;
-// the result is restored afterwards, as a speculative checkpoint is, so the
-// probe leaves no rows (lowering indexes its type map by type_count), no live
-// interning entries and no diagnostics behind.
+// own diagnostic. The speculative probe uses the ordinary type parser and
+// restores the full model, undo log and scratch state before returning, so no
+// rows or live interning entries escape to lowering.
 BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                             u32 start, u32 end, bool type_name, u64* size_out, u32* alignment_out)
 {
@@ -9877,6 +9882,9 @@ BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPre
     {
         u64 mark = scratch->position;
         CParseResult checkpoint = *result;
+        CTypeInterning* type_interning = c_parse_type_interning(result);
+        bool type_interning_enabled = type_interning && type_interning->enabled;
+        if (type_interning) type_interning->enabled = false;
         u32 capacity = end - start + 64;
         CTypeParseMachine machine = {
             .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
@@ -9886,8 +9894,38 @@ BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPre
             .scratch_arena = scratch,
             .frame_capacity = capacity, .mutation_capacity = capacity, .expression_task_capacity = capacity,
         };
-        CTypeId type = C_TYPE_ID_INVALID;
+        bool grouped_pointer_type_name = false;
         if (type_name)
+        {
+            for (u32 token_index = start; token_index < end && !grouped_pointer_type_name; token_index += 1)
+            {
+                CToken token = preprocess.tokens[token_index];
+                if (token.kind == C_TOKEN_IDENTIFIER &&
+                    string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__fp16")))
+                {
+                    bool grouped_pointer = false;
+                    u32 group_close = UINT32_MAX;
+                    bool recognized = c_parse_storage_half_type_name_group(scratch, result, preprocess, token_index,
+                                                                           &grouped_pointer, &group_close);
+                    grouped_pointer_type_name = recognized && grouped_pointer && group_close == end;
+                }
+            }
+        }
+        CTypeId type = C_TYPE_ID_INVALID;
+        bool layout_ready = false;
+        if (type_name && grouped_pointer_type_name)
+        {
+            type = c_parse_identity_type_name(&machine, result, preprocess, scope, start, end);
+            valid = type.value < result->type_count && result->types[type.value].kind == C_TYPE_POINTER;
+            if (valid)
+            {
+                TargetTypeLayout pointer = c_preprocess_detail(&preprocess)->data_layout.pointer;
+                *size_out = pointer.size;
+                *alignment_out = pointer.alignment;
+                layout_ready = true;
+            }
+        }
+        else if (type_name)
         {
             u32 index = start;
             type = c_parse_type_name_specifiers(&machine, result, preprocess, scope, start, end, &index);
@@ -9910,8 +9948,9 @@ BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPre
             element = result->types[element.value].element_type;
         }
         valid = valid && element.value < result->type_count && result->types[element.value].kind == C_TYPE_FP16_STORAGE &&
-                c_parse_type_layout(&machine, scratch, preprocess, result, type, size_out, alignment_out);
-        *result = checkpoint;
+                (layout_ready || c_parse_type_layout(&machine, scratch, preprocess, result, type, size_out, alignment_out));
+        c_type_parse_rollback(&machine, result, &checkpoint, 0);
+        if (type_interning) type_interning->enabled = type_interning_enabled;
         arena_set_position(scratch, mark);
     }
     return valid;
@@ -24842,12 +24881,14 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* resul
 // `entity`, the answer of a lookup of that token in `scope` the caller
 // already made, and diagnoses an unresolved name unless it is predefined.
 // The unresolved storage-only half spelling can still start an abstract
-// type name inside a parenthesized operand. Recognize the qualifier, pointer
-// and array token shape without parsing or mutating the type model, so binding
-// cannot recurse through a nested type query or leave speculative rows behind.
+// type name inside a parenthesized operand. Recognize direct qualifier,
+// pointer and array runs plus one grouped pointer-to-array shape. Function
+// suffixes remain outside this exception; binding never starts a type query.
 BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CParseResult* result, CPreprocessResult preprocess,
-                                                             u32 token_index)
+                                                             u32 token_index, bool* grouped_pointer, u32* group_close_out)
 {
+    if (grouped_pointer) *grouped_pointer = false;
+    if (group_close_out) *group_close_out = UINT32_MAX;
     u32 type_start = token_index;
     while (type_start > 0)
     {
@@ -24896,6 +24937,8 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CPar
         u32 end = close;
         bool required = false;
         bool saw_declarator = false;
+        bool saw_group = false;
+        bool saw_group_pointer = false;
         bool after_group = false;
         while (valid)
         {
@@ -24904,7 +24947,29 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CPar
                 while (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
                 {
                     u32 array_close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
-                    valid = array_close < end;
+                    bool matched = array_close < end;
+                    bool simple_bound = matched;
+                    for (u32 bound_token_index = cursor + 1; simple_bound && bound_token_index < array_close; bound_token_index += 1)
+                    {
+                        CToken bound_token = preprocess.tokens[bound_token_index];
+                        String8 bound_spelling = c_token_spelling(preprocess.spelling_base, bound_token);
+                        bool nested_query = string_equal(bound_spelling, S8("sizeof")) || string_equal(bound_spelling, S8("_Alignof")) ||
+                            string_equal(bound_spelling, S8("__alignof")) || string_equal(bound_spelling, S8("__alignof__")) ||
+                            string_equal(bound_spelling, S8("typeof")) || string_equal(bound_spelling, S8("__typeof")) ||
+                            string_equal(bound_spelling, S8("__typeof__")) || string_equal(bound_spelling, S8("_Generic")) ||
+                            string_equal(bound_spelling, S8("__builtin_types_compatible_p")) ||
+                            string_equal(bound_spelling, S8("__builtin_choose_expr")) ||
+                            string_equal(bound_spelling, S8("__builtin_constant_p"));
+                        CType bound_qualifiers = {0};
+                        bool bound_metadata = string_equal(bound_spelling, S8("static")) ||
+                            c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers) || c_parse_nullability_word(bound_spelling);
+                        bool nested_group = c_token_is_punctuator(&bound_token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                            c_token_is_punctuator(&bound_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                            c_token_is_punctuator(&bound_token, C_PUNCTUATOR_LEFT_BRACE) ||
+                            c_token_is_punctuator(&bound_token, C_PUNCTUATOR_RIGHT_BRACE);
+                        simple_bound &= !nested_query && !nested_group && !bound_metadata;
+                    }
+                    valid = matched && (!saw_group || simple_bound);
                     if (!valid) break;
                     cursor = array_close + 1;
                     saw_declarator = true;
@@ -24915,6 +24980,7 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CPar
                 while (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_STAR))
                 {
                     saw_declarator = true;
+                    saw_group_pointer |= depth != 0;
                     cursor += 1;
                     while (cursor < end)
                     {
@@ -24930,6 +24996,7 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CPar
                 }
                 if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
                 {
+                    valid = !depth;
                     while (valid && cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
                     {
                         u32 array_close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
@@ -24943,7 +25010,9 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CPar
                 {
                     u32 group_open = cursor;
                     u32 group_close = c_parse_matching_delimiter_indexed(result, preprocess, group_open);
-                    valid = group_close < end && group_close > group_open + 1 && depth < capacity;
+                    valid = !depth && !saw_group && !saw_declarator && group_close < end && group_close > group_open + 1 &&
+                            depth < capacity;
+                    saw_group |= valid;
                     if (valid)
                     {
                         frames[depth++] = (CStorageHalfAbstractDeclaratorFrame){
@@ -24982,7 +25051,9 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CPar
                 valid = false;
             }
         }
-        valid = valid && cursor == close && depth == 0;
+        valid = valid && cursor == close && depth == 0 && (!saw_group || saw_group_pointer);
+        if (grouped_pointer) *grouped_pointer = valid && saw_group && saw_group_pointer;
+        if (group_close_out && valid) *group_close_out = close;
         arena_set_position(scratch, mark);
     }
     return valid;
@@ -25047,7 +25118,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index - 2]), S8("__builtin_bit_cast")) &&
             c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_COMMA);
         bool storage_type_name_group = string_equal(spelling, S8("__fp16")) &&
-                                      c_parse_storage_half_type_name_group(arena, result, preprocess, token_index);
+                                      c_parse_storage_half_type_name_group(arena, result, preprocess, token_index, 0, 0);
         predefined_function_name |= storage_type_slot || storage_type_name_group;
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
@@ -38108,6 +38179,20 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         if (grouped && operand_start < close)
         {
             u32 cursor = operand_start;
+            bool grouped_half_pointer_type = false;
+            for (u32 candidate = operand_start; candidate < close && !grouped_half_pointer_type; candidate += 1)
+            {
+                CToken candidate_token = preprocess.tokens[candidate];
+                if (candidate_token.kind == C_TOKEN_IDENTIFIER &&
+                    string_equal(c_token_spelling(preprocess.spelling_base, candidate_token), S8("__fp16")))
+                {
+                    bool grouped_pointer = false;
+                    u32 group_close = UINT32_MAX;
+                    bool recognized = c_parse_storage_half_type_name_group(machine->scratch_arena, result, preprocess, candidate,
+                                                                           &grouped_pointer, &group_close);
+                    grouped_half_pointer_type = recognized && grouped_pointer && group_close == close;
+                }
+            }
             if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
             {
                 u32 body_start = 0;
@@ -38123,6 +38208,45 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 {
                     diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
                 }
+            }
+            else if (grouped_half_pointer_type)
+            {
+                // The token-only recognizer admits a grouped pointer-to-array
+                // whose bound cannot start a nested type query. Check its
+                // expression grammar here without typing the full type name
+                // while the body binder is still validating operands.
+                u32 half_token = operand_start;
+                while (half_token < close &&
+                       !(preprocess.tokens[half_token].kind == C_TOKEN_IDENTIFIER &&
+                         string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[half_token]), S8("__fp16"))))
+                {
+                    half_token += 1;
+                }
+                u32 group_open = half_token + 1;
+                CType base_qualifiers = {0};
+                while (group_open < close && preprocess.tokens[group_open].kind == C_TOKEN_IDENTIFIER &&
+                       c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[group_open]), &base_qualifiers))
+                {
+                    group_open += 1;
+                }
+                u32 pointer_close = group_open < close ? c_parse_matching_delimiter_indexed(result, preprocess, group_open) : close;
+                for (u32 bound_open = pointer_close + 1; bound_open < close && !diagnostic.message.length;)
+                {
+                    u32 bound_close = c_parse_matching_delimiter_indexed(result, preprocess, bound_open);
+                    if (bound_close >= close) break;
+                    if (bound_open + 1 < bound_close)
+                    {
+                        u32 error_token = bound_open + 1;
+                        String8 message = c_parse_constant_expression_syntax_error(machine, result, preprocess,
+                            c_parse_scope_for_token(result, scope, index), bound_open + 1, bound_close, &error_token);
+                        if (message.length)
+                        {
+                            diagnostic = (CParseInitializerDiagnostic){.message = message, .token = error_token};
+                        }
+                    }
+                    bound_open = bound_close + 1;
+                }
+                type_operand = !diagnostic.message.length;
             }
             else
             {
@@ -42666,11 +42790,12 @@ BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult pre
 
 // Every recorded array bound is one expression once its `static`, qualifier
 // and nullability words are set aside; `[]` and `[*]` have none to check.
-BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
+BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                            u32 first_bound)
 {
     u32 bound_count = result->array_bound_count;
     bool reported = false;
-    for (u32 bound_index = 0; bound_index < bound_count && !reported; bound_index += 1)
+    for (u32 bound_index = first_bound; bound_index < bound_count && !reported; bound_index += 1)
     {
         CArrayBound bound = result->array_bounds[bound_index];
         u32 start = c_parse_array_bound_expression_start(preprocess, bound);
@@ -42687,7 +42812,7 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
             token = bound.token_start;
             message = S8("star array bound is only allowed in function prototype scope");
         }
-        else if (!bound.is_star)
+        else if (!bound.is_star && !bound.has_inferred_count)
         {
             message = c_parse_constant_expression_syntax_error(machine, result, preprocess, (CScopeId){.value = 0}, start, end, &token);
         }
@@ -43036,7 +43161,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
 {
     c_parse_index_declarations(result, arena);
     c_parse_validate_storage_half_declarations(machine, result, preprocess);
-    c_parse_validate_array_bound_syntax(machine, result, preprocess);
+    c_parse_validate_array_bound_syntax(machine, result, preprocess, 0);
+    u32 late_array_bound_start = result->array_bound_count;
     CTypeId scalar_types[C_TYPE_COUNT];
     memset(scalar_types, 0xff, sizeof(scalar_types));
     result->expression_scalar_types = scalar_types;
@@ -43354,6 +43480,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         }
     }
     // Type names in expressions can append bounds after declaration binding.
+    // Validate their syntax before the value pass; the declaration-bound pass
+    // above ran before function bodies added these rows.
+    c_parse_validate_array_bound_syntax(machine, result, preprocess, late_array_bound_start);
     c_parse_validate_array_bound_values(machine, result, preprocess);
     // Expression/type-name validation can append members after the initial
     // declarations were bound; inspect the final member table before lowering.
