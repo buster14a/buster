@@ -750,11 +750,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
                         reasons.append("the self-host inline leg is valid only in pull mode")
-                    inline_record = receipt.get("inline_acceptance")
+                    # The #48 inline leg is selected by presence, not freshness, so it runs beside this one.
                     if any(receipt.get(key) is not None for key in
                            ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
                             "frontend_selector", "wild_linker", "link_tls", "constant_reuse_acceptance")) or \
-                            (isinstance(inline_record, dict) and inline_record.get("requested") is True) or \
                             "scaling_profile" in receipt:
                         reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
                                        "scaling leg included")
