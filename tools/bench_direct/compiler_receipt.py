@@ -183,6 +183,12 @@ THROUGHPUT_HISTORICAL_PROFILE = dict(
 # publisher re-derives the same inventory natively with `verify`. The native
 # tables in tools/compiler_evidence.c must stay equal (compiler_test checks).
 EVIDENCE_INVENTORY = "buster-compiler-ordinary-raw-v1"
+# The ordinary pull snapshot-v1 route (#3211) adds its closure records and its exact
+# owned-phase population; the identity's EVIDENCE_ROUTE_KEYS lines select it.
+EVIDENCE_SNAPSHOT_INVENTORY = "buster-compiler-snapshot-raw-v1"
+EVIDENCE_CLOSURE_MEMBERS = tuple(f"closure-{operation}.json{suffix}" for operation in ("snapshot", "restore", "verify")
+                                 for suffix in ("", ".manifest.tsv"))
+EVIDENCE_PHASE_SUFFIXES = ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete")
 EVIDENCE_MANIFEST = "evidence-manifest.tsv"
 EVIDENCE_SEAL = "evidence-seal.txt"
 EVIDENCE_OMISSIONS = "evidence-omissions.json"
@@ -198,6 +204,8 @@ EVIDENCE_CORPUS_CORE = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.t
 EVIDENCE_IDENTITY_KEYS = ("repository", "request_run", "request_attempt", "executor_run", "executor_attempt",
                           "trusted_revision", "baseline_revision", "candidate_revision", "baseline_tree",
                           "candidate_tree", "lab_profile", "corpus_profile", "corpus_harness_revision")
+# Trailing identity lines of a snapshot-v1 attempt only; a legacy-rebuild identity has none.
+EVIDENCE_ROUTE_KEYS = ("preparation_policy", "owned_phases")
 
 
 def evidence_lab_required(pairs: int, counters: tuple[bool, bool], metrics: tuple[bool, bool]) -> tuple[str, ...]:
@@ -215,8 +223,25 @@ def evidence_corpus_required(profile: dict) -> tuple[str, ...]:
     return (*EVIDENCE_CORPUS_CORE, *(f"inputs/{name}.c" for name in profile["workloads"]))
 
 
+def evidence_preparation(receipt: dict) -> str:
+    """The receipt's declared preparation policy, as validate_closure reads it, or '' when unsupported."""
+    declared = receipt.get("preparation_policy", "legacy-rebuild" if receipt.get("closure") is None else "snapshot-v1") \
+        if isinstance(receipt, dict) else None
+    return declared if declared in ("legacy-rebuild", "snapshot-v1") else ""
+
+
+def evidence_inventory(receipt: dict) -> str:
+    """The sealed inventory a receipt's route selects (#2918, #3211)."""
+    return EVIDENCE_SNAPSHOT_INVENTORY if evidence_preparation(receipt) == "snapshot-v1" else EVIDENCE_INVENTORY
+
+
 def evidence_identity(receipt: dict, request_attempt: str) -> str:
-    """The trusted identity lines of a receipt's ordinary attempt, or '' when it has none."""
+    """The trusted identity lines of a receipt's ordinary attempt, or '' when it has none.
+
+    A snapshot-v1 attempt appends its route and its owned-phase count, which select the snapshot
+    inventory and its exact phase population; validate_closure binds that declared policy to the
+    receipt's closure records and the retained closure manifests.
+    """
     identity = receipt.get("identity") if isinstance(receipt, dict) else None
     profile, corpus = (receipt.get("profile"), receipt.get("throughput_profile")) if isinstance(receipt, dict) else (None, None)
     text = ""
@@ -229,6 +254,13 @@ def evidence_identity(receipt: dict, request_attempt: str) -> str:
                   corpus.get("name"), harness)
         if all(isinstance(value, str) and value and "\t" not in value and "\n" not in value for value in values):
             text = "".join(f"{key}\t{value}\n" for key, value in zip(EVIDENCE_IDENTITY_KEYS, values))
+        policy = evidence_preparation(receipt)
+        population = receipt.get("phase_ownership")
+        count = population.get("count") if isinstance(population, dict) else None
+        if policy == "snapshot-v1" and type(count) is int and 1 <= count <= 256:
+            text += f"preparation_policy\tsnapshot-v1\nowned_phases\t{count}\n" if text else ""
+        elif policy != "legacy-rebuild":
+            text = ""
     return text
 
 
