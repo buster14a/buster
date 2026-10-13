@@ -219,7 +219,7 @@ actually satisfied.
 
 The original frontier growth is acknowledged in
 [`docs/source-size/acks/3186-linux-kernel-frontier.txt`](../../source-size/acks/3186-linux-kernel-frontier.txt).
-This assembly-census change adds 58,076 build-category bytes including its
+This assembly-census change adds 58,603 build-category bytes including its
 bounded first-party lint control; that incremental growth is acknowledged in
 [`docs/source-size/acks/4079-linux-assembly-census.txt`](../../source-size/acks/4079-linux-assembly-census.txt).
 The harness changes no compiler behavior or native-retirement identity
