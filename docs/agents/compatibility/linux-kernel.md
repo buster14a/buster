@@ -156,3 +156,13 @@ poweroff, while the same image triple-faults on `qemu64`. Kbuild rejects the
 Buster compiler as unknown, and all 24 unchanged-flag diagnostic replays
 refuse `-Wp,-MMD,<path>`; the other 908 actions remain unattempted.
 The passing frontier reports `qualified_kernel=no` and leaves #3186 open.
+
+A later container rerun against main `897275fb9e3c` (GCC 14.2.0 and QEMU
+8.2.2 on Ubuntu 24.04, so the inventory is 926 actions) again passes the
+`max` reference with seven controls. Configuration still stops at `-P`
+(#1418). The depfile and macro-prefix-map blockers are fixed; 15 boot
+replays now stop at i386 code generation (#3654) and nine at
+`-mcmodel=small` (#4052). A separate unchanged-flag replay of all 926
+actions, outside this tool's 24-action bound, first stops at `-fshort-wchar`
+for 897 of them (#4052). Frontend findings behind those options are #3237
+and #4053.
