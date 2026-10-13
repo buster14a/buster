@@ -17,7 +17,7 @@
 // against input prefixes before the native writer receives its DSO list.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
-// through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
+// through preprocess, parse (the -fc-ast-pilot syntax-tree build, on by default,
 // compiler_driver_c_ast_pilot_run, runs ahead of c_parse_ast), lowering,
 // codegen, and object/executable output (with -emit-llvm, WebAssembly, eBPF, and direct Vulkan compute
 // SPIR-V as alternate canonical emissions), the
@@ -2115,6 +2115,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+        // The syntax tree is built ahead of analysis on every compile
+        // (GitHub #3102); -fno-c-ast-pilot is the tree-free reference path
+        // until #4058 deletes it.
+        .c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
         // Source debug information is opt-in; ordinary artifact generation
         // should not construct debug models or pay their output cost.
         .debug_info = false,
@@ -2953,9 +2957,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
             continue;
         }
-        if (string_equal(argument, S8("-fc-ast-pilot")))
+        if (string_equal(argument, S8("-fc-ast-pilot")) || string_equal(argument, S8("-fno-c-ast-pilot")))
         {
-            invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
+            invocation.c_ast_pilot = string_equal(argument, S8("-fc-ast-pilot")) ? COMPILER_DRIVER_C_AST_PILOT_IMPLICIT : COMPILER_DRIVER_C_AST_PILOT_OFF;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fc-ast-pilot="));
@@ -7587,8 +7591,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* tot
 // label releases (c_ast_release); its storage record lives in the unit's
 // arena. Nothing reads it after the unit. The driver has no phase
 // arena to lend (c_preprocess is not given one either), so the builder makes
-// and retires a private one. A tree that is not complete fails the unit with
-// the parse error class and its diagnostics, published like c_parse_ast's.
+// and retires a private one. The caller fails the unit when the builder could
+// not reserve its storage, and otherwise compiles an incomplete tree's unit
+// without one, counting it in `rejections`.
 // Under -v three diagnostic passes over a finished tree are timed with the
 // same clock as the build: one c_ast_walk over the root, one linear pass over
 // the kinds column counting CALL nodes, and c_ast_children over every node
@@ -8844,8 +8849,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
+        // A unit the builder rejects on syntax takes the tree-free path, so
+        // its diagnostics (or, for a form only the builder refuses, its
+        // object) come from the same authority as under -fno-c-ast-pilot;
+        // the builder's own message is not published (#3102 default switch).
+        // A builder that could not reserve its storage still fails the unit.
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
-        if (!tree.complete)
+        bool exhausted = !tree.complete && tree.diagnostic_count && tree.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
+        if (exhausted)
         {
             result.parser_diagnostic_count = tree.diagnostic_count;
             result.error = COMPILER_DRIVER_ERROR_PARSE;
@@ -8853,8 +8864,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                       invocation.input_paths[0], (String8){0}, 0);
             goto end;
         }
-        pilot_tree = tree.ast;
-        pilot_tree_built = true;
+        result.c_ast.rejections += !tree.complete;
+        if (tree.complete)
+        {
+            pilot_tree = tree.ast;
+            pilot_tree_built = true;
+        }
     }
     // Under the pilot the declaration split is read from the tree; it falls
     // back to c_parse_ast's token walker for any unit the walker would read
@@ -11223,6 +11238,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.type_layout.agenda_pushes += unit.type_layout.agenda_pushes;
         result.type_layout.agenda_fallbacks += unit.type_layout.agenda_fallbacks;
         result.c_ast.units += unit.c_ast.units;
+        result.c_ast.rejections += unit.c_ast.rejections;
         result.c_ast.nodes += unit.c_ast.nodes;
         result.c_ast.tokens += unit.c_ast.tokens;
         result.c_ast.build_nanoseconds += unit.c_ast.build_nanoseconds;

@@ -1121,6 +1121,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    not accepted; a different flag pair needs its own versioned profile.
    `compiler_publish.py` re-validates every raw cell document, the tree probe
    and the recomputed verdict on the 9700X evidence.
+   Since `-fc-ast-pilot` became the default (2026-10-13, #3102), variant A
+   builds a tree on a head after the switch, so the profile fails closed at
+   its tree probe there. The tree's acceptance follows #4058 through the
+   ordinary two-binary comparison.
 
    **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
    fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the

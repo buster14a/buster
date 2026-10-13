@@ -5759,9 +5759,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
             for (u32 form = 0; form < 4; form += 1)
             {
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"),
-                    form & 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source, S8("-fc-ast-pilot")};
-                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
-                    (SliceString8){.pointer = command, .length = form < 2 ? BUSTER_ARRAY_LENGTH(command) - 1 : BUSTER_ARRAY_LENGTH(command)});
+                    form & 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source, form < 2 ? S8("-fno-c-ast-pilot") : S8("-fc-ast-pilot")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("nested designator depth={u32} form={u32}: {S8}"),
@@ -5838,9 +5837,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
             for (u32 form = 0; form < 4; form += 1)
             {
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"),
-                    form & 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source, S8("-fc-ast-pilot")};
-                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
-                    (SliceString8){.pointer = command, .length = form < 2 ? BUSTER_ARRAY_LENGTH(command) - 1 : BUSTER_ARRAY_LENGTH(command)});
+                    form & 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source, form < 2 ? S8("-fno-c-ast-pilot") : S8("-fc-ast-pilot")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
                     string_first_sequence(compiled.diagnostic, S8("bad")) != BUSTER_STRING_NO_MATCH,
@@ -40569,10 +40567,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
                         {
                             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                             String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typeof-label-run"), S8(".exe"));
-                            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode], S8("-fverify-codegen"),
+                            String8 command[] = {pilot ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode], S8("-fverify-codegen"),
                                 form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, path};
                             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
-                                (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot});
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                             invocation.reject_machine_fallback = true;
                             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
@@ -42607,7 +42605,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
                 String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-type-interning-{u32}-{u32}-{u32}"), source_index,
                                                                                  level, mode),
                                                             S8(".o"));
-                String8 plain[] = {S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+                String8 plain[] = {S8("-nostdinc"), debug[level], S8("-fno-c-ast-pilot"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
                 String8 pilot[] = {S8("-nostdinc"), debug[level], S8("-fc-ast-pilot"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"),
                                    S8("-o"), output, input};
                 SliceString8 command = mode ? (SliceString8)BUSTER_ARRAY_TO_SLICE(pilot) : (SliceString8)BUSTER_ARRAY_TO_SLICE(plain);
@@ -42687,10 +42685,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         {
             String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-root-conditionals-{u32}-{u32}"), level, pilot),
                                                         S8(".o"));
-            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+            String8 command[] = {pilot ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"), S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
                                  output, input};
             compiled[pilot] = compiler_driver_execute_invocation(
-                arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             BUSTER_TEST_RAW(arguments, compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE, compiled[pilot].diagnostic);
             objects[pilot] = compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
         }
@@ -42779,10 +42777,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditional_chains(UnitTestA
             {
                 String8 output = buster_test_temporary_path(
                     arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}-{u32}"), shape_names[shape], depth, pilot), S8(".o"));
-                String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                String8 command[] = {pilot ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
                                      output, input};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(
-                    arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 objects[pilot] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
                 if (pilot)
@@ -43225,17 +43223,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_initializer(UnitTest
         {
             Arena* conflicts[] = {arguments->arena};
             TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"), source_path, S8("-fc-ast-pilot")};
-            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
-                (SliceString8){.pointer = command, .length = BUSTER_ARRAY_LENGTH(command) - (form == 0)});
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"), source_path, form ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot")};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
             CompilerDriverResult checked = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE,
                 string_format(temporary.arena, S8("conditional comma syntax form={u32}: {S8}"), form, checked.diagnostic));
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
             String8 output = buster_test_temporary_unique_path(temporary.arena, S8("conditional-comma-initializer-run"), S8(".exe"));
-            String8 build[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source_path, S8("-fc-ast-pilot")};
-            invocation = compiler_driver_parse_arguments(temporary.arena,
-                (SliceString8){.pointer = build, .length = BUSTER_ARRAY_LENGTH(build) - (form == 0)});
+            String8 build[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source_path,
+                form ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot")};
+            invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build));
             invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
