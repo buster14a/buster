@@ -7,3 +7,4 @@
 # compiler_receipt.SCALING_PROFILE names. See README.md in this directory.
 #
 # request: issue #424 scaling-v1, first 9700X run
+# request: issue #2761 refresh of scaling-v1 through the joined inventory consumer (#3656); last of four pre-join refreshes; request-only head over main 5ba3e4764; report-only
