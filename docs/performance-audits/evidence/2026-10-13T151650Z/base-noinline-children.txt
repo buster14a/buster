@@ -1,0 +1,70 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles:u'
+# Event count (approx.): 9338261963
+#
+# Children      Self  Shared Object         Symbol                                                         IPC   [IPC Coverage]
+# ........  ........  ....................  .............................................................  ....................
+#
+   100.00%     0.00%  ide-base              [.] main                                                       -      -            
+   100.00%     0.00%  libc.so.6             [.] 0x00007fa60d427c8e                                         -      -            
+   100.00%     0.00%  [unknown]             [.] 0x00007fffd059d4dc                                         -      -            
+   100.00%     0.00%  [unknown]             [.] 0x00657361622d6564                                         -      -            
+    99.98%     0.00%  ide-base              [.] compiler_driver_execute_invocation                         -      -            
+    99.98%     0.00%  ide-base              [.] run_c_compiler                                             -      -            
+    99.54%     0.00%  ide-base              [.] compiler_driver_execute_c_single                           -      -            
+    99.54%     0.00%  ide-base              [.] compiler_driver_execute_unit                               -      -            
+    54.47%     0.10%  ide-base              [.] c_analyze_with_options                                     -      -            
+    27.12%     0.53%  ide-base              [.] c_analyze_semantics_core                                   -      -            
+    27.10%     2.52%  ide-base              [.] c_lower_to_ir_reserved_run                                 -      -            
+    23.15%     0.03%  ide-base              [.] codegen_generate_canonical_module_with_trace               -      -            
+    23.05%     0.69%  ide-base              [.] codegen_generate_canonical_module_attempt                  -      -            
+    17.66%     1.76%  ide-base              [.] c_parse_validate_lowering_constraints                      -      -            
+    17.25%     0.22%  ide-base              [.] c_ir_lower_dispatch_run                                    -      -            
+     8.83%     1.13%  ide-base              [.] ir_prepare_canonical_module                                -      -            
+     8.76%     0.00%  ide-base              [.] machine_select_validated_canonical_function                -      -            
+     8.61%     3.23%  ide-base              [.] machine_select_canonical_function_x86_64                   -      -            
+     7.68%     0.67%  ide-base              [.] c_parse_expression_type_query                              -      -            
+     7.42%     0.00%  ide-base              [.] c_preprocess                                               -      -            
+     7.37%     2.77%  ide-base              [.] c_type_parse_machine_run                                   -      -            
+     7.31%     1.73%  ide-base              [.] c_preprocess_run                                           -      -            
+     7.12%     1.29%  ide-base              [.] c_ir_lower_expression_core_step                            -      -            
+     6.66%     0.75%  ide-base              [.] c_ir_lower_expression_step                                 -      -            
+     6.51%     1.01%  ide-base              [.] c_parse_validate_const_assignments                         -      -            
+     5.90%     0.00%  ide-base              [.] machine_predicate_placement_build                          -      -            
+     5.69%     0.48%  ide-base              [.] c_parse_checked_expression_type                            -      -            
+     5.37%     0.42%  ide-base              [.] c_ir_lower_logical_value_step                              -      -            
+     3.83%     0.08%  ide-base              [.] c_parse_bind_function_body                                 -      -            
+     3.69%     2.65%  ide-base              [.] machine_fast_placement_build_prepassed                     -      -            
+     3.66%     0.44%  ide-base              [.] c_ir_lower_condition_step                                  -      -            
+     3.37%     1.33%  ide-base              [.] machine_encode_x86_64_into                                 -      -            
+     3.32%     0.00%  ide-base              [.] c_parse_validate_initializer_shape                         -      -            
+     3.31%     1.15%  ide-base              [.] c_parse_ast_run                                            -      -            
+     3.30%     0.07%  ide-base              [.] c_ir_global_initializer_impl                               -      -            
+     3.30%     0.77%  ide-base              [.] c_ir_ssa_finish                                            -      -            
+     3.20%     0.67%  ide-base              [.] c_parse_bind_block_statements                              -      -            
+     3.13%     0.95%  ide-base              [.] codegen_record_machine_locations                           -      -            
+     2.87%     0.70%  ide-base              [.] c_parse_initializer_expression_constraint                  -      -            
+     2.74%     1.58%  ide-base              [.] c_ir_lower_body_advance                                    -      -            
+     2.72%     0.71%  ide-base              [.] c_ir_constant_initializer_bytes                            -      -            
+     2.62%     0.37%  ide-base              [.] c_ir_lower_condition_leaf_step                             -      -            
+     2.58%     0.07%  ide-base              [.] c_parse_scalar_type_in_scope_attempt                       -      -            
+     2.53%     0.25%  ide-base              [.] c_ir_lower_assignment_statement_step                       -      -            
+     2.46%     0.68%  ide-base              [.] ir_function_publish_cfg                                    -      -            
+     2.40%     2.37%  ide-base              [.] c_ir_ssa_finish_publish                                    -      -            
+     2.39%     1.82%  ide-base              [.] ir_validate_function_walk                                  -      -            
+     2.31%     0.27%  ide-base              [.] c_parse_infer_initializer_array_count_core                 -      -            
+     2.24%     0.09%  ide-base              [.] object_from_canonical_codegen_module                       -      -            
+     2.16%     2.11%  ide-base              [.] codegen_machine_debug_index_build                          -      -            
+     2.15%     0.74%  ide-base              [.] c_parse_expression_leaf_without_cast                       -      -            
+     2.12%     0.00%  ide-base              [.] c_parse_type_layout_solve                                  -      -            
+     2.08%     1.98%  ide-base              [.] machine_fast_prepass_build                                 -      -            
+     2.02%     0.18%  ide-base              [.] c_parse_validate_statement_expression_range                -      -            
+
+
+#
+# (Tip: To see call chains by final symbol taking CPU time (bottom up) use perf report -G)
+#
