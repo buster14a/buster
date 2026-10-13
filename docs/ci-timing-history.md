@@ -68,6 +68,13 @@ unavailable machine/source observations and does not erase a previously verified
 receipt or count as an API outage. Permission errors, server errors, unknown
 transport failures and malformed status text still retain their failure state.
 
+GitHub can also list an unfinished admission check inside an already terminal
+Actions run. Only runnerless, step-free, label-free checks independently bound
+to the owned admission marker, exact head, GitHub Actions app and check URL are
+classified as controller-only and counted as skipped. They create no physical
+execution row, duration or invented conclusion. Ordinary unfinished jobs and
+unverified controllers still produce gaps; admission state is never changed.
+
 ## Physical execution and metric identities
 
 Schema buster-hosted-ci-execution-v1 retains the repository, numeric run/job IDs,
