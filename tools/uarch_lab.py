@@ -181,6 +181,14 @@ AST_PILOT_FLAG = "-fc-ast-pilot"
 # and B passing the cell's one opt-in flag. B's object differs from A's by
 # design; each run keeps its stdout and stderr in `<output>.diagnostics`.
 CONSTANT_REUSE_CELLS = {"intern": "-fcanonical-intern-constants", "cse": "-fcanonical-fast-cse"}
+# The fixed issue #1125 per-process floor cells (compare --process-floor-pair
+# CELL), run with --repo-root a directory holding only tiny.c: A is always the
+# native x86-64 object compile and B is the cell's own compile. An object
+# compile writes `-o OUT`; the syntax-only one writes nothing, so its
+# `<output>.diagnostics` transcript is its compared output.
+PROCESS_FLOOR_OBJECT = ["cc", "-g0", "-c", "tiny.c"]
+PROCESS_FLOOR_CELLS = {"aa": PROCESS_FLOOR_OBJECT, "aarch64": ["cc", "-g0", "-target", "aarch64-unknown-linux", "-c", "tiny.c"],
+                       "syntax-only": ["cc", "-g0", "-fsyntax-only", "tiny.c"]}
 # No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
 # list with another event; wall time is the harness span (see step_timed).
 TIMED_EVENTS = ["task-clock", "cycles:u", "instructions:u", "branch-misses:u",
@@ -3029,6 +3037,7 @@ def compare_labs(arguments, output, cpu, extra):
     canonical_inline_pair = getattr(arguments, "canonical_inline_pair", False)
     ast_cell = getattr(arguments, "ast_pilot_pair", None)
     reuse_cell = getattr(arguments, "constant_reuse_pair", None)
+    floor_cell = getattr(arguments, "process_floor_pair", None)
     for key, role in VARIANTS:
         ide = os.path.abspath(getattr(arguments, role))
         if not os.path.isfile(ide):
@@ -3036,8 +3045,13 @@ def compare_labs(arguments, output, cpu, extra):
         variant_extra = (["-fcanonical-inline"] if canonical_inline_pair and key == "b" else
                          [] if canonical_inline_pair else
                          [AST_PILOT_FLAG] if ast_cell and key == "b" else [] if ast_cell else
-                         [CONSTANT_REUSE_CELLS[reuse_cell]] if reuse_cell and key == "b" else [] if reuse_cell else extra)
-        if ast_cell:
+                         [CONSTANT_REUSE_CELLS[reuse_cell]] if reuse_cell and key == "b" else [] if reuse_cell else
+                         [] if floor_cell else extra)
+        if floor_cell:
+            floor_compile = PROCESS_FLOOR_CELLS[floor_cell] if key == "b" else PROCESS_FLOOR_OBJECT
+            lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy,
+                      compile_command=floor_compile, writes_output="-c" in floor_compile, transcripts=True)
+        elif ast_cell:
             lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy,
                       compile_command=AST_PILOT_COMPILE + [AST_PILOT_CELLS[ast_cell]], writes_output=ast_cell != "syntax-only", transcripts=True)
         elif reuse_cell:
@@ -3051,6 +3065,8 @@ def compare_labs(arguments, output, cpu, extra):
             lab.meta["config"]["ast_pilot_cell"] = ast_cell
         if reuse_cell:
             lab.meta["config"]["constant_reuse_cell"] = reuse_cell
+        if floor_cell:
+            lab.meta["config"]["process_floor_cell"] = floor_cell
         lab.save_meta()
         labs[key] = lab
     return labs
@@ -3153,6 +3169,9 @@ def command_compare(arguments):
     reuse_cell = getattr(arguments, "constant_reuse_pair", None)
     if reuse_cell and (extra or arguments.canonical_inline_pair or ast_cell or arguments.profile_steps or arguments.sudo):
         sys.exit("uarch_lab: --constant-reuse-pair accepts no extra compile arguments, other fixed pair or profile steps")
+    floor_cell = getattr(arguments, "process_floor_pair", None)
+    if floor_cell and (extra or arguments.canonical_inline_pair or ast_cell or reuse_cell or arguments.profile_steps or arguments.sudo):
+        sys.exit("uarch_lab: --process-floor-pair accepts no extra compile arguments, other fixed pair or profile steps")
     steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
     if arguments.sudo and "ibs" not in steps:
         steps.append("ibs")
@@ -3175,6 +3194,7 @@ def command_compare(arguments):
     labs = compare_labs(arguments, directory, cpu, extra)
     command = (["IDE"] + AST_PILOT_COMPILE + [AST_PILOT_CELLS[ast_cell]] + (["-o", "OUT"] if ast_cell == "object" else []) if ast_cell else
                ["IDE"] + AST_PILOT_COMPILE + ["-c", "-o", "OUT"] if reuse_cell else
+               ["IDE"] + PROCESS_FLOOR_OBJECT + ["-o", "OUT"] if floor_cell else
                ["IDE"] + DEFAULT_COMPILE + extra + ["-o", "OUT"])
     meta = {"version": 1, "mode": "compare", "steps": {}, "plan": None,
             "config": {"command": shell_join(command), "repo_root": os.path.abspath(arguments.repo_root),
@@ -3184,7 +3204,8 @@ def command_compare(arguments):
                        "canonical_inline_pair": arguments.canonical_inline_pair,
                        "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else
                                            {"a": [], "b": [AST_PILOT_FLAG]} if ast_cell else
-                                           {"a": [], "b": [CONSTANT_REUSE_CELLS[reuse_cell]]} if reuse_cell else {"a": extra, "b": extra},
+                                           {"a": [], "b": [CONSTANT_REUSE_CELLS[reuse_cell]]} if reuse_cell else
+                                           {"a": [], "b": []} if floor_cell else {"a": extra, "b": extra},
                        "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
             "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
                                "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
@@ -3192,6 +3213,10 @@ def command_compare(arguments):
         meta["config"]["ast_pilot_pair"] = ast_cell
     if reuse_cell:
         meta["config"]["constant_reuse_pair"] = reuse_cell
+    if floor_cell:
+        meta["config"]["process_floor_pair"] = floor_cell
+        meta["config"]["command_by_variant"] = {key: shell_join(["IDE"] + labs[key].compile + (["-o", "OUT"] if labs[key].writes_output else []))
+                                                for key, _ in VARIANTS}
     save_compare_meta(directory, meta)
     print("uarch_lab: compare output %s; %s" % (directory, "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else
                                                 "pair count chosen after %d pilot pairs to land near %g min" % (PILOT_PAIRS, arguments.target_minutes)), flush=True)
@@ -3480,7 +3505,7 @@ def compare_summary(directory):
     code = code_bytes_summary(references)
     counters = compare_counters(directory)
     extension = {}
-    if config.get("ast_pilot_pair") or config.get("constant_reuse_pair"):
+    if config.get("ast_pilot_pair") or config.get("constant_reuse_pair") or config.get("process_floor_pair"):
         transcripts = [os.path.join(directory, key, "reference.diagnostics") for key, _ in VARIANTS]
         extension["diagnostics_identical"] = filecmp.cmp(*transcripts, shallow=False) if all(map(os.path.isfile, transcripts)) else None
     return {**extension, "schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
@@ -4164,6 +4189,9 @@ def main(argv=None):
                          help="fixed issue #3397 acceptance cell: A omits -fc-ast-pilot, B passes it, on the -g0 unity source")
     compare.add_argument("--constant-reuse-pair", choices=sorted(CONSTANT_REUSE_CELLS), default=None,
                          help="fixed issue #3011 acceptance cell: A default, B passes the cell's opt-in flag, on the -g0 unity object compile")
+    compare.add_argument("--process-floor-pair", choices=sorted(PROCESS_FLOOR_CELLS), default=None,
+                         help="fixed issue #1125 floor cell in a --repo-root holding only tiny.c: A is the x86-64 -g0 object compile, "
+                              "B the same (aa), the AArch64 object compile (aarch64) or -fsyntax-only (syntax-only)")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
     retire = commands.add_parser("retirement", help="historical #512 native-retirement v1 gate (archived compilers required): compare per allocator mode plus generated-program "
                                  "runtime, judged against the #511 limits (retirement.md, retirement.json)")

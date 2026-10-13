@@ -258,6 +258,13 @@ times the candidate binary on the `-g0` unity `-c` compile, without and with
 Its method and evidence are in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: process-floor-v1` line, added once against every
+parent, adds issue #1125's fixed per-process floor profile. It times the
+candidate binary in fresh processes on `int main(void){return 0;}`: the
+x86-64 `-g0 -c` compile against itself (A/A), against the AArch64 object
+compile and against `-fsyntax-only`. Its method and evidence are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 A fresh exact `profile: throughput-real-source-v1` line, added once against
 every parent, adds the real-source throughput leg (#2761) after the corpus
 leg. The merge base's `./build.sh bench_throughput run --real-source` times
