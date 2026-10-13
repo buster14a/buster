@@ -55607,7 +55607,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_flexible_array_promoted_members(UnitTe
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, c_test_parse_type_replay_effective_member_count() &&
                                c_test_ast_type_replay_effective_member_count() &&
-                               c_test_flexible_array_postorder_work(&arguments->arena));
+                               c_test_flexible_array_postorder_work(arguments->arena));
     Target target = target_native;
     target.cpu_arch = CPU_ARCH_X86_64;
     target.os = OPERATING_SYSTEM_LINUX;
