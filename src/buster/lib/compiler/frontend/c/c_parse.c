@@ -8948,6 +8948,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     else if (machine->ast_types && !(literal && c_ast_types_waiting(machine)) &&
              c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
     {
+        WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_TREE_ROOTS, 1);
         valid = true;
     }
     else if (literal)
