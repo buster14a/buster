@@ -6284,7 +6284,9 @@ bool os_linux_process_group_filter_self_test(void)
     // An invalid descriptor makes any attempted stat read fail. Only a known
     // unrelated group in the same PID coordinate system can avoid that read.
     u32 coordinates[][2] = {{1, 0}, {2, 1}, {2, 0}, {0, 0}, {1, 1}};
-    bool result = process_id > 0 && own_group > 0;
+    // A new PID namespace can inherit a group outside its visible namespace,
+    // so getpgrp legitimately returns zero until it creates a local group.
+    bool result = process_id > 0 && own_group >= 0;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coordinates); index += 1)
     {
         OsLinuxProcContext context = {
