@@ -10482,7 +10482,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                         ((first_header >> 27) & 0x1fu) == 0 &&
                                         first_extension == (UINT16_MAX | (3u << 16)) &&
                                         first_scope == ((3u << 22) | (32u / 4u)));
-            BUSTER_TEST(arguments, (second_header & 0x3ffffu) == (arm64_scope_limit_function.code_size -
+            BUSTER_TEST(arguments, (second_header & 0x3ffffu) == (windows_arm64_scope_limit_function.code_size -
                                                                     arm64_scope_limit_epilogs[UINT16_MAX]) /
                                                                        4u &&
                                         ((second_header >> 22) & 0x1fu) == 1 &&

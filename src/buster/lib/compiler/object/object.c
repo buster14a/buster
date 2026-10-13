@@ -13346,8 +13346,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                        });
         }
     }
-    u64 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
-                                    (u64)windows_unwind.pdata_count * (windows_unwind.aarch64 ? 2u : 3u);
+    u64 metadata_relocation_count = (u64)(dwarf.valid ? dwarf.relocation_count : 0) + (u64)(codeview.valid ? codeview.relocation_count : 0) +
+                                    (u64)cfi.relocation_count + (u64)windows_unwind.pdata_count * (windows_unwind.aarch64 ? 2u : 3u);
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -13526,12 +13526,12 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         };
     }
     u64 relocation_capacity = (u64)module->relocation_count + metadata_relocation_count + initializer_count;
-    if (relocation_capacity > UINT32_MAX)
+    bool relocation_capacity_valid = relocation_capacity <= UINT32_MAX;
+    if (!relocation_capacity_valid)
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
     }
-    result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity);
+    result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity_valid ? relocation_capacity : 0);
     Arena* name_conflicts[] = {
         arena,
     };
@@ -13581,7 +13581,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             entry_by_symbol[symbol_value] = defined_owner[module->entry_count + module->global_count + alias_index];
         }
     }
-    for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
+    for (u32 relocation_index = 0; relocation_index < module->relocation_count && result.error == OBJECT_ERROR_NONE; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
         ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
