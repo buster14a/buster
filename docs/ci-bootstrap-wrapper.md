@@ -112,21 +112,26 @@ provider/directory rejection, UTF8 export bytes and all original failure cases.
 Windows PowerShell 5.1 finds a cmdlet from a module it has not loaded by
 asking its module analysis cache about each module on `PSModulePath`, in
 order, and analyzing every module the cache cannot answer for. The hosted
-Windows runners list about 250 modules with roughly 2,900 script files. With a
+Windows runners list 253-262 modules with 2,927-3,024 script files. With a
 cold cache, one lookup costs 22-29 s of CPU, or 41 s under x64 emulation on the
 ARM64 runner. PowerShell writes what it analyzed back to the cache only after
 the analysis has been quiet for more than ten seconds. A short process
 therefore exits first, and the next process repeats the work.
 
-The `windows-2025` image ships a cache that answers these lookups. On
-`windows-11-arm`, the cache present when a job starts does not. Every
-`build.ps1` launch, VS probe and Windows PowerShell CI step on that runner
-therefore spent about 23 s before its first `Split-Path`, `Join-Path` or
-`Write-Output`. Process startup, the exit path, JIT, missing native images,
-lockdown policy and Defender were each measured and excluded.
+The cache keys each module file by its local `LastWriteTime`. The
+`windows-11-arm` image's cache was recorded under UTC, but that runner executes
+jobs in Pacific Standard Time. In image 20261004.176.1, 108 of its 434 entries,
+including the module manifests, therefore differ by exactly the seven- or
+eight-hour offset and never match. The `windows-2025` runner runs in UTC, and
+its image cache matches entry for entry. Every `build.ps1` launch, VS probe and
+Windows PowerShell CI step on the ARM64 runner therefore spent about 23 s before
+its first `Split-Path`, `Join-Path` or `Write-Output`. Process startup, the
+exit path, JIT, missing native images, lockdown policy and Defender were each
+measured and excluded.
 
 Importing `Microsoft.PowerShell.Management` and `Microsoft.PowerShell.Utility`
-by name loads them from their own directories in about 0.15 s. After that,
+by name loads them from their own directories, in 0.14-0.16 s even under x64
+emulation. After that,
 their cmdlets resolve without the lookup. `build.ps1`, the three Windows
 PowerShell steps in `ci.yml` and the VS-probe fixture import both first, and
 `tools/ci_vs_dev_shell_test.py` requires the import before each step's first
@@ -136,18 +141,26 @@ PowerShell glue imports what it uses by name.
 The diagnostic runs live on the #3979 branch. They are hosted diagnostics
 only, not 9700X performance acceptance (#2761).
 
-| Runner | First cmdlet, unloaded module | Qualified or imported | Cold fresh cache, then after one 25 s process |
+| Runner | First cmdlet, unloaded module | After importing by name | Fresh cache, then after one 25 s process |
 | --- | ---: | ---: | ---: |
-| `windows-11-arm`, Cobalt 100, ARM64-native | 22.1-22.9 s | pending | 23.2-23.3 s, then 0.13-0.14 s |
+| `windows-11-arm`, Cobalt 100, ARM64-native | 22.1-22.9 s | 0.05 s for three cmdlets | 23.2-23.3 s, then 0.13-0.14 s |
 | Same runner, x64-emulated PowerShell | 40.7-43.4 s | 0.14-0.16 s | not measured |
 | `windows-2025`, EPYC 7763, image cache | 0.11-0.15 s | 0.09-0.10 s | 28.8 s, then 0.12 s |
+
+On the same two Cobalt 100 runners, the 22 wrapper launches took 10.2-10.3 s
+with the import and 139.9-144.6 s without it: 0.8-2.8 s per launch against
+23.2-35.8 s. The VS-shell suite took 3.8-4.0 s, with every probe under 0.9 s.
 
 PowerShell launched from the x64 Git Bash runs x64-emulated on the ARM64
 runner. The Python harnesses and the runner's own `shell: powershell` steps
 run it ARM64-native. Runs
-[38369510621](https://github.com/buster14a/buster/actions/runs/38369510621)
-and [38372883339](https://github.com/buster14a/buster/actions/runs/38372883339)
-hold the probe, trace and cache records.
+[38369510621](https://github.com/buster14a/buster/actions/runs/38369510621),
+[38372883339](https://github.com/buster14a/buster/actions/runs/38372883339)
+and [38374367876](https://github.com/buster14a/buster/actions/runs/38374367876)
+hold the probe, cache and same-runner wrapper records; the last retains both
+caches as artifacts. Resetting the runner's time zone would also restore the
+image cache, but it changes every timestamp the jobs record. Importing by name
+does not depend on runner state.
 
 ## Bounded independent cases (#2034)
 
