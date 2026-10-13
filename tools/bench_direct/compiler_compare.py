@@ -2141,9 +2141,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if reuse_requested:
         receipt["constant_reuse_acceptance"] = {"requested": True, "request_line": CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
                                                 "profile": CONSTANT_REUSE_ACCEPTANCE_PROFILE, "status": "pending"}
-        # One long opt-in leg per compare-pull job keeps the unchanged compare-pull budget provable.
-        if ast_requested or inline_requested:
-            reasons.append("constant-reuse-acceptance-v1 cannot be combined with the inline or ast-pilot acceptance profile")
+        # One long opt-in leg per compare-pull job keeps the unchanged compare-pull budget provable. The inline
+        # profile is not one: its exact line is in main's request history, so it rides every pull compare.
+        if ast_requested:
+            reasons.append("constant-reuse-acceptance-v1 cannot be combined with the ast-pilot acceptance profile")
     real_requested = arguments.mode == "pull" and getattr(arguments, "real_source_requested", False)
     problem = getattr(arguments, "real_source_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
