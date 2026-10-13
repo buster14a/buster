@@ -5801,6 +5801,8 @@ struct CMacroExpansionStorage
 {
     Arena* argument_arena;
     Arena* expansion_arena;
+    // Conditional expressions have a post-rescan defined-operator extension.
+    bool conditional_expression;
     // Stop retrying after a resource failure until this storage is destroyed.
     bool failed;
 };
@@ -5812,12 +5814,20 @@ struct CMacroExpansionMark
     u64 expansion;
 };
 
+typedef enum CMacroExpansionDefinedState
+{
+    C_MACRO_EXPANSION_DEFINED_NONE,
+    C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN,
+    C_MACRO_EXPANSION_DEFINED_NAME,
+} CMacroExpansionDefinedState;
+
 typedef struct CMacroExpansionContext CMacroExpansionContext;
 struct CMacroExpansionContext
 {
     CMacroExpansionContext* parent;
     CMacroExpansionContinuation* continuation;
     u64 task_base;
+    CMacroExpansionDefinedState defined_state;
     // The root context's rescan output is the line's node list, which the
     // caller consumes. An argument context (one with a continuation) writes
     // `output_tokens` instead: one contiguous run in the expansion arena that
@@ -7861,6 +7871,38 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
             else
             {
                 CPpToken token = task.token;
+                if (storage->conditional_expression)
+                {
+                    if (context->defined_state == C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN)
+                    {
+                        if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NAME;
+                        }
+                        else if (token.token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            token.no_expand = true;
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                        }
+                        else
+                        {
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                        }
+                    }
+                    else if (context->defined_state == C_MACRO_EXPANSION_DEFINED_NAME)
+                    {
+                        if (token.token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            token.no_expand = true;
+                        }
+                        context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                    }
+                    else if (token.token.kind == C_TOKEN_IDENTIFIER &&
+                             c_token_spelling_equal(space->base, token.token, S8("defined")))
+                    {
+                        context->defined_state = C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN;
+                    }
+                }
                 if (token.token.kind == C_TOKEN_PRAGMA && !context->parent &&
                     c_preprocess_expansion_pragma(pragma_context, space->base, token, stamps, &tasks))
                 {
@@ -8923,6 +8965,46 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
 
 // Parse-side constant queries share the reducer but retain their existing
 // semantics; only conditional-inclusion arithmetic widens decoded types.
+// Macro expansion may introduce a defined operator after the source-token pass.
+// The rescan context has already marked its identifier operand no-expand; reduce
+// those operators here before the conditional expression's ordinary identifiers
+// become zero-valued operands.
+BUSTER_C_INTERNAL bool c_conditional_defined_operators(CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
+                                                       CPreprocessTokenNode* first)
+{
+    char8 const* base = space->base;
+    bool valid = true;
+    CPreprocessTokenNode* node = first;
+    while (node && valid)
+    {
+        if (node->token.token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, node->token.token, S8("defined")))
+        {
+            CPreprocessTokenNode* operand = node->next;
+            bool parenthesized = operand && c_token_is_punctuator(&operand->token.token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+            operand = parenthesized ? operand->next : operand;
+            valid = operand && operand->token.token.kind == C_TOKEN_IDENTIFIER;
+            CPreprocessTokenNode* close = valid && parenthesized ? operand->next : 0;
+            valid = valid && (!parenthesized || (close && c_token_is_punctuator(&close->token.token, C_PUNCTUATOR_RIGHT_PARENTHESIS)));
+            if (valid)
+            {
+                CMacro* macro = c_macro_find_token(first_macro, symbols, base, &operand->token.token);
+                node->token.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
+                node->token.token.punctuator = C_PUNCTUATOR_NONE;
+                node->token.token.offset = macro && macro->definition.defined ? C_SPELLING_ONE : C_SPELLING_ZERO;
+                node->token.token.length = 1;
+                node->token.token.symbol = 0;
+                node->next = parenthesized ? close->next : operand->next;
+                node = node->next;
+            }
+        }
+        else
+        {
+            node = node->next;
+        }
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
                                                                      bool preprocessor_arithmetic, CPreprocessResult* result,
@@ -8977,7 +9059,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     u64 expanded_count = 0;
     if (valid && preprocessor_arithmetic)
     {
-        CMacroExpansionStorage expansion_storage = {0};
+        CMacroExpansionStorage expansion_storage = {.conditional_expression = true};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
@@ -9001,6 +9083,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
         }
         first_expanded = valid && transformed_count ? nodes : 0;
         expanded_count = transformed_count;
+    }
+    if (valid && preprocessor_arithmetic)
+    {
+        valid = c_conditional_defined_operators(space, symbols, first_macro, first_expanded);
     }
     if (valid)
     {
