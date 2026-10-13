@@ -1,0 +1,1281 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 0032312b..49da6d4e 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -3855,6 +3855,7 @@ struct CIntegerIrBuilder
+     // without an address-of-label.
+     bool label_metadata_store_cleared;
+ };
++#include "census_map.inc"
+ 
+ BUSTER_C_INTERNAL bool c_ir_lower_scratch_reservation(CIntegerIrBuilder* builder, u64 element_size, u64 count, u64 alignment)
+ {
+@@ -4241,7 +4242,7 @@ BUSTER_C_INTERNAL bool c_ir_query_request(CIntegerIrBuilder* builder, CIrQueryFr
+     return found;
+ }
+ 
+-BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFrame root, CIrQueryFrame* result_out)
++BUSTER_C_INTERNAL bool c_ir_query_execute__real(CIntegerIrBuilder* builder, CIrQueryFrame root, CIrQueryFrame* result_out)
+ {
+     WORK_LEDGER_RECORD(REDERIVE_LOWER_QUERY_ROOTS, 1);
+     CIrQueryMachine* machine = builder->queries;
+@@ -4847,7 +4848,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_balanced(CIntegerIrBuilder* buil
+ // `(`, `[`, `_Generic` or `__builtin_choose_expr` group that does not close in
+ // the range, or when the lowering machine has no frame left for it. A balanced
+ // range with none of those tokens, with a frame to spare, answers no.
+-BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     bool result = true;
+     CIrLowerMachine* machine = &builder->lower_machine;
+@@ -6440,7 +6441,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name_decode(u32 encoded)
+ // machine runs, and the memo answers the second and third probe of one `(`
+ // -- the expression steps, the unary-end scan and the call preparer each ask
+ // -- so the probe itself, unchanged, stays the reference for both.
+-BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close)
++BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name__real(CIntegerIrBuilder* builder, u32 open, u32 close)
+ {
+     IrTypeId result;
+     u32* slot = c_ir_group_type_name_slot(builder, open);
+@@ -18575,6 +18576,7 @@ struct CIrLowerFrame
+         CIrLowerAssignmentStatementState* assignment_statement;
+     } as;
+ };
++#include "census_frames.inc"
+ 
+ BUSTER_C_INTERNAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* builder, CIrLowerFrame root);
+ 
+@@ -23444,7 +23446,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
+     return valid;
+ }
+ 
+-BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL bool c_ir_has_root_control_operator__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     u32 parentheses = 0;
+     u32 brackets = 0;
+@@ -23509,7 +23511,7 @@ BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder
+ 
+ BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
+ 
+-BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL bool c_ir_has_root_assignment__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     bool result = false;
+     // An assignment after a top-level `?` belongs to one of the
+@@ -23545,7 +23547,7 @@ BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32
+ 
+ // A `?` at the root of the range. Groups are hopped over whole, as in
+ // c_ir_has_root_assignment, so this is the classifying pass's root token test.
+-BUSTER_C_INTERNAL bool c_ir_has_root_question(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL bool c_ir_has_root_question__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     bool found = false;
+     for (u32 index = start; index < end && !found; index += 1)
+@@ -23825,7 +23827,7 @@ BUSTER_C_INTERNAL void c_ir_group_facts_build(CIntegerIrBuilder* builder)
+ // Short interiors, and any group outside a body whose delimiters nest properly,
+ // run the predicate itself; the rest read the classifying pass. Both answer the
+ // same, so the choice is only a cost choice.
+-BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32 close, CIrGroupFact fact)
++BUSTER_C_INTERNAL bool c_ir_group_fact__real(CIntegerIrBuilder* builder, u32 open, u32 close, CIrGroupFact fact)
+ {
+     bool answer;
+     bool tabled = builder->group_facts_exact && close - open > C_IR_GROUP_FACT_SCAN_LIMIT && open >= builder->body_token_start &&
+@@ -23895,7 +23897,7 @@ BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u
+ 
+ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
+ 
+-BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
++BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step__real(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+@@ -24277,7 +24279,7 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
+ // The first top-level comma of [index, end), or end. Groups are hopped over
+ // whole, so splitting the arguments of `f(g(h(...)))` at every level of the
+ // nesting stays linear in the arguments' top-level tokens.
+-BUSTER_C_INTERNAL u32 c_ir_call_argument_separator(CIntegerIrBuilder* builder, u32 index, u32 end)
++BUSTER_C_INTERNAL u32 c_ir_call_argument_separator__real(CIntegerIrBuilder* builder, u32 index, u32 end)
+ {
+     u32 separator = end;
+     for (; index < end && separator == end; index += 1)
+@@ -24589,7 +24591,7 @@ BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, I
+ // postfix continuations below can. The walk only ever consumes shapes it
+ // recognizes, so malformed input stops it where it stands rather than
+ // swallowing an evaluated call after the operand.
+-BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 cursor, u32 end)
++BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end__real(CIntegerIrBuilder* builder, u32 cursor, u32 end)
+ {
+     bool prefixes = true;
+     while (prefixes && cursor < end)
+@@ -24980,7 +24982,7 @@ BUSTER_C_INTERNAL u32 c_ir_subscript_callee_base(CIntegerIrBuilder* builder, u32
+     return valid && builder->preprocess.tokens[base].kind == C_TOKEN_IDENTIFIER ? base : UINT32_MAX;
+ }
+ 
+-BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
++BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover__real(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
+                                                      u32* emission_count_out)
+ {
+     u32 first_new = builder->prepared_call_count;
+@@ -28749,7 +28751,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
+     return true;
+ }
+ 
+-BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
++BUSTER_C_INTERNAL void c_ir_prepare_calls_step__real(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+@@ -35353,7 +35355,7 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_combine(CIntegerIrBui
+     return step;
+ }
+ 
+-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields)
++BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted__real(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields)
+ {
+     CIrSizeofFrame local_frames[C_IR_SIZEOF_LOCAL_FRAME_CAPACITY];
+     CIrQueryMachine* machine = builder->queries;
+@@ -36106,7 +36108,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression(CIntegerIrBuilder* builder, u32 st
+     return result;
+ }
+ 
+-BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL u32 c_ir_unary_expression_end__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     u32 index = start;
+     bool need_primary = true;
+@@ -36321,7 +36323,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_vla_suffix_evaluated(CIntegerIrBuilder* build
+ #define C_IR_EXPRESSION_CORE_ITERATION_PUSHES 4u
+ 
+ // One stack slot per token the evaluator visits; prepared calls contribute only their result.
+-BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     u32 visited = 0;
+     for (u32 index = start; index < end; index += 1)
+@@ -36344,7 +36346,7 @@ BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity(CIntegerIrBuilder* builder,
+     return visited + C_IR_EXPRESSION_CORE_STACK_SLACK;
+ }
+ 
+-BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
++BUSTER_C_INTERNAL void c_ir_lower_expression_core_step__real(CIntegerIrBuilder* builder)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+@@ -38657,7 +38659,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
+ // Conditions and nested operands still obey comma precedence. Only commas outside
+ // delimiter groups and the middle operand of ?: belong to its root. The full
+ // expression machine already owns their ordered evaluation and result type.
+-BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
++BUSTER_C_INTERNAL bool c_ir_has_root_comma__real(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     bool found = false;
+     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+@@ -38709,7 +38711,7 @@ BUSTER_C_INTERNAL bool c_ir_group_is_logical_chain(CIntegerIrBuilder* builder, u
+            !c_ir_group_fact(builder, open, close, C_IR_GROUP_FACT_TOP_COMMA);
+ }
+ 
+-BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
++BUSTER_C_INTERNAL void c_ir_lower_condition_step__real(CIntegerIrBuilder* builder)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+@@ -40346,7 +40348,7 @@ BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* build
+     return false;
+ }
+ 
+-BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
++BUSTER_C_INTERNAL void c_ir_lower_logical_value_step__real(CIntegerIrBuilder* builder)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+@@ -40934,7 +40936,7 @@ BUSTER_C_INTERNAL CIrTreeConditionals const* c_ir_tree_conditionals_find(CIrTree
+     return low < index->body_count && index->braces[low] == brace ? index->bodies + low : 0;
+ }
+ 
+-BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
++BUSTER_C_INTERNAL bool c_ir_tree_root_conditional__real(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                     u32* expression_end)
+ {
+     CIrTreeConditionals const* tree = builder->tree_conditionals;
+@@ -42288,7 +42290,7 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
+     return pushed;
+ }
+ 
+-BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
++BUSTER_C_INTERNAL void c_ir_lower_expression_step__real(CIntegerIrBuilder* builder)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+diff --git a/src/buster/lib/compiler/frontend/c/census_frames.inc b/src/buster/lib/compiler/frontend/c/census_frames.inc
+new file mode 100644
+index 00000000..5d781e55
+--- /dev/null
++++ b/src/buster/lib/compiler/frontend/c/census_frames.inc
+@@ -0,0 +1,63 @@
++// THROWAWAY CENSUS frames (#3102). Never commit.
++#define CENSUS_FRAME(name, klass, field)                                                       \
++    BUSTER_C_INTERNAL void name##__real(CIntegerIrBuilder* builder);                            \
++    __attribute__((noinline)) static void name##__hit(CIntegerIrBuilder* builder)              \
++    {                                                                                          \
++        name##__real(builder);                                                                 \
++    }                                                                                          \
++    __attribute__((noinline)) static void name##__miss(CIntegerIrBuilder* builder)             \
++    {                                                                                          \
++        name##__real(builder);                                                                 \
++    }                                                                                          \
++    __attribute__((noinline)) BUSTER_C_INTERNAL void name(CIntegerIrBuilder* builder)          \
++    {                                                                                          \
++        CIrLowerFrame* frame = &builder->lower_machine.frames[builder->lower_machine.frame_count - 1]; \
++        CensusHit hit = {.relative = CM_NONE};                                                 \
++        if (frame->stage == C_IR_LOWER_STAGE_BEGIN)                                            \
++        {                                                                                      \
++            hit = census_classify(builder, klass, frame->as.field.start, frame->as.field.end); \
++        }                                                                                      \
++        if (hit.relative != CM_NONE)                                                           \
++        {                                                                                      \
++            name##__hit(builder);                                                              \
++        }                                                                                      \
++        else                                                                                   \
++        {                                                                                      \
++            name##__miss(builder);                                                             \
++        }                                                                                      \
++    }
++
++CENSUS_FRAME(c_ir_lower_expression_step, CC_EXPRESSION_FRAME, expression)
++CENSUS_FRAME(c_ir_lower_logical_value_step, CC_LOGICAL_FRAME, logical)
++CENSUS_FRAME(c_ir_lower_condition_step, CC_CONDITION_FRAME, condition)
++CENSUS_FRAME(c_ir_lower_expression_core_step, CC_CORE_FRAME, expression_core)
++
++#define CENSUS_FRAME2(name, klass, field)                                                      \
++    BUSTER_C_INTERNAL void name##__real(CIntegerIrBuilder* builder, CIrLowerFrame* frame);      \
++    __attribute__((noinline)) static void name##__hit(CIntegerIrBuilder* builder, CIrLowerFrame* frame) \
++    {                                                                                          \
++        name##__real(builder, frame);                                                          \
++    }                                                                                          \
++    __attribute__((noinline)) static void name##__miss(CIntegerIrBuilder* builder, CIrLowerFrame* frame) \
++    {                                                                                          \
++        name##__real(builder, frame);                                                          \
++    }                                                                                          \
++    __attribute__((noinline)) BUSTER_C_INTERNAL void name(CIntegerIrBuilder* builder, CIrLowerFrame* frame) \
++    {                                                                                          \
++        CensusHit hit = {.relative = CM_NONE};                                                 \
++        if (frame->stage == C_IR_LOWER_STAGE_BEGIN)                                            \
++        {                                                                                      \
++            hit = census_classify(builder, klass, frame->as.field.start, frame->as.field.end); \
++        }                                                                                      \
++        if (hit.relative != CM_NONE)                                                           \
++        {                                                                                      \
++            name##__hit(builder, frame);                                                       \
++        }                                                                                      \
++        else                                                                                   \
++        {                                                                                      \
++            name##__miss(builder, frame);                                                      \
++        }                                                                                      \
++    }
++
++CENSUS_FRAME2(c_ir_prepare_control_expressions_step, CC_PREPARE_CONTROL_FRAME, prepare_control)
++CENSUS_FRAME2(c_ir_prepare_calls_step, CC_PREPARE_CALLS_FRAME, prepare_calls)
+diff --git a/src/buster/lib/compiler/frontend/c/census_map.inc b/src/buster/lib/compiler/frontend/c/census_map.inc
+new file mode 100644
+index 00000000..303bd769
+--- /dev/null
++++ b/src/buster/lib/compiler/frontend/c/census_map.inc
+@@ -0,0 +1,997 @@
++// THROWAWAY CENSUS for a token-to-node map in lowering (#3102). Never commit.
++// Included once into c_gen.c after struct CIntegerIrBuilder.
++#include <stdio.h>
++
++enum
++{
++    CC_ROOT_CONDITIONAL,
++    CC_HAS_ROOT_COMMA,
++    CC_HAS_ROOT_ASSIGNMENT,
++    CC_HAS_ROOT_QUESTION,
++    CC_HAS_ROOT_CONTROL,
++    CC_GROUP_FACT,
++    CC_CORE_CAPACITY,
++    CC_MAY_PREPARE_CONTROL,
++    CC_PREPARE_DISCOVER,
++    CC_ARGUMENT_SEPARATOR,
++    CC_UNEVALUATED_END,
++    CC_UNARY_END,
++    CC_GROUP_TYPE_NAME,
++    CC_QUERY_EXECUTE,
++    CC_SIZEOF_ATTEMPT,
++    CC_EXPRESSION_FRAME,
++    CC_LOGICAL_FRAME,
++    CC_CONDITION_FRAME,
++    CC_CORE_FRAME,
++    CC_PREPARE_CONTROL_FRAME,
++    CC_PREPARE_CALLS_FRAME,
++    CC_COUNT,
++};
++
++static char const* const census_class_names[CC_COUNT] = {
++    "root_conditional", "has_root_comma", "has_root_assignment", "has_root_question", "has_root_control", "group_fact",
++    "core_capacity", "may_prepare_control", "prepare_discover", "argument_separator", "unevaluated_end", "unary_end",
++    "group_type_name", "query_execute", "sizeof_attempt", "expression_frame", "logical_frame", "condition_frame",
++    "core_frame", "prepare_control_frame", "prepare_calls_frame",
++};
++
++#define CM_COMMA 1u
++#define CM_ASSIGN 2u
++#define CM_QUESTION 4u
++#define CM_LOGICAL 8u
++#define CM_CALL 16u
++#define CM_NONE UINT32_MAX
++
++typedef struct CensusMap CensusMap;
++struct CensusMap
++{
++    CAst const* ast;
++    CToken const* tokens;
++    u32 const* matches;
++    u32 token_total;
++    Arena* arena;
++    u64 mark;
++    u32 body_token_start;
++    u32 body_token_count;
++    bool built;
++    bool valid;
++    u32 begin;
++    u32 body;
++    // Design A: dense per-body start chain plus masks.
++    u32* first;
++    u32* end;
++    u32* link;
++    u32* head;
++    u8* region;
++    u8* any;
++    // Design B: sparse table of the nodes whose region holds a split operator.
++    u32* b_first;
++    u32* b_end;
++    u32* b_node;
++    u8* b_region;
++    u8* b_any;
++    u32 b_count;
++};
++
++static BUSTER_THREAD_LOCAL_DECL CensusMap census_map;
++BUSTER_C_INTERNAL u32 c_ir_statement_extents_body_node(CIrStatementExtents const* extents, u32 brace);
++
++static u64 census_calls[CC_COUNT];
++static u64 census_gate_hits[CC_COUNT];
++static u64 census_inbody[CC_COUNT];
++static u64 census_hit_a[CC_COUNT];
++static u64 census_hit_b[CC_COUNT];
++static u64 census_stripped[CC_COUNT];
++static u64 census_agree[CC_COUNT];
++static u64 census_disagree[CC_COUNT];
++static u64 census_result_true[CC_COUNT];
++static u64 census_answered_true[CC_COUNT];
++static u64 census_kinds[CC_COUNT][C_AST_KIND_COUNT];
++static u64 census_bodies;
++static u64 census_refused;
++static u64 census_body_nodes;
++static u64 census_body_tokens;
++static u64 census_spanned_nodes;
++static u64 census_b_entries;
++static u64 census_max_body_nodes;
++static u64 census_max_body_tokens;
++static u64 census_disagree_print;
++static BUSTER_THREAD_LOCAL_DECL u32 census_last_fact;
++
++#define CADD(x, v) __atomic_fetch_add(&(x), (u64)(v), __ATOMIC_RELAXED)
++
++__attribute__((destructor)) static void census_print(void)
++{
++    if (!census_bodies && !census_calls[CC_HAS_ROOT_COMMA])
++    {
++        return;
++    }
++    fprintf(stderr, "CENSUS bodies=%llu refused=%llu body_nodes=%llu body_tokens=%llu spanned=%llu b_entries=%llu max_nodes=%llu max_tokens=%llu\n",
++            (unsigned long long)census_bodies, (unsigned long long)census_refused, (unsigned long long)census_body_nodes,
++            (unsigned long long)census_body_tokens, (unsigned long long)census_spanned_nodes, (unsigned long long)census_b_entries,
++            (unsigned long long)census_max_body_nodes, (unsigned long long)census_max_body_tokens);
++    for (u32 c = 0; c < CC_COUNT; c += 1)
++    {
++        fprintf(stderr, "CENSUS_CLASS %s calls=%llu inbody=%llu hit_a=%llu hit_b=%llu stripped=%llu agree=%llu disagree=%llu result_true=%llu answered_true=%llu gate=%llu kinds=",
++                census_class_names[c], (unsigned long long)census_calls[c], (unsigned long long)census_inbody[c], (unsigned long long)census_hit_a[c],
++                (unsigned long long)census_hit_b[c], (unsigned long long)census_stripped[c], (unsigned long long)census_agree[c],
++                (unsigned long long)census_disagree[c], (unsigned long long)census_result_true[c], (unsigned long long)census_answered_true[c],
++                (unsigned long long)census_gate_hits[c]);
++        for (u32 k = 0; k < C_AST_KIND_COUNT; k += 1)
++        {
++            if (census_kinds[c][k])
++            {
++                String8 name = c_ast_kind_name((CAstKind)k);
++                fprintf(stderr, "%.*s:%llu,", (int)name.length, (char const*)name.pointer, (unsigned long long)census_kinds[c][k]);
++            }
++        }
++        fprintf(stderr, "\n");
++    }
++}
++
++static BUSTER_INLINE u32 census_match(CensusMap const* m, u32 open)
++{
++    u32 close = open < m->token_total ? m->matches[open] - 1 : CM_NONE;
++    return close > open ? close : CM_NONE;
++}
++
++static BUSTER_INLINE bool census_punct(CensusMap const* m, u32 token, CPunctuator punctuator)
++{
++    return token < m->token_total && c_token_is_punctuator(&m->tokens[token], punctuator);
++}
++
++static BUSTER_INLINE u32 census_first_child(CAst const* ast, u32 node)
++{
++    u32 begin = c_ast_subtree_begin(ast, node);
++    u32 child = node - 1;
++    while (c_ast_subtree_begin(ast, child) > begin)
++    {
++        child = c_ast_subtree_begin(ast, child) - 1;
++    }
++    return child;
++}
++
++static BUSTER_INLINE void census_expand(CensusMap const* m, u32 const* first_column, u32 const* end_column, u32 relative, u32* first_out, u32* end_out)
++{
++    u32 first = first_column[relative];
++    u32 end = end_column[relative];
++    if (first != CM_NONE)
++    {
++        while (first > 0 && census_punct(m, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && census_match(m, first - 1) == end)
++        {
++            first -= 1;
++            end += 1;
++        }
++    }
++    *first_out = first;
++    *end_out = end;
++}
++
++static BUSTER_INLINE bool census_wrapped(CensusMap const* m, u32 const* first_column, u32 const* end_column, u32 relative)
++{
++    u32 first = first_column[relative];
++    return first != CM_NONE && first > 0 && census_punct(m, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && census_match(m, first - 1) == end_column[relative];
++}
++
++// The typer's span rules (c_ast_types_span), over the census columns.
++static BUSTER_INLINE void census_span(CensusMap const* m, u32 const* first_column, u32 const* end_column, u32 node, u32 relative, u32* first_out,
++                                      u32* end_out)
++{
++    CAst const* ast = m->ast;
++    u32 kind = ast->kinds[node];
++    u32 token = ast->tokens[node];
++    u32 first = CM_NONE;
++    u32 end = CM_NONE;
++    switch (kind)
++    {
++    case C_AST_IDENTIFIER:
++    case C_AST_NUMBER:
++    case C_AST_CHARACTER:
++    case C_AST_BOOLEAN_CONSTANT:
++    case C_AST_NULLPTR:
++        first = token;
++        end = token + 1;
++        break;
++    case C_AST_STRING:
++        first = token;
++        end = token + ast->data[node];
++        break;
++    case C_AST_LABEL_ADDRESS:
++        first = token ? token - 1 : CM_NONE;
++        end = token + 1;
++        break;
++    case C_AST_STATEMENT_EXPRESSION:
++    case C_AST_INITIALIZER_LIST:
++    {
++        u32 close = census_match(m, token);
++        first = close != CM_NONE ? token : CM_NONE;
++        end = close != CM_NONE ? close + 1 : CM_NONE;
++    }
++    break;
++    case C_AST_GENERIC_SELECTION:
++    case C_AST_SIZEOF_TYPE:
++    case C_AST_ALIGNOF_TYPE:
++    {
++        u32 close = census_match(m, token + 1);
++        first = close != CM_NONE ? token : CM_NONE;
++        end = close != CM_NONE ? close + 1 : CM_NONE;
++    }
++    break;
++    case C_AST_CALL:
++    case C_AST_INDEX:
++    {
++        u32 callee = census_first_child(ast, node);
++        u32 ef = CM_NONE;
++        u32 ee = CM_NONE;
++        census_expand(m, first_column, end_column, callee - m->begin, &ef, &ee);
++        u32 close = census_match(m, token);
++        if (ef != CM_NONE && close != CM_NONE)
++        {
++            first = ef;
++            end = close + 1;
++        }
++    }
++    break;
++    case C_AST_MEMBER:
++    case C_AST_MEMBER_ARROW:
++    case C_AST_POST_INCREMENT:
++    case C_AST_POST_DECREMENT:
++    {
++        u32 ef = CM_NONE;
++        u32 ee = CM_NONE;
++        census_expand(m, first_column, end_column, relative - 1, &ef, &ee);
++        if (ef != CM_NONE)
++        {
++            first = ef;
++            end = token + 1;
++        }
++    }
++    break;
++    case C_AST_COMPOUND_LITERAL:
++    {
++        u32 close = census_match(m, ast->tokens[node - 1]);
++        first = close != CM_NONE ? token : CM_NONE;
++        end = close != CM_NONE ? close + 1 : CM_NONE;
++    }
++    break;
++    default:
++    {
++        if (kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST)
++        {
++            u32 ef = CM_NONE;
++            u32 ee = CM_NONE;
++            census_expand(m, first_column, end_column, relative - 1, &ef, &ee);
++            if (ef != CM_NONE)
++            {
++                first = token;
++                end = ee;
++            }
++        }
++        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
++        {
++            u32 leftmost = census_first_child(ast, node);
++            u32 lf = CM_NONE;
++            u32 le = CM_NONE;
++            u32 rf = CM_NONE;
++            u32 re = CM_NONE;
++            census_expand(m, first_column, end_column, leftmost - m->begin, &lf, &le);
++            census_expand(m, first_column, end_column, relative - 1, &rf, &re);
++            if (lf != CM_NONE && re != CM_NONE)
++            {
++                first = lf;
++                end = re;
++            }
++        }
++    }
++    break;
++    }
++    bool valid = first != CM_NONE && end != CM_NONE && first < end && end <= m->token_total;
++    *first_out = valid ? first : CM_NONE;
++    *end_out = valid ? end : CM_NONE;
++}
++
++static BUSTER_INLINE u8 census_own_bit(u32 kind)
++{
++    u8 bit = 0;
++    if (kind == C_AST_COMMA)
++    {
++        bit = CM_COMMA;
++    }
++    else if (kind >= C_AST_ASSIGN && kind <= C_AST_BIT_OR_ASSIGN)
++    {
++        bit = CM_ASSIGN;
++    }
++    else if (kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED)
++    {
++        bit = CM_QUESTION;
++    }
++    else if (kind == C_AST_LOGICAL_AND || kind == C_AST_LOGICAL_OR)
++    {
++        bit = CM_LOGICAL;
++    }
++    else if (kind == C_AST_CALL)
++    {
++        bit = CM_CALL;
++    }
++    return bit;
++}
++
++#define CM_OPAQUE 32u
++enum
++{
++    CK_SKIP,
++    CK_LEAF,
++    CK_BINARY,
++    CK_CONDITIONAL,
++    CK_CONDITIONAL_OMITTED,
++    CK_UNARY,
++    CK_CALL,
++    CK_INDEX,
++    CK_OPAQUE,
++};
++
++static u8 census_kind_class[C_AST_KIND_COUNT];
++
++static void census_kind_classes(void)
++{
++    if (census_kind_class[C_AST_IDENTIFIER])
++    {
++        return;
++    }
++    for (u32 kind = 0; kind < C_AST_KIND_COUNT; kind += 1)
++    {
++        u8 klass = CK_SKIP;
++        if (kind == C_AST_IDENTIFIER || kind == C_AST_NUMBER || kind == C_AST_CHARACTER || kind == C_AST_STRING || kind == C_AST_BOOLEAN_CONSTANT ||
++            kind == C_AST_NULLPTR || kind == C_AST_LABEL_ADDRESS)
++        {
++            klass = CK_LEAF;
++        }
++        else if (kind == C_AST_CONDITIONAL)
++        {
++            klass = CK_CONDITIONAL;
++        }
++        else if (kind == C_AST_CONDITIONAL_OMITTED)
++        {
++            klass = CK_CONDITIONAL_OMITTED;
++        }
++        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
++        {
++            klass = CK_BINARY;
++        }
++        else if (kind == C_AST_CALL)
++        {
++            klass = CK_CALL;
++        }
++        else if (kind == C_AST_INDEX)
++        {
++            klass = CK_INDEX;
++        }
++        else if ((kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST && kind != C_AST_SIZEOF_TYPE && kind != C_AST_ALIGNOF_TYPE) || kind == C_AST_MEMBER ||
++                 kind == C_AST_MEMBER_ARROW || kind == C_AST_POST_INCREMENT || kind == C_AST_POST_DECREMENT)
++        {
++            klass = CK_UNARY;
++        }
++        else if (kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_GENERIC_SELECTION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_TYPE ||
++                 kind == C_AST_COMPOUND_LITERAL || kind == C_AST_INITIALIZER_LIST)
++        {
++            klass = CK_OPAQUE;
++        }
++        census_kind_class[kind] = klass;
++    }
++}
++
++static BUSTER_INLINE u8 census_child_region(CensusMap const* m, u32 const* first_column, u32 const* end_column, u8 const* region, u32 relative)
++{
++    return census_wrapped(m, first_column, end_column, relative) ? 0 : region[relative];
++}
++
++// One forward pass over the body's nodes: spans for expression nodes, the
++// root-region mask (operators outside any parenthesis, bracket or brace of the
++// node, as the token scans see depth 0) and the anywhere mask. Statements and
++// declarations are skipped; opaque kinds (statement expressions, compound
++// literals, initializer lists, _Generic, sizeof/alignof of a type) mark the
++// anywhere mask opaque.
++static BUSTER_INLINE void census_pass(CensusMap const* m, u32* first_column, u32* end_column, u8* region, u8* any, u32 count, u64* spanned_out)
++{
++    CAst const* ast = m->ast;
++    u64 spanned = 0;
++    for (u32 relative = 0; relative < count; relative += 1)
++    {
++        u32 node = m->begin + relative;
++        u32 kind = ast->kinds[node];
++        u8 klass = census_kind_class[kind];
++        u32 first = CM_NONE;
++        u32 end = CM_NONE;
++        u8 region_mask = 0;
++        u8 any_mask = 0;
++        if (klass != CK_SKIP)
++        {
++            census_span(m, first_column, end_column, node, relative, &first, &end);
++            u8 own = census_own_bit(kind);
++            region_mask = own;
++            any_mask = own;
++            switch (klass)
++            {
++            case CK_BINARY:
++            {
++                u32 right = relative - 1;
++                u32 left = right - ast->extents[node - 1];
++                region_mask |= census_child_region(m, first_column, end_column, region, left) | census_child_region(m, first_column, end_column, region, right);
++                any_mask |= any[left] | any[right];
++            }
++            break;
++            case CK_CONDITIONAL:
++            {
++                u32 otherwise = relative - 1;
++                u32 then = otherwise - ast->extents[node - 1];
++                u32 condition = then - ast->extents[m->begin + then];
++                region_mask |= census_child_region(m, first_column, end_column, region, condition) |
++                               (u8)((census_child_region(m, first_column, end_column, region, then) |
++                                     census_child_region(m, first_column, end_column, region, otherwise)) &
++                                    ~CM_ASSIGN);
++                any_mask |= any[condition] | any[then] | any[otherwise];
++            }
++            break;
++            case CK_CONDITIONAL_OMITTED:
++            {
++                u32 otherwise = relative - 1;
++                u32 condition = otherwise - ast->extents[node - 1];
++                region_mask |= census_child_region(m, first_column, end_column, region, condition) |
++                               (u8)(census_child_region(m, first_column, end_column, region, otherwise) & ~CM_ASSIGN);
++                any_mask |= any[condition] | any[otherwise];
++            }
++            break;
++            case CK_UNARY:
++                region_mask |= census_child_region(m, first_column, end_column, region, relative - 1);
++                any_mask |= any[relative - 1];
++                break;
++            case CK_INDEX:
++            {
++                u32 subscript = relative - 1;
++                u32 base = subscript - ast->extents[node - 1];
++                region_mask |= census_child_region(m, first_column, end_column, region, base);
++                any_mask |= any[base] | any[subscript];
++            }
++            break;
++            case CK_CALL:
++            {
++                u32 begin = relative + 1 - ast->extents[node];
++                u32 child = relative - 1;
++                while (true)
++                {
++                    any_mask |= any[child];
++                    u32 child_begin = child + 1 - ast->extents[m->begin + child];
++                    if (child_begin == begin)
++                    {
++                        break;
++                    }
++                    child = child_begin - 1;
++                }
++                region_mask |= census_child_region(m, first_column, end_column, region, child);
++            }
++            break;
++            case CK_OPAQUE:
++                any_mask |= CM_OPAQUE;
++                break;
++            default:
++                break;
++            }
++        }
++        first_column[relative] = first;
++        end_column[relative] = end;
++        spanned += first != CM_NONE;
++        region[relative] = region_mask;
++        any[relative] = any_mask;
++    }
++    *spanned_out = spanned;
++}
++
++__attribute__((noinline)) static void census_a_build(CensusMap* m, u64* spanned_out)
++{
++    census_kind_classes();
++    u32 count = m->body - m->begin + 1;
++    m->first = arena_allocate(m->arena, u32, count);
++    m->end = arena_allocate(m->arena, u32, count);
++    m->link = arena_allocate(m->arena, u32, count);
++    m->region = arena_allocate(m->arena, u8, count);
++    m->any = arena_allocate(m->arena, u8, count);
++    m->head = arena_allocate(m->arena, u32, (u64)m->body_token_count + 1);
++    memset(m->head, 0, sizeof(u32) * ((u64)m->body_token_count + 1));
++    census_pass(m, m->first, m->end, m->region, m->any, count, spanned_out);
++    for (u32 relative = 0; relative < count; relative += 1)
++    {
++        u32 first = m->first[relative];
++        u32 offset = first - m->body_token_start;
++        if (first != CM_NONE && first >= m->body_token_start && offset < m->body_token_count)
++        {
++            m->link[relative] = m->head[offset];
++            m->head[offset] = relative + 1;
++        }
++    }
++}
++
++__attribute__((noinline)) static void census_b_build(CensusMap* m)
++{
++    census_kind_classes();
++    u32 count = m->body - m->begin + 1;
++    u64 position = m->arena->position;
++    u32* first_column = arena_allocate(m->arena, u32, count);
++    u32* end_column = arena_allocate(m->arena, u32, count);
++    u8* region = arena_allocate(m->arena, u8, count);
++    u8* any = arena_allocate(m->arena, u8, count);
++    u64 spanned = 0;
++    census_pass(m, first_column, end_column, region, any, count, &spanned);
++    u32 selected = 0;
++    for (u32 relative = 0; relative < count; relative += 1)
++    {
++        selected += first_column[relative] != CM_NONE && region[relative] != 0;
++    }
++    u64* keys = arena_allocate(m->arena, u64, (u64)selected + 1);
++    u64* scratch = arena_allocate(m->arena, u64, (u64)selected + 1);
++    u32 filled = 0;
++    for (u32 relative = 0; relative < count; relative += 1)
++    {
++        if (first_column[relative] != CM_NONE && region[relative] != 0)
++        {
++            keys[filled++] = ((u64)(first_column[relative] - m->body_token_start) << 32) | relative;
++        }
++    }
++    // LSD radix sort by the high 32 bits, 8-bit digits, skipping empty digits.
++    u32 high = m->body_token_count;
++    for (u32 shift = 32; shift < 64 && (high >> (shift - 32)) != 0; shift += 8)
++    {
++        u32 counts[257];
++        memset(counts, 0, sizeof(counts));
++        for (u32 index = 0; index < selected; index += 1)
++        {
++            counts[((keys[index] >> shift) & 0xffu) + 1] += 1;
++        }
++        for (u32 digit = 0; digit < 256; digit += 1)
++        {
++            counts[digit + 1] += counts[digit];
++        }
++        for (u32 index = 0; index < selected; index += 1)
++        {
++            scratch[counts[(keys[index] >> shift) & 0xffu]++] = keys[index];
++        }
++        u64* swap = keys;
++        keys = scratch;
++        scratch = swap;
++    }
++    // Retained compact table; the transient columns are dropped.
++    u32* b_first = arena_allocate(m->arena, u32, (u64)selected + 1);
++    u32* b_end = arena_allocate(m->arena, u32, (u64)selected + 1);
++    u32* b_node = arena_allocate(m->arena, u32, (u64)selected + 1);
++    u8* b_region = arena_allocate(m->arena, u8, (u64)selected + 1);
++    u8* b_any = arena_allocate(m->arena, u8, (u64)selected + 1);
++    for (u32 index = 0; index < selected; index += 1)
++    {
++        u32 relative = (u32)keys[index];
++        b_first[index] = first_column[relative];
++        b_end[index] = end_column[relative];
++        b_node[index] = relative;
++        b_region[index] = region[relative];
++        b_any[index] = any[relative];
++    }
++    (void)position;
++    m->b_first = b_first;
++    m->b_end = b_end;
++    m->b_node = b_node;
++    m->b_region = b_region;
++    m->b_any = b_any;
++    m->b_count = selected;
++}
++
++// Design A lookup: the node whose span is exactly [start, end) after
++// stripping balanced outer parentheses (c_ast_types_locate).
++__attribute__((noinline)) static u32 census_a_locate(CensusMap const* m, u32 start, u32 end, bool* stripped_out)
++{
++    u32 relative = CM_NONE;
++    bool stripped = false;
++    bool searching = start < end && start >= m->body_token_start && end <= m->body_token_start + m->body_token_count;
++    while (searching)
++    {
++        u32 hit = m->head[start - m->body_token_start];
++        while (hit && relative == CM_NONE)
++        {
++            relative = m->end[hit - 1] == end ? hit - 1 : CM_NONE;
++            hit = relative == CM_NONE ? m->link[hit - 1] : 0;
++        }
++        searching = relative == CM_NONE && end > start + 2 && census_punct(m, start, C_PUNCTUATOR_LEFT_PARENTHESIS) && census_match(m, start) + 1 == end;
++        stripped |= searching;
++        start += searching ? 1 : 0;
++        end -= searching ? 1 : 0;
++    }
++    *stripped_out = stripped;
++    return relative;
++}
++
++// Design B lookup: binary search by start, then the entries sharing it.
++__attribute__((noinline)) static u32 census_b_locate(CensusMap const* m, u32 start, u32 end)
++{
++    u32 found = CM_NONE;
++    bool searching = start < end && start >= m->body_token_start && end <= m->body_token_start + m->body_token_count;
++    while (searching)
++    {
++        u32 low = 0;
++        u32 high = m->b_count;
++        while (low < high)
++        {
++            u32 middle = low + (high - low) / 2;
++            low = m->b_first[middle] < start ? middle + 1 : low;
++            high = m->b_first[middle] < start ? high : middle;
++        }
++        for (u32 index = low; index < m->b_count && m->b_first[index] == start && found == CM_NONE; index += 1)
++        {
++            found = m->b_end[index] == end ? index : CM_NONE;
++        }
++        searching = found == CM_NONE && end > start + 2 && census_punct(m, start, C_PUNCTUATOR_LEFT_PARENTHESIS) && census_match(m, start) + 1 == end;
++        start += searching ? 1 : 0;
++        end -= searching ? 1 : 0;
++    }
++    return found;
++}
++
++// Opens the builder's current body in the map, building both designs on the
++// first query of each body. Returns false outside a mapped body.
++__attribute__((noinline)) static bool census_ensure(CIntegerIrBuilder* builder)
++{
++    CIrStatementExtents* extents = builder->statement_extents;
++    CensusMap* m = &census_map;
++    bool ready = false;
++    if (extents && builder->stream_matching_delimiters_plus_one && extents->token_start)
++    {
++        if (!m->arena)
++        {
++            m->arena = c_frontend_arena_create((ArenaCreation){0}, C_FRONTEND_RESERVATION_LOWERING);
++            m->mark = m->arena->position;
++        }
++        if (!m->built || m->body_token_start != extents->token_start || m->ast != extents->ast)
++        {
++            arena_set_position(m->arena, m->mark);
++            m->ast = extents->ast;
++            m->tokens = builder->preprocess.tokens;
++            m->matches = builder->stream_matching_delimiters_plus_one;
++            m->token_total = (u32)builder->preprocess.token_count;
++            m->body_token_start = extents->token_start;
++            m->body_token_count = extents->token_count;
++            m->built = true;
++            u32 body = c_ir_statement_extents_body_node(extents, extents->token_start - 1);
++            m->valid = body != C_AST_NODE_INVALID;
++            if (m->valid)
++            {
++                m->body = body;
++                m->begin = c_ast_subtree_begin(m->ast, body);
++                u64 spanned = 0;
++                census_a_build(m, &spanned);
++                census_b_build(m);
++                u32 count = body - m->begin + 1;
++                CADD(census_bodies, 1);
++                CADD(census_body_nodes, count);
++                CADD(census_body_tokens, m->body_token_count);
++                CADD(census_spanned_nodes, spanned);
++                CADD(census_b_entries, m->b_count);
++                if (count > census_max_body_nodes)
++                {
++                    census_max_body_nodes = count;
++                }
++                if (m->body_token_count > census_max_body_tokens)
++                {
++                    census_max_body_tokens = m->body_token_count;
++                }
++            }
++            else
++            {
++                CADD(census_refused, 1);
++            }
++        }
++        ready = m->valid;
++    }
++    return ready;
++}
++
++typedef struct CensusHit CensusHit;
++struct CensusHit
++{
++    u32 relative;
++    u32 b_index;
++    bool stripped;
++    bool in_body;
++};
++
++__attribute__((noinline)) static CensusHit census_classify(CIntegerIrBuilder* builder, u32 klass, u32 start, u32 end)
++{
++    CensusHit hit = {.relative = CM_NONE, .b_index = CM_NONE};
++    CADD(census_calls[klass], 1);
++    CensusMap* m = &census_map;
++    if (census_ensure(builder) && start < end && start >= m->body_token_start && end <= m->body_token_start + m->body_token_count)
++    {
++        hit.in_body = true;
++        CADD(census_inbody[klass], 1);
++        hit.relative = census_a_locate(m, start, end, &hit.stripped);
++        hit.b_index = census_b_locate(m, start, end);
++        if (hit.relative != CM_NONE)
++        {
++            CADD(census_hit_a[klass], 1);
++            CADD(census_stripped[klass], hit.stripped);
++            CADD(census_kinds[klass][m->ast->kinds[m->begin + hit.relative]], 1);
++        }
++        CADD(census_hit_b[klass], hit.b_index != CM_NONE);
++    }
++    return hit;
++}
++
++static void census_check(u32 klass, CensusHit hit, bool tree_answer, bool result, u32 start, u32 end)
++{
++    CADD(census_result_true[klass], result);
++    if (hit.relative != CM_NONE)
++    {
++        CADD(census_answered_true[klass], tree_answer);
++        if (tree_answer == result)
++        {
++            CADD(census_agree[klass], 1);
++        }
++        else
++        {
++            CADD(census_disagree[klass], 1);
++            if (census_disagree_print < 40)
++            {
++                census_disagree_print += 1;
++                CensusMap* m = &census_map;
++                fprintf(stderr, "CENSUS_DISAGREE %s [%u,%u) kind=%u tree=%d scan=%d stripped=%d fact=%u\n", census_class_names[klass], start, end,
++                        m->ast->kinds[m->begin + hit.relative], tree_answer, result, hit.stripped, census_last_fact);
++            }
++        }
++    }
++}
++
++// The answer each root-token predicate would take from the node: the region
++// mask, false when the range was wrapped in parentheses for the scans that do
++// not strip them.
++static BUSTER_INLINE u8 census_region(CensusHit hit)
++{
++    return hit.relative != CM_NONE ? census_map.region[hit.relative] : 0;
++}
++
++BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
++
++#define CG_COMMA 1u
++#define CG_ASSIGN 2u
++#define CG_QUESTION 4u
++#define CG_LOGICAL 8u
++
++// Whether [start, end) holds a candidate token of `classes` anywhere, nested
++// or not: a token-count gate (no tree) answers every range that holds none.
++__attribute__((noinline)) static bool census_gate(CIntegerIrBuilder* builder, u32 start, u32 end, u32 classes)
++{
++    bool present = false;
++    for (u32 index = start; index < end && !present; index += 1)
++    {
++        CToken token = builder->preprocess.tokens[index];
++        present = ((classes & CG_COMMA) && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA)) ||
++                  ((classes & CG_QUESTION) && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION)) ||
++                  ((classes & CG_LOGICAL) && (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) || c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))) ||
++                  ((classes & CG_ASSIGN) && c_ir_assignment_operator(token));
++    }
++    return present;
++}
++BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
++
++// ---- wrapped queries ----
++
++#define CENSUS_SPLIT_BOOL(name, params, args)                                  \
++    BUSTER_C_INTERNAL bool name##__real params;                                \
++    __attribute__((noinline, unused)) static bool name##__hit params                   \
++    {                                                                          \
++        return name##__real args;                                              \
++    }                                                                          \
++    __attribute__((noinline)) static bool name##__miss params                  \
++    {                                                                          \
++        return name##__real args;                                              \
++    } \
++    __attribute__((noinline, unused)) static bool name##__gate params { return name##__real args; }
++
++CENSUS_SPLIT_BOOL(c_ir_has_root_comma, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++CENSUS_SPLIT_BOOL(c_ir_has_root_assignment, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++CENSUS_SPLIT_BOOL(c_ir_has_root_question, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++CENSUS_SPLIT_BOOL(c_ir_has_root_control_operator, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++CENSUS_SPLIT_BOOL(c_ir_group_fact, (CIntegerIrBuilder * builder, u32 open, u32 close, CIrGroupFact fact), (builder, open, close, fact))
++CENSUS_SPLIT_BOOL(c_ir_range_may_prepare_control, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++CENSUS_SPLIT_BOOL(c_ir_tree_root_conditional,
++                  (CIntegerIrBuilder * builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon, u32* expression_end),
++                  (builder, start, end, expression_start, question, colon, expression_end))
++CENSUS_SPLIT_BOOL(c_ir_prepare_calls_discover, (CIntegerIrBuilder * builder, u32 start, u32 end, u32** emission_order_out, u32* emission_count_out),
++                  (builder, start, end, emission_order_out, emission_count_out))
++CENSUS_SPLIT_BOOL(c_ir_query_execute, (CIntegerIrBuilder * builder, CIrQueryFrame root, CIrQueryFrame* result_out), (builder, root, result_out))
++CENSUS_SPLIT_BOOL(c_ir_sizeof_operand_type_attempt_promoted, (CIntegerIrBuilder * builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields),
++                  (builder, start, end, type_out, promote_bit_fields))
++
++#define CENSUS_SPLIT_U32(name, params, args)                                   \
++    BUSTER_C_INTERNAL u32 name##__real params;                                 \
++    __attribute__((noinline, unused)) static u32 name##__hit params                    \
++    {                                                                          \
++        return name##__real args;                                              \
++    }                                                                          \
++    __attribute__((noinline)) static u32 name##__miss params                   \
++    {                                                                          \
++        return name##__real args;                                              \
++    } \
++    __attribute__((noinline, unused)) static u32 name##__gate params { return name##__real args; }
++
++CENSUS_SPLIT_U32(c_ir_expression_core_capacity, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++CENSUS_SPLIT_U32(c_ir_call_argument_separator, (CIntegerIrBuilder * builder, u32 index, u32 end), (builder, index, end))
++CENSUS_SPLIT_U32(c_ir_unevaluated_operand_end, (CIntegerIrBuilder * builder, u32 cursor, u32 end), (builder, cursor, end))
++CENSUS_SPLIT_U32(c_ir_unary_expression_end, (CIntegerIrBuilder * builder, u32 start, u32 end), (builder, start, end))
++
++BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name__real(CIntegerIrBuilder* builder, u32 open, u32 close);
++__attribute__((noinline)) static IrTypeId c_ir_group_type_name__hit(CIntegerIrBuilder* builder, u32 open, u32 close)
++{
++    return c_ir_group_type_name__real(builder, open, close);
++}
++__attribute__((noinline)) static IrTypeId c_ir_group_type_name__miss(CIntegerIrBuilder* builder, u32 open, u32 close)
++{
++    return c_ir_group_type_name__real(builder, open, close);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_HAS_ROOT_COMMA, start, end);
++    bool result = hit.relative != CM_NONE ? (census_gate(builder, start, end, CG_COMMA) ? c_ir_has_root_comma__hit(builder, start, end) : ((void)CADD(census_gate_hits[CC_HAS_ROOT_COMMA], 1), c_ir_has_root_comma__gate(builder, start, end))) : c_ir_has_root_comma__miss(builder, start, end);
++    census_check(CC_HAS_ROOT_COMMA, hit, (census_region(hit) & CM_COMMA) != 0, result, start, end);
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_HAS_ROOT_ASSIGNMENT, start, end);
++    bool result = hit.relative != CM_NONE ? (census_gate(builder, start, end, CG_ASSIGN) ? c_ir_has_root_assignment__hit(builder, start, end) : ((void)CADD(census_gate_hits[CC_HAS_ROOT_ASSIGNMENT], 1), c_ir_has_root_assignment__gate(builder, start, end))) : c_ir_has_root_assignment__miss(builder, start, end);
++    census_check(CC_HAS_ROOT_ASSIGNMENT, hit, !hit.stripped && (census_region(hit) & CM_ASSIGN) != 0, result, start, end);
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_has_root_question(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_HAS_ROOT_QUESTION, start, end);
++    bool result = hit.relative != CM_NONE ? (census_gate(builder, start, end, CG_QUESTION) ? c_ir_has_root_question__hit(builder, start, end) : ((void)CADD(census_gate_hits[CC_HAS_ROOT_QUESTION], 1), c_ir_has_root_question__gate(builder, start, end))) : c_ir_has_root_question__miss(builder, start, end);
++    census_check(CC_HAS_ROOT_QUESTION, hit, !hit.stripped && (census_region(hit) & CM_QUESTION) != 0, result, start, end);
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_HAS_ROOT_CONTROL, start, end);
++    bool result =
++        hit.relative != CM_NONE ? (census_gate(builder, start, end, CG_QUESTION | CG_LOGICAL) ? c_ir_has_root_control_operator__hit(builder, start, end) : ((void)CADD(census_gate_hits[CC_HAS_ROOT_CONTROL], 1), c_ir_has_root_control_operator__gate(builder, start, end))) : c_ir_has_root_control_operator__miss(builder, start, end);
++    census_check(CC_HAS_ROOT_CONTROL, hit, !hit.stripped && (census_region(hit) & (CM_QUESTION | CM_LOGICAL)) != 0, result, start, end);
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32 close, CIrGroupFact fact)
++{
++    CensusHit hit = census_classify(builder, CC_GROUP_FACT, open + 1, close);
++    u32 classes = fact == C_IR_GROUP_FACT_ROOT_CONTROL || fact == C_IR_GROUP_FACT_ANY_CONTROL ? (CG_QUESTION | CG_LOGICAL)
++                  : fact == C_IR_GROUP_FACT_ROOT_ASSIGNMENT || fact == C_IR_GROUP_FACT_ANY_ASSIGNMENT ? CG_ASSIGN
++                  : fact == C_IR_GROUP_FACT_ROOT_QUESTION ? CG_QUESTION
++                  : fact == C_IR_GROUP_FACT_TOP_COMMA ? CG_COMMA
++                                                       : (CG_QUESTION | CG_LOGICAL | CG_ASSIGN | CG_COMMA);
++    bool opaque = hit.relative != CM_NONE && (fact == C_IR_GROUP_FACT_ANY_ASSIGNMENT || fact == C_IR_GROUP_FACT_ANY_CONTROL) &&
++                  (census_map.any[hit.relative] & CM_OPAQUE);
++    if (opaque)
++    {
++        hit.relative = CM_NONE;
++    }
++    bool result = hit.relative != CM_NONE ? (census_gate(builder, open + 1, close, classes) ? c_ir_group_fact__hit(builder, open, close, fact)
++                                                                                        : ((void)CADD(census_gate_hits[CC_GROUP_FACT], 1), c_ir_group_fact__gate(builder, open, close, fact)))
++                                          : c_ir_group_fact__miss(builder, open, close, fact);
++    u8 region = hit.stripped ? 0 : census_region(hit);
++    u8 any = hit.relative != CM_NONE ? census_map.any[hit.relative] : 0;
++    bool tree = false;
++    bool checkable = true;
++    switch (fact)
++    {
++    case C_IR_GROUP_FACT_ROOT_CONTROL: tree = (region & (CM_QUESTION | CM_LOGICAL)) != 0; break;
++    case C_IR_GROUP_FACT_ROOT_ASSIGNMENT: tree = (region & CM_ASSIGN) != 0; break;
++    case C_IR_GROUP_FACT_ROOT_QUESTION: tree = (region & CM_QUESTION) != 0; break;
++    case C_IR_GROUP_FACT_TOP_COMMA: tree = (region & CM_COMMA) != 0; break;
++    case C_IR_GROUP_FACT_ANY_ASSIGNMENT: tree = (any & CM_ASSIGN) != 0; break;
++    case C_IR_GROUP_FACT_ANY_CONTROL: tree = (any & (CM_QUESTION | CM_LOGICAL)) != 0; break;
++    default: checkable = false; break;
++    }
++    census_last_fact = fact;
++    if (checkable)
++    {
++        census_check(CC_GROUP_FACT, hit, tree, result, open + 1, close);
++    }
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_MAY_PREPARE_CONTROL, start, end);
++    return hit.relative != CM_NONE ? c_ir_range_may_prepare_control__hit(builder, start, end) : c_ir_range_may_prepare_control__miss(builder, start, end);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start,
++                                                                             u32* question, u32* colon, u32* expression_end)
++{
++    CensusHit hit = census_classify(builder, CC_ROOT_CONDITIONAL, start, end);
++    bool result = hit.relative != CM_NONE ? c_ir_tree_root_conditional__hit(builder, start, end, expression_start, question, colon, expression_end)
++                                          : c_ir_tree_root_conditional__miss(builder, start, end, expression_start, question, colon, expression_end);
++    u32 kind = hit.relative != CM_NONE ? census_map.ast->kinds[census_map.begin + hit.relative] : 0;
++    bool tree = (kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED) &&
++                (kind == C_AST_CONDITIONAL || c_preprocess_dialect_is_gnu(builder->preprocess.dialect));
++    census_check(CC_ROOT_CONDITIONAL, hit, tree, result, start, end);
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
++                                                                              u32* emission_count_out)
++{
++    CensusHit hit = census_classify(builder, CC_PREPARE_DISCOVER, start, end);
++    bool result = hit.relative != CM_NONE ? c_ir_prepare_calls_discover__hit(builder, start, end, emission_order_out, emission_count_out)
++                                          : c_ir_prepare_calls_discover__miss(builder, start, end, emission_order_out, emission_count_out);
++    if (hit.relative != CM_NONE)
++    {
++        // The tree's call count under the node, against the calls found.
++        CADD(census_answered_true[CC_PREPARE_DISCOVER], (census_map.any[hit.relative] & CM_CALL) != 0);
++        CADD(census_result_true[CC_PREPARE_DISCOVER], result && emission_count_out && *emission_count_out);
++    }
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFrame root, CIrQueryFrame* result_out)
++{
++    bool ranged = root.kind != C_IR_QUERY_FRAME_ARRAY_BOUND;
++    CensusHit hit = ranged ? census_classify(builder, CC_QUERY_EXECUTE, root.start, root.end) : (CensusHit){.relative = CM_NONE};
++    if (!ranged)
++    {
++        CADD(census_calls[CC_QUERY_EXECUTE], 1);
++    }
++    return hit.relative != CM_NONE ? c_ir_query_execute__hit(builder, root, result_out) : c_ir_query_execute__miss(builder, root, result_out);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out,
++                                                                                            bool promote_bit_fields)
++{
++    CensusHit hit = census_classify(builder, CC_SIZEOF_ATTEMPT, start, end);
++    return hit.relative != CM_NONE ? c_ir_sizeof_operand_type_attempt_promoted__hit(builder, start, end, type_out, promote_bit_fields)
++                                   : c_ir_sizeof_operand_type_attempt_promoted__miss(builder, start, end, type_out, promote_bit_fields);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_CORE_CAPACITY, start, end);
++    return hit.relative != CM_NONE ? c_ir_expression_core_capacity__hit(builder, start, end) : c_ir_expression_core_capacity__miss(builder, start, end);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL u32 c_ir_call_argument_separator(CIntegerIrBuilder* builder, u32 index, u32 end)
++{
++    // Keyed by the argument list's remaining range [index, end): a hit means
++    // the rest is one argument (no separator).
++    CensusHit hit = census_classify(builder, CC_ARGUMENT_SEPARATOR, index, end);
++    u32 result = hit.relative != CM_NONE ? (census_gate(builder, index, end, CG_COMMA) ? c_ir_call_argument_separator__hit(builder, index, end) : ((void)CADD(census_gate_hits[CC_ARGUMENT_SEPARATOR], 1), c_ir_call_argument_separator__gate(builder, index, end))) : c_ir_call_argument_separator__miss(builder, index, end);
++    census_check(CC_ARGUMENT_SEPARATOR, hit, (census_region(hit) & CM_COMMA) != 0 && !hit.stripped, result != end, index, end);
++    return result;
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 cursor, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_UNEVALUATED_END, cursor, end);
++    return hit.relative != CM_NONE ? c_ir_unevaluated_operand_end__hit(builder, cursor, end) : c_ir_unevaluated_operand_end__miss(builder, cursor, end);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    CensusHit hit = census_classify(builder, CC_UNARY_END, start, end);
++    return hit.relative != CM_NONE ? c_ir_unary_expression_end__hit(builder, start, end) : c_ir_unary_expression_end__miss(builder, start, end);
++}
++
++__attribute__((noinline)) BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close)
++{
++    // Exact negative: a group whose interior is one expression node holds no
++    // type name, because the tree resolved typedef names when it parsed.
++    CensusHit hit = census_classify(builder, CC_GROUP_TYPE_NAME, open + 1, close);
++    IrTypeId result = hit.relative != CM_NONE ? c_ir_group_type_name__hit(builder, open, close) : c_ir_group_type_name__miss(builder, open, close);
++    census_check(CC_GROUP_TYPE_NAME, hit, false, result.value != IR_ID_UNDERLYING_INVALID, open + 1, close);
++    return result;
++}

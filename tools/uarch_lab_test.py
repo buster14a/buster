@@ -1815,6 +1815,76 @@ class PeakRssTests(unittest.TestCase):
         self.assertIsNone(lab.rss_value({}))
 
 
+# A perf that forks its workload and exits without reaping it (#3709): the
+# orphan is `true` (exited, a zombie) or, with LIVE, a still-running sleep.
+LEAKING_PERF = """#!python
+import os, sys, time
+if "-o" in sys.argv:
+    with open(sys.argv[sys.argv.index("-o") + 1], "w") as handle:
+        handle.write(STAT)
+workload = ["sleep", "60"] if LIVE else sys.argv[sys.argv.index("--") + 1:]
+pid = os.fork()
+if pid == 0:
+    os.execvp(workload[0], workload)
+with open(PIDS, "w") as handle:
+    handle.write(str(pid))
+time.sleep(0.2)
+os._exit(0)
+"""
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "PR_SET_CHILD_SUBREAPER is Linux-only")
+class ProbeOrphanTests(unittest.TestCase):
+    """`perf stat -- true` probes reap what perf leaves behind, so the
+    9700X supervisor's subreaper never adopts it (#3709)."""
+
+    def leaking_lab(self, live):
+        root = tempfile.mkdtemp(prefix="uarch-lab-orphan-")
+        self.addCleanup(shutil.rmtree, root, True)
+        perf, pids = os.path.join(root, "perf"), os.path.join(root, "leaked.pid")
+        write_script(perf, LEAKING_PERF, {"STAT": STAT_CSV, "PIDS": pids, "LIVE": live})
+        return lab.Lab(os.path.join(root, "out"), perf, None, None, root), pids
+
+    def assert_reaped(self, measured, pids, state):
+        with open(pids) as handle:
+            pid = int(handle.read())
+        self.assertFalse(os.path.exists("/proc/%d" % pid), "the leaked workload was not reaped")
+        with open(measured.path("commands.log")) as handle:
+            text = handle.read()
+        self.assertIn("orphan reaped: pid=%d stat=[%d (" % (pid, pid), text)
+        self.assertIn(") %s " % state, text)
+        self.assertEqual(lab.child_subreaper(0), 0, "the subreaper flag was not restored")
+
+    def test_counter_probe_reaps_exited_true(self):
+        measured, pids = self.leaking_lab(False)
+        self.assertTrue(lab.probe_counters(measured))
+        self.assert_reaped(measured, pids, "Z")
+
+    def test_wrapper_probe_kills_and_reaps_live_orphan(self):
+        measured, pids = self.leaking_lab(True)
+        measured.counters = True
+        directory = measured.directory("probe")
+        status, _, _ = measured.run_command(lab.timed_command(measured, os.path.join(directory, "wrapper.csv")) + ["true"],
+                                            log=os.path.join(directory, "wrapper-rss.log"), probe=True)
+        self.assertEqual(status, 0)
+        self.assert_reaped(measured, pids, "Z")
+        with open(os.path.join(directory, "wrapper-rss.log")) as handle:
+            self.assertIn("orphan reaped: pid=", handle.read())
+
+    # Workload runs keep orphans visible to an outer supervisor's adoption check.
+    def test_workload_runs_do_not_reap(self):
+        measured, pids = self.leaking_lab(True)
+        usage = {}
+        status = lab.run_measured([measured.perf, "stat", "--", "true"], measured.repo_root, measured.environment, 60, usage)[0]
+        self.assertEqual(status, 0)
+        self.assertNotIn("orphans", usage)
+        with open(pids) as handle:
+            pid = int(handle.read())
+        self.addCleanup(os.kill, pid, 9)
+        with open("/proc/%d/stat" % pid) as handle:
+            self.assertNotEqual(int(handle.read().rsplit(")", 1)[1].split()[1]), os.getpid())
+
+
 def interval_row(ratio, low, high, n=20):
     return {"ratio": ratio, "ci_low": low, "ci_high": high, "ci_coverage": 0.9586, "n": n, "a_median": 1.0, "b_median": ratio}
 
@@ -2245,6 +2315,38 @@ class AstPilotPairTest(unittest.TestCase):
             lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
                       "--output", os.path.join(temporary, "out"), "--ast-pilot-pair", "link"])
 
+
+
+class ConstantReusePairTest(unittest.TestCase):
+    def test_fixed_cell_gives_only_candidate_the_cell_flag_on_the_g0_object_compile(self):
+        for cell, flag in lab.CONSTANT_REUSE_CELLS.items():
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(cell=cell):
+                root = os.path.abspath(temporary)
+                ide = os.path.join(root, "ide")
+                open(ide, "wb").close()
+                arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                             "sudo": False, "fresh_copy": True, "constant_reuse_pair": cell})()
+                labs = lab.compare_labs(arguments, root, 2, [])
+                self.assertEqual((labs["a"].extra, labs["b"].extra), ([], [flag]))
+                for key in ("a", "b"):
+                    self.assertEqual(labs[key].compile, lab.AST_PILOT_COMPILE + ["-c"])
+                    self.assertIn("-g0", labs[key].compile)
+                    self.assertEqual((labs[key].writes_output, labs[key].transcripts), (True, True))
+                    self.assertEqual(labs[key].meta["config"]["constant_reuse_cell"], cell)
+                    self.assertNotIn("ast_pilot_cell", labs[key].meta["config"])
+                self.assertIn("-o", labs["b"].workload("OUT"))
+
+    def test_fixed_cell_rejects_request_flags_other_pairs_and_profile_steps(self):
+        for extra in (["--", "-O3"], ["--canonical-inline-pair"], ["--ast-pilot-pair", "object"],
+                      ["--profile-steps", "topdown"]):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as raised:
+                    lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                              "--output", os.path.join(temporary, "out"), "--constant-reuse-pair", "intern", *extra])
+                self.assertIn("accepts no", str(raised.exception.code))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
+            lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                      "--output", os.path.join(temporary, "out"), "--constant-reuse-pair", "table"])
 
 if __name__ == "__main__":
     unittest.main()

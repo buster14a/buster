@@ -459,6 +459,8 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_AARCH64_SME_I16I64,
     TARGET_CPU_FEATURE_X86_MMX,
     TARGET_CPU_FEATURE_X86_SSE,
+    // Appended to preserve serialized feature identities.
+    TARGET_CPU_FEATURE_X86_RDTSCP,
     TARGET_CPU_FEATURE_COUNT,
 } TargetCpuFeature;
 

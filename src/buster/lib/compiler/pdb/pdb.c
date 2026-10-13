@@ -1063,6 +1063,7 @@ enum
     PDB_S_PROCREF = 0x1125,
     PDB_S_LPROCREF = 0x1127,
     PDB_GSI_BUCKET_COUNT = 4096,
+    PDB_GSI_INSERTION_LIMIT = 16,
     PDB_GSI_BITMAP_WORDS = (PDB_GSI_BUCKET_COUNT + 32) / 32,
     PDB_GSI_HASH_RECORD_SIZE = 8,
     PDB_GSI_BUCKET_OFFSET_UNIT = 12,
@@ -1133,9 +1134,13 @@ BUSTER_GLOBAL_LOCAL bool pdb_gsi_name_less(String8 left, String8 right)
 }
 
 // Groups entries by bucket (counting sort) and orders each bucket; returns the
-// number of present buckets.
-BUSTER_GLOBAL_LOCAL u32 pdb_gsi_order(Arena* arena, PdbGsiEntry const* entries, u32 count, u32* order)
+// number of present buckets. Comparison counts are optional regression evidence.
+// The unchanged mixed ASCII/non-ASCII comparator can be non-transitive (#3752);
+// large buckets now follow deterministic stable merge order in that case.
+BUSTER_GLOBAL_LOCAL u32 pdb_gsi_order(Arena* arena, PdbGsiEntry const* entries, u32 count, u32* order, u64* comparison_count)
 {
+    u64 comparisons = 0;
+    u32 largest = 0;
     u32* bucket_start = arena_allocate_zeroed(arena, u32, PDB_GSI_BUCKET_COUNT + 1);
     for (u32 index = 0; index < count; index += 1)
     {
@@ -1144,6 +1149,7 @@ BUSTER_GLOBAL_LOCAL u32 pdb_gsi_order(Arena* arena, PdbGsiEntry const* entries, 
     u32 present = 0;
     for (u32 bucket = 0; bucket < PDB_GSI_BUCKET_COUNT; bucket += 1)
     {
+        largest = BUSTER_MAX(largest, bucket_start[bucket + 1]);
         present += bucket_start[bucket + 1] != 0;
         bucket_start[bucket + 1] += bucket_start[bucket];
     }
@@ -1153,22 +1159,79 @@ BUSTER_GLOBAL_LOCAL u32 pdb_gsi_order(Arena* arena, PdbGsiEntry const* entries, 
     {
         order[cursor[entries[index].bucket]++] = index;
     }
+    // One workspace serves every bucket. Small buckets need no allocation;
+    // insertion work is capped even when all format hashes collide (#3737).
+    u32* scratch = largest > PDB_GSI_INSERTION_LIMIT ? arena_allocate(arena, u32, largest) : 0;
     for (u32 bucket = 0; bucket < PDB_GSI_BUCKET_COUNT; bucket += 1)
     {
-        for (u32 position = bucket_start[bucket] + 1; position < bucket_start[bucket + 1]; position += 1)
+        u32* items = order + bucket_start[bucket];
+        u32 size = bucket_start[bucket + 1] - bucket_start[bucket];
+        if (size <= PDB_GSI_INSERTION_LIMIT)
         {
-            u32 moving = order[position];
-            u32 slot = position;
-            while (slot > bucket_start[bucket] && pdb_gsi_name_less(entries[moving].name, entries[order[slot - 1]].name))
+            for (u32 position = 1; position < size; position += 1)
             {
-                order[slot] = order[slot - 1];
-                slot -= 1;
+                u32 moving = items[position];
+                u32 slot = position;
+                while (slot)
+                {
+                    comparisons += 1;
+                    if (!pdb_gsi_name_less(entries[moving].name, entries[items[slot - 1]].name))
+                    {
+                        break;
+                    }
+                    items[slot] = items[slot - 1];
+                    slot -= 1;
+                }
+                items[slot] = moving;
             }
-            order[slot] = moving;
         }
+        else
+        {
+            // Widen run arithmetic before doubling, including the final run.
+            // Taking the left item on equality preserves input record order.
+            for (u64 width = 1; width < size; width *= 2)
+            {
+                for (u64 left = 0; left < size; left += 2 * width)
+                {
+                    u64 middle = BUSTER_MIN(left + width, (u64)size);
+                    u64 right = BUSTER_MIN(left + 2 * width, (u64)size);
+                    u64 a = left;
+                    u64 b = middle;
+                    for (u64 out = left; out < right; out += 1)
+                    {
+                        bool take_left = a < middle;
+                        if (take_left && b < right)
+                        {
+                            comparisons += 1;
+                            take_left = !pdb_gsi_name_less(entries[items[b]].name, entries[items[a]].name);
+                        }
+                        scratch[out] = take_left ? items[a++] : items[b++];
+                    }
+                }
+                memcpy(items, scratch, (u64)size * sizeof(*items));
+            }
+        }
+    }
+    if (comparison_count)
+    {
+        *comparison_count = comparisons;
     }
     return present;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// Observe the real ordering path without a timing gate or global test state.
+u32 pdb_test_gsi_order(Arena* arena, SliceString8 names, u32* order, u64* comparisons)
+{
+    u32 count = (u32)names.length;
+    PdbGsiEntry* entries = arena_allocate(arena, PdbGsiEntry, count ? count : 1);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        entries[index] = (PdbGsiEntry){.name = names.pointer[index], .bucket = pdb_hash_string_v1(names.pointer[index]) % PDB_GSI_BUCKET_COUNT};
+    }
+    return pdb_gsi_order(arena, entries, count, order, comparisons);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL u64 pdb_gsi_size(u32 count, u32 present)
 {
@@ -1911,8 +1974,8 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     }
     u32* global_order = arena_allocate(arena, u32, global_count ? global_count : 1);
     u32* public_order = arena_allocate(arena, u32, public_count ? public_count : 1);
-    u32 global_present = pdb_gsi_order(arena, global_entries, global_count, global_order);
-    u32 public_present = pdb_gsi_order(arena, public_entries, public_count, public_order);
+    u32 global_present = pdb_gsi_order(arena, global_entries, global_count, global_order, 0);
+    u32 public_present = pdb_gsi_order(arena, public_entries, public_count, public_order, 0);
     u64 global_hash_size = pdb_gsi_size(global_count, global_present);
     u64 public_hash_size = pdb_gsi_size(public_count, public_present);
     PDB_STREAM_BEGIN(PDB_STREAM_GLOBALS, global_hash_size);

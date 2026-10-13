@@ -9,8 +9,8 @@ reports `owned-by-release-shard` without executing the suite again.
 python3 tests/bootstrap_wrapper_test.py -v
 # Bash platforms; use python rather than python3 on Windows.
 python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v
-# Windows CI runs the same behavior methods through two-case scheduling.
-python tools/bootstrap_wrapper_cases.py --jobs 2
+# Windows CI runs the same behavior methods through four-case scheduling.
+python tools/bootstrap_wrapper_cases.py --jobs 4
 # Serial control with identical instrumentation and assertions.
 python tools/bootstrap_wrapper_cases.py --jobs 1
 # Lifecycle/admission controls, executed by workflow_tools in Release.
@@ -76,7 +76,10 @@ logs and environment outputs; each retains its 120-second deadline measured
 from its own launch and its existing ten-second cleanup deadline. This bounds
 PowerShell startup pressure while the other two suite lanes compile their
 fixtures. A timed-out owner remains a failure and does not suppress later
-controls. Cleanup attempts every registered child even if one cleanup fails,
+controls. The plan admits the four probes that pass the vendor shell (24-39 s
+each on hosted AArch64) before the sub-second early failures, so the fixed
+batches no longer pair each slow probe with a fast one (#3912). Cleanup
+attempts every registered child even if one cleanup fails,
 then propagates that error. `VS_PROBE_START`/`VS_PROBE_END` records retain slot,
 case, outcome and duration. Host-independent scheduling controls cover the
 owner limit, complete inventory after timeout, launch failure, cleanup failure
@@ -104,8 +107,11 @@ provider/directory rejection, UTF8 export bytes and all original failure cases.
 
 ## Bounded independent cases (#2034)
 
-Windows admits two independent behavior cases through one persistent worker
-gang. Each original test instance owns a temporary repository, cache, environment
+Windows admits four independent behavior cases (`MAX_JOBS`) through one
+persistent worker gang. On hosted Windows AArch64 every PowerShell wrapper
+launch costs about 22.6 s, and the six-writer case's 35 s launches match six
+CPU-bound launches over four CPUs; two lanes left half the runner idle for
+the step's 218 s of cases (#3912). Each original test instance owns a temporary repository, cache, environment
 dictionary, fake compiler log, outputs and child owners. Cold/warm, invalidation,
 corrupt/incomplete-entry and failure sequences stay ordered inside their method.
 Assertions and shell selection stay in the unchanged, ledger-pinned test module.
@@ -131,19 +137,99 @@ cleanup immediately, before another launch or assertion, and cleanup precedes
 fixture removal.
 
 The scheduler adds a cancellation registry. Registration and cancellation share
-a lock, and each child's cleanup is serialized against normal collection. Windows
-captures native descendant process handles before the original system
-`taskkill /T /F`, then waits for those processes to signal termination before
-fixture removal. A successful termination request alone is insufficient: a
-descendant can still hold its inherited current-directory handle while exiting
-(#2985). All descendant waits share the original ten-second cleanup deadline;
-expired/failed waits and snapshot failures remain errors, and later cleanup
-cannot relabel that owner as clean. Snapshot capture adds no PID signal targets. Native creation times must fall
-between the retained parent's creation and the pre-snapshot UTC cutoff; a PID
-replacement acquired after snapshot admission or a stale parent ID fails capture
-without waiting on that handle. These are stable, readiness-published fixture
-trees; they do not admit new descendant spawning during cleanup. Clock/identity
-ambiguity fails the owner instead of authorizing a numeric-PID wait.
+a lock, and each child's cleanup is serialized against normal collection.
+
+On Windows, ownership is fixed before a case command starts (#3690). The
+scheduler runs every case through `tools/windows_process_tree.c launch`. The
+launcher creates a fresh named Job Object with kill-on-close, starts the
+command suspended, assigns it to the job and only then resumes it, the same
+sequence `os_process_spawn` uses for process groups. Every descendant is
+therefore a kernel-tracked member from birth. No membership decision uses PID parent links or wall-clock creation
+times, which PID reuse and clock adjustment make unreliable.
+
+The native launcher receives the original absolute payload deadline before
+startup. Its selected clock matches the caller's Windows monotonic clock
+(`QueryPerformanceCounter` or `GetTickCount64`). It enforces that deadline on
+the payload, then allows only the original separate ten-second cleanup budget.
+Collection can wait for both phases without extending payload runtime.
+
+Before fixture removal, the mechanical adapter requests cancellation by creating
+the private terminal path's `.cancel` file and waits under the original cleanup
+deadline. The native owner checks cancellation before creating or resuming the
+payload and at most every 25 milliseconds during its bounded wait. This avoids
+an external drain racing job creation or payload assignment. Only the native
+owner terminates and certifies its job; the launcher stays outside it.
+
+Native cleanup waits on retained root handles and on listed handles confirmed
+by `IsProcessInJob`, then requires zero active job members. A terminated member
+can leave the PID list before enumeration, so `waited` is diagnostic; controls
+retain live process handles before cancellation. A successful termination
+request alone cannot certify release of inherited current-directory handles
+(#2985).
+
+The owner atomically publishes a fresh terminal record after checked teardown
+and handle closes. The adapter requires a complete record bound to the exact
+deadline, ordered timing fields and the broker's exit: zero for certified normal
+completion or cancellation, 124 for certified runtime timeout, and 125 for
+lifecycle failure. Arbitrary payload statuses, including 124 and 125, are restored
+from the record to the original result. Native publication must also finish by
+the cleanup deadline. Missing, malformed, contradictory or late evidence fails;
+failure reaping shares the remaining cleanup deadline and never relabels an
+uncertified owner as clean. `BOOTSTRAP_COLLECTION.native_launch` retains the
+certificate and actual payload status. Later cleanup reuses the first certified
+record. The standalone `drain` CLI and its bounded malformed/late protocol
+controls remain available, but production cancellation uses the native owner.
+
+`./build.sh bootstrap_process_owner` (or `build.ps1 bootstrap_process_owner`)
+builds the helper through the native driver. It qualifies host Clang, applies
+strict warnings and the existing C semantic flags, and always compiles into a
+fresh, exclusively claimed `.cache/bootstrap-process-owner/` directory outside
+`generate`'s disposable trees. Compilation and the Windows `selftest` each have
+one 60-second native deadline; any nonzero exit, capture or cleanup failure prevents
+publication of `BOOTSTRAP_PROCESS_OWNER <absolute-path>`. Outputs remain available
+for the invoking test process's lifetime. This retains the existing helper's
+`launch`, `drain`, `fixture` and `selftest` protocols.
+`bootstrap_process_owner_test` also builds and runs the standalone native
+deadline controls, under the same flags and a single 60-second deadline.
+The startup-cancellation control creates its cancel file synchronously after
+job establishment and before the pre-root cancellation check. This test-only
+hook covers both QPC and tick clocks without racing a writer process against a
+startup delay. The production owner checks cancellation at startup boundaries;
+the artificial startup delay is only a deadline-test hook, not a production
+wait requiring polling.
+When any native deadline-control assertion fails or the control returns an
+unexpected code, it prints `WINDOWS_PROCESS_TREE_TEST_CONTEXT` and
+`WINDOWS_PROCESS_TREE_TEST_STATUS` after the case assertions. The test-only
+snapshot retains the root PID, cancel-observed time, runtime and cleanup
+deadlines, cleanup and publication timestamps, clock validity, and the first
+failed publication operation with its immediate Win32 error when available.
+The status line includes the recorded JSON, or an explicit missing marker.
+Diagnostic clock sampling uses a copy of the owner's state; the production
+status schema, return-code rules and cleanup allowance are unchanged.
+
+CI bootstraps `build.c` with hosted image Clang under the documented exception,
+runs the native control command in the workflow-tools and bootstrap-wrapper
+steps, and mechanically exports its returned path as `BUSTER_WINDOWS_PROCESS_TREE`.
+Python only receives that path; Windows case
+execution refuses to start without it. Native `fixture` modes supply silent,
+partial, repeated and late drain records for the caller controls on every
+host, and `selftest` checks on Windows that a live non-member process is
+neither admitted, waited on, nor terminated.
+
+`WorkflowSetupTests` in `tools/matrix_shard_test.py` replays both step bodies.
+Six replays used to rerun this identical native command, about 19–23 s each on
+hosted Windows, so the suite grew from 38 s to about 178 s and sat on the
+critical Windows release path (#3912). The class now runs the step's exact
+`bootstrap_process_owner_test` once, on a copy of its source closure, under the
+120-second Windows child deadline. The replays' 30-second deadline left about
+7 s of margin for this command alone; run beside the other suite lanes on a
+slower hosted x86-64 runner, the single run exceeded it. Each replay substitutes only that invocation with
+the verified output; the step still tees, parses and exports it, and the fixture
+suites require the exported helper path. A changed invocation runs for real. A
+changed driver, Clang or closure requalifies before the next replay, and a
+missing, corrupt or stale record fails the replay. The real steps still qualify
+the helper on every release lane.
+
 Unix uses isolated process groups. Direct children retain the ten-second cleanup
 deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.

@@ -770,6 +770,9 @@ typedef enum MachineOpcode
     MACHINE_A64_CVT_F16_TO_F64,
     MACHINE_A64_CVT_F32_TO_F16,
     MACHINE_A64_CVT_F64_TO_F16,
+    // ELF general-dynamic TLS: descriptor resolver call returning its address
+    // in X0. Separate MOV_RR captures the canonical result after the call.
+    MACHINE_A64_TLS_DESCRIPTOR,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1305,8 +1308,11 @@ BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
 // System V x86-64 needs two parts; an AArch64 HFA can contain four.
 #define MACHINE_VA_ARG_PART_LIMIT 4
 // Largest alignment of a SysV x86-64 MEMORY-class aggregate that VA_ARG rounds
-// the overflow area up to: the widest vector the target stores in one slot.
-#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 64u
+// the overflow area up to. The rounding is `add alignment - 1` and
+// `and -alignment` with sign-extended imm32 operands, which encode every power
+// of two up to 2^31; a u32-sized aggregate is a multiple of its alignment, so
+// this admits every alignment such an aggregate can have.
+#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 0x80000000u
 // ELF AAPCS64: three pointers followed by two independent signed 32-bit offsets.
 // Darwin and Windows use their separate one-pointer va_list representations.
 #define MACHINE_A64_VA_STACK_OFFSET 0u
@@ -1697,6 +1703,10 @@ typedef enum MachineThreadLocalSite
     MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
     MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET,
     MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_PAGE,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_LOAD,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_ADD,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_CALL,
 } MachineThreadLocalSite;
 
 // A relocation site: the function-relative offset of the field to patch
@@ -2250,6 +2260,9 @@ struct MachineX64MetadataShapeCacheAudit
     u32 resolved_rows;
     u32 pending_rows;
     u32 invalid_rows;
+    // Registrations whose selector form is pinned; each is re-checked
+    // against the selector by the complete resolution.
+    u32 pinned_queries;
     bool valid;
     u8 reserved[3];
 };

@@ -1,0 +1,503 @@
+cell,phase,pair,position,binary,wall_ns,returncode
+T=512 -no-pie object,warmup,0,0,baseline,22173056,0
+T=512 -no-pie object,warmup,0,1,candidate,14118434,0
+T=512 -no-pie object,warmup,1,0,candidate,14608745,0
+T=512 -no-pie object,warmup,1,1,baseline,16123333,0
+T=512 -no-pie object,measured,0,0,baseline,14999526,0
+T=512 -no-pie object,measured,0,1,candidate,15718497,0
+T=512 -no-pie object,measured,1,0,candidate,15303470,0
+T=512 -no-pie object,measured,1,1,baseline,19675071,0
+T=512 -no-pie object,measured,2,0,baseline,18286840,0
+T=512 -no-pie object,measured,2,1,candidate,18268821,0
+T=512 -no-pie object,measured,3,0,candidate,16653497,0
+T=512 -no-pie object,measured,3,1,baseline,15660326,0
+T=512 -no-pie object,measured,4,0,baseline,14932472,0
+T=512 -no-pie object,measured,4,1,candidate,14526526,0
+T=512 -no-pie object,measured,5,0,candidate,13512006,0
+T=512 -no-pie object,measured,5,1,baseline,13857103,0
+T=512 -no-pie object,measured,6,0,baseline,15443810,0
+T=512 -no-pie object,measured,6,1,candidate,14041943,0
+T=512 -no-pie object,measured,7,0,candidate,13968432,0
+T=512 -no-pie object,measured,7,1,baseline,13584482,0
+T=512 -no-pie object,measured,8,0,baseline,16955583,0
+T=512 -no-pie object,measured,8,1,candidate,16651118,0
+T=512 -no-pie object,measured,9,0,candidate,17614653,0
+T=512 -no-pie object,measured,9,1,baseline,18753659,0
+T=512 -no-pie object,measured,10,0,baseline,18451312,0
+T=512 -no-pie object,measured,10,1,candidate,17487551,0
+T=512 -no-pie object,measured,11,0,candidate,17346931,0
+T=512 -no-pie object,measured,11,1,baseline,17723184,0
+T=512 -no-pie object,measured,12,0,baseline,13998019,0
+T=512 -no-pie object,measured,12,1,candidate,14524391,0
+T=512 -no-pie object,measured,13,0,candidate,13760365,0
+T=512 -no-pie object,measured,13,1,baseline,13966386,0
+T=512 -no-pie object,measured,14,0,baseline,14512697,0
+T=512 -no-pie object,measured,14,1,candidate,18105777,0
+T=512 -pie object,warmup,0,0,baseline,16378216,0
+T=512 -pie object,warmup,0,1,candidate,14126609,0
+T=512 -pie object,warmup,1,0,candidate,15542132,0
+T=512 -pie object,warmup,1,1,baseline,13851526,0
+T=512 -pie object,measured,0,0,baseline,15103220,0
+T=512 -pie object,measured,0,1,candidate,13590100,0
+T=512 -pie object,measured,1,0,candidate,15348282,0
+T=512 -pie object,measured,1,1,baseline,14995249,0
+T=512 -pie object,measured,2,0,baseline,14604123,0
+T=512 -pie object,measured,2,1,candidate,13704307,0
+T=512 -pie object,measured,3,0,candidate,13504237,0
+T=512 -pie object,measured,3,1,baseline,15506049,0
+T=512 -pie object,measured,4,0,baseline,16063544,0
+T=512 -pie object,measured,4,1,candidate,14541738,0
+T=512 -pie object,measured,5,0,candidate,14839234,0
+T=512 -pie object,measured,5,1,baseline,15302479,0
+T=512 -pie object,measured,6,0,baseline,15472124,0
+T=512 -pie object,measured,6,1,candidate,14485746,0
+T=512 -pie object,measured,7,0,candidate,13703772,0
+T=512 -pie object,measured,7,1,baseline,20112533,0
+T=512 -pie object,measured,8,0,baseline,16493815,0
+T=512 -pie object,measured,8,1,candidate,17617826,0
+T=512 -pie object,measured,9,0,candidate,17922134,0
+T=512 -pie object,measured,9,1,baseline,17960747,0
+T=512 -pie object,measured,10,0,baseline,16265377,0
+T=512 -pie object,measured,10,1,candidate,15734447,0
+T=512 -pie object,measured,11,0,candidate,16808483,0
+T=512 -pie object,measured,11,1,baseline,17300790,0
+T=512 -pie object,measured,12,0,baseline,19230569,0
+T=512 -pie object,measured,12,1,candidate,17903548,0
+T=512 -pie object,measured,13,0,candidate,18254125,0
+T=512 -pie object,measured,13,1,baseline,19757227,0
+T=512 -pie object,measured,14,0,baseline,14235507,0
+T=512 -pie object,measured,14,1,candidate,13627483,0
+T=2048 -no-pie object,warmup,0,0,baseline,25091551,0
+T=2048 -no-pie object,warmup,0,1,candidate,14788709,0
+T=2048 -no-pie object,warmup,1,0,candidate,15038616,0
+T=2048 -no-pie object,warmup,1,1,baseline,25398632,0
+T=2048 -no-pie object,measured,0,0,baseline,25027218,0
+T=2048 -no-pie object,measured,0,1,candidate,15414070,0
+T=2048 -no-pie object,measured,1,0,candidate,14964900,0
+T=2048 -no-pie object,measured,1,1,baseline,26122678,0
+T=2048 -no-pie object,measured,2,0,baseline,29602898,0
+T=2048 -no-pie object,measured,2,1,candidate,17261961,0
+T=2048 -no-pie object,measured,3,0,candidate,16108182,0
+T=2048 -no-pie object,measured,3,1,baseline,24168890,0
+T=2048 -no-pie object,measured,4,0,baseline,30425140,0
+T=2048 -no-pie object,measured,4,1,candidate,17497626,0
+T=2048 -no-pie object,measured,5,0,candidate,18715418,0
+T=2048 -no-pie object,measured,5,1,baseline,25360593,0
+T=2048 -no-pie object,measured,6,0,baseline,26560570,0
+T=2048 -no-pie object,measured,6,1,candidate,21422296,0
+T=2048 -no-pie object,measured,7,0,candidate,18015008,0
+T=2048 -no-pie object,measured,7,1,baseline,25378086,0
+T=2048 -no-pie object,measured,8,0,baseline,28084045,0
+T=2048 -no-pie object,measured,8,1,candidate,15122773,0
+T=2048 -no-pie object,measured,9,0,candidate,19247406,0
+T=2048 -no-pie object,measured,9,1,baseline,34813927,0
+T=2048 -no-pie object,measured,10,0,baseline,30730427,0
+T=2048 -no-pie object,measured,10,1,candidate,20473494,0
+T=2048 -no-pie object,measured,11,0,candidate,24913017,0
+T=2048 -no-pie object,measured,11,1,baseline,31585313,0
+T=2048 -no-pie object,measured,12,0,baseline,32624603,0
+T=2048 -no-pie object,measured,12,1,candidate,15884207,0
+T=2048 -no-pie object,measured,13,0,candidate,15102627,0
+T=2048 -no-pie object,measured,13,1,baseline,26094947,0
+T=2048 -no-pie object,measured,14,0,baseline,32962537,0
+T=2048 -no-pie object,measured,14,1,candidate,16029675,0
+T=2048 -pie object,warmup,0,0,baseline,23071533,0
+T=2048 -pie object,warmup,0,1,candidate,18303488,0
+T=2048 -pie object,warmup,1,0,candidate,21712746,0
+T=2048 -pie object,warmup,1,1,baseline,23857106,0
+T=2048 -pie object,measured,0,0,baseline,22935440,0
+T=2048 -pie object,measured,0,1,candidate,15083645,0
+T=2048 -pie object,measured,1,0,candidate,15332306,0
+T=2048 -pie object,measured,1,1,baseline,27531739,0
+T=2048 -pie object,measured,2,0,baseline,27955466,0
+T=2048 -pie object,measured,2,1,candidate,21052931,0
+T=2048 -pie object,measured,3,0,candidate,16338064,0
+T=2048 -pie object,measured,3,1,baseline,22003074,0
+T=2048 -pie object,measured,4,0,baseline,21635159,0
+T=2048 -pie object,measured,4,1,candidate,15536595,0
+T=2048 -pie object,measured,5,0,candidate,14663403,0
+T=2048 -pie object,measured,5,1,baseline,21691251,0
+T=2048 -pie object,measured,6,0,baseline,21719180,0
+T=2048 -pie object,measured,6,1,candidate,24556271,0
+T=2048 -pie object,measured,7,0,candidate,18530133,0
+T=2048 -pie object,measured,7,1,baseline,24930668,0
+T=2048 -pie object,measured,8,0,baseline,23184777,0
+T=2048 -pie object,measured,8,1,candidate,15798886,0
+T=2048 -pie object,measured,9,0,candidate,18359705,0
+T=2048 -pie object,measured,9,1,baseline,22798498,0
+T=2048 -pie object,measured,10,0,baseline,22308982,0
+T=2048 -pie object,measured,10,1,candidate,15341788,0
+T=2048 -pie object,measured,11,0,candidate,15480584,0
+T=2048 -pie object,measured,11,1,baseline,22374537,0
+T=2048 -pie object,measured,12,0,baseline,21860797,0
+T=2048 -pie object,measured,12,1,candidate,66335890,0
+T=2048 -pie object,measured,13,0,candidate,16706539,0
+T=2048 -pie object,measured,13,1,baseline,21506674,0
+T=2048 -pie object,measured,14,0,baseline,22209710,0
+T=2048 -pie object,measured,14,1,candidate,15545169,0
+T=8192 -no-pie object,warmup,0,0,baseline,196540336,0
+T=8192 -no-pie object,warmup,0,1,candidate,18062187,0
+T=8192 -no-pie object,warmup,1,0,candidate,18905960,0
+T=8192 -no-pie object,warmup,1,1,baseline,212739123,0
+T=8192 -no-pie object,measured,0,0,baseline,193111887,0
+T=8192 -no-pie object,measured,0,1,candidate,28419822,0
+T=8192 -no-pie object,measured,1,0,candidate,29733481,0
+T=8192 -no-pie object,measured,1,1,baseline,178564758,0
+T=8192 -no-pie object,measured,2,0,baseline,171038469,0
+T=8192 -no-pie object,measured,2,1,candidate,17834166,0
+T=8192 -no-pie object,measured,3,0,candidate,20040619,0
+T=8192 -no-pie object,measured,3,1,baseline,219787978,0
+T=8192 -no-pie object,measured,4,0,baseline,170934284,0
+T=8192 -no-pie object,measured,4,1,candidate,18899408,0
+T=8192 -no-pie object,measured,5,0,candidate,22541091,0
+T=8192 -no-pie object,measured,5,1,baseline,174339845,0
+T=8192 -no-pie object,measured,6,0,baseline,169727515,0
+T=8192 -no-pie object,measured,6,1,candidate,20123239,0
+T=8192 -no-pie object,measured,7,0,candidate,20310729,0
+T=8192 -no-pie object,measured,7,1,baseline,171825496,0
+T=8192 -no-pie object,measured,8,0,baseline,176669812,0
+T=8192 -no-pie object,measured,8,1,candidate,19157912,0
+T=8192 -no-pie object,measured,9,0,candidate,18575719,0
+T=8192 -no-pie object,measured,9,1,baseline,186439413,0
+T=8192 -no-pie object,measured,10,0,baseline,189729988,0
+T=8192 -no-pie object,measured,10,1,candidate,18832646,0
+T=8192 -no-pie object,measured,11,0,candidate,18569390,0
+T=8192 -no-pie object,measured,11,1,baseline,166577291,0
+T=8192 -no-pie object,measured,12,0,baseline,177172058,0
+T=8192 -no-pie object,measured,12,1,candidate,25836397,0
+T=8192 -no-pie object,measured,13,0,candidate,23256379,0
+T=8192 -no-pie object,measured,13,1,baseline,175873408,0
+T=8192 -no-pie object,measured,14,0,baseline,162215278,0
+T=8192 -no-pie object,measured,14,1,candidate,27229491,0
+T=8192 -pie object,warmup,0,0,baseline,165912479,0
+T=8192 -pie object,warmup,0,1,candidate,23586862,0
+T=8192 -pie object,warmup,1,0,candidate,20498432,0
+T=8192 -pie object,warmup,1,1,baseline,125429018,0
+T=8192 -pie object,measured,0,0,baseline,129406644,0
+T=8192 -pie object,measured,0,1,candidate,17919603,0
+T=8192 -pie object,measured,1,0,candidate,18677636,0
+T=8192 -pie object,measured,1,1,baseline,127578946,0
+T=8192 -pie object,measured,2,0,baseline,117141234,0
+T=8192 -pie object,measured,2,1,candidate,17731545,0
+T=8192 -pie object,measured,3,0,candidate,16921498,0
+T=8192 -pie object,measured,3,1,baseline,120103591,0
+T=8192 -pie object,measured,4,0,baseline,117857989,0
+T=8192 -pie object,measured,4,1,candidate,17300408,0
+T=8192 -pie object,measured,5,0,candidate,26202431,0
+T=8192 -pie object,measured,5,1,baseline,120514433,0
+T=8192 -pie object,measured,6,0,baseline,120636164,0
+T=8192 -pie object,measured,6,1,candidate,17672326,0
+T=8192 -pie object,measured,7,0,candidate,17083592,0
+T=8192 -pie object,measured,7,1,baseline,124703678,0
+T=8192 -pie object,measured,8,0,baseline,130496380,0
+T=8192 -pie object,measured,8,1,candidate,21117739,0
+T=8192 -pie object,measured,9,0,candidate,22526004,0
+T=8192 -pie object,measured,9,1,baseline,127443190,0
+T=8192 -pie object,measured,10,0,baseline,146997914,0
+T=8192 -pie object,measured,10,1,candidate,19356316,0
+T=8192 -pie object,measured,11,0,candidate,19967524,0
+T=8192 -pie object,measured,11,1,baseline,150148327,0
+T=8192 -pie object,measured,12,0,baseline,135727172,0
+T=8192 -pie object,measured,12,1,candidate,20707870,0
+T=8192 -pie object,measured,13,0,candidate,17824204,0
+T=8192 -pie object,measured,13,1,baseline,115218584,0
+T=8192 -pie object,measured,14,0,baseline,120638366,0
+T=8192 -pie object,measured,14,1,candidate,17717679,0
+T=32768 -no-pie object,warmup,0,0,baseline,2772027537,0
+T=32768 -no-pie object,warmup,0,1,candidate,54319080,0
+T=32768 -no-pie object,warmup,1,0,candidate,41613710,0
+T=32768 -no-pie object,warmup,1,1,baseline,2836646033,0
+T=32768 -no-pie object,measured,0,0,baseline,2643906638,0
+T=32768 -no-pie object,measured,0,1,candidate,32551679,0
+T=32768 -no-pie object,measured,1,0,candidate,36626902,0
+T=32768 -no-pie object,measured,1,1,baseline,3214959713,0
+T=32768 -no-pie object,measured,2,0,baseline,2874479875,0
+T=32768 -no-pie object,measured,2,1,candidate,41756453,0
+T=32768 -no-pie object,measured,3,0,candidate,39092857,0
+T=32768 -no-pie object,measured,3,1,baseline,2843640365,0
+T=32768 -no-pie object,measured,4,0,baseline,2716638556,0
+T=32768 -no-pie object,measured,4,1,candidate,33524761,0
+T=32768 -no-pie object,measured,5,0,candidate,31439196,0
+T=32768 -no-pie object,measured,5,1,baseline,2762483157,0
+T=32768 -no-pie object,measured,6,0,baseline,2682927888,0
+T=32768 -no-pie object,measured,6,1,candidate,41309567,0
+T=32768 -no-pie object,measured,7,0,candidate,41685450,0
+T=32768 -no-pie object,measured,7,1,baseline,2609032130,0
+T=32768 -no-pie object,measured,8,0,baseline,2607897293,0
+T=32768 -no-pie object,measured,8,1,candidate,35296095,0
+T=32768 -no-pie object,measured,9,0,candidate,33274086,0
+T=32768 -no-pie object,measured,9,1,baseline,2807430606,0
+T=32768 -no-pie object,measured,10,0,baseline,2665791388,0
+T=32768 -no-pie object,measured,10,1,candidate,32734285,0
+T=32768 -no-pie object,measured,11,0,candidate,33646330,0
+T=32768 -no-pie object,measured,11,1,baseline,2679763262,0
+T=32768 -no-pie object,measured,12,0,baseline,2792661261,0
+T=32768 -no-pie object,measured,12,1,candidate,34784736,0
+T=32768 -no-pie object,measured,13,0,candidate,36869857,0
+T=32768 -no-pie object,measured,13,1,baseline,2668285908,0
+T=32768 -no-pie object,measured,14,0,baseline,2712139773,0
+T=32768 -no-pie object,measured,14,1,candidate,36752790,0
+T=32768 -pie object,warmup,0,0,baseline,1822297825,0
+T=32768 -pie object,warmup,0,1,candidate,30370641,0
+T=32768 -pie object,warmup,1,0,candidate,31053579,0
+T=32768 -pie object,warmup,1,1,baseline,1797121609,0
+T=32768 -pie object,measured,0,0,baseline,1732445629,0
+T=32768 -pie object,measured,0,1,candidate,31250230,0
+T=32768 -pie object,measured,1,0,candidate,31172202,0
+T=32768 -pie object,measured,1,1,baseline,1823977249,0
+T=32768 -pie object,measured,2,0,baseline,1863703118,0
+T=32768 -pie object,measured,2,1,candidate,32700371,0
+T=32768 -pie object,measured,3,0,candidate,32309611,0
+T=32768 -pie object,measured,3,1,baseline,1856759336,0
+T=32768 -pie object,measured,4,0,baseline,1948727271,0
+T=32768 -pie object,measured,4,1,candidate,37025212,0
+T=32768 -pie object,measured,5,0,candidate,33775505,0
+T=32768 -pie object,measured,5,1,baseline,1815173349,0
+T=32768 -pie object,measured,6,0,baseline,1825667425,0
+T=32768 -pie object,measured,6,1,candidate,44185439,0
+T=32768 -pie object,measured,7,0,candidate,41734763,0
+T=32768 -pie object,measured,7,1,baseline,1891726276,0
+T=32768 -pie object,measured,8,0,baseline,1996450839,0
+T=32768 -pie object,measured,8,1,candidate,38414257,0
+T=32768 -pie object,measured,9,0,candidate,43426653,0
+T=32768 -pie object,measured,9,1,baseline,1954180723,0
+T=32768 -pie object,measured,10,0,baseline,1881484170,0
+T=32768 -pie object,measured,10,1,candidate,51135332,0
+T=32768 -pie object,measured,11,0,candidate,49736619,0
+T=32768 -pie object,measured,11,1,baseline,1917164966,0
+T=32768 -pie object,measured,12,0,baseline,1793903872,0
+T=32768 -pie object,measured,12,1,candidate,32415654,0
+T=32768 -pie object,measured,13,0,candidate,34806139,0
+T=32768 -pie object,measured,13,1,baseline,1776093118,0
+T=32768 -pie object,measured,14,0,baseline,1714297902,0
+T=32768 -pie object,measured,14,1,candidate,34826275,0
+T=2048 -no-pie archive,warmup,0,0,baseline,26446550,0
+T=2048 -no-pie archive,warmup,0,1,candidate,16701769,0
+T=2048 -no-pie archive,warmup,1,0,candidate,16024199,0
+T=2048 -no-pie archive,warmup,1,1,baseline,25156541,0
+T=2048 -no-pie archive,measured,0,0,baseline,25719680,0
+T=2048 -no-pie archive,measured,0,1,candidate,17142883,0
+T=2048 -no-pie archive,measured,1,0,candidate,19263649,0
+T=2048 -no-pie archive,measured,1,1,baseline,27478311,0
+T=2048 -no-pie archive,measured,2,0,baseline,27060308,0
+T=2048 -no-pie archive,measured,2,1,candidate,17361947,0
+T=2048 -no-pie archive,measured,3,0,candidate,15745839,0
+T=2048 -no-pie archive,measured,3,1,baseline,24988137,0
+T=2048 -no-pie archive,measured,4,0,baseline,40394482,0
+T=2048 -no-pie archive,measured,4,1,candidate,15023103,0
+T=2048 -no-pie archive,measured,5,0,candidate,15041296,0
+T=2048 -no-pie archive,measured,5,1,baseline,27581537,0
+T=2048 -no-pie archive,measured,6,0,baseline,24016918,0
+T=2048 -no-pie archive,measured,6,1,candidate,14482971,0
+T=2048 -no-pie archive,measured,7,0,candidate,14622750,0
+T=2048 -no-pie archive,measured,7,1,baseline,23744198,0
+T=2048 -no-pie archive,measured,8,0,baseline,24122678,0
+T=2048 -no-pie archive,measured,8,1,candidate,17562054,0
+T=2048 -no-pie archive,measured,9,0,candidate,17446064,0
+T=2048 -no-pie archive,measured,9,1,baseline,30402655,0
+T=2048 -no-pie archive,measured,10,0,baseline,26481113,0
+T=2048 -no-pie archive,measured,10,1,candidate,14241262,0
+T=2048 -no-pie archive,measured,11,0,candidate,14427396,0
+T=2048 -no-pie archive,measured,11,1,baseline,23530750,0
+T=2048 -no-pie archive,measured,12,0,baseline,23514274,0
+T=2048 -no-pie archive,measured,12,1,candidate,14442217,0
+T=2048 -no-pie archive,measured,13,0,candidate,14884934,0
+T=2048 -no-pie archive,measured,13,1,baseline,30003087,0
+T=2048 -no-pie archive,measured,14,0,baseline,30133083,0
+T=2048 -no-pie archive,measured,14,1,candidate,17720576,0
+T=32768 -no-pie archive,warmup,0,0,baseline,2535429950,0
+T=32768 -no-pie archive,warmup,0,1,candidate,55334937,0
+T=32768 -no-pie archive,warmup,1,0,candidate,63163209,0
+T=32768 -no-pie archive,warmup,1,1,baseline,2806089631,0
+T=32768 -no-pie archive,measured,0,0,baseline,2719424310,0
+T=32768 -no-pie archive,measured,0,1,candidate,44025915,0
+T=32768 -no-pie archive,measured,1,0,candidate,41258571,0
+T=32768 -no-pie archive,measured,1,1,baseline,2559713944,0
+T=32768 -no-pie archive,measured,2,0,baseline,2608641739,0
+T=32768 -no-pie archive,measured,2,1,candidate,42498068,0
+T=32768 -no-pie archive,measured,3,0,candidate,38546042,0
+T=32768 -no-pie archive,measured,3,1,baseline,2827717381,0
+T=32768 -no-pie archive,measured,4,0,baseline,2590172025,0
+T=32768 -no-pie archive,measured,4,1,candidate,41910390,0
+T=32768 -no-pie archive,measured,5,0,candidate,42149820,0
+T=32768 -no-pie archive,measured,5,1,baseline,2761006533,0
+T=32768 -no-pie archive,measured,6,0,baseline,2692240656,0
+T=32768 -no-pie archive,measured,6,1,candidate,41177330,0
+T=32768 -no-pie archive,measured,7,0,candidate,44587942,0
+T=32768 -no-pie archive,measured,7,1,baseline,2722175959,0
+T=32768 -no-pie archive,measured,8,0,baseline,2756540910,0
+T=32768 -no-pie archive,measured,8,1,candidate,49787750,0
+T=32768 -no-pie archive,measured,9,0,candidate,43973870,0
+T=32768 -no-pie archive,measured,9,1,baseline,2544437076,0
+T=32768 -no-pie archive,measured,10,0,baseline,2631314272,0
+T=32768 -no-pie archive,measured,10,1,candidate,39369274,0
+T=32768 -no-pie archive,measured,11,0,candidate,37410509,0
+T=32768 -no-pie archive,measured,11,1,baseline,2667461934,0
+T=32768 -no-pie archive,measured,12,0,baseline,2678075254,0
+T=32768 -no-pie archive,measured,12,1,candidate,40795911,0
+T=32768 -no-pie archive,measured,13,0,candidate,40127719,0
+T=32768 -no-pie archive,measured,13,1,baseline,2639868885,0
+T=32768 -no-pie archive,measured,14,0,baseline,2667265143,0
+T=32768 -no-pie archive,measured,14,1,candidate,49530792,0
+no-TLS plain.o -no-pie,warmup,0,0,baseline,30582036,0
+no-TLS plain.o -no-pie,warmup,0,1,candidate,32347271,0
+no-TLS plain.o -no-pie,warmup,1,0,candidate,29390087,0
+no-TLS plain.o -no-pie,warmup,1,1,baseline,25191451,0
+no-TLS plain.o -no-pie,measured,0,0,baseline,26338072,0
+no-TLS plain.o -no-pie,measured,0,1,candidate,23523586,0
+no-TLS plain.o -no-pie,measured,1,0,candidate,23636728,0
+no-TLS plain.o -no-pie,measured,1,1,baseline,23691038,0
+no-TLS plain.o -no-pie,measured,2,0,baseline,23876210,0
+no-TLS plain.o -no-pie,measured,2,1,candidate,28855838,0
+no-TLS plain.o -no-pie,measured,3,0,candidate,33893394,0
+no-TLS plain.o -no-pie,measured,3,1,baseline,30046603,0
+no-TLS plain.o -no-pie,measured,4,0,baseline,24177765,0
+no-TLS plain.o -no-pie,measured,4,1,candidate,27380234,0
+no-TLS plain.o -no-pie,measured,5,0,candidate,27988137,0
+no-TLS plain.o -no-pie,measured,5,1,baseline,26862725,0
+no-TLS plain.o -no-pie,measured,6,0,baseline,25348404,0
+no-TLS plain.o -no-pie,measured,6,1,candidate,23129994,0
+no-TLS plain.o -no-pie,measured,7,0,candidate,25355330,0
+no-TLS plain.o -no-pie,measured,7,1,baseline,23533032,0
+no-TLS plain.o -no-pie,measured,8,0,baseline,23750154,0
+no-TLS plain.o -no-pie,measured,8,1,candidate,23067867,0
+no-TLS plain.o -no-pie,measured,9,0,candidate,23340100,0
+no-TLS plain.o -no-pie,measured,9,1,baseline,23662264,0
+no-TLS plain.o -no-pie,measured,10,0,baseline,24484510,0
+no-TLS plain.o -no-pie,measured,10,1,candidate,22962017,0
+no-TLS plain.o -no-pie,measured,11,0,candidate,24061057,0
+no-TLS plain.o -no-pie,measured,11,1,baseline,22945909,0
+no-TLS plain.o -no-pie,measured,12,0,baseline,24791209,0
+no-TLS plain.o -no-pie,measured,12,1,candidate,24026940,0
+no-TLS plain.o -no-pie,measured,13,0,candidate,24496465,0
+no-TLS plain.o -no-pie,measured,13,1,baseline,23842617,0
+no-TLS plain.o -no-pie,measured,14,0,baseline,23483247,0
+no-TLS plain.o -no-pie,measured,14,1,candidate,23074441,0
+no-TLS plain.o -no-pie,measured,15,0,candidate,23818124,0
+no-TLS plain.o -no-pie,measured,15,1,baseline,33929870,0
+no-TLS plain.o -no-pie,measured,16,0,baseline,25098948,0
+no-TLS plain.o -no-pie,measured,16,1,candidate,26704314,0
+no-TLS plain.o -no-pie,measured,17,0,candidate,27340507,0
+no-TLS plain.o -no-pie,measured,17,1,baseline,25106927,0
+no-TLS plain.o -no-pie,measured,18,0,baseline,24929009,0
+no-TLS plain.o -no-pie,measured,18,1,candidate,23989054,0
+no-TLS plain.o -no-pie,measured,19,0,candidate,24348850,0
+no-TLS plain.o -no-pie,measured,19,1,baseline,35629227,0
+no-TLS plain.o -no-pie,measured,20,0,baseline,29793375,0
+no-TLS plain.o -no-pie,measured,20,1,candidate,32484148,0
+no-TLS plain.o -no-pie,measured,21,0,candidate,33832645,0
+no-TLS plain.o -no-pie,measured,21,1,baseline,28888543,0
+no-TLS plain.o -no-pie,measured,22,0,baseline,26055582,0
+no-TLS plain.o -no-pie,measured,22,1,candidate,24677211,0
+no-TLS plain.o -no-pie,measured,23,0,candidate,24438449,0
+no-TLS plain.o -no-pie,measured,23,1,baseline,24093201,0
+no-TLS plain.o -no-pie,measured,24,0,baseline,23317846,0
+no-TLS plain.o -no-pie,measured,24,1,candidate,26967681,0
+no-TLS plain.o -pie,warmup,0,0,baseline,26067323,0
+no-TLS plain.o -pie,warmup,0,1,candidate,24797146,0
+no-TLS plain.o -pie,warmup,1,0,candidate,24393090,0
+no-TLS plain.o -pie,warmup,1,1,baseline,24372786,0
+no-TLS plain.o -pie,measured,0,0,baseline,23858400,0
+no-TLS plain.o -pie,measured,0,1,candidate,24127053,0
+no-TLS plain.o -pie,measured,1,0,candidate,24146943,0
+no-TLS plain.o -pie,measured,1,1,baseline,24584466,0
+no-TLS plain.o -pie,measured,2,0,baseline,24232316,0
+no-TLS plain.o -pie,measured,2,1,candidate,23908687,0
+no-TLS plain.o -pie,measured,3,0,candidate,23547701,0
+no-TLS plain.o -pie,measured,3,1,baseline,23102525,0
+no-TLS plain.o -pie,measured,4,0,baseline,23145164,0
+no-TLS plain.o -pie,measured,4,1,candidate,23187507,0
+no-TLS plain.o -pie,measured,5,0,candidate,26918447,0
+no-TLS plain.o -pie,measured,5,1,baseline,24529981,0
+no-TLS plain.o -pie,measured,6,0,baseline,23669755,0
+no-TLS plain.o -pie,measured,6,1,candidate,25469321,0
+no-TLS plain.o -pie,measured,7,0,candidate,24329249,0
+no-TLS plain.o -pie,measured,7,1,baseline,44709204,0
+no-TLS plain.o -pie,measured,8,0,baseline,23662367,0
+no-TLS plain.o -pie,measured,8,1,candidate,23953614,0
+no-TLS plain.o -pie,measured,9,0,candidate,23800154,0
+no-TLS plain.o -pie,measured,9,1,baseline,24741676,0
+no-TLS plain.o -pie,measured,10,0,baseline,22804248,0
+no-TLS plain.o -pie,measured,10,1,candidate,23409658,0
+no-TLS plain.o -pie,measured,11,0,candidate,26790019,0
+no-TLS plain.o -pie,measured,11,1,baseline,24745208,0
+no-TLS plain.o -pie,measured,12,0,baseline,23859238,0
+no-TLS plain.o -pie,measured,12,1,candidate,23711606,0
+no-TLS plain.o -pie,measured,13,0,candidate,26211569,0
+no-TLS plain.o -pie,measured,13,1,baseline,26235886,0
+no-TLS plain.o -pie,measured,14,0,baseline,24416817,0
+no-TLS plain.o -pie,measured,14,1,candidate,27436235,0
+no-TLS plain.o -pie,measured,15,0,candidate,25807488,0
+no-TLS plain.o -pie,measured,15,1,baseline,27338885,0
+no-TLS plain.o -pie,measured,16,0,baseline,34601702,0
+no-TLS plain.o -pie,measured,16,1,candidate,27971621,0
+no-TLS plain.o -pie,measured,17,0,candidate,33550452,0
+no-TLS plain.o -pie,measured,17,1,baseline,26151917,0
+no-TLS plain.o -pie,measured,18,0,baseline,25331222,0
+no-TLS plain.o -pie,measured,18,1,candidate,28405395,0
+no-TLS plain.o -pie,measured,19,0,candidate,24491974,0
+no-TLS plain.o -pie,measured,19,1,baseline,25752889,0
+no-TLS plain.o -pie,measured,20,0,baseline,26608672,0
+no-TLS plain.o -pie,measured,20,1,candidate,27095945,0
+no-TLS plain.o -pie,measured,21,0,candidate,28183627,0
+no-TLS plain.o -pie,measured,21,1,baseline,25265700,0
+no-TLS plain.o -pie,measured,22,0,baseline,24467535,0
+no-TLS plain.o -pie,measured,22,1,candidate,23538161,0
+no-TLS plain.o -pie,measured,23,0,candidate,23954880,0
+no-TLS plain.o -pie,measured,23,1,baseline,23024079,0
+no-TLS plain.o -pie,measured,24,0,baseline,27591813,0
+no-TLS plain.o -pie,measured,24,1,candidate,23927484,0
+"T=512 -no-pie object, repeat",warmup,0,0,baseline,16322273,0
+"T=512 -no-pie object, repeat",warmup,0,1,candidate,14412616,0
+"T=512 -no-pie object, repeat",warmup,1,0,candidate,14508189,0
+"T=512 -no-pie object, repeat",warmup,1,1,baseline,14821113,0
+"T=512 -no-pie object, repeat",measured,0,0,baseline,14415700,0
+"T=512 -no-pie object, repeat",measured,0,1,candidate,17121993,0
+"T=512 -no-pie object, repeat",measured,1,0,candidate,14116626,0
+"T=512 -no-pie object, repeat",measured,1,1,baseline,14223102,0
+"T=512 -no-pie object, repeat",measured,2,0,baseline,14226976,0
+"T=512 -no-pie object, repeat",measured,2,1,candidate,13919856,0
+"T=512 -no-pie object, repeat",measured,3,0,candidate,14092336,0
+"T=512 -no-pie object, repeat",measured,3,1,baseline,14096367,0
+"T=512 -no-pie object, repeat",measured,4,0,baseline,14027065,0
+"T=512 -no-pie object, repeat",measured,4,1,candidate,18480598,0
+"T=512 -no-pie object, repeat",measured,5,0,candidate,13486835,0
+"T=512 -no-pie object, repeat",measured,5,1,baseline,15305909,0
+"T=512 -no-pie object, repeat",measured,6,0,baseline,14529097,0
+"T=512 -no-pie object, repeat",measured,6,1,candidate,15429628,0
+"T=512 -no-pie object, repeat",measured,7,0,candidate,13756000,0
+"T=512 -no-pie object, repeat",measured,7,1,baseline,14598750,0
+"T=512 -no-pie object, repeat",measured,8,0,baseline,14692460,0
+"T=512 -no-pie object, repeat",measured,8,1,candidate,13571515,0
+"T=512 -no-pie object, repeat",measured,9,0,candidate,13713417,0
+"T=512 -no-pie object, repeat",measured,9,1,baseline,14477013,0
+"T=512 -no-pie object, repeat",measured,10,0,baseline,18797919,0
+"T=512 -no-pie object, repeat",measured,10,1,candidate,16780522,0
+"T=512 -no-pie object, repeat",measured,11,0,candidate,15579912,0
+"T=512 -no-pie object, repeat",measured,11,1,baseline,17552857,0
+"T=512 -no-pie object, repeat",measured,12,0,baseline,16140830,0
+"T=512 -no-pie object, repeat",measured,12,1,candidate,15718905,0
+"T=512 -no-pie object, repeat",measured,13,0,candidate,13447266,0
+"T=512 -no-pie object, repeat",measured,13,1,baseline,14931415,0
+"T=512 -no-pie object, repeat",measured,14,0,baseline,14603799,0
+"T=512 -no-pie object, repeat",measured,14,1,candidate,13779329,0
+"T=512 -no-pie object, repeat",measured,15,0,candidate,13675253,0
+"T=512 -no-pie object, repeat",measured,15,1,baseline,14681482,0
+"T=512 -no-pie object, repeat",measured,16,0,baseline,14596589,0
+"T=512 -no-pie object, repeat",measured,16,1,candidate,18736829,0
+"T=512 -no-pie object, repeat",measured,17,0,candidate,14380086,0
+"T=512 -no-pie object, repeat",measured,17,1,baseline,16260216,0
+"T=512 -no-pie object, repeat",measured,18,0,baseline,19796466,0
+"T=512 -no-pie object, repeat",measured,18,1,candidate,16303903,0
+"T=512 -no-pie object, repeat",measured,19,0,candidate,14372698,0
+"T=512 -no-pie object, repeat",measured,19,1,baseline,13959903,0
+"T=512 -no-pie object, repeat",measured,20,0,baseline,14962264,0
+"T=512 -no-pie object, repeat",measured,20,1,candidate,14396423,0
+"T=512 -no-pie object, repeat",measured,21,0,candidate,14352192,0
+"T=512 -no-pie object, repeat",measured,21,1,baseline,14296040,0
+"T=512 -no-pie object, repeat",measured,22,0,baseline,14852378,0
+"T=512 -no-pie object, repeat",measured,22,1,candidate,14303592,0
+"T=512 -no-pie object, repeat",measured,23,0,candidate,13980129,0
+"T=512 -no-pie object, repeat",measured,23,1,baseline,25956756,0
+"T=512 -no-pie object, repeat",measured,24,0,baseline,18090375,0
+"T=512 -no-pie object, repeat",measured,24,1,candidate,13858117,0
