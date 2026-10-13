@@ -71,7 +71,8 @@ target layouts (#3743, #3758).
 
 For a direct prefix or postfix update of a selected `_Generic` place, C lowering
 defers the selection to its iterative place frames. That path lowers only the
-retained association as a place, preparing selected-arm calls once; ordinary
+retained association as a place, forcing its call-preparation pass even inside
+an enclosing call argument; selected-arm calls therefore run once. Ordinary
 Generic values and Generic-selected call callees retain the expression path.
 
 ## Declaration constraints

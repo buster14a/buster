@@ -23,6 +23,11 @@ static int sibling(void)
     return 3;
 }
 
+static int accept_update_argument(int value)
+{
+    return value;
+}
+
 static int selected_callee(void)
 {
     selected_callee_calls += 1;
@@ -39,11 +44,12 @@ int main(void)
 {
     int prefix = ++((_Generic(0, int: values[selected_index()], default: values[discarded_index()])));
     int postfix = ((_Generic(0, int: values[selected_index()], default: values[discarded_index()])))++ + sibling();
+    int argument = accept_update_argument(_Generic(0, int: values[selected_index()], default: values[discarded_index()])++);
     int nested = _Generic(0,
                           int: _Generic(1, int: values[selected_index()], default: values[discarded_index()]),
                           default: values[discarded_index()])++;
     int called = _Generic(0, int (*)(void): selected_callee, default: discarded_callee)();
-    return !(prefix == 5 && postfix == 8 && nested == 6 && values[0] == 7 &&
-             selected_index_calls == 3 && discarded_index_calls == 0 && sibling_calls == 1 &&
+    return !(prefix == 5 && postfix == 8 && argument == 6 && nested == 7 && values[0] == 8 &&
+             selected_index_calls == 4 && discarded_index_calls == 0 && sibling_calls == 1 &&
              selected_callee_calls == 1 && discarded_callee_calls == 0 && called == 7);
 }

@@ -5023,6 +5023,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
             }
         }
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
     TemporalArena generic_update_temporary = scratch_begin(&arguments->arena, 1);
     String8 generic_update_output =
         buster_test_temporary_path(generic_update_temporary.arena, S8("generic-place-update"), S8(""));
@@ -5049,6 +5050,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
     }
     os_file_delete(generic_update_output);
     scratch_end(generic_update_temporary);
+#endif
     return result;
 }
 

@@ -19078,7 +19078,8 @@ struct CIrLowerFrame
             u32 emission_index;
             u32 first_new;
             bool previous_preparing_calls;
-            u8 reserved[3];
+            bool force_preparing_calls;
+            u8 reserved[2];
         } prepare_calls;
         struct
         {
@@ -19458,6 +19459,7 @@ BUSTER_C_INTERNAL bool c_ir_selection_answer(CIntegerIrBuilder* builder, u32 tok
                                               u32* selected_end_out);
 BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end);
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_selected_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 
 // Whether [start, end) is a bare member chain: an identifier followed only by
@@ -19587,11 +19589,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_place_try_generic_selection(CIntegerIrBuilder*
     bool handled = generic_selection;
     if (generic_selection)
     {
-        u32 association_start = frame->as.place.selection_start;
-        u32 association_end = frame->as.place.selection_end;
-        bool selection_valid = generic_call && generic_call->deferred_place_selection;
-        if (selection_valid)
+        u32 association_start = 0;
+        u32 association_end = 0;
+        bool selection_valid = false;
+        if (generic_call && generic_call->deferred_place_selection)
         {
+            association_start = generic_call->place_selection_start;
+            association_end = generic_call->place_selection_end;
             selection_valid = association_start < association_end && association_end <= generic_close;
         }
         else
@@ -19616,7 +19620,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_place_try_generic_selection(CIntegerIrBuilder*
                       .kind = C_IR_LOWER_FRAME_PLACE,
                       .as.place = {.start = association_start, .end = association_end, .selection_context = true},
                   })
-                : c_ir_prepare_calls_frame_push(builder, association_start, association_end);
+                : c_ir_prepare_calls_selected_frame_push(builder, association_start, association_end);
             if (!child_pushed)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -20476,6 +20480,19 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder,
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                  },
+                                          });
+}
+
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_selected_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_PREPARE_CALLS,
+                                              .as.prepare_calls =
+                                                  {
+                                                      .start = start,
+                                                      .end = end,
+                                                      .force_preparing_calls = true,
                                                   },
                                           });
 }
@@ -29626,7 +29643,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLo
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
         frame->as.prepare_calls.previous_preparing_calls = builder->preparing_calls;
-        if (builder->preparing_calls)
+        if (builder->preparing_calls && !frame->as.prepare_calls.force_preparing_calls)
         {
             c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
             return;
