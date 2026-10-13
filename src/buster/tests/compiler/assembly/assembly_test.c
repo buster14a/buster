@@ -7258,6 +7258,18 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                x86_syntax_switches.bytes.length == sizeof(expected_x86_syntax_switches) &&
                                memcmp(x86_syntax_switches.bytes.pointer, expected_x86_syntax_switches,
                                       sizeof(expected_x86_syntax_switches)) == 0);
+    AssemblyEncodeResult bare_x86_syntax_switch = assembly_encode(
+        arguments->arena,
+        S8(".intel_syntax noprefix\n"
+           "mov rax, rbx\n"
+           ".att_syntax\n"
+           "movq %rcx, %rdx\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_bare_x86_syntax_switch[] = {0x48, 0x89, 0xd8, 0x48, 0x89, 0xca};
+    BUSTER_TEST(arguments, bare_x86_syntax_switch.diagnostic_count == 0 &&
+                               bare_x86_syntax_switch.bytes.length == sizeof(expected_bare_x86_syntax_switch) &&
+                               memcmp(bare_x86_syntax_switch.bytes.pointer, expected_bare_x86_syntax_switch,
+                                      sizeof(expected_bare_x86_syntax_switch)) == 0);
     AssemblyEncodeResult invalid_x86_syntax_switches = assembly_encode(
         arguments->arena, S8(".intel_syntax prefix\n.att_syntax noprefix\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -7273,6 +7285,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = aarch64_syntax_target, .syntax = ASSEMBLY_SYNTAX_DEFAULT});
     BUSTER_TEST(arguments, invalid_aarch64_syntax_switch.diagnostic_count == 1 &&
                                invalid_aarch64_syntax_switch.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX);
+    AssemblyEncodeResult invalid_aarch64_att_syntax_switch = assembly_encode(
+        arguments->arena, S8(".att_syntax\n"),
+        (AssemblyEncodeOptions){.target = aarch64_syntax_target, .syntax = ASSEMBLY_SYNTAX_DEFAULT});
+    BUSTER_TEST(arguments, invalid_aarch64_att_syntax_switch.diagnostic_count == 1 &&
+                               invalid_aarch64_att_syntax_switch.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX);
 
     u8 expected_x86_register_forms[] = {
         0x48, 0x89, 0xd8,
