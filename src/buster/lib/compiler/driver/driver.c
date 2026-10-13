@@ -9942,10 +9942,13 @@ BUSTER_GLOBAL_LOCAL CompilerDriverNativeFamily compiler_driver_native_family(Cpu
     return cpu_arch == CPU_ARCH_AARCH64 ? COMPILER_DRIVER_NATIVE_FAMILY_AARCH64 : COMPILER_DRIVER_NATIVE_FAMILY_X86_64;
 }
 
-// Everything a gang compiling native C for cpu_arch reads, filled before the
-// gang runs. The x86 caches fill lazily under a serial check, so they must be
-// complete; AArch64 readers keep an exact lazy fallback but would pay the
-// decode on every lookup. Parked workers are live threads (os.h), so a family
+// Everything a gang compiling native C for cpu_arch reads that is still built
+// serially, filled before the gang runs. On x86 that is the serial compile's
+// own prewarm plus the forwarding and NOP recipes: the per-form caches, exact
+// plans, TLS/GOT recipe groups, shapes, dense tables and template rows fill on
+// demand from the lanes, under once-claims, so a gang prepares the forms it
+// emits, not all 11,013 (#53). AArch64 readers keep an exact lazy fallback
+// but would pay the decode on every lookup. Parked workers are live threads (os.h), so a family
 // not yet prepared first releases the calling thread's gang; the next lane_run
 // recreates it. Preparing only the target family keeps the other family's
 // cold cost out of the multi-lane entry (#53).
@@ -9964,8 +9967,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_native_family_prepare(CpuArch cpu_arch)
         if (family == COMPILER_DRIVER_NATIVE_FAMILY_X86_64)
         {
             codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
-            machine_x86_64_exact_prewarm_all();
-            buster_x86_metadata_prewarm_all_forms();
+            buster_x86_metadata_prewarm_for_lanes();
         }
         else
         {

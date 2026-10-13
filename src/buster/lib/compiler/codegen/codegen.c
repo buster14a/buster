@@ -2579,10 +2579,10 @@ void codegen_prewarm_for_target(Target target)
     }
     // Exact machine emission reads these tables without filling them, so
     // they are initialized here rather than on first use during emission.
-    // The exceptions are the closed shape set and the variable-memory
-    // encoding cells, registered here and prepared on their first serial
-    // read; a caller about to run a gang uses machine_x86_64_exact_prewarm_all
-    // instead.
+    // The exceptions are the per-form metadata caches, the closed shape set,
+    // the dense tables, the template rows and the variable-memory encoding
+    // cells, registered here and prepared on their first read from any
+    // thread, each under its once-claim.
     buster_x86_metadata_prewarm();
     machine_x86_64_exact_prewarm();
 }
