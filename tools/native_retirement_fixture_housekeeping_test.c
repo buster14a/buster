@@ -1259,4 +1259,3 @@ int main(void)
         fputs("Native-retirement fixture housekeeping qualification failed.\n", stderr);
     return valid ? 0 : 1;
 }
-

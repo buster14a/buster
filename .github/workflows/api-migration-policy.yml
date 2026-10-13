@@ -14,7 +14,7 @@ permissions:
 env:
   MAIN_PUSH_MAINTENANCE_SHA256: 110724cb83bf01f6eaf296142c87a77d359509d024a570835a4e0676c7e2944b
   MAIN_PUSH_INVENTORY_SHA256: 87355440fe1ff41cc5f9f9ccae5156a48f24110d9ef2b24189d755ef6515a217
-  MAIN_PUSH_JSON_SHA256: 353d14e35fc8dd056a1a37637f7c28d3c4cb2b9f6724466a55e7eac445781590
+  MAIN_PUSH_JSON_SHA256: 27af98437418614a05561f35a9cb4d84070858ec86243fd7c5ef027c3785f67c
 
 # Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
 # so GitHub cannot cancel or replace an older pending run. The push-only helper
