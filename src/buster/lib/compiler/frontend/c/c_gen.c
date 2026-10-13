@@ -18057,7 +18057,7 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_source_name_object(CIntegerIrBuilder* bu
     }
     else
     {
-        String8 name = builtin == C_SYMBOL_BUILTIN_SOURCE_FILE ? c_semantic_source_file(&builder->preprocess, token_index) : (String8){0};
+        String8 name = builtin == C_SYMBOL_BUILTIN_SOURCE_FILE ? c_semantic_source_file(builder->arena, &builder->preprocess, token_index) : (String8){0};
         CIrDecodedString decoded = {
             .bytes = {.pointer = (u8*)name.pointer, .length = name.length},
             .element_count = name.length,

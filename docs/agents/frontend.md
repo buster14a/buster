@@ -39,11 +39,14 @@ controls. The external Clang `macro_disable.c` assertion remains unchanged.
 ## Macro filename prefix maps
 
 `CPreprocessOptions.macro_prefix_maps` supplies ordered
-`CMacroPrefixMap` entries; the last byte-prefix match is substituted once by
-`c_macro_builtin_token`. Only synthesized filename literals change.
-`CMacro` retains the immutable mapping view for the preprocess call and its
-directive-context bit; no final result retains this view. `__FILE__` reads
-the current logical filename, `__BASE_FILE__` the root, and
+`CMacroPrefixMap` entries; the last byte-prefix match is substituted once.
+For macro spellings, `c_macro_builtin_token` applies it only to synthesized
+filename literals. `CMacro` retains the immutable mapping view for the
+preprocess call and its directive-context bit. The result's arena-owned
+`CPreprocessDetail` retains a copy for parser-stage `__builtin_FILE()`, so it
+uses the same mapping as `__FILE__` without enlarging the frequently copied
+`CPreprocessResult`.
+`__FILE__` reads the current logical filename, `__BASE_FILE__` the root, and
 `__FILE_NAME__` the original basename before substitution. GCC-style
 directive expansions bypass mapping. Escaping happens after substitution
 through the existing literal renderer. Include identity/probes, dependencies,
@@ -287,12 +290,14 @@ static initializers. Positions come from the token's source map
 (`c_semantic_source_line`, `c_semantic_source_file`), so a macro-produced call
 reports its invocation and `#line` renumbers and renames it. In a macro
 invocation spanning lines, the reported line is the line of `__LINE__` there,
-which matches GCC; Clang reports the closing line. The
+which matches GCC; Clang reports the closing line. `__builtin_FILE()` applies
+the current logical filename's prefix map before building its literal, matching
+`__FILE__`; source maps and diagnostics keep their original names. The
 result types follow GCC; Clang 18 answers `unsigned int` and `char *`.
-Every use with an argument is diagnosed. `-fmacro-prefix-map` does not apply
-to the FILE spelling yet (#3917). `c_test_source_location_builtins` checks types, constant
-contexts and invalid arity on three targets in both SSA forms. It also runs the
-program in every allocator and form, with GCC and Clang as oracles.
+Every use with an argument is diagnosed. `c_test_source_location_builtins` checks types, constant contexts and invalid
+arity on three targets in both SSA forms, with absolute and relative mapped
+and unmapped `#line` controls. It also runs the original program in every
+allocator and form, with GCC and Clang as oracles.
 
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,

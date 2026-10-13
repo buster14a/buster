@@ -24586,6 +24586,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArgum
         BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
         scratch_end(temporary);
     }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        char8 old_prefix[] = "source-location/";
+        char8 new_prefix[] = "mapped/";
+        CMacroPrefixMap map = {
+            .old_prefix = {.pointer = old_prefix, .length = sizeof(old_prefix) - 1},
+            .new_prefix = {.pointer = new_prefix, .length = sizeof(new_prefix) - 1},
+        };
+        CPreprocessOptions options = {
+            .macro_prefix_maps = &map,
+            .macro_prefix_map_count = 1,
+            .source_path = S8("source-location/probe.c"),
+            .target = targets[0],
+            .data_layout = target_data_layout(targets[0]),
+            .dialect = C_PREPROCESS_DIALECT_GNU17,
+        };
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("int probe;\n"), options);
+        old_prefix[0] = 'X';
+        new_prefix[0] = 'X';
+        map.old_prefix = (String8){0};
+        map.new_prefix = (String8){0};
+        String8 file = c_semantic_source_file(temporary.arena, &preprocess, 0);
+        BUSTER_TEST(arguments, !preprocess.diagnostic_count);
+        BUSTER_TEST(arguments, string_equal(file, S8("mapped/probe.c")));
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, &map, (char8*)&map + sizeof(map)) == 0);
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, old_prefix, old_prefix + sizeof(old_prefix)) == 0);
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, new_prefix, new_prefix + sizeof(new_prefix)) == 0);
+        c_preprocess_release(&preprocess);
+        scratch_end(temporary);
+    }
 #if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -24654,6 +24684,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArgum
                                     references[reference], run.platform_status, (u32)run.timed_out));
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+        String8 source_paths[] = {
+            S8("/source-location/absolute.c"),
+            S8("source-location/relative.c"),
+            S8("/source-location/absolute.c"),
+            S8("source-location/relative.c"),
+        };
+        String8 expected_paths[] = {
+            S8("mapped/absolute.c"),
+            S8("mapped/relative.c"),
+            S8("/source-location/absolute.c"),
+            S8("source-location/relative.c"),
+        };
+        String8 map_prefixes[] = {
+            S8("/source-location/"),
+            S8("source-location/"),
+            {0},
+            {0},
+        };
+        bool map_enabled[] = {true, true, false, false};
+        for (u32 map_case = 0; map_case < BUSTER_ARRAY_LENGTH(source_paths); map_case += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena,
+                S8("#line 1 \"{S8}\"\n"
+                   "static int same(const char* a, const char* b) { while (*a && *a == *b) { a += 1; b += 1; } return *a == *b; }\n"
+                   "#define FILE_HERE() __builtin_FILE()\n"
+                   "static const char* builtin_file = __builtin_FILE();\n"
+                   "static const char* macro_builtin_file = FILE_HERE();\n"
+                   "static const char* macro_file = __FILE__;\n"
+                   "int main(void) { return !(same(builtin_file, macro_builtin_file) && same(builtin_file, macro_file) && "
+                   "same(__builtin_FILE(), \"{S8}\")); }\n"),
+                source_paths[map_case], expected_paths[map_case]);
+            bool source_written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+            if (BUSTER_REQUIRE(arguments, source_written))
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+                    {
+                        String8 output = buster_test_temporary_path(temporary.arena,
+                            string_format(temporary.arena, S8("source-location-map-{u32}-{u32}-{u32}"), map_case, mode, form), S8(".exe"));
+                        CompilerDriverInvocation invocation = {0};
+                        if (map_enabled[map_case])
+                        {
+                            String8 map_argument = string_format(temporary.arena, S8("-fmacro-prefix-map={S8}=mapped/"), map_prefixes[map_case]);
+                            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
+                                S8("-fverify-codegen"), map_argument, S8("-o"), output, input};
+                            invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        }
+                        else
+                        {
+                            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
+                                S8("-fverify-codegen"), S8("-o"), output, input};
+                            invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        }
+                        invocation.reject_machine_fallback = true;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("source-location prefix map case={u32} mode={u32} form={u32}: {S8}"),
+                                map_case, mode, form, compiled.diagnostic));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 command_line[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena,
+                                        S8("source-location prefix map case={u32} mode={u32} form={u32} status={u32} timeout={u32} expected={S8}"),
+                                        map_case, mode, form, run.platform_status, (u32)run.timed_out, expected_paths[map_case]));
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
                     }
                 }
             }
