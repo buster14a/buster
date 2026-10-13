@@ -16109,45 +16109,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArgum
     char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
     if (BUSTER_REQUIRE(arguments, source_bytes))
     {
-        u64 source_length = 0;
-        c_test_append_source(source_bytes, source_capacity, &source_length, S8("int main(void) { int value = 7; if ("));
-        for (u32 index = 0; index < 1000; index += 1)
+        String8 fixture_labels[] = {
+            S8("cast-frame-depth-signed"),
+            S8("cast-frame-depth-unsigned"),
+            S8("cast-frame-depth-pointer"),
+            S8("cast-frame-depth-sizeof"),
+            S8("cast-frame-depth-shallow"),
+        };
+        String8 fixture_prefixes[] = {
+            S8("int main(void) { int value = 7; if ("),
+            S8("int main(void) { unsigned int unsigned_value = 9; if ("),
+            S8("int main(void) { int object = 0; void* pointer = &object; if ("),
+            S8("int main(void) { int value = 0; if (sizeof("),
+            S8("int main(void) { int value = 7; unsigned int sum = 0; "),
+        };
+        String8 fixture_even_casts[] = {
+            S8("(signed char)"),
+            S8("(unsigned int)"),
+            S8("(char*)"),
+            S8("(int)"),
+            S8(""),
+        };
+        String8 fixture_odd_casts[] = {
+            S8("(int)"),
+            S8("(int)"),
+            S8("(void*)"),
+            S8("(int)"),
+            S8(""),
+        };
+        String8 fixture_suffixes[] = {
+            S8("value != 7) return 1; return 0; }\n"),
+            S8("unsigned_value != 9u) return 1; return 0; }\n"),
+            S8("pointer != pointer) return 1; return 0; }\n"),
+            S8("value) != sizeof(int)) return 1; return 0; }\n"),
+            S8("if (sum != 3584u) return 1; return 0; }\n"),
+        };
+        // Keep each 1000-cast case in its own translation unit.
+        // c_ir_lower_capacity_plan sizes IR type rows per unit as
+        // 2 * parse.type_count + parse.declaration_count + string_literal_count
+        // + C_TYPE_COUNT + 4; combining independent chains would test
+        // aggregate IR reservation rather than the type parser's frame limit.
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(fixture_labels); fixture_index += 1)
         {
-            c_test_append_source(source_bytes, source_capacity, &source_length,
-                                 index % 2 ? S8("(int)") : S8("(signed char)"));
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, fixture_prefixes[fixture_index]);
+            if (fixture_index == BUSTER_ARRAY_LENGTH(fixture_labels) - 1)
+            {
+                // Keep the wide but shallow cast control in its own unit too.
+                for (u32 index = 0; index < 512; index += 1)
+                {
+                    c_test_append_source(source_bytes, source_capacity, &source_length, S8("sum += (int)value; "));
+                }
+            }
+            else
+            {
+                for (u32 index = 0; index < 1000; index += 1)
+                {
+                    String8 cast = index % 2 ? fixture_odd_casts[fixture_index] : fixture_even_casts[fixture_index];
+                    c_test_append_source(source_bytes, source_capacity, &source_length, cast);
+                }
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, fixture_suffixes[fixture_index]);
+            BUSTER_TEST_RAW(arguments, source_length < source_capacity, S8("isolated cast-depth fixture fits its input buffer"));
+            String8 cast_program = {.pointer = source_bytes, .length = source_length};
+            UnitTestResult runtime = c_test_run_exit_zero_program(arguments, fixture_labels[fixture_index], cast_program);
+            result.test_count += runtime.test_count;
+            result.succeeded_test_count += runtime.succeeded_test_count;
+            String8 token_label = string_format(temporary.arena, S8("{S8}-no-ast"), fixture_labels[fixture_index]);
+            UnitTestResult token_runtime = c_test_run_exit_zero_program_mode(arguments, token_label, cast_program, true);
+            result.test_count += token_runtime.test_count;
+            result.succeeded_test_count += token_runtime.succeeded_test_count;
         }
-        c_test_append_source(source_bytes, source_capacity, &source_length, S8("value != 7) return 1; unsigned int unsigned_value = 9; if ("));
-        for (u32 index = 0; index < 1000; index += 1)
-        {
-            c_test_append_source(source_bytes, source_capacity, &source_length,
-                                 index % 2 ? S8("(int)") : S8("(unsigned int)"));
-        }
-        c_test_append_source(source_bytes, source_capacity, &source_length, S8("unsigned_value != 9u) return 2; int object = 0; void* pointer = &object; if ("));
-        for (u32 index = 0; index < 1000; index += 1)
-        {
-            c_test_append_source(source_bytes, source_capacity, &source_length,
-                                 index % 2 ? S8("(void*)") : S8("(char*)"));
-        }
-        c_test_append_source(source_bytes, source_capacity, &source_length, S8("pointer != pointer) return 3; if (sizeof("));
-        for (u32 index = 0; index < 1000; index += 1)
-        {
-            c_test_append_source(source_bytes, source_capacity, &source_length, S8("(int)"));
-        }
-        c_test_append_source(source_bytes, source_capacity, &source_length,
-                             S8("value) != sizeof(int)) return 4; unsigned int sum = 0; "));
-        for (u32 index = 0; index < 512; index += 1)
-        {
-            c_test_append_source(source_bytes, source_capacity, &source_length, S8("sum += (int)value; "));
-        }
-        c_test_append_source(source_bytes, source_capacity, &source_length, S8("if (sum != 3584u) return 5; return 0; }\n"));
-        BUSTER_TEST_RAW(arguments, source_length < source_capacity, S8("cast-depth fixture fits its input buffer"));
-        String8 cast_program = {.pointer = source_bytes, .length = source_length};
-        UnitTestResult runtime = c_test_run_exit_zero_program(arguments, S8("cast-frame-depth"), cast_program);
-        result.test_count += runtime.test_count;
-        result.succeeded_test_count += runtime.succeeded_test_count;
-        UnitTestResult token_runtime = c_test_run_exit_zero_program_mode(arguments, S8("cast-frame-depth-no-ast"), cast_program, true);
-        result.test_count += token_runtime.test_count;
-        result.succeeded_test_count += token_runtime.succeeded_test_count;
     }
     c_test_scratch_end(temporary);
 
