@@ -4914,6 +4914,15 @@ bool c_semantic_math_link_is_long_double(String8 link_name)
            c_semantic_math_special_value(link_name).kind == C_TYPE_LONG_DOUBLE || (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
 }
 
+bool c_semantic_math_long_double_builtin_supported_on_target(Target target, String8 name)
+{
+    String8 link_name = string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name;
+    bool long_double = c_semantic_math_link_is_long_double(link_name) || string_equal(link_name, S8("huge_vall"));
+    bool native = target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
+    bool supported = !long_double || native;
+    return supported;
+}
+
 // The constant-valued special-float builtins by link name: the census every
 // result-type query, arity check, constant folder and runtime lowering reads.
 // c_ir_math_builtin_link_name folds the spellings onto six link names:
@@ -8717,6 +8726,11 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
+    if (result && c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_MATH &&
+        !c_semantic_math_long_double_builtin_supported_on_target((Target){.cpu_arch = cpu_arch, .os = os}, name))
+    {
+        result = false;
+    }
     return result;
 }
 
