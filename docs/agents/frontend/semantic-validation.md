@@ -10,6 +10,21 @@ syntax-only and ordinary compilation share diagnostic ownership. The older
 `c_parse` / `c_analyze_semantics` entry points retain their model-building contract
 for callers that explicitly pair them with `c_lower_to_ir`.
 
+At the end of lowering-constraint validation, file-scope tentative object
+definitions are checked against their final translation-unit types. An object
+whose type is still incomplete is rejected before semantic-only success. A
+later tag or array completion remains valid, and an extern-only declaration
+does not create a tentative definition. An external-linkage tentative array
+with a complete element type is completed to one element on a per-object type
+copy under C17 6.9.2p2; an internal-linkage tentative incomplete object does
+not receive that rule under 6.9.2p3. The check runs after source expressions,
+so it does not make an earlier sizeof of an incomplete array valid. The
+registered compiler_driver_test_tentative_object_completeness fixture checks
+syntax-only/object diagnostic parity, declaration completion, exact final
+array symbol sizes, and the internal-linkage and point-of-use refusals in C17,
+GNU17, C23 and GNU23 across both canonical frontend forms and the AST pilot.
+
+
 The semantic model remains `CAnalysisResult` (`CParseResult` is its compatibility
 name). Validation uses its types, entities, declaration ranges, identifier
 bindings, delimiter index and scope index. It does not construct a second IR.
