@@ -14,8 +14,8 @@ re-derives validity from the lab's own summary.json and the throughput
 corpus's own summary.json and metadata.json (#2761), and, when the receipt
 names the scaling profile (#424), each scaling bundle's own scaling.json and
 scaling-metadata.json, and, when the receipt holds an opt-in same-candidate
-flag-pair profile (#48 inline, #3397 ast-pilot, #3011 constant-reuse), that profile's raw lab
-documents, and completes the
+flag-pair profile (#48 inline, #3397 ast-pilot, #3011 constant-reuse) or the #1125
+per-process floor, that profile's raw lab documents, and completes the
 attempt's check run named check_name(mode) with external ID attempt_marker(...)
 on the head. The checks are report-only; nothing gates merging on them.
 
@@ -68,6 +68,7 @@ only publication-only recovery of a run whose producer predates sealing
 bytes reported unverified. Anything else fails closed.
 
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
+validate_process_floor_bundle (#1125 per-process floor),
 validate_real_source_bundle, validate_production_profile_bundle,
 validate_compiler_probes_bundle, validate_frontend_selector_bundle,
 validate_frontend_nesting_bundle (#2676 deep nesting) and
@@ -109,6 +110,8 @@ from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate
 from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
+from process_floor_acceptance import (cell_record as process_floor_cell_record,
+                                      validate_documents as validate_process_floor_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
                               ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
@@ -116,6 +119,8 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_ast_pilot_acceptance,
                               CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_CELLS,
                               validate_constant_reuse_acceptance,
+                              PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_CELLS,
+                              validate_process_floor_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -319,6 +324,46 @@ def validate_constant_reuse_bundle(receipt_reuse: object, bundle: object, head: 
                 problems.append(f"constant-reuse {cell} acceptance metrics or identity results do not match its raw summary")
     except (RuntimeError, AttributeError, TypeError, KeyError) as error:
         problems.append(f"raw issue #3011 profile is incomplete or mismatched: {error}")
+    return problems
+
+
+PROCESS_FLOOR_BUNDLE_FILES = {
+    "acceptance": "process_floor/acceptance.json",
+    **{f"{cell}_{key}": f"process_floor/{cell}/{member}" for cell in PROCESS_FLOOR_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"), ("b", "b/lab.json"))},
+}
+
+
+def validate_process_floor_bundle(receipt_floor: object, bundle: object, head: str, candidate_sha: str) -> list[str]:
+    """Re-derive the requested #1125 result from its raw cell summaries and configs."""
+    if receipt_floor is None:
+        return []
+    problems: list[str] = []
+    if not isinstance(receipt_floor, dict) or receipt_floor.get("requested") is not True:
+        return ["receipt process-floor record is present but not a request"]
+    if receipt_floor.get("status") != "complete" or receipt_floor.get("exit") != 0:
+        problems.append("receipt issue #1125 process-floor run did not complete successfully")
+    if receipt_floor.get("request_line") != PROCESS_FLOOR_REQUEST_LINE:
+        problems.append("receipt process-floor request selector is not the exact supported line")
+    if receipt_floor.get("profile") != PROCESS_FLOOR_PROFILE:
+        problems.append("receipt process-floor profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(PROCESS_FLOOR_BUNDLE_FILES):
+        return [*problems, "requested issue #1125 raw evidence bundle is incomplete"]
+    acceptance = bundle.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return [*problems, "raw issue #1125 acceptance document is missing"]
+    if receipt_floor.get("summary") != acceptance:
+        problems.append("receipt and raw process-floor acceptance documents differ")
+    problems.extend(validate_process_floor_acceptance(acceptance, head, candidate_sha))
+    try:
+        cells = acceptance.get("cells") if isinstance(acceptance.get("cells"), dict) else {}
+        for cell in PROCESS_FLOOR_CELLS:
+            raw = validate_process_floor_documents(cell, bundle[f"{cell}_summary"], bundle[f"{cell}_meta"],
+                                                   {"a": bundle[f"{cell}_a"], "b": bundle[f"{cell}_b"]}, candidate_sha)
+            if cells.get(cell) != process_floor_cell_record(raw):
+                problems.append(f"process-floor {cell} metrics or identity results do not match its raw summary")
+    except (RuntimeError, AttributeError, TypeError, KeyError) as error:
+        problems.append(f"raw issue #1125 profile is incomplete or mismatched: {error}")
     return problems
 
 
@@ -641,6 +686,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3397 ast-pilot acceptance")
                 if receipt.get("constant_reuse_acceptance") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3011 constant-reuse acceptance")
+                if receipt.get("process_floor") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the issue #1125 process-floor profile")
                 if receipt.get("throughput_real_source") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with real-source throughput")
                 if receipt.get("production_profile") is not None:
@@ -724,6 +771,20 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_constant_reuse_bundle(receipt["constant_reuse_acceptance"],
                                                                   corpus.get("constant_reuse_bundle"),
                                                                   expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("process_floor") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the issue #1125 process-floor profile is valid only in pull mode")
+                    # The inline profile rides every pull compare (main's request history holds its line), so it
+                    # is not a competing opt-in leg here.
+                    if any(receipt.get(key) is not None for key in
+                           ("ast_pilot_acceptance", "constant_reuse_acceptance", "throughput_real_source",
+                            "production_profile", "compiler_probes", "frontend_selector", "wild_linker", "link_tls",
+                            "selfhost_inline", "frontend_nesting")):
+                        reasons.append("the issue #1125 process-floor profile cannot be combined with another opt-in leg")
+                    candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                    reasons.extend(validate_process_floor_bundle(receipt["process_floor"], corpus.get("process_floor_bundle"),
+                                                                 expected.get("head", ""), candidate.get("sha256", "")))
                 if receipt.get("throughput_real_source") is not None:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
@@ -853,7 +914,8 @@ def sealed_lab_replay(files: dict[str, bytes]) -> int:
             any(config.get(key) != PROFILE[key] for key in ("cpu", "target_minutes", "warmups", "profile_steps")) or \
             config.get("pairs") is not None or type(config.get("seed")) is not int or \
             type(config.get("min_effect_percent")) not in (int, float) or \
-            any(config.get(key) for key in ("ast_pilot_pair", "constant_reuse_pair", "canonical_inline_pair", "sudo")):
+            any(config.get(key) for key in ("ast_pilot_pair", "constant_reuse_pair", "process_floor_pair",
+                                            "canonical_inline_pair", "sudo")):
         raise ValueError("lab raw config is not the frozen compiler-compare-v1 profile")
     count = saved.get("pairs") if isinstance(saved, dict) else None
     if type(count) is not int or not 10 <= count <= 1000 or count % 2 or saved.get("order") != "ABBA" or \
@@ -1348,7 +1410,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
-            "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or \
+            "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or "process_floor" in receipt or \
             "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
             "link_tls" in receipt or "selfhost_inline" in receipt or "frontend_nesting" in receipt:
@@ -1687,6 +1749,22 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed JSON"
                         break
                 throughput["constant_reuse_bundle"] = bundle if not problem and len(bundle) == len(CONSTANT_REUSE_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("process_floor") is not None and not problem:
+                bundle = {}
+                for key, member in PROCESS_FLOOR_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #1125 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                throughput["process_floor_bundle"] = bundle if not problem and len(bundle) == len(PROCESS_FLOOR_BUNDLE_FILES) else None
             if isinstance(receipt, dict) and receipt.get("throughput_real_source") is not None and not problem:
                 bundle = {}
                 for key, member in REAL_SOURCE_BUNDLE_FILES.items():
@@ -1887,6 +1965,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
     head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
     head_reuse_count = head_lines.count(CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
+    head_floor_count = head_lines.count(PROCESS_FLOOR_REQUEST_LINE)
     head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
     head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
     head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
@@ -1899,6 +1978,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     parent_inline_counts = []
     ast_deltas = []
     reuse_deltas = []
+    floor_deltas = []
     real_deltas = []
     production_deltas = []
     probes_deltas = []
@@ -1920,6 +2000,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
         ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
         reuse_deltas.append(head_reuse_count - parent_lines.count(CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE))
+        floor_deltas.append(head_floor_count - parent_lines.count(PROCESS_FLOOR_REQUEST_LINE))
         real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
         production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
         probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
@@ -1940,6 +2021,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "append one selector line for each explicit constant-reuse request")
     if reuse_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in reuse_deltas):
         return "a fresh constant-reuse selector has no constant-reuse acceptance record in the receipt"
+    floor_record = receipt.get("process_floor")
+    if floor_record is not None and not all(delta == 1 for delta in floor_deltas):
+        return ("the exact process-floor selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit process-floor request")
+    if floor_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in floor_deltas):
+        return "a fresh process-floor selector has no process-floor record in the receipt"
     real_record = receipt.get("throughput_real_source")
     if real_record is not None and not all(delta == 1 for delta in real_deltas):
         return ("the exact real-source throughput selector was not freshly added once at this head relative to every "

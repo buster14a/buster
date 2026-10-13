@@ -19752,6 +19752,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_contexts(UnitTest
     return result;
 }
 
+// #4052: -fshort-wchar narrows wchar_t, wide literals and the predefined
+// wchar macros on an ABI whose wchar_t is 32-bit; wint_t keeps its width.
+BUSTER_GLOBAL_LOCAL String8 const c_test_short_wchar_source = S8_INITIALIZER(
+    "#include <stddef.h>\n"
+    "#if SHORT\n"
+    "#define WIDTH 2\n"
+    "#define WCHAR_MAXIMUM 65535\n"
+    "#define WIDE_TYPE unsigned short\n"
+    "#else\n"
+    "#define WIDTH 4\n"
+    "#define WCHAR_MAXIMUM 2147483647\n"
+    "#define WIDE_TYPE int\n"
+    "#endif\n"
+    "_Static_assert(sizeof(wchar_t) == WIDTH, \"wchar_t size\");\n"
+    "_Static_assert(sizeof(L'a') == WIDTH, \"wide character size\");\n"
+    "_Static_assert(_Generic(L'a', WIDE_TYPE: 1, default: 0), \"wide character type\");\n"
+    "_Static_assert(_Generic((wchar_t)0, WIDE_TYPE: 1, default: 0), \"wchar_t type\");\n"
+    "_Static_assert(_Generic(L\"ab\"[0], WIDE_TYPE: 1, default: 0), \"wide string element\");\n"
+    "_Static_assert(sizeof(L\"ab\") == 3 * WIDTH, \"wide string size\");\n"
+    "_Static_assert(_Generic((__WCHAR_TYPE__)0, WIDE_TYPE: 1, default: 0), \"__WCHAR_TYPE__\");\n"
+    "_Static_assert(__SIZEOF_WCHAR_T__ == WIDTH, \"__SIZEOF_WCHAR_T__\");\n"
+    "_Static_assert(__WCHAR_MAX__ == WCHAR_MAXIMUM, \"__WCHAR_MAX__\");\n"
+    "_Static_assert(__WCHAR_WIDTH__ == WIDTH * 8, \"__WCHAR_WIDTH__\");\n"
+    "_Static_assert(__SIZEOF_WINT_T__ == 4, \"wint_t keeps its width\");\n"
+    "#if SHORT\n"
+    "#ifndef __WCHAR_UNSIGNED__\n"
+    "#error short wchar_t is unsigned\n"
+    "#endif\n"
+    "_Static_assert((wchar_t)-1 > 0, \"unsigned wchar_t\");\n"
+    "#else\n"
+    "#ifdef __WCHAR_UNSIGNED__\n"
+    "#error wchar_t is signed on this ABI\n"
+    "#endif\n"
+    "_Static_assert((wchar_t)-1 < 0, \"signed wchar_t\");\n"
+    "#endif\n"
+    "int main(void) { return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_short_wchar_override(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 short_wchar = 0; short_wchar < 2; short_wchar += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = target_native;
+        target.cpu_arch = CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        target.short_wchar = short_wchar != 0;
+        BUSTER_TEST(arguments, target_uses_16_bit_wchar(target) == (short_wchar != 0));
+        BUSTER_TEST(arguments, target_uses_unsigned_wchar(target) == (short_wchar != 0));
+        String8 source = string_format(temporary.arena, S8("#define SHORT {u32}\n{S8}"), short_wchar, c_test_short_wchar_source);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+            semantic.diagnostic_count == 0 && semantic.analysis_complete,
+            tokens.diagnostic_count ? tokens.diagnostics[0].message :
+            syntax.diagnostic_count ? syntax.diagnostics[0].message :
+            semantic.diagnostic_count ? semantic.diagnostics[0].message : source);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42518,7 +42582,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
 // label addresses; `:` before a parenthesized or cast else operand; chains in
 // either arm; GNU `?:`; and conditionals in calls, returns, initializers,
 // subscripts, statement expressions and `if` conditions. A conditional after a
-// root assignment or comma goes to the scan.
+// root assignment or comma goes to the scan. The pilot's retained facts
+// (GitHub #4062) reach the driver's counts and change neither object.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42579,6 +42644,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         BUSTER_TEST(arguments, lower.answers >= 20);
         BUSTER_TEST(arguments, lower.negatives > 0);
         BUSTER_TEST(arguments, lower.fallbacks > 0);
+        // The pilot also retains analysis's facts through lowering (GitHub
+        // #4062), which leaves the object as it was (above).
+        CAstFactStatistics facts = compiled[1].c_ast.facts;
+        BUSTER_TEST(arguments, compiled[0].c_ast.facts.nodes == 0 && compiled[0].c_ast.facts.retained_bytes == 0);
+        BUSTER_TEST(arguments, facts.nodes && facts.retained_bytes && facts.regions == 3 && facts.candidates && facts.stale == 0);
+    }
+    // Nothing lowers a -fsyntax-only unit, so it retains no facts.
+    {
+        String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), input};
+        CompilerDriverResult checked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){command, BUSTER_ARRAY_LENGTH(command)}));
+        BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+        BUSTER_TEST(arguments, checked.c_ast.units && checked.c_ast.facts.nodes == 0 && checked.c_ast.facts.candidates == 0);
     }
     scratch_end(temporary);
     return result;
@@ -43116,6 +43194,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_initializer(UnitTest
 #endif
             c_test_scratch_end(temporary);
         }
+    }
+    return result;
+}
+
+// A `?` whose `:` never comes is a syntax error at the token that ends its
+// expression first (#4072). The default path's syntax check must say so, as
+// the syntax tree does under -fc-ast-pilot, and -c must stop there with the
+// same diagnostic instead of failing in lowering. A comma does not end the
+// middle operand, and `valid` keeps the shapes that complete a conditional
+// (GNU `x ?: y`, nesting, comma and statement-expression middles) and the
+// colons no `?` owns (labels, cases, bit-fields, _Generic and asm operands).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_missing_colon(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 invalid[] = {
+        S8("int f(int x) { int e = x ? 1; return e; }\n"),
+        S8("int f(int x) { int e = x ? 1, 2; return e; }\n"),
+        S8("int h(int); int f(int x) { return h(x ? 1); }\n"),
+        S8("int f(int x) { return x ? 1 : x ? 2; }\n"),
+        S8("int f(int x) { return x ? ({ x ? 1; }) : 2; }\n"),
+        S8("int g = 1 ? 2;\n"),
+        S8("int a[2] = { 1 ? 2 };\n"),
+    };
+    String8 expected[] = {
+        S8(":1:29: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:32: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:42: expected ':' to complete the conditional expression, found ')'"),
+        S8(":1:36: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:35: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:14: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:20: expected ':' to complete the conditional expression, found '}'"),
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(invalid) == BUSTER_ARRAY_LENGTH(expected));
+    String8 valid_parts[] = {
+        S8("int g(void);\n"),
+        S8("int k = 1 ? 2 : 3, k2 = 0 ? 2, 3 : 4;\n"),
+        S8("struct S { int a : 1 ? 2 : 3; int b; };\n"),
+        S8("int f(int x, int a, int b, int c, int d) {\n"),
+        S8("    int e = x ? g(), 1 : 0; int y = x ?: a; int z = a ? b ? c : d : e;\n"),
+        S8("    int v = x ? ({ int q = x ? 1 : 2; q; }) : 2;\n"),
+        S8("    switch (x) { case 1 ? 2 : 3: break; default: break; }\n"),
+        S8("again: x = x ? x - 1 : 0; if (x) goto again;\n"),
+        S8("    __asm__ volatile (\"\" : \"+r\"(x) : \"r\"(x ? 1 : 2));\n"),
+        S8("    return e + y + z + v + _Generic(x, int: x ? 1 : 2, default: 0); }\n"),
+    };
+    String8 valid = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid_parts), false);
+    for (u32 index = 0; index <= BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        Arena* conflicts[] = {arguments->arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        bool accepted = index == BUSTER_ARRAY_LENGTH(invalid);
+        String8 source = buster_test_temporary_path(temporary.arena, S8("conditional-missing-colon"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(accepted ? valid : invalid[index]))))
+        {
+            for (u32 form = 0; form < 4; form += 1)
+            {
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("conditional-missing-colon"), S8(".o"));
+                String8 syntax[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), source,
+                    S8("-fc-ast-pilot")};
+                String8 object[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output,
+                    source, S8("-fc-ast-pilot")};
+                SliceString8 command = form & 2 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(object) : (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax);
+                command.length -= (form & 1) == 0;
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, command);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                bool passed = accepted ? compiled.error == COMPILER_DRIVER_ERROR_NONE
+                                       : compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                             string_first_sequence(compiled.diagnostic, expected[index]) != BUSTER_STRING_NO_MATCH;
+                BUSTER_TEST_RAW(arguments, passed,
+                    string_format(temporary.arena, S8("conditional missing colon case={u32} form={u32}: {S8}"), index, form, compiled.diagnostic));
+            }
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -66831,6 +66982,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_initializer);
     C_TEST_FIXTURE(arguments, c_test_conditional_incomplete_array_runtime);
+    C_TEST_FIXTURE(arguments, c_test_conditional_missing_colon);
     C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
@@ -67245,6 +67397,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);
+    C_TEST_FIXTURE(arguments, c_test_short_wchar_override);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_runtime);
     C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     C_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);

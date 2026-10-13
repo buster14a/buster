@@ -25,7 +25,8 @@
 // docs/agents/compiler-phase-state.md.
 // Lowering reads the implicit postorder tree (CIRLowerOptions.syntax_tree,
 // GitHub #3102): under -fc-ast-pilot the driver passes it, and otherwise
-// c_lower_to_ir_tree_run builds it (a placeholder for #3102 step 1). The
+// c_lower_to_ir_tree_run builds it (a placeholder until the parse phase's
+// tree reaches every compile; #3102 step 1 retains it under -fc-ast-pilot). The
 // statement walker, c_ir_lower_body_advance, reads every body's statements
 // from their statement nodes (#4060; "statement nodes" below), and
 // c_ir_root_conditional answers from the conditional nodes through
@@ -34,7 +35,9 @@
 // through the parse result's scopes and answering structure questions from a
 // prebuilt matching-delimiter index (c_ir_build_delimiter_index); the walker
 // hands them their ranges through one marked adapter. No node id reaches the
-// IR. The prepared control
+// IR. The caller may also pass the facts semantic analysis retained per node
+// (CIRLowerOptions.syntax_facts, GitHub #4062); no lowering consumer reads
+// them yet. The prepared control
 // expressions of a function are answered by token-indexed tables, not scans of
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
@@ -66190,8 +66193,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
 // with the builder's diagnostics; there is no token walk to fall back to. A
 // unit without a body, or whose analysis did not complete, lowers as before:
 // nothing it lowers reads the tree, and lowering reports an incomplete
-// analysis itself. Step 1 retains the parse phase's tree through lowering and
-// replaces this; it is not part of the step-2 change (#4060).
+// analysis itself. Step 1 (#4076) retains the parse phase's tree and facts
+// through lowering under -fc-ast-pilot only; once they are retained in every
+// compile, that tree replaces this. It is not part of the step-2 change
+// (#4060).
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse,
                                                         Target target, CIRLowerOptions options, u64 query_reservation_limit,
                                                         u64 function_reservation_limit)

@@ -47,7 +47,12 @@
 //   declaration's entry carries declarator hints (c_parse_plan_declarators):
 //   the split (c_parse_planned_local_declarations) takes each declarator's
 //   `,` and `=` from them, and binds a plain initializer with the use filter
-//   alone.
+//   alone. With a facts record (CParserResult.ast_facts, GitHub #4062) the
+//   semantic phase also publishes what lowering needs per node: a top-level
+//   query's answer inside a typed region (c_ast_types_facts_answer, at the end
+//   of c_parse_expression_type_query), and at each region's end the typer's
+//   accepted nodes plus a machine run for the rest that keeps nothing it appended
+//   (c_parse_region_facts). The parsing method is unchanged.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -183,6 +188,8 @@
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_assignment_conversion_classify,      assignment-conversion admission and the
 //   c_parse_pointer_sign_warning                 -Wpointer-sign warning class (#4051)
+//   c_parse_region_facts,                        the retained facts' completion
+//   c_parse_region_facts_sound                   run at a typed region's end
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
 //   c_parse_ast_from_tree, c_parser_tree_*       the declaration split read from
 //                                                the syntax tree, and its probe
@@ -2005,6 +2012,7 @@ BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CPar
     }
     else
     {
+        machine->committed_mutation_count = machine->mutation_count;
         machine->mutation_count = mutation_mark;
     }
     if (machine->failed)
@@ -9221,7 +9229,131 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
                 flags | (pending.answer.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
     }
 #endif
+    // A top-level answer inside a typed region is kept as the fact of the
+    // node whose span the range is (GitHub #4062). Its rows stay: only a
+    // failing root rolls back, and to its own checkpoint.
+    if (valid && machine->ast_facts && !machine->frame_count && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL)
+    {
+        c_ast_types_facts_answer(machine, start, end, *type_out, machine->result_nonplace_projection);
+    }
     return valid;
+}
+
+// Whether a completion run left the model as it was apart from appended type
+// rows and what hangs off them (array bounds, alignment records, interned-row
+// log entries): no row mutated, no member, enumerator, parameter, entity or
+// scope added, no diagnostic. Such a run's answer is exact even when its
+// operands appended rows, provided the answer's own row is older than the run.
+BUSTER_GLOBAL_LOCAL bool c_parse_region_facts_sound(CTypeParseMachine const* machine, CParseResult const* result, CParseResult const* checkpoint,
+                                                    u32 mutation_mark)
+{
+    return machine->mutation_count == mutation_mark && result->member_count == checkpoint->member_count &&
+           result->enum_member_count == checkpoint->enum_member_count && result->parameter_count == checkpoint->parameter_count &&
+           result->entity_count == checkpoint->entity_count && result->scope_count == checkpoint->scope_count &&
+           result->diagnostic_count == checkpoint->diagnostic_count && result->alignment_count == checkpoint->alignment_count;
+}
+
+// The completion run of the retained facts (GitHub #4062), at a typed
+// region's end while its scratch and the body's memo still stand. The typer's
+// candidates are published first (c_ast_types_facts_begin); every candidate
+// still without a type is then asked of the machine over its span, unchecked,
+// in the region's mode, operands before their operators, so an operator's run
+// reads its operands' answers from the memo instead of typing them again. The
+// typer is set aside meanwhile: it would only decline these nodes again.
+// Nothing a run appends is kept: an appended row would get an IR type of its
+// own in lowering, and -g describes every IR type, so keeping it would change
+// the object. A run that appended anything is rolled back to its checkpoint
+// and the memo slot it may have overwritten is restored. Its answer is still
+// the node's fact when the run was otherwise sound
+// (c_parse_region_facts_sound) and either the answer's row is older than the
+// run (the rows it appended were an operand's, such as a string literal's
+// under `[]`), or the node is a string literal, whose array row is kept in
+// structural form (c_ast_types_facts_string). Any other node is a gap.
+// `scope` is a body's declaration scope, which each node's scope descends
+// from, or an initializer's own scope.
+BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, bool body)
+{
+    CAstTypeBody* region = machine->ast_facts ? c_ast_types_facts_begin(machine, &preprocess) : 0;
+    if (region)
+    {
+        CAstFacts* facts = machine->ast_facts;
+        bool checked = machine->validate_expression_constraints;
+        bool runtime = machine->runtime_expression_constraints;
+        machine->ast_types = 0;
+        machine->validate_expression_constraints = false;
+        machine->runtime_expression_constraints = body;
+        // The runs' scratch goes back after them, so an initializer's region
+        // arrays below it are still released by their caller.
+        u64 scratch_mark = machine->scratch_arena->position;
+        u32 node = 0;
+        u32 first = 0;
+        u32 end = 0;
+        while (c_ast_types_facts_next(region, facts, &node, &first, &end))
+        {
+            if (machine->failed)
+            {
+                facts->statistics.gaps[C_AST_FACT_GAP_BUSY] += 1;
+            }
+            else
+            {
+                CScopeId node_scope = body ? c_parse_scope_for_token(result, scope, first) : scope;
+                u32 slot = machine->expression_queries && machine->expression_query_result == result && first >= machine->expression_query_start &&
+                                   first < machine->expression_query_end
+                               ? first - machine->expression_query_start
+                               : UINT32_MAX;
+                CParseExpressionQuery saved_query = slot != UINT32_MAX ? machine->expression_queries[slot] : (CParseExpressionQuery){0};
+                u8 saved_flags = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0;
+                CParseResult checkpoint = *result;
+                u32 mutation_mark = machine->mutation_count;
+                machine->committed_mutation_count = mutation_mark;
+                CTypeId type = C_TYPE_ID_INVALID;
+                bool valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
+                facts->statistics.completion_queries += 1;
+                // A valid root drops the records of the rows it mutated; they
+                // are still in place, so the rollback below can undo them.
+                bool mutated = machine->committed_mutation_count > mutation_mark;
+                machine->mutation_count = mutated ? machine->committed_mutation_count : machine->mutation_count;
+                bool sound = !mutated && !machine->failed && c_parse_region_facts_sound(machine, result, &checkpoint, mutation_mark);
+                bool appended = result->type_count != checkpoint.type_count || result->array_bound_count != checkpoint.array_bound_count ||
+                                result->type_alignment_count != checkpoint.type_alignment_count ||
+                                result->interned_type_count != checkpoint.interned_type_count ||
+                                result->interned_qualified_count != checkpoint.interned_qualified_count;
+                bool kept = sound && valid && type.value < checkpoint.type_count;
+                bool string = sound && valid && !kept &&
+                              c_ast_types_facts_string(facts, result, machine->syntax_tree, node, type, checkpoint.type_count);
+                if (kept)
+                {
+                    c_ast_types_facts_record(facts, node, type, machine->result_nonplace_projection);
+                }
+                else if (string)
+                {
+                    facts->statistics.completed += 1;
+                    facts->statistics.strings += 1;
+                }
+                else
+                {
+                    CAstFactGap gap = machine->failed                                       ? C_AST_FACT_GAP_BUSY
+                                      : !sound || (valid && type.value < result->type_count) ? C_AST_FACT_GAP_APPENDS
+                                                                                              : C_AST_FACT_GAP_INVALID;
+                    facts->statistics.gaps[gap] += 1;
+                }
+                if (!sound || appended)
+                {
+                    c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+                    if (slot != UINT32_MAX)
+                    {
+                        machine->expression_queries[slot] = saved_query;
+                        machine->expression_query_flags[slot] = saved_flags;
+                    }
+                }
+            }
+            node += 1;
+        }
+        arena_set_position(machine->scratch_arena, scratch_mark);
+        machine->ast_types = region;
+        machine->validate_expression_constraints = checked;
+        machine->runtime_expression_constraints = runtime;
+    }
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -28846,10 +28978,10 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_terminator(CAst const* ast, CPreprocessResu
 // states it. Compound statements, and the statements whose last child is a
 // statement, are transparent: the chain runs node, node - 1, ... to a
 // statement whose last token an anchor gives, and each compound on the way
-// adds its `}`. Lowering's extent table (c_gen.c) shares it. `lasts` memoizes the answer per node - `begin` (last + 1,
+// adds its `}`. `lasts` memoizes the answer per node - `begin` (last + 1,
 // UINT32_MAX for none, 0 for not yet known), so nested statements share one
 // descent. `limit` is the body's `}`.
-BUSTER_C_SHARED u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit)
+BUSTER_C_INTERNAL u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit)
 {
     u32 cursor = node;
     u32 last = UINT32_MAX;
@@ -31627,6 +31759,81 @@ BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResu
     return result;
 }
 
+// Pairs the `?` at `question` with its `:` and every `?` it meets on the way
+// (#4072). `pending` receives the delimiter depth of each unmatched `?`; a `:`
+// at the innermost one's depth completes it, including GNU `x ?: y`. A comma
+// does not end a middle operand, since that is a whole expression. A `;` or a
+// closing delimiter at a pending `?`'s depth ends its expression first, and is
+// the token returned, or UINT32_MAX when every `?` is completed. `*checked_end`
+// is where the scan stopped, so a caller asks again only past it and the scans
+// stay linear over the stream. A `:` with no `?` pending at its depth (a label,
+// a case, a bit-field) is not this scan's to judge.
+BUSTER_GLOBAL_LOCAL u32 c_parser_unmatched_conditional(CPreprocessResult const* preprocess, CTokenShape const* token_shapes, u32 question,
+                                                       u32 end, u32* pending, u32* checked_end)
+{
+    u32 failure = UINT32_MAX;
+    u32 pending_count = 0;
+    u32 depth = 0;
+    u32 index = question;
+    bool open = true;
+    while (open && index < end)
+    {
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, preprocess, index);
+        CPunctuator punctuator = c_token_shape_punctuator(shape);
+        bool at_pending = pending_count && pending[pending_count - 1] == depth;
+        if (shape == C_TOKEN_END_OF_FILE)
+        {
+            open = false;
+        }
+        else if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            pending[pending_count++] = depth;
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON && at_pending)
+        {
+            pending_count -= 1;
+            open = pending_count != 0;
+        }
+        else if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+        {
+            depth += 1;
+        }
+        else if (at_pending && (punctuator == C_PUNCTUATOR_SEMICOLON || c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE)))
+        {
+            failure = index;
+            open = false;
+        }
+        else if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+        {
+            open = depth != 0;
+            depth -= depth != 0;
+        }
+        index += failure == UINT32_MAX;
+    }
+    *checked_end = index;
+    return failure;
+}
+
+// Reports the conditional the `?` at `question` leaves unfinished, unless an
+// earlier scan already covered it, with the syntax tree's wording.
+BUSTER_GLOBAL_LOCAL void c_parser_validate_conditional(Arena* arena, CParserResult* result, CPreprocessResult const* preprocess,
+                                                       CTokenShape const* token_shapes, u32 question, u32 end, u32* pending, u32* checked_end)
+{
+    if (question >= *checked_end)
+    {
+        u32 failure = c_parser_unmatched_conditional(preprocess, token_shapes, question, end, pending, checked_end);
+        if (failure != UINT32_MAX)
+        {
+            CToken token = preprocess->tokens[failure];
+            CDiagnosticKind kind = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ? C_DIAGNOSTIC_EXPECTED_DECLARATION
+                                                                                                 : C_DIAGNOSTIC_UNMATCHED_DELIMITER;
+            c_parser_diagnostic(arena, result, c_preprocess_token_location(preprocess, token), kind,
+                                string_format(arena, S8("expected ':' to complete the conditional expression, found '{S8}'"),
+                                              c_token_spelling(preprocess->spelling_base, token)));
+        }
+    }
+}
+
 typedef struct CParserBlockFrame CParserBlockFrame;
 struct CParserBlockFrame
 {
@@ -32197,6 +32404,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
         CParserTypedefNames typedef_names = {0};
         u32 index = 0;
         u32 validated_specifier_end = 0;
+        u32 validated_conditional_end = 0;
         while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
         {
             u32 start = index;
@@ -32245,6 +32453,13 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 else if (shape == C_TOKEN_IDENTIFIER)
                 {
                     c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
+                }
+                else if (punctuator == C_PUNCTUATOR_QUESTION)
+                {
+                    // The open delimiters hold at most `index` slots, which
+                    // leaves one for every `?` the scan can still meet.
+                    c_parser_validate_conditional(arena, &result, &preprocess, token_shapes, index, token_count, delimiter_stack + delimiter_count,
+                                                  &validated_conditional_end);
                 }
                 u32 decoration_end = c_parse_skip_declaration_decoration(preprocess, index, token_count);
                 if (decoration_end != index)
@@ -32349,6 +32564,11 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             else if (body_shape == C_TOKEN_IDENTIFIER)
                             {
                                 c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
+                            }
+                            else if (c_token_shape_punctuator(body_shape) == C_PUNCTUATOR_QUESTION)
+                            {
+                                c_parser_validate_conditional(arena, &result, &preprocess, token_shapes, index, token_count, delimiter_stack,
+                                                              &validated_conditional_end);
                             }
                             if (body_shape == C_TOKEN_IDENTIFIER &&
                                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("return")))
@@ -33511,6 +33731,9 @@ BUSTER_C_INTERNAL u32 c_parser_tree_probe_run_slot(u64 const* runs, u64 key)
 // validates: it steps over declaration decorations outside bodies, and checks
 // return operands only inside bodies, where the body's `{` has already
 // cleared its return state. A clean probe therefore means a clean walk. The
+// walker's conditional check (c_parser_validate_conditional) is not repeated:
+// the split runs only over a tree that built, and the tree builds no `?`
+// without its `:` or with an operand a `;` or a closing delimiter ends. The
 // stream is read in 64-token windows of the shape sidecar, and only number
 // and identifier lanes do scalar work. Two filters skip only calls that
 // cannot report: a number whose fact converted as an integer (its flags are
@@ -38864,6 +39087,8 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                                                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])));
                 }
             }
+            // The retained facts of the initializer's nodes (GitHub #4062).
+            c_parse_region_facts(machine, preprocess, result, scope, false);
             c_ast_types_initializer_end(machine);
             // The region's arrays go back unless something allocated above
             // them is still held.
@@ -43424,6 +43649,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             c_parse_validate_control_statements(machine, result, preprocess, declaration, skipped, &diagnostic);
             c_parse_validate_statement_expressions(machine, result, preprocess, declaration, skipped, &diagnostic);
             machine->runtime_expression_constraints = false;
+            // The retained facts of the body's nodes (GitHub #4062), while the
+            // body's memo and scope index still stand.
+            c_parse_region_facts(machine, preprocess, result, declaration->scope, true);
         }
         c_ast_types_body_end(machine);
         machine->expression_queries = 0;
@@ -43631,6 +43859,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .expression_task_capacity = expression_task_capacity,
         .syntax_tree = syntax.ast,
         .ast_type_statistics = syntax.ast_type_statistics,
+        .ast_facts = syntax.ast && syntax.ast_facts && syntax.ast_facts->node_count == syntax.ast->node_count ? syntax.ast_facts : 0,
         .ast_statement_statistics = syntax.ast_statement_statistics,
         .ast_specifier_statistics = syntax.ast_specifier_statistics,
     };
@@ -44489,6 +44718,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // gates the ordinary member-constraint pass. This publishes only retained
     // width rows and never opens that gate or evaluates incomplete members.
     c_parse_publish_deferred_bit_field_width_diagnostics(arena, &result, preprocess);
+    // The retained facts are final with the type tables (GitHub #4062).
+    c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result);
     result.analysis_complete = true;
     // The literal memo stays published: lowering reads the recorded bytes
     // and never records.

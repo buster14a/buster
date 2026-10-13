@@ -732,8 +732,11 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
-`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
+`C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
+Except under `-fsyntax-only`, the flag also retains semantic analysis's
+per-node facts for lowering
+([retained facts](frontend/ast.md#retained-facts)).
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -813,6 +816,25 @@ the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
 and `unsigned char` keep their specified behavior. The options apply to C
 frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
 pipelines reject them because their toolchains do not use Buster's C frontend.
+
+## Short wchar_t and x86-64 code models
+
+`-fshort-wchar` (#4052) sets `Target.short_wchar`, which makes
+`target_uses_16_bit_wchar` and `target_uses_unsigned_wchar` true on any
+native target, so `wchar_t` is `unsigned short`. The type layer, wide
+character and `L"..."` literals, `<stddef.h>` `wchar_t`, `__WCHAR_TYPE__`,
+`__SIZEOF_WCHAR_T__`, `__WCHAR_MAX__`, `__WCHAR_WIDTH__` and
+`__WCHAR_UNSIGNED__` all follow it. `wint_t` keeps the ABI's own width, as in
+GCC. External GPU pipelines reject the option.
+
+`-mcmodel=small` is the x86-64 default and a no-op. The backend emits only the
+small model (rip-relative or GOT-relative references; no kernel-model
+sign-extended absolute addressing, no large-model `movabs`), so
+`-mcmodel=kernel`, `medium` and `large` fail with
+`unsupported option: -mcmodel=<model> (the x86-64 backend implements only the
+small code model)` rather than aliasing small. Unknown values report
+`invalid value for -mcmodel`, and non-x86-64 or GPU targets report
+`unsupported option ... for this target`.
 
 ## C input phase selection
 

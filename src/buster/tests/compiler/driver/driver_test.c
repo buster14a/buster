@@ -16677,6 +16677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArgum
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_tls_cross_link(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     String8 clang = executable_resolve_in_path(temporary.arena, S8("clang"));
@@ -19419,6 +19420,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_constrai
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, output));
 #endif
+            c_test_scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_width_modifier(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_width_modifier.c");
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-asm-width-modifier"), S8(""));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"),
+                                     modes[mode], frontends[frontend], optimizations[optimization], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("Buster {S8} {S8} {S8}: {S8}"),
+                    modes[mode], frontends[frontend], optimizations[optimization], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, output), description);
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+
+    String8 compilers[] = {executable_resolve_in_path(arguments->arena, S8("gcc")),
+                           executable_resolve_in_path(arguments->arena, S8("clang"))};
+    String8 compiler_names[] = {S8("GCC"), S8("Clang")};
+    BUSTER_TEST(arguments, compilers[0].length != 0 && compilers[1].length != 0);
+    for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+    {
+        if (!compilers[compiler].length) continue;
+        for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("host-asm-width-modifier"), S8(""));
+            String8 command[] = {compilers[compiler], S8("-std=gnu17"), optimizations[optimization], path, S8("-o"), output};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0},
+                (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool compiled = spawned.handle &&
+                os_process_wait_deadline(temporary.arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
+            String8 description = string_format(temporary.arena, S8("{S8} {S8}: independent inline-asm width oracle"),
+                compiler_names[compiler], optimizations[optimization]);
+            BUSTER_TEST_RAW(arguments, compiled, description);
+            if (compiled)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, output), description);
+            }
             c_test_scratch_end(temporary);
         }
     }
@@ -36581,6 +36649,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_location_counter);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_inline_assembly_constraint_unions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_inline_assembly_width_modifier);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_machine_fallback);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_many_native_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scalar_argument_boundaries);
@@ -37303,6 +37372,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                              target_char_policy.target.cpu_arch == CPU_ARCH_AARCH64 &&
                              target_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED &&
                              target_data_layout(target_char_policy.target).plain_char_is_signed);
+    // #4052: -fshort-wchar reaches the target; -mcmodel=small is the x86-64
+    // default and the other models are refused by name.
+    String8 short_wchar_arguments[] = {S8("--target=x86_64-linux"), S8("-fshort-wchar"), S8("-mcmodel=small"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation short_wchar_invocation = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(short_wchar_arguments));
+    BUSTER_TEST(arguments, short_wchar_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                             short_wchar_invocation.target.short_wchar &&
+                             target_uses_16_bit_wchar(short_wchar_invocation.target) &&
+                             target_uses_unsigned_wchar(short_wchar_invocation.target));
+    String8 default_wchar_arguments[] = {S8("--target=x86_64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation default_wchar_invocation = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_wchar_arguments));
+    BUSTER_TEST(arguments, default_wchar_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                             !default_wchar_invocation.target.short_wchar &&
+                             !target_uses_16_bit_wchar(default_wchar_invocation.target));
+    String8 code_models[] = {S8("kernel"), S8("medium"), S8("large")};
+    for (u32 model = 0; model < BUSTER_ARRAY_LENGTH(code_models); model += 1)
+    {
+        String8 model_option = string_format(arguments->arena, S8("-mcmodel={S8}"), code_models[model]);
+        String8 model_arguments[] = {S8("--target=x86_64-linux"), model_option, S8("-c"), S8("source.c")};
+        CompilerDriverInvocation refused_model = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(model_arguments));
+        BUSTER_TEST(arguments, refused_model.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, refused_model.diagnostic,
+                           string_format(arguments->arena,
+                                         S8("unsupported option: -mcmodel={S8} (the x86-64 backend implements only the small code model)"),
+                                         code_models[model]));
+    }
+    String8 invalid_model_arguments[] = {S8("--target=x86_64-linux"), S8("-mcmodel=tiny"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation invalid_model = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_model_arguments));
+    BUSTER_STRING_TEST(arguments, invalid_model.diagnostic, S8("invalid value for -mcmodel: tiny"));
+    String8 aarch64_model_arguments[] = {S8("--target=aarch64-linux"), S8("-mcmodel=small"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation aarch64_model = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_model_arguments));
+    BUSTER_STRING_TEST(arguments, aarch64_model.diagnostic, S8("unsupported option: -mcmodel=small for this target"));
     String8 census_command[] = {S8("-fcodegen-fallback-census"), S8("source.c")};
     CompilerDriverInvocation census_enabled = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command));
     BUSTER_TEST(arguments, census_enabled.error == COMPILER_DRIVER_ERROR_NONE && census_enabled.record_codegen_fallbacks);

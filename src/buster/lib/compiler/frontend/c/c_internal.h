@@ -1600,6 +1600,16 @@ struct CTypeParseMachine
     // the tree does not cover), and `ast_type_statistics` the optional counts.
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
+    // The facts record analysis publishes into for lowering
+    // (CParserResult.ast_facts, GitHub #4062), or null. Written only at a
+    // typed region's end (c_ast_types_facts_begin and the completion run in
+    // c_parse_region_facts) and by a top-level query's answer inside one
+    // (c_ast_types_facts_answer).
+    CAstFacts* ast_facts;
+    // The mutation count a valid root query reached before
+    // c_type_parse_root_finish dropped its records (the records stay in
+    // place): the completion run reads it to undo a run that mutated a row.
+    u32 committed_mutation_count;
     // The body binder's statement plan (c_parse_statement_plan_build) reads
     // the same tree: `ast_statement_bodies` holds the `{` of every top-level
     // function definition, ascending, and its COMPOUND_STATEMENT node, built
@@ -1790,6 +1800,26 @@ BUSTER_C_EXTERN void c_ast_types_initializer_begin(CTypeParseMachine* machine, C
                                                    u32 start, u32 end);
 BUSTER_C_EXTERN void c_ast_types_initializer_end(CTypeParseMachine* machine);
 BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
+// Retained facts (GitHub #4062). At a typed region's end, before its scratch
+// goes: c_ast_types_facts_begin types a waiting initializer and publishes
+// every candidate the typer accepted, its binding and its bit-field width,
+// and returns the region; c_ast_types_facts_next then yields, in index order
+// (operands before their operators), each candidate still without a type and
+// its span, counting an unspanned one as a gap itself, so the caller can ask
+// the machine; c_ast_types_facts_record keeps such an answer.
+// c_ast_types_facts_answer keeps a top-level query's valid answer for the
+// candidate whose span it is, a string literal's in structural form
+// (c_ast_types_facts_string). c_ast_types_facts_finish settles the unit's
+// counts once analysis is done.
+BUSTER_C_EXTERN CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess);
+BUSTER_C_EXTERN bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out);
+BUSTER_C_EXTERN void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeId type, bool nonplace);
+// A string literal's fact in structural form from the array row the machine
+// answered for it (C_AST_FACT_STRING); false, and nothing kept, when the row
+// is not a string literal's or its element row is at or past `rows`.
+BUSTER_C_EXTERN bool c_ast_types_facts_string(CAstFacts* facts, CParseResult const* result, CAst const* ast, u32 node, CTypeId array, u32 rows);
+BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
+BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);
 // The machine state a tree answer leaves, as a valid machine answer with no
@@ -1834,12 +1864,6 @@ BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u3
 // Whether c_parse_pending_enum_member could answer a single identifier: an
 // enumerator list still being parsed.
 BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
-
-// The last token of the statement at `node` by the statement plan's anchor
-// rules (c_parse.c), or UINT32_MAX when no rule states it. `lasts` memoizes
-// answers per node - `begin`, zeroed by the caller; `limit` is the body's `}`.
-// Lowering's extent table (c_gen.c) reads the same rules.
-BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit);
 
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;
