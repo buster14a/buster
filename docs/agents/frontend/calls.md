@@ -656,7 +656,8 @@ incompatible-pointer error it was:
 - a rank change (`long *` to `unsigned long long *`, even where both are 64
   bits), `_Bool` and non-integer pointees;
 - enumerations: an `enum` pointee is outside the class, so `enum E *` converts
-  only to a pointer to the enumeration's compatible integer type, as before;
+  only to a pointer to the enumeration's target-dependent compatible integer
+  type, as before;
 - a lost qualifier (`const char *` to `unsigned char *`) and `_Atomic`
   pointees;
 - pointer/integer conversions and every other #1039 refusal.

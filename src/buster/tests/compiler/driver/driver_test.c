@@ -6099,7 +6099,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("void g(long *p) { unsigned long long *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("void g(const char *p) { unsigned char *q = p; (void)q; }\n"), false, false, S8("cannot convert from 'const char *' to 'unsigned char *'"), S8("-std=c17")},
         {S8("void g(_Bool *p) { unsigned char *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
-        {S8("enum E { X }; void g(enum E *p) { int *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("void g(int *p) { long long *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("void g(char (*p)[3]) { unsigned char (*q)[3] = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("void g(int *p) { float *q = p; (void)q; }\n"), false, false, S8("cannot convert from 'int *' to 'float *': incompatible pointer types"), S8("-std=c17")},
         {S8("struct S { char name[8]; int x; }; struct S s = { { \"abc\" }, 1 };\n"), true, false, {0}, S8("-std=c17")},
