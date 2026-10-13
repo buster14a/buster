@@ -1,8 +1,8 @@
 name: PowerShell autoload attribution
 
 # Temporary #3979 diagnostic. Branch-only; removed before the fix merges.
-# Attributes the ~23 s Windows PowerShell 5.1 command-discovery cost on hosted
-# Windows ARM64 against a windows-2025 control. Policy is observed only.
+# Same-runner before/after for importing the two system modules by name, and
+# the provisioned versus rebuilt module analysis caches for offline comparison.
 on:
   push:
     branches: ['claude/festive-fermi-i37ej5']
@@ -28,9 +28,11 @@ jobs:
             sample: arm-2
           - os: windows-2025
             sample: x64-control
-    name: discovery (${{ matrix.sample }})
+    name: fix (${{ matrix.sample }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      BUSTER_CI_PYTHON: python
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -53,105 +55,101 @@ jobs:
           source-directory: .
           source-repository: ${{ github.repository }}
 
-      # First PowerShell step in the job: the image's cache state is untouched.
-      - name: Trace first command discovery
-        shell: powershell
+      - name: Keep the provisioned analysis cache
+        shell: bash
         run: |
-          $Cache = $env:PSModuleAnalysisCachePath
-          if ([IO.File]::Exists($Cache)) { $Info = [IO.FileInfo]::new($Cache); [Console]::Out.WriteLine('IMAGE_CACHE bytes=' + $Info.Length + ' mtime=' + $Info.LastWriteTimeUtc.ToString('o')) } else { [Console]::Out.WriteLine('IMAGE_CACHE missing ' + $Cache) }
-          [Console]::Out.WriteLine('ARCH=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' LANGUAGE_MODE=' + $ExecutionContext.SessionState.LanguageMode)
-          try { [Console]::Out.WriteLine('SYSTEM_LOCKDOWN=' + [System.Management.Automation.Security.SystemPolicy]::GetSystemLockdownPolicy()) } catch { [Console]::Out.WriteLine('SYSTEM_LOCKDOWN_ERROR=' + $_.Exception.Message) }
-          $Trace = [IO.Path]::Combine($env:RUNNER_TEMP, 'discovery-trace.log')
-          $Watch = [Diagnostics.Stopwatch]::StartNew()
-          Microsoft.PowerShell.Utility\Trace-Command -Name CommandDiscovery, '*Module*' -Expression { $null = Write-Output probe } -FilePath $Trace -ListenerOption Timestamp
-          [Console]::Out.WriteLine('TRACED_WRITE_OUTPUT_MS=' + $Watch.ElapsedMilliseconds)
-          $Lines = [IO.File]::ReadAllLines($Trace)
-          [Console]::Out.WriteLine('TRACE_LINES=' + $Lines.Length)
-          $Frequency = [double][Diagnostics.Stopwatch]::Frequency
-          $Previous = $null
-          $Message = ''
-          $PreviousMessage = ''
-          $Gaps = [Collections.Generic.List[string]]::new()
-          foreach ($Line in $Lines) {
-            if ($Line -match '^\s+Timestamp=(\d+)') {
-              $Stamp = [long]$Matches[1]
-              if ($null -ne $Previous) { $Gaps.Add(('{0,10:F1} ms after: {1}' -f (($Stamp - $Previous) * 1000.0 / $Frequency), $PreviousMessage)) }
-              $Previous = $Stamp
-              $PreviousMessage = $Message
-            } elseif ($Line -notmatch '^\s') {
-              $Message = $Line
-            }
-          }
-          [Console]::Out.WriteLine('== largest gaps')
-          foreach ($Gap in ($Gaps | Microsoft.PowerShell.Utility\Sort-Object -Descending | Microsoft.PowerShell.Utility\Select-Object -First 40)) { [Console]::Out.WriteLine('GAP ' + $Gap) }
-          [Console]::Out.WriteLine('== distinct messages')
-          $Lines | Microsoft.PowerShell.Core\Where-Object { $_ -notmatch '^\s' } | ForEach-Object { ($_ -replace '[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}', 'GUID') -replace '\d+', 'N' } |
-            Microsoft.PowerShell.Utility\Group-Object | Microsoft.PowerShell.Utility\Sort-Object Count -Descending |
-            Microsoft.PowerShell.Utility\Select-Object -First 60 | ForEach-Object { [Console]::Out.WriteLine(('{0,6} {1}' -f $_.Count, $_.Name)) }
-          [Console]::Out.WriteLine('== first trace lines')
-          $Lines | Microsoft.PowerShell.Utility\Select-Object -First 120 | ForEach-Object { [Console]::Out.WriteLine($_) }
-          if ([IO.File]::Exists($Cache)) { $Info = [IO.FileInfo]::new($Cache); [Console]::Out.WriteLine('CACHE_AFTER_TRACE bytes=' + $Info.Length + ' mtime=' + $Info.LastWriteTimeUtc.ToString('o')) }
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/caches"
+          cache=$(cygpath -u "$PSModuleAnalysisCachePath")
+          stat -c 'PROVISIONED_CACHE bytes=%s mtime=%y' "$cache"
+          cp "$cache" "$RUNNER_TEMP/caches/provisioned.bin"
+          printf 'TIME_ZONE %s utc=%s local=%s\n' "$(MSYS_NO_PATHCONV=1 tzutil /g)" "$(date -u +%FT%T)" "$(date +%FT%T%z)"
+          for module in Microsoft.PowerShell.Management/Microsoft.PowerShell.Management.psd1 Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1; do
+            stat -c 'MODULE_FILE %n mtime=%y' "/c/Windows/System32/WindowsPowerShell/v1.0/Modules/$module"
+          done
 
-      - name: Policy state (observed only)
+      - name: Windows PowerShell step that imports first
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Continue'
-          [Console]::Out.WriteLine('PSLockdownPolicy=' + $env:__PSLockdownPolicy)
-          $Path = [IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psm1')
-          try {
-            $Watch = [Diagnostics.Stopwatch]::StartNew()
-            for ($Index = 0; $Index -lt 50; $Index += 1) { $Mode = [System.Management.Automation.Security.SystemPolicy]::GetLockdownPolicy($Path, $null) }
-            [Console]::Out.WriteLine('FILE_LOCKDOWN=' + $Mode + ' x50_ms=' + $Watch.ElapsedMilliseconds)
-          } catch { [Console]::Out.WriteLine('FILE_LOCKDOWN_ERROR=' + $_.Exception.Message) }
-          Get-ExecutionPolicy -List | Format-Table -AutoSize | Out-String -Width 200
-          Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -ErrorAction SilentlyContinue | Format-List | Out-String -Width 200
-          Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers' -ErrorAction SilentlyContinue | Format-List | Out-String -Width 200
-          Get-Service AppIDSvc -ErrorAction SilentlyContinue | Format-List Name, Status, StartType | Out-String
-          try { (Get-AppLockerPolicy -Effective -Xml) } catch { 'APPLOCKER_ERROR ' + $_.Exception.Message }
-          try { Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard | Format-List CodeIntegrityPolicyEnforcementStatus, UsermodeCodeIntegrityPolicyEnforcementStatus, SecurityServicesRunning, VirtualizationBasedSecurityStatus | Out-String } catch { 'DEVICEGUARD_ERROR ' + $_.Exception.Message }
-          $CiTool = [IO.Path]::Combine($env:SystemRoot, 'System32\CiTool.exe')
-          if ([IO.File]::Exists($CiTool)) { & $CiTool --list-policies 2>&1 | Select-Object -First 80 } else { 'CITOOL missing' }
-          foreach ($Root in $env:PSModulePath.Split(';')) {
-            if ($Root -and [IO.Directory]::Exists($Root)) {
-              $Files = [IO.Directory]::GetFiles($Root, '*', [IO.SearchOption]::AllDirectories)
-              $Script = @($Files | Where-Object { $_ -match '\.(psd1|psm1|ps1|ps1xml|cdxml)$' }).Count
-              [Console]::Out.WriteLine('MODULE_ROOT ' + $Root + ' modules=' + [IO.Directory]::GetDirectories($Root).Length + ' files=' + $Files.Length + ' script_files=' + $Script)
-            }
-          }
-
-      - name: Analysis-cache persistence across ARM64-native children
-        shell: powershell
-        run: |
-          $Child = [IO.Path]::Combine($env:RUNNER_TEMP, 'child.ps1')
-          [IO.File]::WriteAllText($Child, @'
+          $ErrorActionPreference = 'Stop'
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           $Watch = [Diagnostics.Stopwatch]::StartNew()
-          $null = Write-Output probe
-          $Elapsed = $Watch.ElapsedMilliseconds
-          if ($env:CHILD_LINGER_MS) { [Threading.Thread]::Sleep([int]$env:CHILD_LINGER_MS) }
-          [Console]::Out.WriteLine('stmt_ms=' + $Elapsed + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
-          '@)
-          function Show-Cache([string]$Label) {
-            $Path = $env:PSModuleAnalysisCachePath
-            if ([IO.File]::Exists($Path)) { $Info = [IO.FileInfo]::new($Path); [Console]::Out.WriteLine('CACHE ' + $Label + ' bytes=' + $Info.Length + ' mtime=' + $Info.LastWriteTimeUtc.ToString('o')) } else { [Console]::Out.WriteLine('CACHE ' + $Label + ' missing') }
+          $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          Write-Output ('IMPORTED_STEP cmdlets_ms=' + $Watch.ElapsedMilliseconds + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' time_zone=' + [TimeZoneInfo]::Local.Id)
+
+      - name: Bootstrap wrapper cases with and without the import
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set +e -u
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          process_owner_driver="$RUNNER_TEMP/buster-ci/bootstrap-wrapper-build.exe"
+          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -Wall -Werror \
+            -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -lws2_32 \
+            -o "$process_owner_driver"
+          "$process_owner_driver" bootstrap_process_owner_test > "$RUNNER_TEMP/buster-ci/owner.log" 2>&1
+          printf 'OWNER_TEST status=%s\n' "$?"
+          while IFS= read -r line; do
+            line=${line%$'\r'}
+            case "$line" in
+              'BOOTSTRAP_PROCESS_OWNER '*) export BUSTER_WINDOWS_PROCESS_TREE="${line#BOOTSTRAP_PROCESS_OWNER }" ;;
+            esac
+          done < "$RUNNER_TEMP/buster-ci/owner.log"
+          cases() {
+            local label=$1 start end status
+            start=$(date +%s%N)
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 > "$RUNNER_TEMP/buster-ci/cases-$label.log" 2>&1
+            status=$?
+            end=$(date +%s%N)
+            grep -o '"observed_elapsed_seconds": [0-9.]*' "$RUNNER_TEMP/buster-ci/cases-$label.log" | awk '{print $2}' | sort -n | tr '\n' ' '
+            printf '\nWRAPPER_CASES variant=%s status=%s wall_ms=%s\n' "$label" "$status" "$(( (end - start) / 1000000 ))"
+            if [[ $status != 0 ]]; then tail -60 "$RUNNER_TEMP/buster-ci/cases-$label.log"; fi
+            stat -c "CACHE_AFTER_$label bytes=%s mtime=%y" "$(cygpath -u "$PSModuleAnalysisCachePath")"
           }
-          function Invoke-Child([string]$Label, [string]$Linger) {
-            $env:CHILD_LINGER_MS = $Linger
-            $Watch = [Diagnostics.Stopwatch]::StartNew()
-            $Output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Child
-            [Console]::Out.WriteLine('RUN ' + $Label + ' linger_ms=' + $Linger + ' wall_ms=' + $Watch.ElapsedMilliseconds + ' ' + ($Output -join ' '))
-            Show-Cache $Label
-          }
-          Show-Cache 'machine-start'
-          Invoke-Child 'machine-1' '0'
-          Invoke-Child 'machine-2' '0'
-          Invoke-Child 'machine-3-linger' '25000'
-          Invoke-Child 'machine-4' '0'
-          Invoke-Child 'machine-5' '0'
-          $Fresh = [IO.Path]::Combine($env:RUNNER_TEMP, 'fresh-cache')
-          $null = [IO.Directory]::CreateDirectory($Fresh)
-          $env:PSModuleAnalysisCachePath = [IO.Path]::Combine($Fresh, 'ModuleAnalysisCache')
-          Show-Cache 'fresh-start'
-          Invoke-Child 'fresh-1' '0'
-          Invoke-Child 'fresh-2-linger' '25000'
-          Invoke-Child 'fresh-3' '0'
-          Invoke-Child 'fresh-4' '0'
+          # The import variant runs first: its launches never write the cache.
+          cases import
+          cp build.ps1 "$RUNNER_TEMP/build.ps1.import"
+          sed -i '/^Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility\r\?$/d' build.ps1
+          git diff --stat
+          cases no-import
+          cp "$RUNNER_TEMP/build.ps1.import" build.ps1
+          git diff --exit-code --stat
+          exit 0
+
+      - name: VS shell helper suite with the import
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set +e
+          start=$(date +%s%N)
+          "$BUSTER_CI_PYTHON" tools/ci_vs_dev_shell_test.py -v > "$RUNNER_TEMP/buster-ci/vs.log" 2>&1
+          status=$?
+          end=$(date +%s%N)
+          grep -E 'VS_PROBE_END|^Ran |^OK|^FAILED' "$RUNNER_TEMP/buster-ci/vs.log"
+          printf 'VS_SUITE status=%s wall_ms=%s\n' "$status" "$(( (end - start) / 1000000 ))"
+          if [[ $status != 0 ]]; then tail -80 "$RUNNER_TEMP/buster-ci/vs.log"; fi
+          exit 0
+
+      - name: Rebuild the analysis cache with a lingering process
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
+          $Child = Join-Path $env:RUNNER_TEMP 'linger.ps1'
+          Set-Content -LiteralPath $Child -Value '$null = Get-Command -Name Buster-NoSuchCommand -ErrorAction SilentlyContinue; [Threading.Thread]::Sleep(25000)'
+          $Watch = [Diagnostics.Stopwatch]::StartNew()
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Child
+          Write-Output ('LINGER_MS=' + $Watch.ElapsedMilliseconds)
+          Copy-Item -LiteralPath $env:PSModuleAnalysisCachePath -Destination (Join-Path $env:RUNNER_TEMP 'caches\rebuilt.bin')
+          Get-Item -LiteralPath $env:PSModuleAnalysisCachePath | Format-List Length, LastWriteTimeUtc | Out-String
+
+      - name: Retain caches
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: analysis-caches-${{ matrix.sample }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/caches/
+            ${{ runner.temp }}/buster-ci/
+          if-no-files-found: ignore
