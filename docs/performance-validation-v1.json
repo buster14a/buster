@@ -221,6 +221,19 @@
       }
     },
     {
+      "id": "tool:benchmark_frontend_scaling.py@frontend-nesting",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#2676 fixed frontend-nesting-v1 on an owner request line: the base revision's tool compares the baseline and candidate binaries on --suite nesting (eleven families of control statements nested 2000, 8000 and 32000 levels deep, 68 syntax/object cells), one warmup and eleven pinned repetitions each, with byte-identical objects required; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-nesting-v1",
+        "request": "one exact fresh line, profile: frontend-nesting-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
       "id": "tool:selection_benchmark.py",
       "kind": "tool",
       "validation": "performance",
