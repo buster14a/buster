@@ -54,8 +54,8 @@
 // only the cohort's native family and releases a parked gang (lane_release)
 // before preparing another one; compiler_parallel_prewarm prepares both.
 // compiler_driver_unit_worker_limit clamps the request and applies the
-// minimum-work gate (COMPILER_DRIVER_LANE_MIN_WORK_BYTES): a population too
-// small to repay that preparation stays serial.
+// lane gate: a population below COMPILER_DRIVER_LANE_MIN_WORK_BYTES stays serial,
+// and COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES caps the worker count.
 // Dependency output follows successful C object or bounded -Wp assembly
 // publication: the preprocessor contributes identity-deduplicated prerequisites
 // and this driver renders their Makefile after the artifact writer succeeds.
@@ -289,6 +289,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_warning_group_find(String8 name)
         {S8_INITIALIZER("endif-labels"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS)},
         {S8_INITIALIZER("gnu-designator"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
         {S8_INITIALIZER("gnu"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
+        {S8_INITIALIZER("pointer-sign"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN)},
         {S8_INITIALIZER("everything"), COMPILER_DRIVER_WARNING_GROUP_MASK_ALL},
     };
     u32 result = 0;
@@ -308,6 +309,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_group_name(CompilerDriverWar
         [COMPILER_DRIVER_WARNING_GROUP_CPP] = S8_INITIALIZER("cpp"),
         [COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] = S8_INITIALIZER("extra-tokens"),
         [COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR] = S8_INITIALIZER("gnu-designator"),
+        [COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN] = S8_INITIALIZER("pointer-sign"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_WARNING_GROUP_COUNT);
     return (u32)group < (u32)BUSTER_ARRAY_LENGTH(names) ? names[group] : S8("");
@@ -329,6 +331,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_of_
         break;
     case C_DIAGNOSTIC_OBSOLETE_DESIGNATOR:
         result = COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR;
+        break;
+    case C_DIAGNOSTIC_POINTER_SIGN:
+        result = COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN;
         break;
     default:
         break;
@@ -2196,6 +2201,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     bool x86_execution_mode_seen = false;
     bool x86_regparm_seen = false;
     bool x86_preferred_stack_boundary_seen = false;
+    String8 code_model_value = {0};
+    bool code_model_seen = false;
+    bool short_wchar_requested = false;
     bool options_ended = false;
     bool action_seen = false;
     // Whether the code model in force came from -fPIE/-fpie, which is what
@@ -2910,7 +2918,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-fcanonical-intern-constants")) || string_equal(argument, S8("-fno-canonical-intern-constants")))
         {
-            invocation.intern_block_constants = string_equal(argument, S8("-fcanonical-intern-constants"));
+            invocation.disable_block_constant_interning = string_equal(argument, S8("-fno-canonical-intern-constants"));
             continue;
         }
         if (string_equal(argument, S8("-fcanonical-construction-fold")) || string_equal(argument, S8("-fno-canonical-construction-fold")))
@@ -3180,6 +3188,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             x86_regparm_seen = true;
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-mcmodel=")))
+        {
+            code_model_value = string_slice(argument, S8("-mcmodel=").length, argument.length);
+            code_model_seen = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fshort-wchar")))
+        {
+            short_wchar_requested = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-mpreferred-stack-boundary=")))
         {
             x86_preferred_stack_boundary_value =
@@ -3431,7 +3450,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             // translation units that run before thread-local storage exists,
             // where the canary's own load would fault; accepting the flag lets
             // one flag set drive this compiler and the reference one.
-            string_equal(argument, S8("-fno-stack-protector"));
+            string_equal(argument, S8("-fno-stack-protector")) ||
+            // Presentation-only options (#4041). No diagnostic here is colored,
+            // and doc-comment commands only affect Clang's -Wdocumentation, so
+            // both are accepted and ignored for build-system probes.
+            string_equal(argument, S8("-fcolor-diagnostics")) || string_equal(argument, S8("-fno-color-diagnostics")) ||
+            (string_starts_with_sequence(argument, S8("-fcomment-block-commands=")) && argument.length > 25);
         if (warning_option)
         {
             compiler_driver_warning_policy_apply(&invocation.warning_policy, argument);
@@ -3597,6 +3621,41 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
         }
     }
+    // The x86-64 backend emits only the small code model: every symbol
+    // reference is rip-relative or GOT-relative, and the object writer has no
+    // large-code-model (movabs/GOTOFF64) or kernel-model (sign-extended
+    // 32-bit absolute, top 2 GiB) addressing. small is the default, so it is
+    // a no-op; the rest are named and refused rather than aliased to small.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && code_model_seen)
+    {
+        bool known_model = string_equal(code_model_value, S8("small")) || string_equal(code_model_value, S8("kernel")) ||
+                           string_equal(code_model_value, S8("medium")) || string_equal(code_model_value, S8("large"));
+        if (invocation.has_gpu_target || invocation.target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mcmodel={S8} for this target"), code_model_value);
+        }
+        else if (!known_model)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mcmodel: {S8}"), code_model_value);
+        }
+        else if (!string_equal(code_model_value, S8("small")))
+        {
+            compiler_driver_argument_error(arena, &invocation,
+                                           S8("unsupported option: -mcmodel={S8} (the x86-64 backend implements only the small code model)"),
+                                           code_model_value);
+        }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && short_wchar_requested)
+    {
+        if (invocation.has_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-fshort-wchar"));
+        }
+        else
+        {
+            invocation.target.short_wchar = true;
+        }
+    }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.no_asynchronous_unwind_tables &&
         invocation.target.cpu_arch != CPU_ARCH_I386)
     {
@@ -3690,6 +3749,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 invocation.input_paths[input_index] = resolved;
             }
         }
+    }
+    // GCC ignores linker arguments when nothing is linked and Clang warns and
+    // ignores them, so -c/-S/-E/-fsyntax-only probes drop them (#4041). A
+    // leading --version stays so the linker query keeps rejecting it.
+    if (invocation.action != COMPILER_DRIVER_ACTION_LINK && invocation.linker_argument_count && invocation.linker_arguments &&
+        !string_equal(invocation.linker_arguments[0], S8("--version")))
+    {
+        invocation.linker_argument_count = 0;
     }
     compiler_driver_validate_linker_query(&invocation);
     compiler_driver_consume_linker_as_needed(&invocation);
@@ -7445,6 +7512,30 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
     return layout;
 }
 
+// Adds one unit's fact counts (GitHub #4062) to the invocation's, as the
+// other -v rows sum theirs over the inputs.
+BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* total, CAstFactStatistics unit)
+{
+    total->nodes += unit.nodes;
+    total->regions += unit.regions;
+    total->candidates += unit.candidates;
+    total->tree += unit.tree;
+    total->machine += unit.machine;
+    total->completed += unit.completed;
+    total->bound += unit.bound;
+    total->bit_fields += unit.bit_fields;
+    total->strings += unit.strings;
+    for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+    {
+        total->gaps[gap] += unit.gaps[gap];
+    }
+    total->uncovered += unit.uncovered;
+    total->outside += unit.outside;
+    total->stale += unit.stale;
+    total->completion_queries += unit.completion_queries;
+    total->retained_bytes += unit.retained_bytes;
+}
+
 // The -fc-ast-pilot hook (GitHub #3102): builds the syntax tree of one
 // preprocessed unit. Its columns live in private arenas that the unit's end
 // label releases (c_ast_release); its storage record lives in the unit's
@@ -8566,6 +8657,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // preprocessing result by index, so the end label releases its column
     // arenas first.
     CAst pilot_tree = {0};
+    // The semantic facts the pilot retains for lowering (GitHub #4062), over
+    // the same tree; released right after lowering, and again, idempotently,
+    // at the end label.
+    CAstFacts pilot_facts = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -8726,6 +8821,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_statement_statistics = &result.c_ast.statements;
         syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
+        // Nothing lowers a -fsyntax-only unit, so it retains no facts.
+        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY && c_ast_facts_create(&pilot_facts, &pilot_tree))
+        {
+            syntax.ast_facts = &pilot_facts;
+        }
     }
     // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
     // not decoded (CParserResult.string_literal_lengths_only).
@@ -8744,13 +8844,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
         result.analysis_diagnostic_count = semantic.diagnostic_count;
-        if (semantic.diagnostic_count || !semantic.analysis_complete)
+        u64 promoted_analysis_warnings = 0;
+        String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.warnings,
+                                                                                 semantic.warning_count, invocation.input_paths[0],
+                                                                                 (String8){0}, &promoted_analysis_warnings);
+        result.analysis_warning_count = (u32)(semantic.warning_count - promoted_analysis_warnings);
+        if (semantic.diagnostic_count || !semantic.analysis_complete || promoted_analysis_warnings)
         {
             result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
             if (semantic.diagnostic_count)
             {
                 result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.diagnostics,
                                                                           semantic.diagnostic_count, invocation.input_paths[0], (String8){0}, 0);
+            }
+            else if (promoted_analysis_warnings)
+            {
+                result.diagnostic = promoted_analysis_error;
             }
             else
             {
@@ -8761,7 +8870,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                    .intern_block_constants = invocation.intern_block_constants,
+                                                                    .disable_block_constant_interning = invocation.disable_block_constant_interning,
                                                                     .construction_fold = invocation.construction_fold,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
                                                                     // A GPU target has no symbol visibility to restrict.
@@ -8775,8 +8884,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     // releases the unit's tree itself.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = &result.c_ast.lower,
-                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0,
+                                                                    .syntax_facts = syntax.ast_facts});
+    // Lowering was the facts' last reader.
+    if (syntax.ast_facts)
+    {
+        compiler_driver_c_ast_facts_add(&result.c_ast.facts, pilot_facts.statistics);
+        c_ast_facts_release(&pilot_facts);
+    }
     result.analysis_diagnostic_count = lowered.diagnostic_count;
+    // Semantic warnings (-Wpointer-sign) publish ahead of any error; one that
+    // -Werror promotes fails the unit as an analysis error.
+    u64 promoted_analysis_warnings = 0;
+    String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.warnings,
+                                                                             lowered.warning_count, invocation.input_paths[0],
+                                                                             (String8){0}, &promoted_analysis_warnings);
+    result.analysis_warning_count = (u32)(lowered.warning_count - promoted_analysis_warnings);
     result.direct_ssa = lowered.direct_ssa;
     result.constant_interning = lowered.constant_interning;
     result.construction_folds = lowered.construction_folds;
@@ -8793,6 +8916,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         {
             result.diagnostic = string_format(arena, S8("{S8}: C analysis or lowering did not publish a complete program"), invocation.input_paths[0]);
         }
+        goto end;
+    }
+    if (promoted_analysis_warnings)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
+        result.diagnostic = promoted_analysis_error;
         goto end;
     }
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_IR);
@@ -8931,10 +9060,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         investigation_digest(bytes, investigation->input_sha256);
         compiler_driver_investigation_tokens(investigation, preprocess);
         TargetCpuFeatures features = target_cpu_features_effective(invocation.target);
-        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32}"),
+        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32} wchar={u32}"),
                                               (u32)invocation.target.cpu_arch, (u32)invocation.target.cpu_model, (u32)invocation.target.os,
                                               invocation.target.os_version_major, invocation.target.os_version_minor, invocation.target.os_version_patch,
-                                              (u32)invocation.target.plain_char_policy);
+                                              (u32)invocation.target.plain_char_policy, (u32)invocation.target.short_wchar);
         for (u32 word = 0; word < TARGET_CPU_FEATURE_WORD_COUNT; word += 1)
         {
             investigation->target = string_format(arena, S8("{S8} features{u32}={u64:x}"), investigation->target, word, features.words[word]);
@@ -9155,6 +9284,7 @@ end:
     {
         compiler_driver_detach_object(arena, &preprocess, &result.object);
     }
+    c_ast_facts_release(&pilot_facts);
     c_ast_release(&pilot_tree);
     c_preprocess_release(&preprocess);
     file_map_unmap(source_file);
@@ -9657,6 +9787,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 compiler_driver_unit_arena_fail
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_lane_work_overridden;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 compiler_driver_lane_min_work_override;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 compiler_driver_lane_input_work_override;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 compiler_driver_lane_worker_work_override;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_setup_order_armed;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CompilerDriverTestSetupOrder compiler_driver_setup_order;
 
@@ -9714,11 +9845,12 @@ void compiler_driver_test_set_function_limit(u32 limit)
     compiler_driver_function_limit_override = limit;
 }
 
-void compiler_driver_test_set_lane_work(u64 minimum_bytes, u64 per_input_bytes)
+void compiler_driver_test_set_lane_work(u64 minimum_bytes, u64 per_input_bytes, u64 per_worker_bytes)
 {
     compiler_driver_lane_work_overridden = true;
     compiler_driver_lane_min_work_override = minimum_bytes;
     compiler_driver_lane_input_work_override = per_input_bytes;
+    compiler_driver_lane_worker_work_override = per_worker_bytes;
 }
 
 void compiler_driver_test_restore_lane_work(void)
@@ -9726,6 +9858,7 @@ void compiler_driver_test_restore_lane_work(void)
     compiler_driver_lane_work_overridden = false;
     compiler_driver_lane_min_work_override = 0;
     compiler_driver_lane_input_work_override = 0;
+    compiler_driver_lane_worker_work_override = 0;
 }
 
 void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal)
@@ -9951,36 +10084,48 @@ BUSTER_GLOBAL_LOCAL CompilerDriverUnitWorkers compiler_driver_unit_worker_limit(
     }
     if (result.limit > 1)
     {
-        // The minimum-work gate (#53). compiler_driver_native_family_prepare
-        // runs once per invocation, so the population is every eligible input. Inputs are
-        // stat'ed only until the work is known to repay it; a missing or
-        // unreadable input counts no bytes and still fails in input order.
+        // The lane gate (#53). compiler_driver_native_family_prepare runs once
+        // per invocation, so the population is every eligible input. Inputs are
+        // stat'ed only until the work is known to repay the entry cost and to
+        // keep every requested worker busy; a missing or unreadable input
+        // counts no bytes and still fails in input order.
         u64 minimum = COMPILER_DRIVER_LANE_MIN_WORK_BYTES;
         u64 per_input = COMPILER_DRIVER_LANE_INPUT_WORK_BYTES;
+        u64 per_worker = COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES;
 #if BUSTER_INCLUDE_TESTS
         minimum = compiler_driver_lane_work_overridden ? compiler_driver_lane_min_work_override : minimum;
         per_input = compiler_driver_lane_work_overridden ? compiler_driver_lane_input_work_override : per_input;
+        per_worker = compiler_driver_lane_work_overridden ? compiler_driver_lane_worker_work_override : per_worker;
 #endif
+        u64 full_width = per_worker > UINT64_MAX / result.limit ? UINT64_MAX : per_worker * result.limit;
+        u64 enough = BUSTER_MAX(minimum, full_width);
         u64 work = 0;
         u32 eligible = 0;
-        for (u32 input_index = 0; input_index < invocation.input_count && (eligible < 2 || work < minimum); input_index += 1)
+        for (u32 input_index = 0; input_index < invocation.input_count && (eligible < 2 || work < enough); input_index += 1)
         {
             if (compiler_driver_parallel_c_input(invocation, input_index))
             {
                 eligible += 1;
                 work += per_input;
-                if (work < minimum)
+                if (work < enough)
                 {
                     FileStats stats = os_path_followed_stats(invocation.input_paths[input_index]);
                     work += stats.valid && stats.kind == OS_FILE_KIND_REGULAR ? stats.size : 0;
                 }
             }
         }
-        result.gate = eligible < 2       ? COMPILER_DRIVER_LANE_GATE_NONE
-                      : work < minimum ? COMPILER_DRIVER_LANE_GATE_SERIAL
-                                       : COMPILER_DRIVER_LANE_GATE_LANES;
+        // The cap never removes lanes outright: the measured serial minimum
+        // decides that, and two workers already gained on the smallest
+        // measured population.
+        u64 affordable = per_worker ? BUSTER_MAX(work / per_worker, (u64)2) : (u64)result.limit;
+        result.gate = eligible < 2                ? COMPILER_DRIVER_LANE_GATE_NONE
+                      : work < minimum          ? COMPILER_DRIVER_LANE_GATE_SERIAL
+                      : affordable < result.limit ? COMPILER_DRIVER_LANE_GATE_CAPPED
+                                                : COMPILER_DRIVER_LANE_GATE_LANES;
         // One worker is exactly the -fcompile-jobs=1 path: no prewarm, no gang.
-        result.limit = result.gate == COMPILER_DRIVER_LANE_GATE_SERIAL ? 1 : result.limit;
+        result.limit = result.gate == COMPILER_DRIVER_LANE_GATE_SERIAL ? 1
+                       : result.gate == COMPILER_DRIVER_LANE_GATE_CAPPED ? (u32)affordable
+                                                                        : result.limit;
     }
 #else
     BUSTER_UNUSED(invocation);
@@ -10970,6 +11115,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         result.tokenizer_error_count += unit.tokenizer_error_count;
         result.tokenizer_warning_count += unit.tokenizer_warning_count;
+        result.analysis_warning_count += unit.analysis_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;
         result.analysis_diagnostic_count += unit.analysis_diagnostic_count;
         // Each unit dedups its own include closure, so across several inputs
@@ -11055,6 +11201,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
         result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
+        compiler_driver_c_ast_facts_add(&result.c_ast.facts, unit.c_ast.facts);
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;
         for (u32 reason = 0; reason < C_AST_STATEMENT_FALLBACK_COUNT; reason += 1)
@@ -11185,6 +11332,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.inlining.recursion_skips += unit.inlining.recursion_skips;
         result.inlining.visits += unit.inlining.visits;
         result.inlining.released_bytes += unit.inlining.released_bytes;
+        result.inlining.splice_proofs += unit.inlining.splice_proofs;
+        result.inlining.splice_fallbacks += unit.inlining.splice_fallbacks;
+        result.inlining.reused_proofs += unit.inlining.reused_proofs;
         if (result.inlining.required_budget_reason == IR_INLINE_BUDGET_NONE &&
             unit.inlining.required_budget_reason != IR_INLINE_BUDGET_NONE)
         {
@@ -11678,6 +11828,7 @@ String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation co
         [COMPILER_DRIVER_LANE_GATE_NONE] = S8_INITIALIZER("none"),
         [COMPILER_DRIVER_LANE_GATE_LANES] = S8_INITIALIZER("lanes"),
         [COMPILER_DRIVER_LANE_GATE_SERIAL] = S8_INITIALIZER("serial"),
+        [COMPILER_DRIVER_LANE_GATE_CAPPED] = S8_INITIALIZER("capped"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(action_names) == COMPILER_DRIVER_ACTION_COUNT);
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(lane_gate_names) == COMPILER_DRIVER_LANE_GATE_COUNT);

@@ -288,6 +288,11 @@ typedef enum CDiagnosticKind
     // GNU's obsolete `member: value` field designator in a strict ISO dialect;
     // it is accepted as `.member = value` with this warning.
     C_DIAGNOSTIC_OBSOLETE_DESIGNATOR,
+    // An implicit pointer conversion whose pointees are integer types of one
+    // rank that differ only in signedness (plain char counting as either):
+    // GCC/Clang -Wpointer-sign. Semantic analysis publishes it as a warning
+    // in CParseResult.warnings; every other pointee mismatch stays an error.
+    C_DIAGNOSTIC_POINTER_SIGN,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -971,6 +976,8 @@ struct CArrayBound
     // Bounds made while parsing a parameter (nested prototypes included).
     // Definition parameters receive the additional signature-scope check.
     bool is_parameter_declarator;
+    // Captured before later tag or array completion can erase the constraint.
+    bool has_invalid_element_type;
 };
 
 typedef struct CType CType;
@@ -1699,6 +1706,102 @@ struct CAstLowerStatistics
     u64 span_bytes;
 };
 
+// The semantic facts semantic analysis retains for lowering (GitHub #4062,
+// step 1 of #3102's 2026-10-13 direction; contract in
+// docs/agents/frontend/ast.md § Storage and lifetime). Each column is indexed
+// by node, so no node id or AST pointer travels further than lowering's own
+// reads: canonical IR never sees one. The tree typer (c_ast_types.c)
+// publishes the nodes it accepts; the type machine's answers fill the nodes it
+// declines. A node is a fact candidate when it is an expression node
+// (identifier through comma, braced lists and _Generic associations aside) of
+// a typed region: a function body or a file-scope object's initializer.
+#define C_AST_FACT_NONE UINT32_MAX
+
+typedef enum CAstFactFlag
+{
+    // The node is a fact candidate.
+    C_AST_FACT_EXPRESSION = 1u << 0,
+    // `types` holds the node's C type row (CTypeId value).
+    C_AST_FACT_TYPED = 1u << 1,
+    // The type is the type machine's answer, not the tree typer's rule.
+    C_AST_FACT_MACHINE = 1u << 2,
+    // The machine's nonplace-projection fact (`__real__`/`__imag__` of a real
+    // operand).
+    C_AST_FACT_NONPLACE = 1u << 3,
+    // An IDENTIFIER: `payloads` holds the entity it names.
+    C_AST_FACT_BOUND = 1u << 4,
+    // A MEMBER or MEMBER_ARROW of a bit-field: `payloads` holds its width.
+    C_AST_FACT_BIT_FIELD = 1u << 5,
+    // A STRING: the literal's array type in structural form, `types` holding
+    // its element row and `payloads` its length with the terminator. No array
+    // row is kept for it: unless a validator's query already minted one,
+    // minting it would give lowering an IR type of its own and change -g.
+    C_AST_FACT_STRING = 1u << 6,
+} CAstFactFlag;
+
+// Why a fact candidate has no type.
+typedef enum CAstFactGap
+{
+    // The span rules give the node no token range.
+    C_AST_FACT_GAP_UNSPANNED,
+    // The machine types its range to nothing (`__func__`, an unbound
+    // `__builtin_expect(...)`, a void-typed failure).
+    C_AST_FACT_GAP_INVALID,
+    // The machine's answer is a type row its own run appended (an appended
+    // row would get an IR type and change -g), or the run mutated a row or
+    // raised a diagnostic; the run is rolled back.
+    C_AST_FACT_GAP_APPENDS,
+    // The machine had failed or had no capacity left.
+    C_AST_FACT_GAP_BUSY,
+    C_AST_FACT_GAP_COUNT,
+} CAstFactGap;
+
+// What publication did over one analysis. `regions` are the typed bodies and
+// initializers; `candidates` their fact candidates, of which `tree` were
+// published from the typer, `machine` from a query the validators made, and
+// `completed` from the completion run (a string literal in structural form
+// counts as typed, in `strings` too); `gaps` counts the rest by reason.
+// `uncovered` counts expression nodes inside a function definition that no
+// typed region covered, and `outside` those at file scope outside any
+// initializer region (array bounds, enumerators, attributes). `stale` counts
+// published rows a rollback left past the type table. `retained_bytes` is the
+// committed size of the facts' arena.
+typedef struct CAstFactStatistics CAstFactStatistics;
+struct CAstFactStatistics
+{
+    u64 nodes;
+    u64 regions;
+    u64 candidates;
+    u64 tree;
+    u64 machine;
+    u64 completed;
+    u64 bound;
+    u64 bit_fields;
+    u64 strings;
+    u64 gaps[C_AST_FACT_GAP_COUNT];
+    u64 uncovered;
+    u64 outside;
+    u64 stale;
+    u64 completion_queries;
+    u64 retained_bytes;
+};
+
+// The retained columns: `types` (a CTypeId value or C_AST_FACT_NONE),
+// `payloads` (an entity id or a bit-field width, per flag, else
+// C_AST_FACT_NONE) and `flags` (CAstFactFlag), each `node_count` long. They
+// are the only allocations in `arena`, which the facts own: c_ast_facts_create
+// reserves it, c_ast_facts_release retires it once lowering is done.
+typedef struct CAstFacts CAstFacts;
+struct CAstFacts
+{
+    Arena* arena;
+    u32* types;
+    u32* payloads;
+    u8* flags;
+    u32 node_count;
+    CAstFactStatistics statistics;
+};
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1726,6 +1829,10 @@ struct CParserResult
     // Optional: receives the declaration specifier read's counts, added to
     // what it already holds. The read runs whenever `ast` is set.
     CAstSpecifierStatistics* ast_specifier_statistics;
+    // Optional, with `ast`: the facts record semantic analysis publishes into
+    // (c_ast_facts_create over the same tree). It must outlive lowering, which
+    // reads it through CIRLowerOptions.syntax_facts.
+    CAstFacts* ast_facts;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -2096,6 +2203,12 @@ struct CParseResult
     u32* declarations_by_entity_offsets;
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
+    // Warning-severity findings of semantic analysis (C_DIAGNOSTIC_POINTER_SIGN
+    // today). They never fail analysis: the driver applies the -W policy to
+    // them. warning_tokens holds each warning's source token, so a conversion
+    // checked more than once is reported once.
+    CDiagnostic* warnings;
+    u32* warning_tokens;
     CDeferredStaticAssert* deferred_static_asserts;
     // One CStaticAssertVerdict per deferred row, written after parsing by
     // c_parse_validate_deferred_assertions; null when validation did not run
@@ -2127,6 +2240,8 @@ struct CParseResult
     u32 scope_count;
     u32 identifier_use_count;
     u32 diagnostic_count;
+    u32 warning_count;
+    u32 warning_capacity;
     u32 deferred_static_assert_count;
     u32 deferred_bit_field_width_diagnostic_count;
     u32 declaration_capacity;
@@ -2197,10 +2312,11 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
-    // -fcanonical-intern-constants (#3011): reuse an integer constant already
-    // built earlier in the current block instead of building another row.
-    // Opt-in construction-time arm of the CSE census; off emits as before.
-    bool intern_block_constants;
+    // -fno-canonical-intern-constants (#3011): by default an integer constant
+    // already built earlier in the current block is reused instead of building
+    // another row (measured on Zen 5: -0.7% wall, -1.8% peak RSS on the
+    // self-host compile). Set to build every constant row afresh.
+    bool disable_block_constant_interning;
     // -fcanonical-construction-fold (#3010): when c_ir_emit_cast or
     // c_ir_truth_value receives a committed single-limb integer constant,
     // build the constant FAST's fold rule gives instead of the CAST or BINARY
@@ -2235,6 +2351,10 @@ struct CIRLowerOptions
     CAstLowerStatistics* ast_lower_statistics;
     // Optional: receives the extent table's counts, added to what it holds.
     CAstExtentStatistics* syntax_tree_extent_statistics;
+    // The facts semantic analysis published over `syntax_tree`
+    // (CParserResult.ast_facts), or null. Step 1 of #3102's lowering plan
+    // retains them; no lowering consumer reads them yet.
+    CAstFacts const* syntax_facts;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -2286,6 +2406,10 @@ struct CIRLowerResult
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
+    // Semantic analysis's warnings (CParseResult.warnings), published whether
+    // or not lowering ran.
+    u32 warning_count;
+    CDiagnostic* warnings;
     // Published only after the C lowerer finishes every function and global
     // through its typed builders without a rejected row. Every row passed the
     // block-row commit protocol and every function its finalization
@@ -2463,6 +2587,15 @@ BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason
 BUSTER_F_DECL String8 c_ast_specifier_fallback_name(CAstSpecifierFallback reason);
 // The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
 BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
+// The CAstFactGap in lower case without its prefix ("unspanned", "invalid", ...).
+BUSTER_F_DECL String8 c_ast_fact_gap_name(CAstFactGap gap);
+// Reserves and clears the fact columns for every node of `ast` in a private
+// arena. False, with nothing reserved, when the reservation fails or the tree
+// is empty. The facts must be released on the thread that created them.
+BUSTER_F_DECL bool c_ast_facts_create(CAstFacts* facts, CAst const* ast);
+// Retires the facts' arena and clears the columns; the statistics stay.
+// Idempotent.
+BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

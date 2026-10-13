@@ -198,7 +198,7 @@ bool target_uses_llp64_data_model(Target target)
 
 bool target_uses_16_bit_wchar(Target target)
 {
-    return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI;
+    return target.short_wchar || target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI;
 }
 
 // Keep predefines, character literals, and string element types on the same

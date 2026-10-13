@@ -99,6 +99,9 @@ BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
 BUSTER_F_DECL u64 c_test_ir_first_token_typedef_probes(void);
 // Blocks the direct SSA finish-time read walk has stepped to on this thread.
 BUSTER_F_DECL u64 c_test_ir_ssa_forward_steps(void);
+// Block rows indexed by the optional loop-exit shortcut on this thread.
+BUSTER_F_DECL u64 c_test_ir_ssa_loop_exit_blocks(void);
+BUSTER_F_DECL bool c_test_ir_ssa_loop_exits_refusal(void);
 // Loops c_ir_ssa_finish_loops has visited on its edge walks on this thread
 // (#2676): a nest of labels or gotos must cost a bounded number per edge.
 BUSTER_F_DECL u64 c_test_ir_ssa_loop_edge_steps(void);

@@ -33,6 +33,7 @@ import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
 import ast_pilot_acceptance  # noqa: E402
 import constant_reuse_acceptance  # noqa: E402
+import process_floor_acceptance  # noqa: E402
 import throughput_real_source  # noqa: E402
 import selfhost_inline_compare  # noqa: E402
 
@@ -2217,6 +2218,199 @@ class MachineRecordRequiredTest(unittest.TestCase):
         self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
 
 
+class SealingRequiredTest(unittest.TestCase):
+    """Recovery waives sealed raw evidence only for a producer revision that never sealed (#2918)."""
+
+    REVISION = "7" * 40
+    PRODUCER = Path(__file__).resolve().with_name("compiler_compare.py")
+
+    def required(self, answer: object, revision: str = REVISION) -> tuple[bool, list[str]]:
+        paths: list[str] = []
+
+        class Contents:
+            def request(self, path: str, data: dict | None = None) -> object:
+                paths.append(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return compiler_publish.sealing_required(Contents(), revision), paths
+
+    def test_the_current_producer_seals_and_only_a_readable_legacy_one_waives_it(self) -> None:
+        text = self.PRODUCER.read_text(encoding="utf-8")
+        self.assertIn(compiler_publish.SEALING_PRODUCER_MARKER.decode(), text)
+        self.assertEqual(self.required(contents_record(text))[0], True)
+        legacy = text.replace(compiler_publish.SEALING_PRODUCER_MARKER.decode(), "def unsealed(")
+        required, paths = self.required(contents_record(legacy))
+        self.assertEqual(required, False)
+        self.assertEqual(urllib.parse.urlsplit(paths[0]).path, "/contents/tools/bench_direct/compiler_compare.py")
+        for label, answer in (("absent file", urllib.error.HTTPError("u", 404, "absent", {}, None)),
+                              ("server error", urllib.error.HTTPError("u", 502, "bad gateway", {}, None)),
+                              ("network", OSError("reset")), ("malformed record", {"type": "dir"})):
+            with self.subTest(label=label):
+                self.assertEqual(self.required(answer)[0], True)
+        self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
+
+    def test_a_required_seal_missing_from_a_measured_attempt_is_a_refusal(self) -> None:
+        unsealed = compiler_publish.verify_evidence_bundle({}, {}, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        self.assertEqual(unsealed, {"state": "unsealed"})
+        self.assertEqual(compiler_publish.evidence_bundle_note(unsealed), "")
+        self.assertIn("is required on this route", compiler_publish.evidence_bundle_problems({}, unsealed)[0])
+        legacy = compiler_publish.verify_evidence_bundle({}, {}, compiler_receipt.THROUGHPUT_PROFILE, "1", required=False)
+        self.assertEqual((legacy, compiler_publish.evidence_bundle_problems({}, legacy)), ({"state": "legacy-unsealed"}, []))
+
+
+def raw_lab(directory: Path, pairs: int = 10) -> dict[str, bytes]:
+    """A raw compiler-compare-v1 lab and its summary from the trusted uarch_lab statistics, as `lab/` members."""
+    from sampling_qualification_receipt import _lab
+    directory.mkdir(parents=True)
+    write = lambda name, text: ((directory / name).parent.mkdir(parents=True, exist_ok=True),  # noqa: E731
+                                (directory / name).write_text(text))
+    variants = {key: {"role": role, "ide": f"/work/bin/ide-{key}", "sha256": key * 64, "size_bytes": 4096}
+                for key, role in _lab.VARIANTS}
+    config = {"command": "IDE cc -o OUT", "repo_root": "/work/candidate", "cpu": 2, "perf": "perf", "pairs": None,
+              "target_minutes": 10, "warmups": 1, "seed": _lab.DEFAULT_SEED, "profile_steps": [], "sudo": False,
+              "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
+              "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": _lab.DEFAULT_MIN_EFFECT}
+    write("compare.json", json.dumps({"version": 1, "mode": "compare", "config": config, "variants": variants,
+                                      "plan": {"pairs": pairs, "reason": "--target-minutes 10: fixture", "order": "ABBA",
+                                               "fresh_copy": True},
+                                      "steps": {name: {"status": "ok"} for name in ("env", "prepare", "timed")},
+                                      "phase_metrics": {"enabled": True, "reason": "both compilers support -fmetrics-out"}}))
+    write("a/env/env.json", json.dumps({"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"}))
+    for key, usable in (("a", True), ("b", False)):
+        write(f"{key}/lab.json", json.dumps({"capabilities": {"perf_stat": {"usable": usable, "reason": f"probe {key}"}},
+                                             "collection": {"metrics_out": True}}))
+    records = []
+    for pair in range(1, pairs + 1):
+        for key in ("ab" if pair % 2 else "ba"):
+            seconds = 1.0 + 0.01 * pair + (0.002 if key == "b" else 0.0)
+            record = {"pair": pair, "order": "AB" if pair % 2 else "BA", "variant": key, "exit": 0, "identical": True,
+                      "span_s": seconds, "counters": key == "a", "cpu_s": seconds * 0.9, "maxrss_bytes": 400000000,
+                      "harness_rss_bytes": 20000000, "wrapper_rss_bytes": 10000000}
+            records.append(record)
+            if key == "a":
+                write(f"pairs/{pair:04d}-a.csv", f"{seconds * 900:.2f},msec,task-clock,1,100.00,,\n"
+                                                 f"{1000000 + pair},,instructions,1,100.00,,\n{800000 + pair},,cycles,1,100.00,,\n")
+            phases = " ".join(f"{phase}_ns={(index + 1) * 1000 + pair}" for index, phase in enumerate(_lab.PHASES))
+            write(f"pairs/{pair:04d}-{key}.ccmetrics", f"CC_METRICS wall_ns={int(seconds * 1e9)}\n"
+                  f"CC_METRICS_INPUT measured=1 start_ns=0 total_ns={9000 + pair} {phases}\n")
+    write("pairs.json", json.dumps(records))
+    write("summary.json", json.dumps(_lab.compare_summary(str(directory))))
+    return {"lab/" + path.relative_to(directory).as_posix(): path.read_bytes()
+            for path in sorted(directory.rglob("*")) if path.is_file()}
+
+
+def raw_corpus(directory: Path, pairs: int = 20) -> None:
+    """A complete one-job native corpus bundle without summaries, as `bench_throughput run` leaves its raw files."""
+    header = ("round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,instructions,"
+              "branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,output_bytes,source_bytes,"
+              "source_lines,source_functions,output_sha256,minor_faults,major_faults,voluntary_context_switches,"
+              "involuntary_context_switches\n")
+
+    def row(round_: int, pair: int, order: int, variant: int, wall: float, counted: bool) -> str:
+        counters = "100,200,30,4,50,6,3,15" if counted else "NA,NA,NA,NA,NA,NA,NA,NA"
+        return f"{round_},{pair},{order},{variant},0,{wall!r},0.25,0.125,67108864,{counters},4,16,2,1,{'0' * 64},1,0,2,3\n"
+    directory.mkdir(parents=True)
+    (directory / "samples.csv").write_text(header + "".join(
+        row(round_, pair, variant ^ (pair & 1), variant, 1.0 + 0.001 * pair + 0.01 * variant, False)
+        for round_ in range(2) for pair in range(pairs) for variant in range(2)))
+    (directory / "telemetry.csv").write_text(header + "".join(
+        row(kind, repeat, variant, variant, 1.0, True) for kind in range(2) for repeat in range(3) for variant in range(2)))
+    for name, text in (("metadata.json", "{}\n"), ("jobs.tsv", "0\ttiny_startup/fast\n"), ("commands.jsonl", "{}\n"),
+                       ("capabilities.jsonl", "{}\n")):
+        (directory / name).write_text(text)
+    (directory / "complete.txt").write_text(f"schema=2 jobs=1 pairs={pairs} rounds=2 guard=1\n" + "".join(
+        hashlib.sha256((directory / name).read_bytes()).hexdigest() + " " + name + "\n"
+        for name in ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl", "capabilities.jsonl")))
+
+
+class SealedReplayTest(unittest.TestCase):
+    """A verified bundle's lab and corpus are replayed from its raw bytes by the trusted statistics (#2918)."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.files = raw_lab(self.root / "lab")
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def edited(self, name: str, change) -> dict[str, bytes]:
+        files = dict(self.files)
+        files[name] = json.dumps(change(json.loads(files[name]))).encode("utf-8")
+        return files
+
+    def test_a_complete_lab_replays_from_its_raw_pairs(self) -> None:
+        self.assertEqual(compiler_publish.sealed_lab_replay(self.files), 10)
+
+    def test_a_lab_whose_raw_bytes_or_saved_inference_disagree_is_refused(self) -> None:
+        def records(change):
+            return lambda rows: [change(dict(row), index) for index, row in enumerate(rows)]
+        cases = {
+            "changed counter bytes": dict(self.files, **{"lab/pairs/0003-a.csv": self.files["lab/pairs/0003-a.csv"].replace(
+                b"927.00,msec,task-clock", b"999.00,msec,task-clock")}),
+            "changed compiler metrics": dict(self.files, **{"lab/pairs/0004-b.ccmetrics": self.files[
+                "lab/pairs/0004-b.ccmetrics"].replace(b"read_ns=1004", b"read_ns=9004")}),
+            "missing compiler metrics": {name: data for name, data in self.files.items() if name != "lab/pairs/0005-b.ccmetrics"},
+            "duplicated pair": self.edited("lab/pairs.json", records(lambda row, index: dict(row, pair=2) if index in (4, 5) else row)),
+            "failed member": self.edited("lab/pairs.json", records(lambda row, index: dict(row, exit=1) if index == 7 else row)),
+            "unordered members": self.edited("lab/pairs.json", lambda rows: [rows[1], rows[0], *rows[2:]]),
+            "truncated population": self.edited("lab/pairs.json", lambda rows: rows[:-1]),
+            "counter claim without its probe": self.edited("lab/b/lab.json", lambda meta: dict(
+                meta, capabilities={"perf_stat": {"usable": True, "reason": "x"}})),
+            "edited verdict": self.edited("lab/summary.json", lambda summary: dict(
+                summary, verdict=dict(summary["verdict"], outcome="faster"))),
+            "edited population": self.edited("lab/summary.json", lambda summary: dict(
+                summary, baseline=dict(summary["baseline"], failed=1))),
+            "edited plan": self.edited("lab/summary.json", lambda summary: dict(
+                summary, plan=dict(summary["plan"], complete_pairs=12))),
+            "another profile": self.edited("lab/compare.json", lambda raw: dict(raw, config=dict(raw["config"], cpu=3))),
+            "a fixed pair count": self.edited("lab/compare.json", lambda raw: dict(raw, config=dict(raw["config"], pairs=10))),
+            "an odd plan": self.edited("lab/compare.json", lambda raw: dict(raw, plan=dict(raw["plan"], pairs=9))),
+            "a flag pair": self.edited("lab/compare.json", lambda raw: dict(raw, config=dict(raw["config"],
+                                                                                             canonical_inline_pair=True))),
+            "duplicate key": dict(self.files, **{"lab/compare.json": b'{"version": 1, "version": 1}'}),
+        }
+        for label, files in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                compiler_publish.sealed_lab_replay(files)
+
+    def corpus_command(self) -> tuple:
+        driver = bootstrapped_driver()
+        if driver is None or shutil.which("clang") is None:
+            self.skipTest("no native driver or clang: set BUSTER_COMPILER_EVIDENCE_DRIVER or put tcc and clang on PATH")
+        return (str(driver), "bench_throughput", "compare")
+
+    def test_a_corpus_replays_through_the_trusted_native_comparison(self) -> None:
+        command = self.corpus_command()
+        produced = self.root / "produced"
+        raw_corpus(produced)
+        made = subprocess.run([*command, "--output", str(produced)], cwd=compiler_publish.TRUSTED_ROOT,
+                              capture_output=True, text=True, timeout=600, check=False)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        files = {"throughput/" + path.relative_to(produced).as_posix(): path.read_bytes()
+                 for path in sorted(produced.rglob("*")) if path.is_file()}
+        self.assertIn("throughput/summary.md", files)
+        replay = lambda members: compiler_publish.sealed_corpus_replay(  # noqa: E731
+            members, tempfile.mkdtemp(dir=self.root))
+        with mock.patch.object(compiler_publish, "CORPUS_REPLAY_COMMAND", command):
+            self.assertEqual(replay(files), 1)
+            samples = files["throughput/samples.csv"].replace(b"\n0,1,1,0,0,1.001,", b"\n0,1,1,0,0,1.5,", 1)
+            self.assertTrue(samples != files["throughput/samples.csv"])
+            summary = files["throughput/summary.json"].replace(b'"valid":true', b'"valid":false')
+            for label, members in (("raw sample", dict(files, **{"throughput/samples.csv": samples})),
+                                   ("summary", dict(files, **{"throughput/summary.json": summary})),
+                                   ("report", dict(files, **{"throughput/summary.md": b"# edited\n"}))):
+                with self.subTest(label=label), self.assertRaisesRegex(ValueError, "does not replay"):
+                    replay(members)
+
+    def test_a_corpus_replay_that_cannot_run_is_refused(self) -> None:
+        files = {"throughput/summary.json": b'{"comparisons": []}'}
+        with mock.patch.object(compiler_publish, "CORPUS_REPLAY_COMMAND", ("/nonexistent/build.sh",)), \
+                self.assertRaisesRegex(ValueError, "corpus replay did not run"):
+            compiler_publish.sealed_corpus_replay(files, str(self.root))
+
+
 class EvidenceTest(unittest.TestCase):
     def test_reads_receipt_and_summary_as_data(self) -> None:
         payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
@@ -3131,37 +3325,71 @@ class HarnessTest(unittest.TestCase):
         (evidence / "machine-specifications" / "report.json").write_text("{}")  # appended after the seal
         throughput = dict(retained(evidence), sealed_files=compiler_publish.sampling_archive(
             self.zipped(evidence), member_limit=compiler_publish.EVIDENCE_ARCHIVE_MEMBERS, require_nonexecutable=True))
-        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (str(driver), "compiler_evidence")):
+        # The harness's stand-in lab and corpus carry no real statistics; SealedReplayTest replays real ones.
+        replayed: list[dict] = []
+
+        def lab(files: dict) -> int:
+            replayed.append(files)
+            return 10
+
+        def corpus(files: dict, temporary: str) -> int:
+            if "replay-refused" in files:
+                raise ValueError("corpus summary.json does not replay")
+            return 12
+        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (str(driver), "compiler_evidence")), \
+                mock.patch.object(compiler_publish, "sealed_lab_replay", lab), \
+                mock.patch.object(compiler_publish, "sealed_corpus_replay", corpus):
             verified = compiler_publish.verify_evidence_bundle(throughput, expected, compiler_receipt.THROUGHPUT_PROFILE, "2")
             other_attempt = compiler_publish.verify_evidence_bundle(throughput, expected, compiler_receipt.THROUGHPUT_PROFILE, "3")
             files = dict(throughput["sealed_files"])
             files["lab/pairs/0007-b.ccmetrics"] = b"tampered\n"
             tampered = compiler_publish.verify_evidence_bundle(dict(throughput, sealed_files=files), expected,
                                                                compiler_receipt.THROUGHPUT_PROFILE, "2")
+            with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", (
+                    "print('COMPILER_EVIDENCE_VERIFIED members=3 payload_bytes=4 manifest_sha256=' + 'a' * 64)"))):
+                unreplayed = compiler_publish.verify_evidence_bundle(
+                    dict(throughput, sealed_files=dict(throughput["sealed_files"], **{"replay-refused": b""})), expected,
+                    compiler_receipt.THROUGHPUT_PROFILE, "2")
         self.maxDiff = None
         self.assertEqual(verified, {"state": "verified", "inventory": compiler_receipt.EVIDENCE_INVENTORY,
-                                    **{key: result["evidence_bundle"][key] for key in ("members", "payload_bytes", "manifest_sha256")}})
+                                    "replay": {"lab_pairs": 10, "corpus_cases": 12},
+                                    **{key: result["evidence_bundle"][key]
+                                       for key in ("members", "payload_bytes", "manifest_sha256")}})
+        self.assertIs(replayed[0], throughput["sealed_files"])
         self.assertEqual((other_attempt["state"], tampered["state"]), ("refused", "refused"))
         self.assertIn("COMPILER_EVIDENCE_REFUSED", tampered["reason"])
+        self.assertEqual(unreplayed, {"state": "refused", "reason": "sealed raw evidence does not replay: corpus summary.json "
+                                                                    "does not replay"})
+        self.assertIn("replayed 10 lab pairs and 12 corpus cases", compiler_publish.evidence_bundle_note(verified))
         decide = lambda bundle, receipt=result: compiler_publish.decide(  # noqa: E731
             expected, True, "success", receipt, summary, "", throughput, evidence_bundle=bundle)
         self.assertEqual(decide(verified)[0], "success")
         self.assertIn("sealed raw evidence refused", decide(tampered)[2][0])
+        self.assertIn("sealed raw evidence refused: sealed raw evidence does not replay", decide(unreplayed)[2][0])
         forged = dict(result, evidence_bundle=dict(result["evidence_bundle"], members=1))
         self.assertIn("receipt evidence_bundle does not name the verified sealed manifest", decide(verified, forged)[2])
         self.assertIn("receipt names sealed raw evidence that the artifact does not carry",
                       decide({"state": "legacy-unsealed"})[2])
 
-    def test_legacy_unsealed_evidence_keeps_its_outcome_and_is_reported_unverified(self) -> None:
+    def test_unsealed_evidence_is_refused_unless_its_producer_predates_sealing(self) -> None:
         code, result, evidence = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (0, "measured"))
         expected = dict(result["identity"], first_parent=self.base, range="1")
         summary = json.loads((evidence / "lab" / "summary.json").read_text())
-        bundle = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        # Only recovery of a run whose producer predates sealing may stand unsealed.
+        bundle = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE,
+                                                         "1", required=False)
         self.assertEqual(bundle, {"state": "legacy-unsealed"})
         self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
                                                  evidence_bundle=bundle)[0], "success")
         self.assertIn("unverified", compiler_publish.evidence_bundle_note(bundle))
+        required = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        self.assertEqual(required, {"state": "unsealed"})
+        decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                          evidence_bundle=required)
+        self.assertEqual(decided[0], "failure")
+        self.assertIn("sealed raw evidence v1 is required on this route, but the artifact carries neither control file",
+                      decided[2])
 
     def test_an_unreadable_or_unverifiable_sealed_bundle_fails_closed(self) -> None:
         expected = {"repository": "buster14a/buster", "request_run_id": "91", "run_id": "92", "run_attempt": "1",
@@ -3273,12 +3501,16 @@ class HarnessTest(unittest.TestCase):
                   "assert lines[13:] == ['preparation_policy\\tsnapshot-v1', 'owned_phases\\t14'], lines\n"
                   "print('COMPILER_EVIDENCE_VERIFIED members=3 payload_bytes=4 manifest_sha256=' + 'a' * 64)\n")
         files = {"evidence-seal.txt": b"seal\n"}
-        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", script)):
+        # Replay has its own tests (SealedReplayTest); the snapshot inventory carries every member it reads.
+        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", script)), \
+                mock.patch.object(compiler_publish, "sealed_lab_replay", lambda files: 10), \
+                mock.patch.object(compiler_publish, "sealed_corpus_replay", lambda files, temporary: 12):
             verified = compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1", receipt)
             # The ordinary identity reproduces no snapshot manifest: the stand-in refuses it like the native verifier.
             ordinary = compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1")
         self.assertEqual(verified, {"state": "verified", "inventory": compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY,
-                                    "members": 3, "payload_bytes": 4, "manifest_sha256": "a" * 64})
+                                    "members": 3, "payload_bytes": 4, "manifest_sha256": "a" * 64,
+                                    "replay": {"lab_pairs": 10, "corpus_cases": 12}})
         self.assertEqual(ordinary["state"], "refused")
         self.assertEqual(compiler_publish.evidence_bundle_problems(receipt, verified), [])
         self.assertIn(compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY, compiler_publish.evidence_bundle_note(verified))
@@ -4597,6 +4829,397 @@ class ConstantReuseAcceptanceTest(unittest.TestCase):
         report = compiler_receipt.render(pull, summary(), "success", [])
         self.assertIn("Issue #3011 constant-reuse arms: complete", report)
         self.assertIn("| intern (-fcanonical-intern-constants) | 0.9900", report)
+
+
+PROCESS_FLOOR_WALL = {"aa": 1.0, "aarch64": 0.7, "syntax-only": 0.65}
+
+
+def process_floor_raw_cell(cell: str, binary: str = "c" * 64, instructions: object = 0.3) -> dict:
+    """One synthetic, complete raw uarch_lab cell of the #1125 process-floor profile."""
+    pairs = compiler_receipt.PROCESS_FLOOR_PROFILE["pairs"]
+    commands = {key: process_floor_acceptance.variant_command(cell, key) for key in ("a", "b")}
+    labs = {key: {"config": {"extra": [], "cpu": 2, "process_floor_cell": cell, "ide": "/bin/ide",
+                             "command": " ".join(["/bin/ide"] + commands[key])}} for key in ("a", "b")}
+    wall = PROCESS_FLOOR_WALL[cell]
+    insn_ratio = 1.0 if cell == "aa" else instructions
+    insn = {"ratio": insn_ratio, "a_median": 1e7 if insn_ratio is not None else None,
+            "b_median": 1e7 * insn_ratio if insn_ratio is not None else None}
+    summary = {"schema": process_floor_acceptance.UARCH_SCHEMA,
+               "plan": {"pairs": pairs, "complete_pairs": pairs, "order": "ABBA", "fresh_copy": True},
+               "baseline": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "candidate": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "metrics": {"wall": {"a_median": 0.01, "b_median": 0.01 * wall, "ratio": wall,
+                                    "ci_low": wall - 0.005, "ci_high": wall + 0.004},
+                           "task_clock": {"a_median": 0.008, "b_median": 0.008 * wall, "ratio": wall},
+                           "compiler_wall": {"a_median": 0.006, "b_median": 0.006 * wall, "ratio": wall},
+                           "instructions": insn, "peak_rss": {"a_median": None, "b_median": None, "ratio": None}},
+               "counters": {"perf_stat": instructions is not None,
+                            "reason": "usable" if instructions is not None else "perf_event_paranoid"},
+               "outputs_identical": cell == "aa", "diagnostics_identical": True}
+    meta = {"config": {"process_floor_pair": cell, "extra_by_variant": {"a": [], "b": []},
+                       "command_by_variant": {key: " ".join(["IDE"] + commands[key]) for key in commands},
+                       "command": " ".join(["IDE"] + commands["a"]), "canonical_inline_pair": False,
+                       "pairs": pairs, "warmups": 2, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True}}
+    return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+
+def process_floor_evidence(head: str = "a" * 40, binary: str = "c" * 64) -> tuple[dict, dict, dict]:
+    """(receipt record, raw bundle, acceptance) built through the helper's own record code."""
+    raw = {cell: process_floor_raw_cell(cell, binary) for cell in compiler_receipt.PROCESS_FLOOR_CELLS}
+    cells = {cell: process_floor_acceptance.cell_record(raw[cell]["summary"]) for cell in raw}
+    acceptance = {"schema": compiler_receipt.PROCESS_FLOOR_SCHEMA, "status": "complete", "source_revision": head,
+                  "profile": compiler_receipt.PROCESS_FLOOR_PROFILE,
+                  "candidate_compiler": {"sha256": binary, "size_bytes": 10}, "cells": cells,
+                  "verdict": compiler_receipt.process_floor_verdict(cells)}
+    bundle = {"acceptance": acceptance}
+    for cell, documents in raw.items():
+        for key, value in documents.items():
+            bundle[f"{cell}_{key}"] = value
+    record = {"requested": True, "request_line": compiler_receipt.PROCESS_FLOOR_REQUEST_LINE,
+              "profile": compiler_receipt.PROCESS_FLOOR_PROFILE, "summary": acceptance, "status": "complete", "exit": 0}
+    return json.loads(json.dumps(record)), json.loads(json.dumps(bundle)), json.loads(json.dumps(acceptance))
+
+
+class ProcessFloorTest(unittest.TestCase):
+    def test_profile_is_frozen_and_matches_the_lab_cells(self) -> None:
+        profile = compiler_receipt.PROCESS_FLOOR_PROFILE
+        self.assertEqual(compiler_receipt.PROCESS_FLOOR_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["source_sha256"],
+                         hashlib.sha256(b"int main(void){return 0;}\n").hexdigest())
+        self.assertEqual(profile["cells"], {"aa": "cc -g0 -c tiny.c -o OUT",
+                                            "aarch64": "cc -g0 -target aarch64-unknown-linux -c tiny.c -o OUT",
+                                            "syntax-only": "cc -g0 -fsyntax-only tiny.c"})
+        self.assertEqual(json.loads(json.dumps(profile)), profile)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        try:
+            import uarch_lab as lab
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(lab.PROCESS_FLOOR_CELLS, compiler_receipt.PROCESS_FLOOR_CELLS)
+        self.assertEqual(lab.PROCESS_FLOOR_OBJECT, compiler_receipt.PROCESS_FLOOR_OBJECT)
+        # Every cell fits the leg's bound, which with the ordinary comparison stays inside the 90-minute job.
+        self.assertGreaterEqual(compiler_compare.PROCESS_FLOOR_TIMEOUT_SECONDS,
+                                len(compiler_receipt.PROCESS_FLOOR_CELLS) * process_floor_acceptance.COMPARE_TIMEOUT_SECONDS)
+        self.assertLessEqual(compiler_compare.PROCESS_FLOOR_TIMEOUT_SECONDS, 75 * 60)
+
+    def test_verdict_applies_the_a_a_stop_rule(self) -> None:
+        unused_record, unused_bundle, acceptance = process_floor_evidence()
+        verdict = acceptance["verdict"]
+        self.assertEqual(verdict["aa_interval"], [0.995, 1.004])
+        self.assertEqual(verdict["aarch64"], {"ci": [0.695, 0.704], "outside_aa": True, "wall_ms": 3.0,
+                                              "task_clock_ms": 2.4})
+        self.assertTrue(verdict["syntax-only"]["outside_aa"])
+        inside = copy.deepcopy(acceptance["cells"])
+        inside["aarch64"]["metrics"]["wall"].update(ci_low=0.998, ci_high=1.002)
+        self.assertFalse(compiler_receipt.process_floor_verdict(inside)["aarch64"]["outside_aa"])
+        overlap = copy.deepcopy(acceptance["cells"])
+        overlap["aarch64"]["metrics"]["wall"].update(ci_high=0.996)
+        self.assertFalse(compiler_receipt.process_floor_verdict(overlap)["aarch64"]["outside_aa"])
+        missing = copy.deepcopy(acceptance["cells"])
+        missing.pop("aa")
+        self.assertEqual(compiler_receipt.process_floor_verdict(missing)["aarch64"]["outside_aa"], False)
+        self.assertIsNone(compiler_receipt.process_floor_verdict({})["syntax-only"]["wall_ms"])
+
+    def test_publisher_revalidates_raw_cells(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        record, bundle, unused_acceptance = process_floor_evidence(head, binary)
+        self.assertEqual(compiler_publish.validate_process_floor_bundle(record, bundle, head, binary), [])
+
+        def broken(change) -> list[str]:
+            changed = copy.deepcopy(bundle)
+            change(changed)
+            return compiler_publish.validate_process_floor_bundle(record, changed, head, binary)
+        cases = {
+            "B command on A": lambda value: value["aarch64_a"]["config"].update(
+                command=value["aarch64_b"]["config"]["command"]),
+            "recorded variant commands": lambda value: value["syntax-only_meta"]["config"]["command_by_variant"].update(
+                b=value["aarch64_meta"]["config"]["command_by_variant"]["b"]),
+            "extra flags": lambda value: value["aa_meta"]["config"].update(extra_by_variant={"a": [], "b": ["-O1"]}),
+            "cell swap": lambda value: value["aarch64_meta"]["config"].update(process_floor_pair="aa"),
+            "constant reuse pair": lambda value: value["aa_meta"]["config"].update(constant_reuse_pair="intern"),
+            "wrong binary": lambda value: value["aa_summary"]["candidate"].update(sha256="d" * 64),
+            "cpu": lambda value: value["aa_meta"]["config"].update(cpu=3),
+            "pair count": lambda value: value["aarch64_summary"]["plan"].update(pairs=12, complete_pairs=12),
+            "missing cell": lambda value: [value.pop(f"syntax-only_{key}") for key in ("summary", "meta", "a", "b")],
+            "metrics": lambda value: value["aarch64_summary"]["metrics"]["wall"].update(ratio=0.5),
+            "task clock": lambda value: value["aa_summary"]["metrics"]["task_clock"].update(b_median=None),
+            "a/a objects": lambda value: value["aa_summary"].update(outputs_identical=False),
+            "diagnostics": lambda value: value["syntax-only_summary"].update(diagnostics_identical=False),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broken(change))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(dict(record, status="failed"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(
+            dict(record, request_line="process-floor"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(record, None, head, binary))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(record, bundle, head, "d" * 64))
+        self.assertEqual(compiler_publish.validate_process_floor_bundle(None, None, head, binary), [])
+
+    def test_receipt_validator_needs_every_cell_the_frozen_profile_and_its_verdict(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        unused_record, unused_bundle, acceptance = process_floor_evidence(head, binary)
+        self.assertEqual(compiler_receipt.validate_process_floor_acceptance(acceptance, head, binary), [])
+        for name, change in {
+            "profile": lambda value: value["profile"].update(pairs=2),
+            "extra profile key": lambda value: value["profile"].update(flags=["-O3"]),
+            "missing cell": lambda value: value["cells"].pop("syntax-only"),
+            "revision": lambda value: value.update(source_revision="b" * 40),
+            "binary": lambda value: value["candidate_compiler"].update(sha256="d" * 64),
+            "a/a objects": lambda value: value["cells"]["aa"].update(outputs_identical=False),
+            "diagnostics": lambda value: value["cells"]["aarch64"].update(diagnostics_identical=False),
+            "verdict": lambda value: value["verdict"]["aarch64"].update(outside_aa=False),
+            "peak rss": lambda value: value["cells"]["aa"]["metrics"]["peak_rss"].update(a_median=-1),
+            "compiler wall": lambda value: value["cells"]["aa"]["metrics"].pop("compiler_wall"),
+            "huge wall": lambda value: value["cells"]["aa"]["metrics"]["wall"].update(ci_high=10 ** 309),
+        }.items():
+            changed = copy.deepcopy(acceptance)
+            change(changed)
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_process_floor_acceptance(changed, head, binary))
+
+    def test_raw_cell_loader_refuses_wrong_commands_binaries_and_unexplained_na(self) -> None:
+        binary = "c" * 64
+        for cell in compiler_receipt.PROCESS_FLOOR_CELLS:
+            raw = process_floor_raw_cell(cell, binary)
+            documents = (raw["summary"], raw["meta"], {"a": raw["a"], "b": raw["b"]})
+            process_floor_acceptance.validate_documents(cell, *documents, binary)
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "frozen candidate-HEAD"):
+                process_floor_acceptance.validate_documents(cell, *documents, "d" * 64)
+            other = "aarch64" if cell != "aarch64" else "syntax-only"
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "fixed process-floor"):
+                process_floor_acceptance.validate_documents(other, *documents, binary)
+            na = process_floor_raw_cell(cell, binary, instructions=None)
+            na["summary"]["metrics"]["instructions"] = {"ratio": None, "a_median": None, "b_median": None}
+            na_documents = (na["summary"], na["meta"], {"a": na["a"], "b": na["b"]})
+            process_floor_acceptance.validate_documents(cell, *na_documents, binary)
+            na["summary"]["counters"] = {"perf_stat": True, "reason": "usable"}
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "NA without"):
+                process_floor_acceptance.validate_documents(cell, *na_documents, binary)
+        with self.assertRaisesRegex(RuntimeError, "unknown"):
+            process_floor_acceptance.validate_documents("x86", *documents, binary)
+        self.assertEqual(process_floor_acceptance.variant_command("syntax-only", "b"),
+                         ["cc", "-g0", "-fsyntax-only", "tiny.c"])
+        self.assertEqual(process_floor_acceptance.variant_command("syntax-only", "a"),
+                         ["cc", "-g0", "-c", "tiny.c", "-o", "OUT"])
+
+    def test_compare_command_is_fixed_and_uses_one_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for cell in compiler_receipt.PROCESS_FLOOR_CELLS:
+                with mock.patch.object(process_floor_acceptance.subprocess, "run") as run:
+                    process_floor_acceptance.run_compare(root / "uarch_lab.py", root / "ide", root, 2, root / cell,
+                                                         "perf", cell)
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--process-floor-pair") + 1], cell)
+                self.assertEqual(argv[argv.index("--baseline") + 1], argv[argv.index("--candidate") + 1])
+                self.assertEqual(argv[argv.index("--pairs") + 1], "100")
+                self.assertEqual(argv[argv.index("--warmups") + 1], "2")
+                self.assertNotIn("--", argv)
+                self.assertNotIn("--constant-reuse-pair", argv)
+
+    def test_profile_writes_the_source_and_runs_every_cell_in_its_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            repo.mkdir()
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            binary = hashlib.sha256(b"candidate compiler").hexdigest()
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate, output=root / "profile",
+                                      head_revision="a" * 40, cpu=2, perf="perf")
+            calls = []
+            with mock.patch.object(process_floor_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(process_floor_acceptance, "run_compare",
+                                   side_effect=lambda *values: calls.append((values[2], values[-1]))), \
+                 mock.patch.object(process_floor_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: process_floor_raw_cell(cell, sha)["summary"]):
+                result = process_floor_acceptance.execute(args)
+            source = (root / "profile/source").resolve()
+            self.assertEqual(calls, [(source, "aa"), (source, "aarch64"), (source, "syntax-only")])
+            self.assertEqual((source / "tiny.c").read_bytes(), b"int main(void){return 0;}\n")
+            self.assertEqual(compiler_receipt.validate_process_floor_acceptance(result, "a" * 40, binary), [])
+            self.assertTrue(result["verdict"]["aarch64"]["outside_aa"])
+            args.output = root / "stray"
+            with mock.patch.object(process_floor_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(process_floor_acceptance, "run_compare",
+                                   side_effect=lambda *values: (values[2] / "tiny.o").write_bytes(b"")), \
+                 mock.patch.object(process_floor_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: process_floor_raw_cell(cell, sha)["summary"]), \
+                 self.assertRaisesRegex(RuntimeError, "source directory changed"):
+                process_floor_acceptance.execute(args)
+            args.cpu = 3
+            args.output = root / "other"
+            with mock.patch.object(process_floor_acceptance, "git", return_value="a" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "pins CPU 2"):
+                process_floor_acceptance.execute(args)
+            args.cpu = 2
+            with mock.patch.object(process_floor_acceptance, "git", return_value="b" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "expected candidate HEAD"):
+                process_floor_acceptance.execute(args)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Process Floor Test")
+            git("config", "user.email", "process-floor@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "seed")
+            line = compiler_receipt.PROCESS_FLOOR_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                git("commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.process_floor_request_selection(repo, git("rev-parse", "HEAD")),
+                                     expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            git("commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.process_floor_request_selection(repo, git("rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.PROCESS_FLOOR_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", process_floor=process_floor_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("process_floor")
+        self.assertIn("no process-floor record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_decision_needs_pull_mode_the_9700x_and_the_complete_bundle(self) -> None:
+        record, bundle, unused_acceptance = process_floor_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["process_floor"] = record
+        expected = dict(EXPECTED, mode="pull")
+        values = {"expected": expected, "authorized": True, "compare_result": "success", "receipt": pull,
+                  "summary": summary(), "policy_value": "", "throughput": dict(corpus(), process_floor_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        both = copy.deepcopy(pull)
+        both["constant_reuse_acceptance"] = constant_reuse_evidence("a" * 40, B256)[0]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "missing cell": {"throughput": dict(corpus(), process_floor_bundle={
+                key: value for key, value in bundle.items() if not key.startswith("aarch64_")})},
+            "failed run": {"receipt": dict(pull, process_floor=dict(record, status="failed", exit=1))},
+            "with constant reuse": {"receipt": both, "throughput": dict(
+                corpus(), process_floor_bundle=bundle, constant_reuse_bundle=constant_reuse_evidence("a" * 40, B256)[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        # main's request history holds the inline selector, so every pull compare carries an inline record.
+        with_inline = copy.deepcopy(pull)
+        with_inline["inline_acceptance"] = {"requested": True, "request_line": compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE,
+                                            "profile": compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "status": "complete"}
+        unused_conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, receipt=with_inline))
+        self.assertFalse([reason for reason in reasons if "cannot be combined" in reason], reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Issue #1125 per-process floor: complete", report)
+        self.assertIn("| aarch64 (`cc -g0 -target aarch64-unknown-linux -c tiny.c -o OUT`) | 10.000 / 7.000 | 3.000 "
+                      "| 0.7000 [0.6950, 0.7040] | 8.000 / 5.600 | 10000000 / 3000000 | True |", report)
+        self.assertIn("| aa (`cc -g0 -c tiny.c -o OUT`) | 10.000 / 10.000 | NA | 1.0000 [0.9950, 1.0040]", report)
+        coverage = compiler_receipt.covered_inventory_rows(pull, "success", "pull")
+        self.assertIn("uarch_lab:compare@process-floor", coverage["discharged"])
+        unrequested = compiler_receipt.covered_inventory_rows(receipt(), "success", "pull")
+        self.assertEqual(unrequested["rows"]["uarch_lab:compare@process-floor"], "not discharged: not requested")
+
+    def test_request_with_another_opt_in_leg_fails_before_any_build(self) -> None:
+        for other in ("constant_reuse_requested", "frontend_nesting_requested", "selfhost_inline_requested"):
+            with self.subTest(combined=other), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                candidate, work, evidence, bins = root / "candidate", root / "work", root / "evidence", root / "bins"
+                for directory in (candidate, work, evidence, bins):
+                    directory.mkdir()
+                current = {"state": "pending", "reasons": [], "timings": {}, "binaries": {}, "lab": {}}
+                args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40, process_floor_requested=True,
+                                          lab=root / "uarch_lab.py", **{other: True})
+                with mock.patch.object(compiler_compare, "scaling_requested", return_value=False), \
+                        mock.patch.object(compiler_compare, "build") as build, \
+                        mock.patch.object(compiler_compare, "run") as run:
+                    compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+                self.assertTrue(any("cannot be combined" in reason for reason in current["reasons"]), current["reasons"])
+                self.assertEqual(current["process_floor"]["status"], "failed")
+                build.assert_not_called()
+                run.assert_not_called()
+
+    def test_leg_exports_only_the_required_documents_when_optional_files_are_deferred(self) -> None:
+        record_value, bundle, acceptance = process_floor_evidence("a" * 40, B256)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            for key, member in compiler_publish.PROCESS_FLOOR_BUNDLE_FILES.items():
+                path = root / "work/process-floor" / member.split("/", 1)[1]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(bundle[key]), encoding="utf-8")
+            (root / "work/process-floor/aa/pairs").mkdir()
+            (root / "work/process-floor/aa/pairs/0001-a.csv").write_text("optional\n", encoding="utf-8")
+            pull = {"state": "pending", "reasons": [], "timings": {}, "binaries": {"candidate": {"sha256": B256}},
+                    "process_floor": {"requested": True, "status": "pending"}}
+            arguments = argparse.Namespace(lab=root / "uarch_lab.py", head="a" * 40)
+            exported_required = []
+
+            def deferred_export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple):
+                exported_required.append(required)
+                for name in required:
+                    target = destination / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source / name, target)
+                return [], []
+
+            with mock.patch.object(compiler_compare, "run", return_value=0) as run, \
+                    mock.patch.object(compiler_compare, "export_tree", side_effect=deferred_export):
+                compiler_compare.measure_process_floor(arguments, root / "candidate", root / "ide-cand", root / "work",
+                                                       root / "evidence", pull)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[argv.index("--cpu") + 1], "2")
+            self.assertTrue(argv[2].endswith("process_floor_acceptance.py"))
+            record = pull["process_floor"]
+            self.assertEqual((record["status"], record["errors"]), ("complete", []))
+            self.assertEqual(record["summary"], acceptance)
+            self.assertEqual(sorted(name for names in exported_required for name in names),
+                             sorted(compiler_compare.PROCESS_FLOOR_REQUIRED))
+            self.assertFalse((root / "evidence/process_floor/aa/pairs/0001-a.csv").exists())
+            self.assertEqual(compiler_publish.validate_process_floor_bundle(
+                dict(record_value, summary=record["summary"]), bundle, "a" * 40, B256), [])
 
 def real_source_evidence() -> tuple[dict, dict]:
     """A complete synthetic throughput-real-source-v1 record and its exported bundle on BINARIES."""

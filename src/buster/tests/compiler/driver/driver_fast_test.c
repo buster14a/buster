@@ -155,7 +155,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     CompilerDriverInvocation parallel = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parallel_command));
     // The tiny positional inputs sit below the minimum-work gate; force the
     // lane path so the two-input cohort is still exercised.
-    compiler_driver_test_set_lane_work(0, 0);
+    compiler_driver_test_set_lane_work(0, 0, 0);
     CompilerDriverResult serial_result = compiler_driver_execute_invocation(arena, serial);
     CompilerDriverResult parallel_result = compiler_driver_execute_invocation(arena, parallel);
     if (serial_result.error != COMPILER_DRIVER_ERROR_NONE)
@@ -248,6 +248,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
             "}\n"), false, S8("static assertion failed: \"false\"")},
+        // #3971: sizeof of a member reached through a C array operand's
+        // one-level decay (`array->member`) is an integer constant expression.
+        {S8("struct B { unsigned long long wide; };\n"
+            "int f(void) {\n"
+            "    struct B buffer[1];\n"
+            "    _Static_assert(sizeof(buffer->wide) == sizeof(unsigned long long), \"member\");\n"
+            "    return 0;\n"
+            "}\n"), true, {0}},
+        {S8("typedef struct { int id; char str[12]; } IdStrMap;\n"
+            "extern const IdStrMap tags[];\n"
+            "extern const IdStrMap one;\n"
+            "_Static_assert(sizeof(tags[0].str) == 12, \"subscript member\");\n"
+            "_Static_assert(sizeof(one.str) == 12, \"dot member\");\n"
+            "_Static_assert(sizeof(tags->str) == 12, \"arrow array member\");\n"
+            "_Static_assert(sizeof(tags->id) == sizeof(int), \"arrow scalar member\");\n"
+            "_Static_assert(sizeof(\"jpeg\") <= sizeof(tags->str), \"img2\");\n"
+            "enum { ARROW = sizeof(tags->str) };\n"
+            "char sized[sizeof(tags->str)];\n"
+            "static unsigned long initialized = sizeof(tags->str);\n"
+            "_Static_assert(ARROW == 12, \"enumerator\");\n"
+            "int pick(int v) {\n"
+            "    switch (v) {\n"
+            "    case sizeof(tags->str): return 1;\n"
+            "    default: return 0;\n"
+            "    }\n"
+            "}\n"), true, {0}},
+        {S8("struct In { short pad; int arr[3]; };\n"
+            "struct Out { char tag; struct In in; struct In list[2]; };\n"
+            "struct Out grid[2][2];\n"
+            "struct Out flat[2];\n"
+            "_Static_assert(sizeof(flat->in) == sizeof(struct In), \"nested struct\");\n"
+            "_Static_assert(sizeof(grid[0]->in) == sizeof(struct In), \"row decay\");\n"
+            "_Static_assert(sizeof(flat->in.arr) == 3 * sizeof(int), \"nested array\");\n"
+            "_Static_assert(sizeof(flat->list->arr) == 3 * sizeof(int), \"member array arrow\");\n"
+            "_Static_assert(sizeof(grid[1]->in.arr[0]) == sizeof(int), \"subscripted\");\n"
+            "_Static_assert(sizeof(flat->in.arr) / sizeof(flat->in.arr[0]) == 3, \"count\");\n"
+            "_Static_assert(sizeof(flat->tag) == 1, \"char\");\n"), true, {0}},
+        {S8("struct B { int wide; };\n"
+            "int f(void) {\n"
+            "    int plain[2];\n"
+            "    _Static_assert(sizeof(plain->wide) == 4, \"scalar element\");\n"
+            "    return 0;\n"
+            "}\n"), false, {0}},
+        {S8("struct B { int wide; };\n"
+            "struct B buffer[1];\n"
+            "_Static_assert(sizeof(buffer->missing) == 4, \"missing member\");\n"), false, {0}},
+        {S8("struct B { int wide; };\n"
+            "struct B buffer[1];\n"
+            "_Static_assert(sizeof(buffer->wide) == 8, \"wrong size\");\n"), false, S8("static assertion failed: \"wrong size\"")},
+        // sizeof of a variably modified operand stays non-constant.
+        {S8("int f(int n) {\n"
+            "    int (*vla)[n];\n"
+            "    _Static_assert(sizeof(*vla) == 4, \"vla\");\n"
+            "    return 0;\n"
+            "}\n"), false, {0}},
         // #1697: _Generic selects on a block-scope object's type.
         {S8("void f(void) {\n"
             "    long y = 0;\n"
@@ -883,7 +938,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
         {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
     };
     struct { String8 first; String8 second; bool intern; } interning[] = {
-        {S8("source.c"), S8("-O2"), false},
+        {S8("source.c"), S8("-O2"), true},
+        {S8("-fno-canonical-intern-constants"), S8("-O2"), false},
         {S8("-fcanonical-intern-constants"), S8("-O0"), true},
         {S8("-fcanonical-intern-constants"), S8("-fno-canonical-intern-constants"), false},
         {S8("-fno-canonical-intern-constants"), S8("-fcanonical-intern-constants"), true},
@@ -893,7 +949,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
     {
         String8 command[] = {interning[index].first, interning[index].second, S8("source.c")};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.intern_block_constants == interning[index].intern);
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.disable_block_constant_interning == !interning[index].intern);
     }
     // -fcanonical-construction-fold is a lowering choice like interning:
     // off by default, last one wins, and FAST controls leave it alone.
@@ -1266,7 +1322,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             command[count++] = S8("-fcanonical-fast");
             if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
-            if (intern) command[count++] = S8("-fcanonical-intern-constants");
+            if (!intern) command[count++] = S8("-fno-canonical-intern-constants");
             if (fold) command[count++] = S8("-fcanonical-construction-fold");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
@@ -1279,7 +1335,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
-            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern &&
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.disable_block_constant_interning == !intern &&
                                    invocation.construction_fold == fold);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);

@@ -2148,7 +2148,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
-        if (invocation.intern_block_constants)
+        if (!invocation.disable_block_constant_interning)
         {
             CIRConstantInternStatistics interned = compile.constant_interning;
             string_print(S8("C_CONSTANT_INTERN lookups={u64} hits={u64} stale={u64}\n"), interned.lookups, interned.hits, interned.stale);
@@ -2234,6 +2234,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
+            // Counts and bytes: the facts analysis retained for lowering, and the fact candidates left without a type, by reason.
+            CAstFactStatistics facts = tree.facts;
+            u64 missing = 0;
+            for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+            {
+                missing += facts.gaps[gap];
+            }
+            string_print(S8("C_AST_FACTS nodes={u64} retained_bytes={u64} regions={u64} candidates={u64} tree={u64} machine={u64} completed={u64} "
+                            "missing={u64} {S8}={u64} {S8}={u64} {S8}={u64} {S8}={u64} bound={u64} bit_fields={u64} strings={u64} uncovered={u64} outside={u64} "
+                            "stale={u64} completion_queries={u64}\n"),
+                         facts.nodes, facts.retained_bytes, facts.regions, facts.candidates, facts.tree, facts.machine, facts.completed, missing,
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_UNSPANNED), facts.gaps[C_AST_FACT_GAP_UNSPANNED],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_INVALID), facts.gaps[C_AST_FACT_GAP_INVALID],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_APPENDS), facts.gaps[C_AST_FACT_GAP_APPENDS],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_BUSY), facts.gaps[C_AST_FACT_GAP_BUSY], facts.bound, facts.bit_fields, facts.strings, facts.uncovered,
+                         facts.outside, facts.stale, facts.completion_queries);
         }
         // Also report disabled passes: -O0 must expose its selected policy.
         {
@@ -2273,10 +2289,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         {
             string_print(S8("IR_INLINE tiny={u32} candidates={u64} inlined={u64} always_inlined={u64} copied_instructions={u64} growth={u64} "
                             "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64} "
-                            "released_bytes={u64}\n"),
+                            "released_bytes={u64} splice_proofs={u64} splice_fallbacks={u64} reused_proofs={u64}\n"),
                          (u32)invocation.inline_options.tiny, inlining.candidates, inlining.inlined, inlining.always_inlined,
                          inlining.copied_instructions, inlining.growth, inlining.budget_skips, inlining.shape_skips,
-                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits, inlining.released_bytes);
+                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits, inlining.released_bytes,
+                         inlining.splice_proofs, inlining.splice_fallbacks, inlining.reused_proofs);
         }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "

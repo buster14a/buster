@@ -11,22 +11,26 @@
 // c_ast_test_columns covers the column arenas: step boundaries, moves, a
 // phase-arena peak that does not grow with the tree, and c_ast_release.
 // Every test releases the trees it builds, then the units they read through
-// c_test_scratch_end; C_AST_TEST_FIXTURE checks that each fixture returned
+// c_test_scratch_end; C_TEST_BOUNDED_FIXTURE checks that each fixture returned
 // every reservation it made (GitHub #3306). c_ast_test_corpus (see "corpus
 // differential" below) builds every tests/**/*.c file and the compiler's own
 // frontend sources and holds the tree to c_parse_ast's top-level declaration
 // split, the declaration split read from the tree (c_parse_ast_from_tree) to
 // c_parse_ast's records field by field (c_ast_corpus_split), and the tree
-// expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types).
+// expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types),
+// where the analysis with the tree must also equal the analysis without it in
+// every model row (c_ast_corpus_models_differ).
 // c_ast_test_sizeof_handoff runs the same inputs through the sizeof handoff
 // comparison (c_test_sizeof_handoff_set), which holds lowering's `sizeof`
 // sizes to semantic analysis's answers.
 // c_ast_test_types probes the typer's accepted kinds, declines and misses one
 // range at a time; c_ast_test_type_lookups holds its name checks to the
 // machine on shadowing shapes; c_ast_test_split runs the tree split on one
-// shape per fallback reason in every layout. c_ast_test_spans checks the
-// retained token spans and their range lookup, which the corpus also holds
-// to every node (c_ast_test_spans_consistent).
+// shape per fallback reason in every layout; c_ast_test_declaration_hints holds
+// the statement plan's declaration hints (storage classes, the auto precheck)
+// to the walker. c_ast_test_spans checks the retained token spans and their
+// range lookup, which the corpus also holds to every node
+// (c_ast_test_spans_consistent).
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -1469,6 +1473,9 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysis
     return difference;
 }
 
+// The first difference between two analyses: the sizes of the type tables,
+// then the diagnostics (count, then each message, kind, severity and
+// location). Empty when there is none.
 BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
 {
     String8 difference = {0};
@@ -1497,6 +1504,227 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysis
     }
     return difference;
 }
+
+
+// The analysis model field by field: every row of the type, entity, scope,
+// array-bound, alignment, declaration, identifier-use, member, enum-member
+// and parameter tables, an enumerator's declaration-point integer constant
+// field by field. Names are compared by content; the syntax record pointer
+// and padding are not compared, since each analysis parses its own. The counts are compared
+// first (c_ast_corpus_analyses_differ), so the rows line up. `rows` receives
+// the number of rows compared.
+#define C_AST_MODEL_FIELD(table, field) \
+    (difference.length || left->table[index].field == right->table[index].field ? difference \
+                                                                                 : string_format(arena, S8(#table " {u32} differs in " #field), index))
+#define C_AST_MODEL_NAME(table, field) \
+    (difference.length || string_equal(left->table[index].field, right->table[index].field) \
+         ? difference \
+         : string_format(arena, S8(#table " {u32} differs in " #field), index))
+#define C_AST_MODEL_SITE(table, field) \
+    (difference.length || (left->table[index].field.map_offset_plus_one == right->table[index].field.map_offset_plus_one && \
+                           left->table[index].field.file == right->table[index].field.file) \
+         ? difference \
+         : string_format(arena, S8(#table " {u32} differs in " #field), index))
+
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_models_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right, u64* rows)
+{
+    String8 difference = {0};
+    if (left->declaration_count != right->declaration_count || left->parameter_count != right->parameter_count ||
+        left->enum_member_count != right->enum_member_count || left->alignment_count != right->alignment_count ||
+        left->scope_count != right->scope_count || left->identifier_use_count != right->identifier_use_count)
+    {
+        difference = string_format(arena, S8("model tables differ: {u32} declarations, {u32} parameters, {u32} enum members, {u32} alignments, {u32} scopes, "
+                                             "{u32} uses without the tree; {u32}, {u32}, {u32}, {u32}, {u32}, {u32} with it"),
+                                   left->declaration_count, left->parameter_count, left->enum_member_count, left->alignment_count, left->scope_count,
+                                   left->identifier_use_count, right->declaration_count, right->parameter_count, right->enum_member_count,
+                                   right->alignment_count, right->scope_count, right->identifier_use_count);
+    }
+    for (u32 index = 0; index < left->type_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(types, tag);
+        difference = C_AST_MODEL_FIELD(types, tag_scope.value);
+        difference = C_AST_MODEL_FIELD(types, element_type.value);
+        difference = C_AST_MODEL_FIELD(types, return_type.value);
+        difference = C_AST_MODEL_FIELD(types, unqualified_type.value);
+        difference = C_AST_MODEL_FIELD(types, array_bound);
+        difference = C_AST_MODEL_FIELD(types, parameter_start);
+        difference = C_AST_MODEL_FIELD(types, parameter_count);
+        difference = C_AST_MODEL_FIELD(types, member_start);
+        difference = C_AST_MODEL_FIELD(types, member_count);
+        difference = C_AST_MODEL_FIELD(types, enum_member_start);
+        difference = C_AST_MODEL_FIELD(types, enum_member_count);
+        difference = C_AST_MODEL_FIELD(types, definition_start);
+        difference = C_AST_MODEL_FIELD(types, definition_token_count);
+        difference = C_AST_MODEL_FIELD(types, vector_byte_size);
+        difference = C_AST_MODEL_FIELD(types, kind);
+        difference = C_AST_MODEL_FIELD(types, is_const);
+        difference = C_AST_MODEL_FIELD(types, is_volatile);
+        difference = C_AST_MODEL_FIELD(types, is_restrict);
+        difference = C_AST_MODEL_FIELD(types, is_atomic);
+        difference = C_AST_MODEL_FIELD(types, is_variadic);
+        difference = C_AST_MODEL_FIELD(types, is_complete);
+        difference = C_AST_MODEL_FIELD(types, is_transparent_union);
+        difference = C_AST_MODEL_FIELD(types, has_unqualified_type);
+        difference = C_AST_MODEL_FIELD(types, is_unprototyped);
+        difference = C_AST_MODEL_FIELD(types, has_fixed_underlying_type);
+    }
+    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(entities, name);
+        difference = C_AST_MODEL_FIELD(entities, symbol);
+        difference = C_AST_MODEL_SITE(entities, location);
+        difference = C_AST_MODEL_FIELD(entities, type.value);
+        difference = C_AST_MODEL_FIELD(entities, scope.value);
+        difference = C_AST_MODEL_FIELD(entities, next_in_scope.value);
+        difference = C_AST_MODEL_FIELD(entities, next_in_lookup.value);
+        difference = C_AST_MODEL_FIELD(entities, next_typedef_in_lookup.value);
+        difference = C_AST_MODEL_FIELD(entities, next_by_name.value);
+        difference = C_AST_MODEL_FIELD(entities, declaration_index);
+        difference = C_AST_MODEL_FIELD(entities, declaration_token_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, declaration_statement_start);
+        difference = C_AST_MODEL_FIELD(entities, declaration_token_start);
+        difference = C_AST_MODEL_FIELD(entities, declaration_token_count);
+        difference = C_AST_MODEL_FIELD(entities, alignment_start);
+        difference = C_AST_MODEL_FIELD(entities, alignment_count);
+        difference = C_AST_MODEL_FIELD(entities, kind);
+        difference = C_AST_MODEL_FIELD(entities, is_definition);
+        difference = C_AST_MODEL_FIELD(entities, is_static_storage);
+        difference = C_AST_MODEL_FIELD(entities, is_thread_local);
+        difference = C_AST_MODEL_FIELD(entities, is_constexpr);
+        difference = C_AST_MODEL_FIELD(entities, has_constant_value);
+        difference = C_AST_MODEL_FIELD(entities, constant_is_negative);
+        difference = C_AST_MODEL_FIELD(entities, has_cleanup);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_checked);
+        difference = C_AST_MODEL_FIELD(entities, is_register);
+        difference = C_AST_MODEL_FIELD(entities, is_extern);
+        difference = C_AST_MODEL_FIELD(entities, definition_is_gnu_inline_only);
+        difference = C_AST_MODEL_FIELD(entities, has_internal_linkage);
+        difference = C_AST_MODEL_FIELD(entities, inline_hints);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_function.value);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_token);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_end);
+        difference = C_AST_MODEL_FIELD(entities, enum_member_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, definition_parameter_count_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, prototype_parameter_count_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, constant_value);
+    }
+    for (u32 index = 0; index < left->scope_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(scopes, parent.value);
+        difference = C_AST_MODEL_FIELD(scopes, first_entity.value);
+        difference = C_AST_MODEL_FIELD(scopes, last_entity.value);
+        difference = C_AST_MODEL_FIELD(scopes, token_start);
+        difference = C_AST_MODEL_FIELD(scopes, token_end);
+        difference = C_AST_MODEL_FIELD(scopes, entity_count);
+    }
+    for (u32 index = 0; index < left->array_bound_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(array_bounds, inferred_count);
+        difference = C_AST_MODEL_FIELD(array_bounds, token_start);
+        difference = C_AST_MODEL_FIELD(array_bounds, token_count);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_static);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_star);
+        difference = C_AST_MODEL_FIELD(array_bounds, has_inferred_count);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_const);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_parameter_declarator);
+    }
+    for (u32 index = 0; index < left->alignment_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(alignments, type.value);
+        difference = C_AST_MODEL_FIELD(alignments, token_start);
+        difference = C_AST_MODEL_FIELD(alignments, token_count);
+    }
+    for (u32 index = 0; index < left->declaration_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(declarations, name);
+        difference = C_AST_MODEL_SITE(declarations, location);
+        difference = C_AST_MODEL_FIELD(declarations, token_start);
+        difference = C_AST_MODEL_FIELD(declarations, token_count);
+        difference = C_AST_MODEL_FIELD(declarations, declarator_start);
+        difference = C_AST_MODEL_FIELD(declarations, declarator_count);
+        difference = C_AST_MODEL_FIELD(declarations, body_start);
+        difference = C_AST_MODEL_FIELD(declarations, body_token_count);
+        difference = C_AST_MODEL_FIELD(declarations, identifier_list_start);
+        difference = C_AST_MODEL_FIELD(declarations, identifier_list_token_count);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_declaration_start);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_declaration_token_count);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_start);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_count);
+        difference = C_AST_MODEL_FIELD(declarations, alignment_start);
+        difference = C_AST_MODEL_FIELD(declarations, alignment_count);
+        difference = C_AST_MODEL_FIELD(declarations, type.value);
+        difference = C_AST_MODEL_FIELD(declarations, base_type.value);
+        difference = C_AST_MODEL_FIELD(declarations, entity.value);
+        difference = C_AST_MODEL_FIELD(declarations, scope.value);
+        difference = C_AST_MODEL_FIELD(declarations, kind);
+        difference = C_AST_MODEL_FIELD(declarations, is_definition);
+        difference = C_AST_MODEL_FIELD(declarations, is_variadic);
+        difference = C_AST_MODEL_FIELD(declarations, is_constexpr);
+        difference = C_AST_MODEL_FIELD(declarations, is_identifier_list_definition);
+        difference = C_AST_MODEL_FIELD(declarations, is_gnu_inline_only);
+        difference = C_AST_MODEL_FIELD(declarations, is_declarator_continuation);
+    }
+    for (u32 index = 0; index < left->identifier_use_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(identifier_uses, token_index);
+        difference = C_AST_MODEL_FIELD(identifier_uses, entity.value);
+        difference = C_AST_MODEL_FIELD(identifier_uses, scope.value);
+    }
+    for (u32 index = 0; index < left->member_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(members, name);
+        difference = C_AST_MODEL_SITE(members, location);
+        difference = C_AST_MODEL_FIELD(members, symbol);
+        difference = C_AST_MODEL_FIELD(members, type.value);
+        difference = C_AST_MODEL_FIELD(members, alignment_start);
+        difference = C_AST_MODEL_FIELD(members, alignment_count);
+        difference = C_AST_MODEL_FIELD(members, bit_width);
+        difference = C_AST_MODEL_FIELD(members, bit_width_token_start);
+        difference = C_AST_MODEL_FIELD(members, bit_width_token_count);
+        difference = C_AST_MODEL_FIELD(members, is_bit_field);
+        difference = C_AST_MODEL_FIELD(members, is_packed);
+        difference = C_AST_MODEL_FIELD(members, bit_width_resolved);
+        difference = C_AST_MODEL_FIELD(members, has_incomplete_type);
+    }
+    for (u32 index = 0; index < left->enum_member_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(enum_members, name);
+        difference = C_AST_MODEL_SITE(enum_members, location);
+        difference = C_AST_MODEL_FIELD(enum_members, symbol);
+        difference = C_AST_MODEL_FIELD(enum_members, token_index);
+        difference = C_AST_MODEL_FIELD(enum_members, enum_type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, declaration_type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.magnitude);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.magnitude_high);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.rank);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.bit_width);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.is_signed);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.is_negative);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.valid);
+        difference = C_AST_MODEL_FIELD(enum_members, value);
+        difference = C_AST_MODEL_FIELD(enum_members, is_negative);
+        difference = C_AST_MODEL_FIELD(enum_members, is_published);
+        difference = C_AST_MODEL_FIELD(enum_members, is_prototype_scope);
+        difference = C_AST_MODEL_FIELD(enum_members, is_expression_defined);
+    }
+    for (u32 index = 0; index < left->parameter_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(parameters, name);
+        difference = C_AST_MODEL_SITE(parameters, location);
+        difference = C_AST_MODEL_FIELD(parameters, type.value);
+        difference = C_AST_MODEL_FIELD(parameters, entity.value);
+        difference = C_AST_MODEL_FIELD(parameters, symbol);
+    }
+    *rows += (u64)left->type_count + left->entity_count + left->scope_count + left->array_bound_count + left->alignment_count + left->declaration_count +
+             left->identifier_use_count + left->member_count + left->enum_member_count + left->parameter_count;
+    return difference;
+}
+
+#undef C_AST_MODEL_SITE
+#undef C_AST_MODEL_NAME
+#undef C_AST_MODEL_FIELD
 
 // The analysis model, field by field: every type row, array bound,
 // alignment specifier, type alignment, member, parameter, entity and
@@ -2281,6 +2509,11 @@ enum
     C_AST_CORPUS_STATEMENT_USE_FLOOR = 20000,
     C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR = 27000,
     C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR = 100000,
+    // Analysis model rows compared field by field with and without the tree
+    // (c_ast_corpus_models_differ): about 125,700 from the fixtures on Linux
+    // x86-64 and about 497,400 in all with the frontend's own sources.
+    C_AST_CORPUS_MODEL_ROW_FLOOR = 100000,
+    C_AST_CORPUS_HOSTED_MODEL_ROW_FLOOR = 440000,
     // Block declarators the split took from their plan hints, and the plain
     // initializers among them: about 3,550 and 2,960 from the fixtures on
     // Linux x86-64, and about 19,000 and 18,100 in all with the frontend's
@@ -2388,6 +2621,9 @@ struct CAstCorpusTally
     u64 statement_braced;
     u64 statement_fallbacks;
     u64 statement_compared;
+    // Analysis model rows compared field by field in the same analyses
+    // (c_ast_corpus_models_differ).
+    u64 model_rows;
     // The declaration specifier read over the same inputs (the analysis with
     // the tree in c_ast_corpus_types): runs read from DECL_SPECIFIERS nodes,
     // runs left to the type machine, and type rows compared field by field.
@@ -2410,6 +2646,13 @@ struct CAstCorpusTally
     // tree, and those of them compared with the machine in verify mode.
     u64 member_answers;
     u64 member_compared;
+    // The retained facts (CAstFacts, GitHub #4062) of the analysis with the
+    // tree: fact candidates, those left without a type, and published rows
+    // found past the type table.
+    u64 fact_candidates;
+    u64 fact_missing;
+    u64 fact_stale;
+    u64 fact_unaccounted;
 };
 
 // c_parse_ast_from_tree on one input whose tree is complete, held to
@@ -2472,9 +2715,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_extents(UnitTestArguments* argum
     return result;
 }
 
-// The first difference between two analyses: the sizes of the type tables,
-// then the diagnostics (count, then each message, kind, severity and
-// location). Empty when there is none.
 // The tree expression typer (c_ast_types.c, #3102) on one input whose tree is
 // complete and whose declarations c_parse_ast accepted. Semantic analysis runs
 // three times on fresh declaration splits: without the tree, with it, and with
@@ -2505,12 +2745,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         typed_syntax.ast_statement_statistics = &statements;
         typed_syntax.ast_specifier_statistics = &specifiers;
         typed_syntax.type_interning = true;
+        // The analysis with the tree also publishes the retained facts, which
+        // must leave the model as the machine alone builds it (below).
+        CAstFacts facts = {0};
+        typed_syntax.ast_facts = c_ast_facts_create(&facts, ast) ? &facts : 0;
         CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
+        CAstFactStatistics fact_counts = facts.statistics;
+        c_ast_facts_release(&facts);
+        u64 fact_gaps = 0;
+        for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+        {
+            fact_gaps += fact_counts.gaps[gap];
+        }
+        tally->fact_candidates += fact_counts.candidates;
+        tally->fact_missing += fact_gaps;
+        tally->fact_stale += fact_counts.stale;
+        tally->fact_unaccounted += fact_counts.tree + fact_counts.machine + fact_counts.completed + fact_gaps != fact_counts.candidates;
         String8 difference = c_ast_corpus_analyses_differ(arguments->arena, &plain, &typed);
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
         // The body binder followed the tree's statement plans in the second
         // analysis; its bindings must be the token walk's, field by field.
         difference = c_ast_corpus_bindings_differ(arguments->arena, &plain, &typed);
+        if (!difference.length)
+        {
+            difference = c_ast_corpus_models_differ(arguments->arena, &plain, &typed, &tally->model_rows);
+        }
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: statement plan: {S8}"), label, difference));
         // It also read the declaration specifier runs it could from their
         // DECL_SPECIFIERS nodes; the model must be the machine's, field by field.
@@ -3063,6 +3322,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
                                   tally->type_shared_members));
     BUSTER_TEST(arguments, !hosted || (tally->statement_segments >= C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR &&
                                        tally->statement_uses >= C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR));
+    BUSTER_TEST(arguments, !hosted || tally->model_rows >= C_AST_CORPUS_HOSTED_MODEL_ROW_FLOOR);
     BUSTER_TEST(arguments, !hosted || (tally->statement_declarators >= C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR &&
                                        tally->statement_initializers >= C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR &&
                                        tally->statement_declarator_declines == 0));
@@ -3114,6 +3374,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
     BUSTER_TEST(arguments, tally.statement_segments >= C_AST_CORPUS_STATEMENT_SEGMENT_FLOOR && tally.statement_uses >= C_AST_CORPUS_STATEMENT_USE_FLOOR &&
                                tally.statement_compared >= tally.statement_uses && tally.statement_hints);
+    BUSTER_TEST(arguments, tally.model_rows >= C_AST_CORPUS_MODEL_ROW_FLOOR);
     BUSTER_TEST(arguments, tally.statement_declarators >= C_AST_CORPUS_STATEMENT_DECLARATOR_FLOOR &&
                                tally.statement_initializers >= C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR && tally.statement_declarator_declines == 0);
     BUSTER_TEST(arguments, tally.specifier_answers >= C_AST_CORPUS_SPECIFIER_ANSWER_FLOOR && tally.specifier_compared);
@@ -3129,6 +3390,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
 #endif
     // Every body of the corpus follows its plan; none is left to the token walk.
     BUSTER_TEST(arguments, tally.statement_fallbacks == 0 && tally.statement_bodies);
+    // Every fact candidate is published or counted as a gap once, and no
+    // published row outlives the type table (GitHub #4062).
+    BUSTER_TEST(arguments, tally.fact_candidates && tally.fact_stale == 0 && tally.fact_unaccounted == 0 && tally.fact_missing < tally.fact_candidates);
     // No corpus body's extent table is refused.
     BUSTER_TEST(arguments, tally.extent_refused == 0 && tally.extent_walked[C_AST_EXTENT_FALLBACK_INPUT] == 0 &&
                                tally.extent_walked[C_AST_EXTENT_FALLBACK_ANCHOR] == 0);
@@ -5362,20 +5626,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* argumen
     }
     return result;
 }
-// C_TEST_FIXTURE, after checking that the fixture already returned every
-// reservation it made: each test ends its scratch with c_test_scratch_end, so
-// the module's address space is bounded by the units one fixture holds at
-// once, not by how many sources it preprocesses (GitHub #3306).
-#define C_AST_TEST_FIXTURE(arguments, function) \
-    do \
-    { \
-        u64 live_ = arena_test_live_reserved_bytes(); \
-        BUSTER_TEST_FIXTURE(arguments, function); \
-        u64 left_ = arena_test_live_reserved_bytes(); \
-        BUSTER_TEST_RAW(arguments, left_ == live_, \
-                        string_format(arguments->arena, S8("{S8}: {u64} reserved bytes live before, {u64} after"), S8(#function), live_, left_)); \
-        c_test_release_preprocess_arenas(); \
-    } while (0)
+// Each test ends its scratch with c_test_scratch_end, so the module's address
+// space is bounded by the units one fixture holds at once, not by how many
+// sources it preprocesses; C_TEST_BOUNDED_FIXTURE checks it (GitHub #3306).
 
 // The declaration specifier read (c_parse.c, #3102) on chosen units, in every
 // layout: one whose block, file-scope and parameter specifier runs are all
@@ -5715,6 +5968,144 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_names(UnitTestArguments* argu
     return result;
 }
 
+// The declaration hints' specifier facts (c_parse_plan_declarators, #3102)
+// on chosen bodies, in every layout: storage classes in every position the
+// walker folds (a list, a typedef, a statement expression's own static, a
+// `for` declaration, an initializer that spells none), and `auto` or
+// `__auto_type` words where the auto-inference scan reads them, the
+// specifiers and the first declarator, as a parameter's specifier included.
+// Each analysis with the tree must equal the analysis without it, diagnostics
+// and model rows alike, inline hints and enumerator constants included; and
+// the model comparator must report a mutation of either.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("int g(int);\n"
+           "void f(int c)\n"
+           "{\n"
+           "    static int s = 1, t;\n"
+           "    extern int x;\n"
+           "    register int r = c;\n"
+           "    typedef int T;\n"
+           "    T u = s + g(r);\n"
+           "    static __thread int w;\n"
+           "    int v = ({ static int z = 2; z + t + w; });\n"
+           "    for (register int i = 0; i < c; i += 1) { u += i; }\n"
+           "    (void)u; (void)v; (void)x;\n"
+           "}\n"),
+        S8("void f(int c) { __auto_type a = c; auto int b = c; (void)a; (void)b; }\n"),
+        S8("void f(void) { int (*h)(__auto_type x); (void)h; }\n"),
+        S8("void f(int c) { int (*h)(int), k = c; __typeof__(c) m = k; (void)h; (void)m; }\n"),
+        S8("enum E { A = 1, B = -2 };\n"
+           "__attribute__((always_inline)) inline int f(void) { int x = A + B; return x; }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 label = string_format(temporary.arena, S8("declaration hint case {u32}, layout {u32}"), index, layout);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
+            {
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAstStatementStatistics statistics = {0};
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &built.ast;
+                syntax.ast_statement_statistics = &statistics;
+                CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &planned);
+                u64 rows = 0;
+                difference = difference.length ? difference : c_ast_corpus_models_differ(temporary.arena, &plain, &planned, &rows);
+                BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, difference));
+                BUSTER_TEST_RAW(arguments, statistics.bodies == 1 && statistics.fallbacks == 0, label);
+            }
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    // The model comparator itself: a copy of one analysis that differs only in
+    // an entity's merged inline hints, or in one field of an enumerator's
+    // declaration-point integer constant, must be reported by that field.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+                                                             S8("enum E { A = 1, B = -2 };\n"
+                                                                "__attribute__((always_inline)) inline int f(void) { return A + B; }\n"),
+                                                             C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult left = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        u32 hinted = left.entity_count;
+        for (u32 index = 0; index < left.entity_count; index += 1)
+        {
+            hinted = hinted == left.entity_count && left.entities[index].inline_hints ? index : hinted;
+        }
+        if (BUSTER_REQUIRE(arguments, left.diagnostic_count == 0 && hinted < left.entity_count && left.enum_member_count == 2 &&
+                                          left.enum_members[1].integer_constant.valid))
+        {
+            String8 const fields[] = {
+                S8("inline_hints"),
+                S8("integer_constant.magnitude"),
+                S8("integer_constant.magnitude_high"),
+                S8("integer_constant.type.value"),
+                S8("integer_constant.rank"),
+                S8("integer_constant.bit_width"),
+                S8("integer_constant.is_signed"),
+                S8("integer_constant.is_negative"),
+                S8("integer_constant.valid"),
+            };
+            for (u32 mutation = 0; mutation < BUSTER_ARRAY_LENGTH(fields); mutation += 1)
+            {
+                CAnalysisResult right = left;
+                right.entities = arena_allocate(temporary.arena, CEntity, left.entity_count);
+                right.enum_members = arena_allocate(temporary.arena, CEnumMember, left.enum_member_count);
+                memcpy(right.entities, left.entities, sizeof(CEntity) * left.entity_count);
+                memcpy(right.enum_members, left.enum_members, sizeof(CEnumMember) * left.enum_member_count);
+                CIntegerConstant* constant = &right.enum_members[1].integer_constant;
+                switch (mutation)
+                {
+                case 0:
+                    right.entities[hinted].inline_hints ^= C_ENTITY_INLINE_HINT_ALWAYS;
+                    break;
+                case 1:
+                    constant->magnitude += 1;
+                    break;
+                case 2:
+                    constant->magnitude_high += 1;
+                    break;
+                case 3:
+                    constant->type.value += 1;
+                    break;
+                case 4:
+                    constant->rank = constant->rank == C_INTEGER_RANK_INT ? C_INTEGER_RANK_LONG : C_INTEGER_RANK_INT;
+                    break;
+                case 5:
+                    constant->bit_width += 1;
+                    break;
+                case 6:
+                    constant->is_signed = !constant->is_signed;
+                    break;
+                case 7:
+                    constant->is_negative = !constant->is_negative;
+                    break;
+                default:
+                    constant->valid = !constant->valid;
+                    break;
+                }
+                u64 rows = 0;
+                String8 difference = c_ast_corpus_models_differ(temporary.arena, &left, &right, &rows);
+                String8 expected = mutation == 0 ? string_format(temporary.arena, S8("entities {u32} differs in {S8}"), hinted, fields[mutation])
+                                                 : string_format(temporary.arena, S8("enum_members 1 differs in {S8}"), fields[mutation]);
+                BUSTER_TEST_RAW(arguments, string_equal(difference, expected),
+                                string_format(temporary.arena, S8("model mutation '{S8}': '{S8}'"), fields[mutation], difference));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // The member specifier read (c_parse_member_specifiers_type, #3102) on chosen
 // units, in every layout: members read from the tree (primitive words,
 // typedef names, qualified ones, a declarator list, a union, and the members
@@ -5915,6 +6306,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments
     return result;
 }
 
+// The facts semantic analysis retains for lowering (CAstFacts, GitHub #4062).
+// One function body and two file-scope initializers are analyzed with the
+// tree and a facts record, and once with the tree alone; the model must be
+// the same, since publication keeps nothing the machine appended. The
+// columns then hold, among others: a bit-field member's width, an
+// identifier's entity, a string literal in structural form (its element row
+// and its length with the terminator), the type of a `[]` over a string
+// literal whose own run appended the literal's row, and the literals of an
+// initializer no query typed. `__func__` and a builtin's callee name are
+// gaps: the machine types them to nothing. Every candidate is accounted for
+// once, and no published row is past the type table.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8("struct S { int a : 3; int b; };\n"
+                        "char const* names[] = { \"one\", \"three\" };\n"
+                        "int table[] = { 1, 2, 3 };\n"
+                        "int f(struct S* s, int i)\n"
+                        "{\n"
+                        "    int x = s->a + s->b;\n"
+                        "    x += (int)sizeof(\"text\");\n"
+                        "    x += \"abc\"[i];\n"
+                        "    x += __builtin_expect(i, 0);\n"
+                        "    char const* name = __func__;\n"
+                        "    return x + table[i] + (name != 0);\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    bool ready = BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete) &&
+                 BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast));
+    if (ready)
+    {
+        CAst const* ast = &built.ast;
+        BUSTER_TEST(arguments, facts.node_count == ast->node_count && facts.statistics.retained_bytes >= (u64)ast->node_count * 9);
+        CParserResult plain_syntax = c_parse_ast(arena, preprocess);
+        plain_syntax.ast = ast;
+        plain_syntax.type_interning = true;
+        CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, plain_syntax);
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        syntax.ast = ast;
+        syntax.type_interning = true;
+        syntax.ast_facts = &facts;
+        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+        String8 difference = c_ast_corpus_analyses_differ(arena, &plain, &analysis);
+        difference = difference.length ? difference : c_ast_corpus_model_differ(arena, &plain, &analysis);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+        CAstFactStatistics statistics = facts.statistics;
+        u64 gaps = 0;
+        for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+        {
+            gaps += statistics.gaps[gap];
+        }
+        BUSTER_TEST(arguments, statistics.regions == 3 && statistics.candidates);
+        BUSTER_TEST(arguments, statistics.tree + statistics.machine + statistics.completed + gaps == statistics.candidates);
+        BUSTER_TEST(arguments, statistics.stale == 0 && statistics.bit_fields == 1 && statistics.strings == 4 && statistics.bound);
+        BUSTER_TEST(arguments, statistics.gaps[C_AST_FACT_GAP_INVALID] >= 2 && statistics.gaps[C_AST_FACT_GAP_APPENDS] == 0);
+        u32 checked = 0;
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            u32 flags = facts.flags[node];
+            u32 type = facts.types[node];
+            u32 kind = ast->kinds[node];
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[node]]);
+            BUSTER_TEST(arguments, !(flags & C_AST_FACT_TYPED) || type < analysis.type_count);
+            CTypeKind type_kind = (flags & C_AST_FACT_TYPED) && type < analysis.type_count ? analysis.types[type].kind : C_TYPE_COUNT;
+            if (kind == C_AST_STRING && string_equal(spelling, S8("\"abc\"")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_STRING) && type_kind == C_TYPE_CHAR && facts.payloads[node] == 4);
+                checked += 1;
+            }
+            if (kind == C_AST_INDEX && (flags & C_AST_FACT_EXPRESSION) && c_ast_subtree_begin(ast, node) + 1 < node &&
+                ast->kinds[c_ast_subtree_begin(ast, node)] == C_AST_STRING)
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_TYPED) && type_kind == C_TYPE_CHAR);
+                checked += 1;
+            }
+            if (kind == C_AST_MEMBER_ARROW && (flags & C_AST_FACT_BIT_FIELD))
+            {
+                BUSTER_TEST(arguments, facts.payloads[node] == 3 && type_kind == C_TYPE_INT);
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("s")) && (flags & C_AST_FACT_EXPRESSION))
+            {
+                u32 entity = facts.payloads[node];
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_BOUND) && entity < analysis.entity_count &&
+                                           analysis.entities[entity].kind == C_ENTITY_PARAMETER && type_kind == C_TYPE_POINTER);
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("__func__")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && !(flags & C_AST_FACT_TYPED));
+                checked += 1;
+            }
+            if (kind == C_AST_NUMBER && string_equal(spelling, S8("2")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && type_kind == C_TYPE_INT && !(flags & C_AST_FACT_MACHINE));
+                checked += 1;
+            }
+        }
+        // "abc", its `[]`, s->a, the two uses of `s`, __func__ and the 2 of `table`.
+        BUSTER_TEST(arguments, checked == 7);
+        c_ast_facts_release(&facts);
+        c_ast_facts_release(&facts);
+        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.statistics.stale == 0);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5925,34 +6431,36 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
         c_ast_test_preprocess(temporary.arena, S8(""), C_PREPROCESS_DIALECT_GNU17);
         c_test_scratch_end(temporary);
     }
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_expressions);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_declarations);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_dialects);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_failures);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_tables);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_navigation);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_spans);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_validator);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_attribute_slots);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_columns);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_oracle);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_uninterned);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_types);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_type_lookups);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_split);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_statements);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_extents);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_specifiers);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_type_names);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_members);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_expressions);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declarations);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_dialects);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_failures);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_tables);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_navigation);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_spans);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_validator);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_attribute_slots);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_options_and_statistics);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_columns);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_oracle);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_uninterned);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_types);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_lookups);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_split);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statements);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_extents);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_specifiers);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_corpus);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_sizeof_handoff);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_handoff);
 #endif
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_truncations);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_deep);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_truncations);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_deep);
     return result;
 }
 #endif

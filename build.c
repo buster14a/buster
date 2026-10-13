@@ -43,9 +43,11 @@
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   tools/ffmpeg_compatibility.c                 opt-in pristine FFmpeg portable census
 //   tools/android_packages.c                    concurrent Android package batches
 //   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
+//   tools/openssl_compatibility.c              pinned OpenSSL build/test intake
 //   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
 //   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
 //                                                and compatibility_ide_selection_self_test
@@ -158,6 +160,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_USERSPACE,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_RADDEBUGGER,
+    BUILD_COMMAND_TEST_OPENSSL,
+    BUILD_COMMAND_TEST_OPENSSL_CONTROLS,
     BUILD_COMMAND_TEST_CURL,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
@@ -165,6 +169,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_QEMU,
     BUILD_COMMAND_QEMU_INPUT_SELF_TEST,
     BUILD_COMMAND_TEST_CLANG_SUITE,
+    BUILD_COMMAND_TEST_FFMPEG,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
     BUILD_COMMAND_TEST_UEFI,
@@ -25662,6 +25667,9 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_OPENSSL:
+        case BUILD_COMMAND_TEST_OPENSSL_CONTROLS:
+        case BUILD_COMMAND_TEST_FFMPEG:
         case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
@@ -25702,6 +25710,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
         {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_OPENSSL, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_OPENSSL_CONTROLS, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_FFMPEG, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_USERSPACE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
@@ -25755,6 +25766,9 @@ struct MatrixTestTree
     u32 unity_analysis_scheduled : 1;
     u32 table_audit_scheduled : 1;
     u32 runs_tests : 1;
+    // The analyzers run as their own outer edge beside the self-host worker
+    // instead of inside the tree's test edge (matrix_superbuild_post_test_assign).
+    u32 post_test_outer : 1;
 };
 
 // Hosted GitHub runners have three or four logical CPUs; at or below this
@@ -25779,6 +25793,9 @@ struct MatrixSuperbuildSelfHostPlan
     u32 enabled : 1;
     u32 ci : 1;
     u32 depends_on_compile : 1;
+    // Set exactly when the producer tree's analyzers run as their own outer
+    // edge: the worker then also waits for the tree's test_all.
+    u32 depends_on_validation : 1;
     u32 uses_inner_ninja : 1;
     u32 producer_clean_required : 1;
 };
@@ -27028,6 +27045,35 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_analyze_jobs(u32 thread_count, u64 mem
     return thread_count >= 3 && memory_bytes >= MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY ? 2 : 1;
 }
 
+// A single-tree superbuild (every release shard) has one outer slot, so the
+// one-CPU self-host worker used to wait for test_all and then for the
+// analyzers, whose longest shard leaves most CPUs idle (hosted x86-64:
+// 59-66 s of analyzers, then 65-96 s of self-host). Where the analyzers
+// already overlap each other, so the host has the memory, and the budget
+// holds both analyzer workers, the optnone frontend and the worker, the
+// analyzers become their own outer edge in a one-slot pool and the worker
+// waits for test_all instead. Larger matrices already have spare slots.
+#define MATRIX_SUPERBUILD_POST_TEST_OVERLAP_THREADS (BUSTER_ANALYZE_DEFAULT_JOBS + 2)
+
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_post_test_overlap(u32 thread_count, u32 tree_count, u32 analyze_jobs, u32 self_host_jobs)
+{
+    return tree_count == 1 && self_host_jobs == 1 && analyze_jobs == 2 && thread_count >= MATRIX_SUPERBUILD_POST_TEST_OVERLAP_THREADS;
+}
+
+// Returns the extra outer slot (0 or 1) the post-test pool adds to the CPU pool.
+BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_post_test_assign(MatrixTestTree* trees, u32 tree_count, u32 thread_count, u32 self_host_tree,
+                                                          u32 self_host_jobs)
+{
+    u32 result = 0;
+    if (self_host_tree < tree_count && trees[self_host_tree].runs_tests &&
+        matrix_superbuild_post_test_overlap(thread_count, tree_count, trees[self_host_tree].analyze_jobs, self_host_jobs))
+    {
+        trees[self_host_tree].post_test_outer = 1;
+        result = 1;
+    }
+    return result;
+}
+
 // Ninja admits ready edges from a shared pool in declaration order, and a fresh
 // CI checkout has no `.ninja_log` for its critical-path scheduler to learn from.
 // Declaring the longest trees first therefore decides whether the slowest test
@@ -27205,13 +27251,24 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, 
 BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuildSelfHostPlan plan, MatrixTestTree* trees, u32 tree_count,
                                                                   u32 thread_count)
 {
-    bool result = !plan.enabled;
+    u32 post_test_trees = 0;
+    for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+    {
+        post_test_trees += trees[tree_i].post_test_outer;
+    }
+    bool result = !plan.enabled && !plan.depends_on_validation && !post_test_trees;
     if (plan.enabled)
     {
         result = plan.tree_index < tree_count && string_equal(plan.build_directory, trees[plan.tree_index].build_directory) &&
                  string_equal(plan.config, S8("Release")) && plan.build_driver.length && plan.provenance_record_path.length && plan.pool_jobs == 1 &&
                  plan.depends_on_compile && !plan.uses_inner_ninja && plan.producer_clean_required &&
-                 matrix_superbuild_self_host_cpu_budget_valid(trees, tree_count, thread_count, plan.pool_jobs);
+                 matrix_superbuild_self_host_cpu_budget_valid(trees, tree_count, thread_count, plan.pool_jobs) &&
+                 // The analyzers' own edge and the worker's wait for test_all
+                 // exist together, on the producer tree, only where admitted.
+                 post_test_trees == plan.depends_on_validation &&
+                 (!plan.depends_on_validation ||
+                  (trees[plan.tree_index].post_test_outer && trees[plan.tree_index].runs_tests &&
+                   matrix_superbuild_post_test_overlap(thread_count, tree_count, trees[plan.tree_index].analyze_jobs, plan.pool_jobs)));
     }
     return result;
 }
@@ -27494,8 +27551,69 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_CONFIG Release)")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_JOBS 2)")) != BUSTER_STRING_NO_MATCH &&
-                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_ANALYZE_JOBS 1)")) != BUSTER_STRING_NO_MATCH;
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_ANALYZE_JOBS 1)")) != BUSTER_STRING_NO_MATCH &&
+                                 // Two trees keep the analyzers in the canonical tree's test edge.
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_POST_TEST_JOBS 0)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_POST_TEST_OUTER 0)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION 0)")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
+
+    // A four-CPU, 16 GiB release shard: one canonical tree, the self-host
+    // worker and overlapping analyzers. The analyzers take the post-test slot
+    // and the worker waits for test_all; the CPU pool keeps its one slot.
+    MatrixTestTree release_trees[1] = {
+        {.build_directory = S8("build/canonical"), .combination_indices = {0}, .combination_count = 1, .unity_only = 1,
+         .unity_analysis_scheduled = 1, .runs_tests = 1},
+    };
+    matrix_superbuild_allocate_jobs(release_trees, 1, 4, 1);
+    release_trees[0].analyze_jobs = matrix_superbuild_analyze_jobs(4, 16759504896ull);
+    u32 release_post_test_jobs = matrix_superbuild_post_test_assign(release_trees, 1, 4, 0, 1);
+    MatrixSuperbuildSelfHostPlan release_self_host = manifest_plan;
+    release_self_host.depends_on_validation = 1;
+    MatrixSuperbuildSelfHostPlan release_without_wait = manifest_plan;
+    bool release_written = matrix_superbuild_manifest_write(arena, manifest_path, S8("/absolute/source"), release_self_host.build_driver,
+                                                             release_trees, 1, matrix_superbuild_outer_jobs(4, 1), manifest_combinations,
+                                                             release_self_host, false, false);
+    ByteSlice release_bytes = file_read(arena, manifest_path, (FileReadOptions){.map_required = 0});
+    String8 release_manifest = BYTE_SLICE_TO_STRING(8, release_bytes);
+    bool release_fields_valid = release_written && release_manifest.pointer &&
+                                string_first_sequence(release_manifest, S8("set(BUSTER_SUPERBUILD_OUTER_JOBS 1)")) != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(release_manifest, S8("set(BUSTER_SUPERBUILD_POST_TEST_JOBS 1)")) != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(release_manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_JOBS 2)")) != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(release_manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_POST_TEST_OUTER 1)")) != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(release_manifest, S8("set(BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION 1)")) !=
+                                    BUSTER_STRING_NO_MATCH;
+    remove_path_recursive(arena, manifest_path);
+    bool release_valid = release_post_test_jobs == 1 && release_trees[0].post_test_outer && release_trees[0].parallel_jobs == 4 &&
+                         release_fields_valid && matrix_superbuild_self_host_plan_valid(release_self_host, release_trees, 1, 4) &&
+                         // The worker must wait for test_all whenever the analyzers leave the CPU pool.
+                         !matrix_superbuild_self_host_plan_valid(release_without_wait, release_trees, 1, 4) &&
+                         // A three-CPU budget cannot hold two analyzer workers, the audit and the worker.
+                         !matrix_superbuild_self_host_plan_valid(release_self_host, release_trees, 1, 3);
+
+    // The 7 GiB macOS release shard and a three-CPU large-memory host keep
+    // the analyzers inside the test edge; forcing the edge there is invalid.
+    MatrixTestTree macos_trees[1] = {release_trees[0]};
+    macos_trees[0].post_test_outer = 0;
+    macos_trees[0].analyze_jobs = matrix_superbuild_analyze_jobs(3, BUSTER_GB(7));
+    MatrixTestTree three_cpu_trees[1] = {macos_trees[0]};
+    three_cpu_trees[0].analyze_jobs = matrix_superbuild_analyze_jobs(3, BUSTER_GB(64));
+    MatrixTestTree no_test_trees[1] = {macos_trees[0]};
+    no_test_trees[0].analyze_jobs = 2;
+    no_test_trees[0].runs_tests = 0;
+    bool kept_serial = !matrix_superbuild_post_test_assign(macos_trees, 1, 3, 0, 1) && !macos_trees[0].post_test_outer &&
+                       !matrix_superbuild_post_test_assign(three_cpu_trees, 1, 3, 0, 1) && three_cpu_trees[0].analyze_jobs == 2 &&
+                       !matrix_superbuild_post_test_assign(no_test_trees, 1, 4, 0, 1) &&
+                       !matrix_superbuild_post_test_assign(release_trees, 1, 4, 0, 0) &&
+                       !matrix_superbuild_post_test_assign(release_trees, 1, 4, 1, 1) &&
+                       matrix_superbuild_self_host_plan_valid(release_without_wait, macos_trees, 1, 3) &&
+                       !matrix_superbuild_self_host_plan_valid(release_self_host, macos_trees, 1, 3);
+    macos_trees[0].post_test_outer = 1;
+    kept_serial = kept_serial && !matrix_superbuild_self_host_plan_valid(release_self_host, macos_trees, 1, 4) &&
+                  !matrix_superbuild_self_host_plan_valid(release_without_wait, macos_trees, 1, 4) &&
+                  !matrix_superbuild_self_host_plan_valid((MatrixSuperbuildSelfHostPlan){0}, release_trees, 1, 4) &&
+                  // Larger matrices already have spare outer slots.
+                  !matrix_superbuild_post_test_overlap(16, 2, 2, 1) && matrix_superbuild_post_test_overlap(16, 1, 2, 1);
 
     // A four-CPU checks shard: the two sanitized test trees keep their build
     // shares, test with the whole budget, and the second waits for the first.
@@ -27538,7 +27656,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
         matrix_superbuild_self_host_plan_valid(malformed_manifest, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_plan_valid(missing_provenance, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_plan_valid(missing_producer_clean, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) || !manifest_fields_valid ||
-        !serial_fields_valid ||
+        !serial_fields_valid || !release_valid || !kept_serial ||
         matrix_superbuild_self_host_plan_valid(oversized_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_cpu_budget_valid(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4, 2) || path_exists(arena, manifest_path))
     {
@@ -27553,11 +27671,17 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                                                            MatrixTestCombination* combinations, MatrixSuperbuildSelfHostPlan self_host,
                                                            bool verbose, bool quiet)
 {
+    u32 post_test_jobs = 0;
+    for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+    {
+        post_test_jobs += trees[tree_i].post_test_outer;
+    }
     String8List lines = {0};
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SOURCE_DIR [==[{S8}]==])\n"), source_directory));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_BUILD_DRIVER [==[{S8}]==])\n"), build_driver));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_COUNT {u32})\n"), tree_count));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_OUTER_JOBS {u32})\n"), outer_jobs));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_POST_TEST_JOBS {u32})\n"), post_test_jobs));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TEST_ADMISSION {S8})\n"), matrix_coverage_test_admission_current()));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_VERBOSE {S8})\n"), verbose ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_QUIET {S8})\n"), quiet ? S8("ON") : S8("OFF")));
@@ -27579,12 +27703,15 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     string8_list_push(arena, &lines,
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_COMPILE {u32})\n"), self_host.depends_on_compile));
     string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION {u32})\n"), self_host.depends_on_validation));
+    string8_list_push(arena, &lines,
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_USES_INNER_NINJA {u32})\n"), self_host.uses_inner_ninja));
     string8_list_push(arena, &lines,
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED {u32})\n"), self_host.producer_clean_required));
 
     u32 previous_test_tree = tree_count;
     String8 previous_test_task = {0};
+    String8 self_host_validation = {0};
     for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
     {
         MatrixTestTree tree = trees[tree_i];
@@ -27641,9 +27768,16 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         }
         if (analyze_config.length)
         {
+            String8 post_test_pool = tree.post_test_outer ? string_format(arena, S8("post-test-{S8}"), phase_tree) : test_pool;
             matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_ANALYZE_OBSERVER"), prefix), phase_tree,
-                               S8("post_test"), analyze_config, test_pool,
-                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), (String8){0}, 0);
+                               S8("post_test"), analyze_config, post_test_pool,
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), (String8){0},
+                               BUSTER_MAX(tree.analyze_jobs, 1));
+        }
+        if (self_host.enabled && self_host.depends_on_validation && tree_i == self_host.tree_index)
+        {
+            String8 last_test_config = second_test_config.length ? second_test_config : first_test_config;
+            self_host_validation = string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, last_test_config);
         }
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_JOBS {u32})\n"), prefix, tree.test_jobs));
         if (chained)
@@ -27677,6 +27811,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_JOBS {u32})\n"), prefix, BUSTER_MAX(tree.analyze_jobs, 1)));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_POST_TEST_OUTER {u32})\n"), prefix, tree.post_test_outer));
         // Whole-table audits ride on the same canonical tree that already
         // owns clang_analyze: unsanitized optimized Clang, exactly one tree
         // per platform. They read only generated metadata tables and source
@@ -27689,8 +27824,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     if (self_host.enabled)
     {
         String8 phase_tree = matrix_phase_find_tree(self_host.build_directory);
+        String8 dependency = self_host_validation.length ? self_host_validation : string_format(arena, S8("{S8}-build-all"), phase_tree);
         matrix_phase_cmake(arena, &lines, S8("BUSTER_SUPERBUILD_SELF_HOST_OBSERVER"), phase_tree, S8("self_host"), S8("Release"),
-                           S8("self-host"), string_format(arena, S8("{S8}-build-all"), phase_tree), (String8){0}, self_host.pool_jobs);
+                           S8("self-host"), dependency, (String8){0}, self_host.pool_jobs);
     }
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), true);
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
@@ -28098,20 +28234,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     // runner's admission behaviour on a large host is to state the budget.
     u32 thread_count = (u32)environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count());
     String8 superbuild_directory = {0};
+    u32 superbuild_outer_jobs = 0;
     if (!direct_matrix)
     {
         u32 self_host_jobs = coverage_obligations.self_host_scheduled && fanout && fanout_requested ? 1 : 0;
         matrix_superbuild_allocate_jobs(trees, tree_count, thread_count, self_host_jobs);
-        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
-        string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
-                     matrix_superbuild_outer_jobs(thread_count, tree_count));
         u64 memory_bytes = os_get_physical_memory_size();
         u32 analyze_jobs = matrix_superbuild_analyze_jobs(thread_count, memory_bytes);
-        string_print(S8("BUSTER_SUPERBUILD_POST_TEST: analyze_jobs={u32} memory_mib={u64}\n"), analyze_jobs, memory_bytes >> 20);
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
             trees[tree_i].analyze_jobs = trees[tree_i].unity_analysis_scheduled ? analyze_jobs : 0;
         }
+        // The CPU pool keeps its depth; the post-test pool adds its own slot.
+        u32 post_test_jobs = matrix_superbuild_post_test_assign(trees, tree_count, thread_count, fanout_tree_index, self_host_jobs);
+        superbuild_outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count) + post_test_jobs;
+        matrix_phase.outer_jobs = superbuild_outer_jobs;
+        string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32} post_test_jobs={u32}\n"), thread_count,
+                     tree_count, superbuild_outer_jobs, post_test_jobs);
+        string_print(S8("BUSTER_SUPERBUILD_POST_TEST: analyze_jobs={u32} memory_mib={u64} beside_self_host={u32}\n"), analyze_jobs,
+                     memory_bytes >> 20, post_test_jobs);
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
             string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} tests={u32} jobs={u32} directory={S8}\n"), tree_i,
@@ -28144,6 +28285,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .enabled = coverage_obligations.self_host_scheduled,
             .ci = fanout && fanout_requested ? fanout->generate.ci : 0,
             .depends_on_compile = fanout && fanout_requested ? 1 : 0,
+            .depends_on_validation = post_test_jobs,
             .uses_inner_ninja = 0,
             .producer_clean_required = fanout && fanout_requested ? 1 : 0,
         };
@@ -28205,7 +28347,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         String8 superbuild_targets[] = {S8("buster_matrix")};
         CmakeBuildOptions superbuild_options = base_options;
         superbuild_options.config = S8("Debug");
-        superbuild_options.parallel_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
+        superbuild_options.parallel_jobs = superbuild_outer_jobs;
         BuildStep* superbuild_step = step_add(arena);
         build_run_add(arena, superbuild_step, superbuild_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(superbuild_targets), (SliceString8){0},
                       superbuild_options);
@@ -39802,6 +39944,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/android_packages.c"
 #include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
+#include "tools/openssl_compatibility.c"
+#include "tools/ffmpeg_compatibility.c"
 #include "tools/compiler_profile_qualification.c"
 #include "tools/userspace_qualification.c"
 #include "tools/curl_compat.c"
@@ -39867,6 +40011,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_USERSPACE] = S8_INITIALIZER("test_userspace"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
+        [BUILD_COMMAND_TEST_OPENSSL] = S8_INITIALIZER("test_openssl"),
+        [BUILD_COMMAND_TEST_OPENSSL_CONTROLS] = S8_INITIALIZER("test_openssl_controls"),
         [BUILD_COMMAND_TEST_CURL] = S8_INITIALIZER("test_curl"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
@@ -39874,6 +40020,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_QEMU] = S8_INITIALIZER("test_qemu"),
         [BUILD_COMMAND_QEMU_INPUT_SELF_TEST] = S8_INITIALIZER("qemu_input_self_test"),
         [BUILD_COMMAND_TEST_CLANG_SUITE] = S8_INITIALIZER("test_clang_suite"),
+        [BUILD_COMMAND_TEST_FFMPEG] = S8_INITIALIZER("test_ffmpeg"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
@@ -39992,6 +40139,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_OPENSSL: result = openssl_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_TEST_OPENSSL_CONTROLS: result = !owned_arguments.length && openssl_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED; break;
+            case BUILD_COMMAND_TEST_FFMPEG: result = ffmpeg_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_USERSPACE: result = userspace_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
@@ -41250,6 +41400,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_OPENSSL:
+        case BUILD_COMMAND_TEST_OPENSSL_CONTROLS:
+        case BUILD_COMMAND_TEST_FFMPEG:
         case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
