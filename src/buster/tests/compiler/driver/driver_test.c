@@ -59,6 +59,7 @@
 // compiler_driver_test_macho_aarch64_listing_round_trip checks Darwin sections and TLVP sites.
 // compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
 // compiler_driver_test_assembly_section_start_round_trip checks -S/-c leaves no undefined `.text`.
+// compiler_driver_test_bss_assembly_round_trip checks every zero-fill label and metadata after -S reassembly.
 // compiler_driver_test_assembly_x86_64_object_semantics compares -c with -S then -c: weak, hidden, priority, PLT, section symbols, TLS-GD padding.
 // compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding checks the TLS-GD padding bytes in -S text.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
@@ -10039,6 +10040,154 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_object_has_relocation(ObjectFile* 
                 candidate->symbol < object->symbol_count && string_equal(object->symbols[candidate->symbol].name, symbol_name);
     }
     return found;
+}
+
+// GitHub #3190: zero-fill assembly keeps every symbol boundary, including
+// coincident aliases and the aligned gap, so -S reassembles to the -c metadata.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bss_assembly_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("bss-assembly-source"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("bss-assembly-listing"), S8(".s"));
+    String8 direct = buster_test_temporary_path(arena, S8("bss-assembly-direct"), S8(".o"));
+    String8 reassembled = buster_test_temporary_path(arena, S8("bss-assembly-reassembled"), S8(".o"));
+    String8 source_text = S8("int bss_first[4];\nextern int bss_first_alias[4] __attribute__((alias(\"bss_first\")));\nstatic int bss_private[3];\n_Alignas(64) int bss_aligned[2];\nint bss_last;\nint* bss_ref_first(void) { return &bss_first[1]; }\nint* bss_ref_alias(void) { return &bss_first_alias[2]; }\nint* bss_ref_private(void) { return &bss_private[1]; }\nint* bss_ref_aligned(void) { return &bss_aligned[1]; }\nint* bss_ref_last(void) { return &bss_last; }\n");
+    String8 triples[] = {
+        S8("x86_64-unknown-linux"),
+        S8("aarch64-unknown-linux"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-apple-macos"),
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+    };
+    String8 symbol_names[] = {
+        S8("bss_first"), S8("bss_first_alias"), S8("bss_private"), S8("bss_aligned"), S8("bss_last"),
+    };
+    bool symbol_globals[] = {true, true, false, true, true};
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text));
+    BUSTER_TEST(arguments, written);
+    if (written)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(triples); target_index += 1)
+        {
+            String8 compile[] = {S8("-target"), triples[target_index], S8("-g0"), S8("-c"), source, S8("-o"), direct};
+            String8 print[] = {S8("-target"), triples[target_index], S8("-g0"), S8("-S"), source, S8("-o"), listing};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+            CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object && printed.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+                String8 prefix = targets[target_index].os == OPERATING_SYSTEM_MACOS ? S8("_") : S8("");
+                for (u32 symbol_index = 0; symbol_index < BUSTER_ARRAY_LENGTH(symbol_names); symbol_index += 1)
+                {
+                    String8 label = string_format(arena, S8("{S8}{S8}:"), prefix, symbol_names[symbol_index]);
+                    BUSTER_TEST(arguments, string_first_sequence(text, label) != BUSTER_STRING_NO_MATCH);
+                }
+                String8 assemble[] = {S8("-target"), triples[target_index], S8("-c"), listing, S8("-o"), reassembled};
+                CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+                BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+                {
+                    ByteSlice direct_bytes = file_read(arena, direct, (FileReadOptions){0});
+                    ByteSlice round_bytes = file_read(arena, reassembled, (FileReadOptions){0});
+                    ObjectFile expected = object_read(arena, direct_bytes, targets[target_index]);
+                    ObjectFile actual = object_read(arena, round_bytes, targets[target_index]);
+                    bool readable = expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE;
+                    BUSTER_TEST(arguments, readable);
+                    if (readable)
+                    {
+                        for (u32 symbol_index = 0; symbol_index < BUSTER_ARRAY_LENGTH(symbol_names); symbol_index += 1)
+                        {
+                            ObjectSymbol* want = compiler_driver_test_symbol_by_name(&expected, symbol_names[symbol_index]);
+                            ObjectSymbol* got = compiler_driver_test_symbol_by_name(&actual, symbol_names[symbol_index]);
+                            BUSTER_TEST(arguments, want != 0 && got != 0);
+                            if (want && got)
+                            {
+                                BUSTER_TEST(arguments, want->kind == OBJECT_SYMBOL_DATA && got->kind == want->kind);
+                                BUSTER_TEST(arguments, want->global == symbol_globals[symbol_index] && got->global == want->global);
+                                BUSTER_TEST(arguments, !want->weak && got->weak == want->weak);
+                                BUSTER_TEST(arguments, !want->hidden && got->hidden == want->hidden);
+                                BUSTER_TEST(arguments, want->value == got->value && want->size == got->size);
+                                bool sections_valid = want->section < expected.section_count && got->section < actual.section_count;
+                                BUSTER_TEST(arguments, sections_valid);
+                                if (sections_valid)
+                                {
+                                    ObjectSection* want_section = expected.sections + want->section;
+                                    ObjectSection* got_section = actual.sections + got->section;
+                                    BUSTER_TEST(arguments, want_section->kind == OBJECT_SECTION_ZERO && got_section->kind == want_section->kind);
+                                    BUSTER_TEST(arguments, want_section->virtual_size == got_section->virtual_size);
+                                    BUSTER_TEST(arguments, want_section->alignment == got_section->alignment);
+                                    BUSTER_TEST(arguments, want_section->data.length == 0 && got_section->data.length == 0);
+                                    BUSTER_TEST(arguments, want->value <= want_section->virtual_size &&
+                                                           want->size <= want_section->virtual_size - want->value);
+                                    BUSTER_TEST(arguments, got->value <= got_section->virtual_size &&
+                                                           got->size <= got_section->virtual_size - got->value);
+                                }
+                            }
+                        }
+                        ObjectSymbol* first = compiler_driver_test_symbol_by_name(&expected, S8("bss_first"));
+                        ObjectSymbol* alias = compiler_driver_test_symbol_by_name(&expected, S8("bss_first_alias"));
+                        ObjectSymbol* local = compiler_driver_test_symbol_by_name(&expected, S8("bss_private"));
+                        ObjectSymbol* aligned = compiler_driver_test_symbol_by_name(&expected, S8("bss_aligned"));
+                        ObjectSymbol* last = compiler_driver_test_symbol_by_name(&expected, S8("bss_last"));
+                        BUSTER_TEST(arguments, first && alias && local && aligned && last);
+                        if (first && alias && local && aligned && last)
+                        {
+                            BUSTER_TEST(arguments, first->section == alias->section && first->value == alias->value &&
+                                                   first->size == alias->size);
+                            BUSTER_TEST(arguments, first->value != local->value && first->value != aligned->value &&
+                                                   first->value != last->value && local->value != aligned->value &&
+                                                   local->value != last->value && aligned->value != last->value);
+                            BUSTER_TEST(arguments, aligned->value % 64u == 0);
+                            bool aligned_section_valid = aligned->section < expected.section_count;
+                            BUSTER_TEST(arguments, aligned_section_valid);
+                            if (aligned_section_valid)
+                            {
+                                BUSTER_TEST(arguments, expected.sections[aligned->section].alignment >= 64u);
+                            }
+                        }
+                        u32 bss_relocations = 0;
+                        for (u32 relocation_index = 0; relocation_index < expected.relocation_count; relocation_index += 1)
+                        {
+                            ObjectRelocation* relocation = expected.relocations + relocation_index;
+                            bool valid_symbol = relocation->symbol < expected.symbol_count;
+                            bool valid_sections = relocation->section < expected.section_count;
+                            if (valid_symbol && valid_sections)
+                            {
+                                ObjectSymbol* symbol = expected.symbols + relocation->symbol;
+                                bool points_to_bss = symbol->section < expected.section_count &&
+                                    expected.sections[symbol->section].kind == OBJECT_SECTION_ZERO;
+                                bool from_text = expected.sections[relocation->section].kind == OBJECT_SECTION_TEXT;
+                                if (points_to_bss && from_text)
+                                {
+                                    bss_relocations += 1;
+                                    BUSTER_TEST(arguments, compiler_driver_test_object_has_relocation(&actual, &expected, relocation));
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, bss_relocations >= 3);
+                    }
+                }
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(direct);
+    os_file_delete(reassembled);
+    c_test_scratch_end(temporary);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_semantics(UnitTestArguments* arguments)
@@ -36638,6 +36787,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bss_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_object_semantics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
