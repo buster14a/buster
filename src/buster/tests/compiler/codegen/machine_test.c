@@ -7016,8 +7016,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(U
         "unsigned long long bad_name(unsigned long long value) { __asm__ volatile(\"movw $1, %w[missing]\" : [value] \"+r\"(value)); return value; }\n"
         "unsigned long long bad_index(unsigned long long value) { __asm__ volatile(\"movw $1, %w1\" : \"+r\"(value)); return value; }\n"
         "unsigned short bad_memory(unsigned short value) { __asm__ volatile(\"movw $1, %w0\" : \"=m\"(value)); return value; }\n"
-        "typedef unsigned long long BadVector __attribute__((vector_size(16)));\n"
-        "BadVector bad_vector(BadVector value) { __asm__ volatile(\"movw $1, %w0\" : \"+x\"(value)); return value; }\n");
+        "double bad_vector(double value) { __asm__ volatile(\"movw $1, %w0\" : \"+x\"(value)); return value; }\n");
     String8 invalid_names[] = {S8("bad_malformed"), S8("bad_empty"), S8("bad_name"), S8("bad_index"),
                                S8("bad_memory"), S8("bad_vector")};
     String8 invalid_failure_details[] = {
