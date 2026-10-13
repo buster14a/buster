@@ -157,8 +157,8 @@ path; ancestor-mounted procfs retains that path for every task. The filter does
 not cache membership across snapshots. Two matching complete censuses, zombie
 state, namespace identity and the final exact-child reservation check remain
 required. `os_linux_process_group_filter_self_test` uses a valid non-directory
-descriptor to prove which cases must still read stat, alongside the existing live-child,
-zombie, ownership-loss, descendant and churn controls.
+descriptor to prove which cases must still read stat, alongside the existing
+live-child, zombie, ownership-loss, descendant and churn controls.
 
 A procfs task can disappear after its stat/status descriptor opens. Both the
 ordinary read and the capacity probe classify native ESRCH as disappearance;

@@ -1,0 +1,63 @@
+{
+  "baseline_revision": "56221853cc5b11acb33e10ceca29484f7560bcf6",
+  "candidate_revision": "e1fb941cbe4463050a8e94231ac73717984f8ff7",
+  "build_root": "/home/david/Documents/Codex/2026-10-13/ana/work/buster",
+  "cpu": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics",
+  "uname": [
+    "Linux",
+    "minipc",
+    "7.2.9-2-cachyos",
+    "#1 SMP PREEMPT_DYNAMIC Thu, 08 Oct 2026 15:06:16 +0000",
+    "x86_64",
+    ""
+  ],
+  "clang": "clang version 23.1.1\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/bin\n",
+  "perf": "perf version 7.2.10-1\n",
+  "test_environment": {
+    "BUSTER_TEST_JOBS": "unset (default budgets)",
+    "BUSTER_TEST_RETAIN_IMAGES": "unset (normal cleanup)"
+  },
+  "capture_environment_difference": "original capture retained test images; native measurements use normal cleanup and no profiler",
+  "configuration": "Clang Release, tests enabled, native ISA, debug info and frame pointers, unity",
+  "build_method": "baseline and candidate built serially in the same configured path and copied before subsequent builds",
+  "comparison_plan": {
+    "aa_os": {
+      "pairs": 6,
+      "warmup_pairs": 1,
+      "tool": "time"
+    },
+    "ab_os_instructions": {
+      "pairs": 6,
+      "warmup_pairs": 1,
+      "tool": "perf-stat instructions (actual raw event instructions:u)"
+    },
+    "ab_suite": {
+      "pairs": 6,
+      "warmup_pairs": 0,
+      "tool": "time",
+      "warmup_note": "no dedicated warmups; baseline already completed full suites and final candidate completed a full sampling attempt with image retention (22 known retention assertions failed, tracked by #3674)",
+      "collector": "run_native_pair.py: exact-child wait4 and CLOCK_MONOTONIC, each run persisted immediately",
+      "output_directory": "ab-suite-final"
+    }
+  },
+  "license": {
+    "buster": "first-party license not selected (LICENSES/README.md)",
+    "perf": "GPL-2.0-only (pacman package metadata)",
+    "strace": "LGPL-2.1-or-later (pacman package metadata)",
+    "superluminal": "proprietary, installed license active; bundled Superluminal_Commandline_LICENSE.md"
+  },
+  "baseline_binary_sha256": "3bbbad302908dba2fffe5c43967654f4df1f19d4b4aded7379d1a1cc5df62b60",
+  "candidate_binary_sha256": "513dd3b6183c14a4a6e191bddaadf6bbf0b7b7530b1658b308fd30949dfd431b",
+  "initial_candidate_revision": "7515c232ea139650d58c320ef843f8fc7c1a46f2",
+  "initial_candidate_binary_sha256": "471a0139cee568c79f8f66981fe9080cbeb05aa4657d49400fea3438312d1dd7",
+  "measurement_limitations": [
+    "A/A control is the OS module, not the complete suite.",
+    "First candidate instruction experiment has complete raw counts but an incomplete tool receipt because of qualified-event parser bug #4123; retained separately.",
+    "Nested namespace OS suite has one pre-existing churn-seam assertion failure on both baseline and final candidate; recorded on #2380.",
+    "First full-suite driver session exited 143 before summary; 11 completed stdout results retained, but no timing claim from that attempt.",
+    "Four bf29aed durable native pairs are superseded by the final regression-fixture correction e1fb941; no six-pair native verdict from that attempt.",
+    "Retained-image perf sampling completes all modules but fails 22 existing pointer-sign output assertions (#3674); used only for CPU attribution. Native timing uses normal image cleanup."
+  ],
+  "prior_candidate_v2_revision": "bf29aed8e0b9369ee4e59b2e7315b842fae32945",
+  "prior_candidate_v2_binary_sha256": "dfc06768803f10cc9e7f9775cd4f35aadf24b6fd1a92d83557eb39f9f9343df3"
+}

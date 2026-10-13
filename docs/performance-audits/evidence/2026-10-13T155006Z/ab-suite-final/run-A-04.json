@@ -1,0 +1,24 @@
+{
+  "schema": "buster-native-pair-observation-v1",
+  "pair": 4,
+  "arm": "A",
+  "started_utc": "2026-10-13T16:54:40Z",
+  "argv": [
+    "/home/david/Documents/Codex/2026-10-13/ana/work/frozen/ide-baseline",
+    "test",
+    "--verbose=0"
+  ],
+  "revision": "56221853cc5b11acb33e10ceca29484f7560bcf6",
+  "binary_sha256": "3bbbad302908dba2fffe5c43967654f4df1f19d4b4aded7379d1a1cc5df62b60",
+  "exit_code": 0,
+  "timed_out": false,
+  "wall_seconds": 125.00757034699927,
+  "user_seconds": 58.99508,
+  "system_seconds": 30.691688,
+  "max_rss_kib": 1740432,
+  "minor_faults": 7108239,
+  "major_faults": 3,
+  "voluntary_switches": 52205,
+  "involuntary_switches": 9846,
+  "scope": "wait4 for the exact child, including its reaped descendants"
+}
