@@ -69,13 +69,14 @@ dialects, three frontend routes and three target layouts (#3743).
 
 In GNU dialects, a block-scope scalar static initializer whose complete
 expression is a statement expression with one expression statement can be
-folded when that tail expression satisfies the existing static-constant rules.
-The parser and folder use the same bounded tail range. Bodies with declarations,
-multiple statements or an evaluated nested statement expression remain
-nonconstant. File-scope statement expressions remain rejected by the separate
-file-scope constraint. The registered driver regression checks the
-constant-only runtime result alongside declaration and multiple-statement
-refusals.
+folded when the existing typed scalar evaluator proves that tail constant.
+Aggregate destinations and tails that read mutable globals, update values or
+call functions retain the statement-expression refusal. The parser and folder
+use the same bounded tail range. Bodies with declarations, multiple statements
+or an evaluated nested statement expression remain nonconstant. File-scope
+statement expressions remain rejected by the separate file-scope constraint.
+The registered driver regression checks the constant-only runtime result
+alongside aggregate and nonconstant-tail refusals.
 
 ## Declaration constraints
 

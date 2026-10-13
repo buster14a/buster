@@ -40641,10 +40641,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(statement_source));
         c_test_scratch_end(statement_temporary);
     }
-    // A whole GNU statement expression with one constant expression statement
-    // can initialize a block-scope static. Bodies with declarations or multiple
-    // statements remain nonconstant at the `(`, so -fsyntax-only and -c agree.
-    // sizeof, _Alignof and typeof operands stay unevaluated and compile,
+    // A whole GNU statement expression can initialize a scalar block-scope
+    // static only when the existing typed scalar evaluator proves its tail
+    // constant. Mutable global reads, updates, calls and aggregate destinations
+    // retain the statement-expression refusal; bodies with declarations or
+    // multiple statements remain nonconstant at the `(`, so -fsyntax-only and
+    // -c agree. sizeof, _Alignof and typeof operands stay unevaluated and compile,
     // including an unparenthesized unary operand such as `sizeof *({ ... })`
     // and one behind nested unary keywords or a cast (`sizeof sizeof +({ ... })`);
     // an evaluated `({` after the operand is still rejected.
@@ -40669,13 +40671,19 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             S8("int main(void) { static int s = sizeof _Alignof +({ int x = 0; x; }); return s - 8; }\n"),
             S8("int main(void) { static int s = sizeof __extension__ +({ int x = 0; x; }); return s - 4; }\n"),
             S8("typedef long L; int main(void) { static int s = sizeof -(L)+({ int x = 0; x; }); return s - 8; }\n"),
+            S8("int g;\nint main(void) { static int s = ({ g; }); return s; }\n"),
+            S8("int g;\nint main(void) { static int s = ({ g++; }); return s; }\n"),
+            S8("int f(void);\nint main(void) { static int s = ({ f(); }); return s; }\n"),
+            S8("struct S { int x; };\nint main(void) { static struct S s = ({ (struct S){ 1 }; }); return s.x; }\n"),
         };
         String8 block_locations[] = {S8(""), S8(":1:33: "), S8(":1:33: "), S8(":1:40: "), S8(""), S8(""), S8(""),
-                                     S8(":1:60: "), S8(":1:48: "), S8(""), S8(""), S8(""), S8(""), S8("")};
+                                     S8(":1:60: "), S8(":1:48: "), S8(""), S8(""), S8(""), S8(""), S8(""),
+                                     S8(":2:33: "), S8(":2:33: "), S8(":2:33: "), S8(":2:38: ")};
         // The nested-keyword operands are accepted by the frontend, but the
         // static-initializer folder cannot fold `sizeof sizeof +1` yet either
         // (#3566): -c is only checked not to report the operand as evaluated.
-        bool block_fold_pending[] = {false, false, false, false, false, false, false, false, false, true, true, true, true, false};
+        bool block_fold_pending[] = {false, false, false, false, false, false, false, false, false, true, true, true, true, false,
+                                      false, false, false, false};
         BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(block_fold_pending) == BUSTER_ARRAY_LENGTH(block_texts));
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(block_texts); index += 1)
         {
