@@ -40,45 +40,78 @@ network interface, shared host directories, physical disks, or passthrough.
 Distribution QEMU's named `max` CPU model with software TCG and its independent firmware boots this
 reference. No Buster-built QEMU, musl, BusyBox, or guest compiler is used.
 QEMU/firmware, GCC/binutils, glibc, cpio, host generators and their libraries
-are external prerequisites. The workflow records installed package versions,
-available package copyright files, binary hashes, and firmware hashes.
-Missing license records are explicit in `licenses/unavailable.txt`.
+are external prerequisites. The earlier opt-in hosted runs recorded installed
+package versions, available package copyright files, binary hashes and firmware
+hashes, with missing license records explicit in `licenses/unavailable.txt`;
+a future main-only recipe must retain the same records.
 Their full component license inventory and supply-chain qualification remain
 incomplete; this tool does not authorize redistribution of built binaries.
 Buster's first-party license remains undecided as documented in
 [LICENSES/README.md](../../../LICENSES/README.md).
 
-## Hosted execution
+## Execution and scheduling
 
 The compiler is generated and built by the existing native `build.c` driver.
 The standalone frontier tool deliberately avoids changing that shared driver
 while independent compatibility workers are active. Its build and
 orchestration are C; existing upstream scripts remain upstream prerequisites.
 
-`.github/workflows/linux-kernel-frontier.yml` runs only on an explicit manual
-dispatch or pushes changing the harness on the dedicated
-`codex/3186-linux-kernel-frontier` development branch. It adds no ordinary PR,
-merge-group, or main workload. Development/correctness must run on disposable
-cloud infrastructure, never the maintainer's laptop or general 9700X agent work.
+No workflow runs this harness. Whole external workloads belong to the single
+main-only owner in [external-project CI](../../external-project-ci.md)
+(#3501); the earlier manual/branch-push workflow was removed. A pinned
+recipe joins that shared Linux job only when its owner qualifies it.
+Development and correctness runs use disposable cloud infrastructure, never
+the maintainer's laptop or general 9700X agent work.
 
-The native invocation, after preparing the trusted initramfs and compiler, is:
+Build the tool with Clang and GCC (`-std=c11 -Wall -Wextra -Wpedantic -Werror
+-fwrapv -fno-strict-aliasing -funsigned-char -Isrc`). Build the init from
+`control_init.c` statically into an initramfs that also holds `/dev/console`
+and `/tmp`. The reference compiler defaults to `gcc-14`; set
+`BUSTER_KERNEL_REFERENCE_CC` to override it. Then run:
 
 ```sh
-.ci-tools/kernel-frontier self-test
-.ci-tools/kernel-frontier run /absolute/pristine/linux /absolute/build/Release/ide /absolute/new-output /absolute/control.cpio /absolute/tools/linux-kernel/minimal.config
+kernel-frontier self-test
+kernel-frontier run /absolute/pristine/linux /absolute/build/Release/ide /absolute/new-output /absolute/control.cpio /absolute/tools/linux-kernel/minimal.config
 ```
 
 Output must not exist. The tool never deletes/reuses a previous result tree.
-The source commit must match the pin; tracked/untracked source drift before
-or after execution fails the diagnostic. Each stage has an independent bound:
+
+`kernel_source_verify` checks the source against the pin before any compiler
+runs, and again afterwards.
+- It clears inherited `GIT_*` overrides and disables replacement objects and
+  system/global configuration.
+- `HEAD` must be the pin and the source must be the repository top level.
+- Every entry of the pin's tree must exist with its exact type and executable
+  bit. Its raw bytes, or a symlink's target, must hash (`--no-filters`) to the
+  recorded blob.
+- No other file, symlink or special entry may exist outside the top-level
+  `.git`.
+
+The index is never consulted, so assume-unchanged/skip-worktree flags, sparse
+checkouts, ignored files and filters cannot hide drift. The local object
+database is trusted as content-addressed; it is not re-hashed.
+
+Each stage has an independent bound:
 reference configure 120 s, reference build 600 s, reference boot 90 s, prior `qemu64` exception diagnostic 3 s,
 candidate configure 60 s, each direct driver reduction 15 s, and each selected target-C replay 15 s. A timeout
 kills the stage's process group and remains exit 124. Job limits are not
 evidence of successful kernel work.
 
 Native controls check argument preservation (spaces and empty arguments),
-nonzero exit attribution, timeout cleanup, malformed records, ledger row/status parsing, and C-action
-classification with Clang and GCC warning-clean harness builds.
+nonzero exit attribution, timeout cleanup, malformed records, ledger row/status
+parsing, and C-action classification. Both the Clang and GCC builds must be
+warning-clean.
+
+`kernel_source_controls` runs the source-pin gate against a disposable Git
+fixture.
+- It must refuse each of these:
+  - an edit hidden by assume-unchanged
+  - an edit hidden by skip-worktree
+  - an ignored extra file
+  - an executable-bit change
+  - a missing tracked file
+  - altered bytes that a replacement ref maps to the pin
+- It must still pass when `GIT_DIR`/`GIT_INDEX_FILE` point elsewhere.
 
 ## Reading evidence
 
@@ -86,8 +119,8 @@ classification with Clang and GCC warning-clean harness builds.
 actual command argv. `commands/target-*.argv` and
 `commands/host-*.argv` separate CC from HOSTCC; sibling result files retain
 their exit status and role. Full verbose Kbuild logs and generated `.cmd`
-files preserve assembly/archive/link actions. The artifact also includes the
-resolved config, generated headers, linker scripts, object/archive/image
+files preserve assembly/archive/link actions. The earlier hosted artifacts also
+included the resolved config, generated headers, linker scripts, object/archive/image
 hashes, upstream Git file inventory, and exact Buster compiler hash.
 
 The trusted kernel must produce all seven expected passes and a clean guest
@@ -135,10 +168,11 @@ Integrate separately qualified #3179 userspace only after independent kernel
 and userspace controls pass. Keep #3186 open until its staged acceptance is
 actually satisfied.
 
-The harness and opt-in workflow add approximately 46 KiB of build-category
-code. The native driver's generated source-size baseline acknowledges this
-new reference/control/provenance capability; it changes no compiler behavior
-or native-retirement identity bindings.
+The harness adds build-category code over the 32 KiB change limit. That
+growth is acknowledged in
+[`docs/source-size/acks/3186-linux-kernel-frontier.txt`](../../source-size/acks/3186-linux-kernel-frontier.txt).
+The harness changes no compiler behavior or native-retirement identity
+bindings.
 
 QEMU exit zero alone is insufficient: a prior nonrelocatable reference exited
 in 0.09 s with an empty serial log and was rejected before candidate work.

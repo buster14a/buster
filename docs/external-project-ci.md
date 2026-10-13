@@ -53,7 +53,8 @@ are unchanged. Broad build/test entry points were inspected for external action
 dispatch: full harnesses require explicit commands and inputs, and ordinary
 `test_all` does not dispatch the portfolio.
 
-yyjson, LZ4, sbase, DoomGeneric, musl/libc-test and CPython have opt-in native
+yyjson, LZ4, sbase, DoomGeneric, musl/libc-test, CPython and the Linux kernel
+frontier ([guide](agents/compatibility/linux-kernel.md)) have opt-in native
 harnesses but no ordinary workflow input owner at this revision. Their
 source/input/platform intake remains pending. The unlanded FFmpeg, userspace,
 curl, PostgreSQL, OpenSSL, QEMU, Linux, MuPDF and SDL3 milestones retain

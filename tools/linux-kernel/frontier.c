@@ -1,7 +1,9 @@
 // #3186 Linux x86-64 frontier; opt-in cloud diagnostic.
 // main owns run/record-cc/record-host/buster-cc. kernel_run bounds stage
 // processes, kernel_record preserves argv/cwd/status, kernel_replay consumes
-// target-C actions without dropping flags. No kernel or compiler source edits.
+// target-C actions without dropping flags. kernel_source_verify pins source
+// bytes independently of the Git index; kernel_source_controls proves its
+// refusals. No kernel or compiler source edits.
 #include <buster/lib/base.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +36,8 @@ typedef struct KernelContext
     char initramfs[KERNEL_PATH_BYTES];
     char config[KERNEL_PATH_BYTES];
 } KernelContext;
+
+extern char** environ;
 
 BUSTER_GLOBAL_LOCAL KernelContext kernel_context;
 BUSTER_GLOBAL_LOCAL char kernel_record_bytes[KERNEL_RECORD_BYTES];
@@ -98,7 +102,8 @@ BUSTER_GLOBAL_LOCAL bool kernel_argv(char const* path, char const* cwd, char* co
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL int kernel_run(char const* name, char const* cwd, char* const* arguments, unsigned budget)
+// input, when set, replaces the inherited stdin of the stage process.
+BUSTER_GLOBAL_LOCAL int kernel_run_input(char const* name, char const* cwd, char* const* arguments, unsigned budget, char const* input)
 {
     char log[KERNEL_PATH_BYTES], argv_path[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES];
     char leaf[256];
@@ -117,12 +122,17 @@ BUSTER_GLOBAL_LOCAL int kernel_run(char const* name, char const* cwd, char* cons
         pid_t child = fork();
         if (child == 0)
         {
-            if (setpgid(0, 0) != 0 || chdir(cwd) != 0 ||
+            int in = input ? open(input, O_RDONLY) : STDIN_FILENO;
+            if (setpgid(0, 0) != 0 || chdir(cwd) != 0 || in < 0 || dup2(in, STDIN_FILENO) < 0 ||
                 dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0)
             {
                 _exit(125);
             }
             close(fd);
+            if (in != STDIN_FILENO)
+            {
+                close(in);
+            }
             execvp(arguments[0], arguments);
             perror(arguments[0]);
             _exit(127);
@@ -186,6 +196,12 @@ BUSTER_GLOBAL_LOCAL int kernel_run(char const* name, char const* cwd, char* cons
     }
     printf("LINUX_STAGE name=%s exit=%d\n", name, result);
     fflush(stdout);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int kernel_run(char const* name, char const* cwd, char* const* arguments, unsigned budget)
+{
+    int result = kernel_run_input(name, cwd, arguments, budget, 0);
     return result;
 }
 
@@ -435,6 +451,240 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
     return result;
 }
 
+// Clears every inherited GIT_* override (repository, index, object, config,
+// replacement and namespace redirections), then disables replacement objects
+// and system/global configuration for all later Git and Kbuild children.
+BUSTER_GLOBAL_LOCAL bool kernel_git_environment(void)
+{
+    bool valid = true, removed = true;
+    while (removed && valid)
+    {
+        removed = false;
+        for (char** entry = environ; *entry && !removed; ++entry)
+        {
+            if (strncmp(*entry, "GIT_", 4) == 0)
+            {
+                char name[256];
+                size_t length = strcspn(*entry, "=");
+                valid = length < sizeof(name);
+                if (valid)
+                {
+                    memcpy(name, *entry, length);
+                    name[length] = 0;
+                    valid = unsetenv(name) == 0;
+                    removed = true;
+                }
+            }
+        }
+    }
+    valid = valid && setenv("GIT_NO_REPLACE_OBJECTS", "1", 1) == 0 && setenv("GIT_CONFIG_NOSYSTEM", "1", 1) == 0 &&
+            setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1) == 0 && setenv("GIT_ATTR_NOSYSTEM", "1", 1) == 0;
+    return valid;
+}
+
+// Loads a whole file; the caller frees the NUL-terminated result.
+BUSTER_GLOBAL_LOCAL char* kernel_load(char const* path, size_t* size)
+{
+    FILE* file = fopen(path, "rb");
+    char* bytes = 0;
+    struct stat facts;
+    *size = 0;
+    if (file && fstat(fileno(file), &facts) == 0 && facts.st_size >= 0)
+    {
+        bytes = malloc((size_t)facts.st_size + 1);
+        size_t count = bytes ? fread(bytes, 1, (size_t)facts.st_size, file) : 0;
+        if (bytes && (count != (size_t)facts.st_size || ferror(file)))
+        {
+            free(bytes);
+            bytes = 0;
+        }
+        else if (bytes)
+        {
+            bytes[count] = 0;
+            *size = count;
+        }
+    }
+    if (file)
+    {
+        fclose(file);
+    }
+    return bytes;
+}
+
+BUSTER_GLOBAL_LOCAL char* kernel_load_log(char const* stage, size_t* size)
+{
+    char leaf[256], path[KERNEL_PATH_BYTES];
+    bool valid = snprintf(leaf, sizeof(leaf), "%s.log", stage) < (int)sizeof(leaf) &&
+                 kernel_path(path, kernel_context.output, leaf);
+    *size = 0;
+    char* bytes = valid ? kernel_load(path, size) : 0;
+    return bytes;
+}
+
+// The stage log must be exactly one line holding expected.
+BUSTER_GLOBAL_LOCAL bool kernel_log_equals(char const* stage, char const* expected)
+{
+    size_t size = 0;
+    char* bytes = kernel_load_log(stage, &size);
+    bool valid = bytes && size == strlen(expected) + 1 && memcmp(bytes, expected, size - 1) == 0 && bytes[size - 1] == '\n';
+    free(bytes);
+    return valid;
+}
+
+// Counts every non-directory entry below source except the top-level .git,
+// with an explicit stack. Entries that are not regular files or symlinks
+// count twice so they can never balance the tracked-entry count.
+BUSTER_GLOBAL_LOCAL bool kernel_count_files(char const* source, size_t* files)
+{
+    size_t capacity = 64, depth = 0;
+    char** stack = malloc(capacity * sizeof(char*));
+    bool valid = stack != 0;
+    *files = 0;
+    if (valid)
+    {
+        stack[depth++] = strdup(source);
+        valid = stack[0] != 0;
+    }
+    while (valid && depth > 0)
+    {
+        char* directory_path = stack[--depth];
+        DIR* directory = opendir(directory_path);
+        valid = directory != 0;
+        struct dirent* entry = 0;
+        while (valid && (entry = readdir(directory)) != 0)
+        {
+            char path[KERNEL_PATH_BYTES];
+            struct stat facts;
+            bool skip = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
+                        (strcmp(entry->d_name, ".git") == 0 && strcmp(directory_path, source) == 0);
+            valid = skip || (kernel_path(path, directory_path, entry->d_name) && lstat(path, &facts) == 0);
+            if (valid && !skip && S_ISDIR(facts.st_mode))
+            {
+                if (depth == capacity)
+                {
+                    char** grown = realloc(stack, capacity * 2 * sizeof(char*));
+                    valid = grown != 0;
+                    stack = grown ? grown : stack;
+                    capacity = grown ? capacity * 2 : capacity;
+                }
+                stack[depth] = valid ? strdup(path) : 0;
+                valid = valid && stack[depth++] != 0;
+            }
+            else if (valid && !skip)
+            {
+                *files += S_ISREG(facts.st_mode) || S_ISLNK(facts.st_mode) ? 1u : 2u;
+            }
+        }
+        if (directory)
+        {
+            valid = closedir(directory) == 0 && valid;
+        }
+        free(directory_path);
+    }
+    while (depth > 0)
+    {
+        free(stack[--depth]);
+    }
+    free(stack);
+    return valid;
+}
+
+// Verifies source byte-for-byte against pin's tree without consulting the
+// index, so assume-unchanged/skip-worktree flags, sparse checkouts, filters,
+// replacement refs and GIT_* overrides cannot hide drift. Every tracked path
+// must exist with its exact type, executable bit and raw blob identity, and no
+// other file, symlink or special entry (ignored or untracked) may exist
+// outside the top-level .git. The local object database is trusted as
+// content-addressed; it is not re-hashed.
+BUSTER_GLOBAL_LOCAL bool kernel_source_verify(char const* source, char const* pin, char const* stage)
+{
+    char name[4][128], list[KERNEL_PATH_BYTES], links[KERNEL_PATH_BYTES], path[KERNEL_PATH_BYTES], leaf[192];
+    char const* suffix[4] = {"revision", "toplevel", "tree", "hash"};
+    bool valid = kernel_git_environment();
+    for (int i = 0; i < 4 && valid; ++i)
+    {
+        valid = snprintf(name[i], sizeof(name[i]), "%s-%s", stage, suffix[i]) < (int)sizeof(name[i]);
+    }
+    valid = valid && snprintf(leaf, sizeof(leaf), "%s-paths.txt", stage) < (int)sizeof(leaf) &&
+            kernel_path(list, kernel_context.output, leaf) &&
+            snprintf(leaf, sizeof(leaf), "%s-links", stage) < (int)sizeof(leaf) &&
+            kernel_path(links, kernel_context.output, leaf) && mkdir(links, 0700) == 0;
+    char* revision[] = {"git", "--no-replace-objects", "rev-parse", "--verify", "HEAD^{commit}", 0};
+    char* toplevel[] = {"git", "--no-replace-objects", "rev-parse", "--show-toplevel", 0};
+    char* tree[] = {"git", "--no-replace-objects", "ls-tree", "-r", "-z", "--full-tree", (char*)pin, 0};
+    char* hash[] = {"git", "--no-replace-objects", "hash-object", "--no-filters", "--stdin-paths", 0};
+    valid = valid && kernel_run(name[0], source, revision, 30) == 0 && kernel_log_equals(name[0], pin) &&
+            kernel_run(name[1], source, toplevel, 30) == 0 && kernel_log_equals(name[1], source) &&
+            kernel_run(name[2], source, tree, 60) == 0;
+    size_t tree_size = 0, entries = 0, verified = 0, files = 0;
+    char* tree_bytes = valid ? kernel_load_log(name[2], &tree_size) : 0;
+    valid = tree_bytes != 0 && tree_size > 0 && tree_bytes[tree_size - 1] == 0;
+    for (size_t i = 0; valid && i < tree_size; ++i)
+    {
+        entries += tree_bytes[i] == 0 ? 1u : 0u;
+    }
+    char** oids = valid ? calloc(entries, sizeof(char*)) : 0;
+    FILE* paths = oids ? fopen(list, "wb") : 0;
+    valid = paths != 0;
+    for (size_t offset = 0, row = 0; valid && offset < tree_size; ++row)
+    {
+        // "<mode> blob <oid>\t<path>\0": ls-tree -r lists only leaf entries.
+        char* entry = tree_bytes + offset;
+        char* type = strchr(entry, ' ');
+        char* oid = type ? strchr(type + 1, ' ') : 0;
+        char* tab = oid ? strchr(oid + 1, '\t') : 0;
+        offset += strlen(entry) + 1;
+        valid = tab && strncmp(type, " blob ", 6) == 0 && !strchr(tab + 1, '\n') && kernel_path(path, source, tab + 1);
+        struct stat facts;
+        bool link = valid && strncmp(entry, "120000 ", 7) == 0;
+        bool executable = valid && strncmp(entry, "100755 ", 7) == 0;
+        valid = valid && (link || executable || strncmp(entry, "100644 ", 7) == 0) && lstat(path, &facts) == 0;
+        if (valid && link)
+        {
+            // Hash the symlink target bytes, never the file it points to.
+            char target[KERNEL_PATH_BYTES], copy[KERNEL_PATH_BYTES];
+            ssize_t bytes = S_ISLNK(facts.st_mode) ? readlink(path, target, sizeof(target)) : -1;
+            valid = bytes >= 0 && bytes < (ssize_t)sizeof(target) &&
+                    snprintf(leaf, sizeof(leaf), "%zu", row) < (int)sizeof(leaf) && kernel_path(copy, links, leaf) &&
+                    kernel_write(copy, target, (size_t)bytes) && fprintf(paths, "%s\n", copy) > 0;
+        }
+        else if (valid)
+        {
+            valid = S_ISREG(facts.st_mode) && ((facts.st_mode & S_IXUSR) != 0) == executable &&
+                    fprintf(paths, "%s\n", path) > 0;
+        }
+        if (valid)
+        {
+            *tab = 0;
+            oids[row] = oid + 1;
+        }
+    }
+    if (paths)
+    {
+        valid = fclose(paths) == 0 && valid;
+    }
+    valid = valid && kernel_run_input(name[3], source, hash, 300, list) == 0;
+    size_t hash_size = 0;
+    char* hash_bytes = valid ? kernel_load_log(name[3], &hash_size) : 0;
+    bool matching = hash_bytes != 0;
+    for (char* line = hash_bytes; matching && *line && verified < entries;)
+    {
+        char* end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) : 0;
+        matching = end && strlen(oids[verified]) == length && strncmp(line, oids[verified], length) == 0;
+        verified += matching ? 1u : 0u;
+        line = matching ? end + 1 : line;
+    }
+    valid = valid && verified == entries && kernel_count_files(source, &files) && files == entries;
+    printf("LINUX_SOURCE_VERIFY stage=%s entries=%zu verified=%zu files=%zu result=%s\n",
+           stage, entries, verified, files, valid ? "pass" : "fail");
+    fflush(stdout);
+    free(hash_bytes);
+    free(oids);
+    free(tree_bytes);
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool kernel_config_matches(void)
 {
     char path[KERNEL_PATH_BYTES];
@@ -469,17 +719,9 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
     snprintf(reference, sizeof(reference), "O=%s", context->reference);
     snprintf(candidate, sizeof(candidate), "O=%s", context->candidate);
     snprintf(config, sizeof(config), "KCONFIG_ALLCONFIG=%s", fragment);
-    char* verify[] = {"git", "rev-parse", "HEAD", 0};
-    int status = valid ? kernel_run("source-revision", context->source, verify, 10) : 125;
+    // Before any compiler runs, the source must be the pin's exact bytes.
+    valid = valid && kernel_source_verify(context->source, KERNEL_PIN, "source-before");
     char log[KERNEL_PATH_BYTES];
-    valid = status == 0 && kernel_path(log, context->output, "source-revision.log") &&
-            kernel_contains(log, KERNEL_PIN "\n");
-    char* clean[] = {"git", "status", "--porcelain", "--untracked-files=all", 0};
-    valid = valid && kernel_run("source-clean-before", context->source, clean, 30) == 0;
-    char clean_log[KERNEL_PATH_BYTES];
-    struct stat clean_stat;
-    valid = valid && kernel_path(clean_log, context->output, "source-clean-before.log") &&
-            stat(clean_log, &clean_stat) == 0 && clean_stat.st_size == 0;
     char* configure[] = {"make", "-C", context->source, reference, "ARCH=x86", cc, host, config, "V=1", "allnoconfig", 0};
     valid = valid && kernel_run("reference-configure", context->source, configure, 120) == 0 && kernel_config_matches();
     char* build[] = {"make", "-C", context->source, reference, "ARCH=x86", cc, host, "V=1", "-j2", "bzImage", 0};
@@ -540,9 +782,9 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
         valid = bytes > 0 && bytes < (int)sizeof(facts) && kernel_path(path, context->output, "stages.txt") &&
                 kernel_write(path, facts, (size_t)bytes) && kernel_replay() == 0;
     }
-    int clean_status = kernel_run("source-clean-after", context->source, clean, 30);
-    valid = valid && clean_status == 0 && kernel_path(clean_log, context->output, "source-clean-after.log") &&
-            stat(clean_log, &clean_stat) == 0 && clean_stat.st_size == 0;
+    // Always runs, so drift caused by a failed stage is still recorded.
+    bool clean_after = kernel_source_verify(context->source, KERNEL_PIN, "source-after");
+    valid = valid && clean_after;
     int result = valid ? 0 : 1;
     return result;
 }
@@ -575,6 +817,95 @@ BUSTER_GLOBAL_LOCAL bool kernel_index_control(char const* path)
         valid = feof(file) && !ferror(file) && rows == 3 && pending == 1 && passed == 1 && failed == 1;
         valid = fclose(file) == 0 && valid;
     }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool kernel_control_git(char const* name, char const* repository, char** arguments)
+{
+    bool valid = kernel_run(name, repository, arguments, 30) == 0;
+    return valid;
+}
+
+// Source-pin controls on a disposable Git fixture: each drift the review
+// reproduced (index flags, ignored/untracked files, mode, replacement refs,
+// inherited GIT_* overrides, missing paths) must be refused, and the pristine
+// fixture must still pass afterwards.
+BUSTER_GLOBAL_LOCAL bool kernel_source_controls(char const* temporary)
+{
+    char repository[KERNEL_PATH_BYTES], fixture[KERNEL_PATH_BYTES], tool[KERNEL_PATH_BYTES], link[KERNEL_PATH_BYTES];
+    char injected[KERNEL_PATH_BYTES], exclude[KERNEL_PATH_BYTES], pin[128] = {0};
+    char const pristine[] = "int pristine;\n";
+    char const altered[] = "int altered;\n";
+    bool valid = kernel_git_environment() && kernel_path(repository, temporary, "repository") &&
+                 mkdir(repository, 0700) == 0 && kernel_path(fixture, repository, "fixture.c") &&
+                 kernel_path(tool, repository, "tool.sh") && kernel_path(link, repository, "link") &&
+                 kernel_path(injected, repository, "injected.h") &&
+                 kernel_path(exclude, repository, ".git/info/exclude") &&
+                 kernel_write(fixture, pristine, sizeof(pristine) - 1) && kernel_write(tool, "#!/bin/sh\n", 10) &&
+                 chmod(tool, 0755) == 0 && symlink("fixture.c", link) == 0;
+    char* init[] = {"git", "init", "-q", 0};
+    char* add[] = {"git", "add", "-A", 0};
+    char* commit[] = {"git", "-c", "user.name=control", "-c", "user.email=control@invalid", "-c", "commit.gpgsign=false",
+        "commit", "-q", "-a", "-m", "fixture", 0};
+    char* head[] = {"git", "rev-parse", "HEAD", 0};
+    valid = valid && kernel_control_git("control-git-init", repository, init) &&
+            kernel_control_git("control-git-add", repository, add) &&
+            kernel_control_git("control-git-commit", repository, commit) &&
+            kernel_control_git("control-git-head", repository, head);
+    size_t size = 0;
+    char* bytes = valid ? kernel_load_log("control-git-head", &size) : 0;
+    valid = bytes && size > 1 && size < sizeof(pin) && bytes[size - 1] == '\n';
+    if (valid)
+    {
+        memcpy(pin, bytes, size - 1);
+    }
+    free(bytes);
+    valid = valid && kernel_source_verify(repository, pin, "control-pristine");
+    // assume-unchanged and skip-worktree hide a tracked edit from git status.
+    char* assume[] = {"git", "update-index", "--assume-unchanged", "fixture.c", 0};
+    char* unassume[] = {"git", "update-index", "--no-assume-unchanged", "fixture.c", 0};
+    char* skip[] = {"git", "update-index", "--skip-worktree", "fixture.c", 0};
+    char* unskip[] = {"git", "update-index", "--no-skip-worktree", "fixture.c", 0};
+    valid = valid && kernel_control_git("control-git-assume", repository, assume) &&
+            kernel_write(fixture, altered, sizeof(altered) - 1) &&
+            !kernel_source_verify(repository, pin, "control-assume-unchanged") &&
+            kernel_control_git("control-git-unassume", repository, unassume) &&
+            kernel_control_git("control-git-skip", repository, skip) &&
+            !kernel_source_verify(repository, pin, "control-skip-worktree") &&
+            kernel_control_git("control-git-unskip", repository, unskip) &&
+            kernel_write(fixture, pristine, sizeof(pristine) - 1);
+    // An ignored extra input, an executable-bit change and a missing path.
+    valid = valid && kernel_write(exclude, "injected.h\n", 11) && kernel_write(injected, "#define X 1\n", 12) &&
+            !kernel_source_verify(repository, pin, "control-ignored") && unlink(injected) == 0 &&
+            chmod(fixture, 0755) == 0 && !kernel_source_verify(repository, pin, "control-mode") &&
+            chmod(fixture, 0644) == 0 && unlink(tool) == 0 && !kernel_source_verify(repository, pin, "control-missing") &&
+            kernel_write(tool, "#!/bin/sh\n", 10) && chmod(tool, 0755) == 0;
+    // A replacement ref that makes the altered bytes look like the pin.
+    char* alternate[] = {"git", "-c", "user.name=control", "-c", "user.email=control@invalid", "-c",
+        "commit.gpgsign=false", "commit", "-q", "-a", "-m", "replacement", 0};
+    char* reset[] = {"git", "reset", "-q", "--hard", pin, 0};
+    char replacement[128] = {0};
+    valid = valid && kernel_write(fixture, altered, sizeof(altered) - 1) &&
+            kernel_control_git("control-git-alternate", repository, alternate) &&
+            kernel_control_git("control-git-alternate-head", repository, head);
+    bytes = valid ? kernel_load_log("control-git-alternate-head", &size) : 0;
+    valid = bytes && size > 1 && size < sizeof(replacement) && bytes[size - 1] == '\n';
+    if (valid)
+    {
+        memcpy(replacement, bytes, size - 1);
+    }
+    free(bytes);
+    char* replace[] = {"git", "replace", pin, replacement, 0};
+    char* unreplace[] = {"git", "replace", "-d", pin, 0};
+    valid = valid && kernel_control_git("control-git-reset", repository, reset) &&
+            kernel_control_git("control-git-replace", repository, replace) &&
+            kernel_write(fixture, altered, sizeof(altered) - 1) &&
+            !kernel_source_verify(repository, pin, "control-replace") &&
+            kernel_control_git("control-git-unreplace", repository, unreplace) &&
+            kernel_write(fixture, pristine, sizeof(pristine) - 1);
+    // Inherited overrides must be cleared rather than redirect verification.
+    valid = valid && setenv("GIT_DIR", temporary, 1) == 0 && setenv("GIT_INDEX_FILE", injected, 1) == 0 &&
+            kernel_source_verify(repository, pin, "control-environment");
     return valid;
 }
 
@@ -614,6 +945,7 @@ BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
             fixture[3] = "-E";
             valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
                     !kernel_target_c(count);
+            valid = valid && kernel_source_controls(temporary);
         }
     }
     printf("LINUX_HARNESS_CONTROLS result=%s directory=%s\n", valid ? "pass" : "fail", temporary);
