@@ -48215,6 +48215,155 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_find_collisions(UnitTestArgumen
     return result;
 }
 
+// The prelude builds the tokens of its predefined object-like texts directly
+// instead of lexing them (c_predefined_text_tokens). Every string of up to
+// four bytes over an alphabet holding the direct path's bytes and the bytes
+// that must send a text to the lexer is compared with c_lex_space in a fresh
+// space: wherever the direct path takes a text, the token rows, the end
+// marker and the spelling bytes must be the lexer's.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_predefined_text_direct_tokens(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    char8 const alphabet[] = {'a', 'e', 'E', 'p', 'P', '_', '0', '.', '+', '-', '(', ')', ' ', '$', '\'', '"'};
+    u32 const symbol_count = BUSTER_ARRAY_LENGTH(alphabet);
+    u32 const maximum_length = 4;
+    u64 agreed = 0;
+    u64 lexed = 0;
+    u64 disagreed = 0;
+    char8 text[4];
+    for (u32 length = 0; length <= maximum_length; length += 1)
+    {
+        u64 combinations = 1;
+        for (u32 position = 0; position < length; position += 1)
+        {
+            combinations *= symbol_count;
+        }
+        for (u64 combination = 0; combination < combinations; combination += 1)
+        {
+            u64 rest = combination;
+            for (u32 position = 0; position < length; position += 1)
+            {
+                text[position] = alphabet[rest % symbol_count];
+                rest /= symbol_count;
+            }
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CTestPredefinedTextResult compared = c_test_predefined_text_compare(temporary.arena, (String8){.pointer = text, .length = length});
+            c_test_scratch_end(temporary);
+            agreed += compared == C_TEST_PREDEFINED_TEXT_AGREES;
+            lexed += compared == C_TEST_PREDEFINED_TEXT_LEXED;
+            if (compared == C_TEST_PREDEFINED_TEXT_DISAGREES && disagreed < 8)
+            {
+                BUSTER_TEST_RAW(arguments, false, string_format(arguments->arena, S8("predefined text \"{S8}\" disagrees with the lexer"),
+                                                                (String8){.pointer = text, .length = length}));
+            }
+            disagreed += compared == C_TEST_PREDEFINED_TEXT_DISAGREES;
+        }
+    }
+    BUSTER_TEST(arguments, disagreed == 0);
+    BUSTER_TEST(arguments, agreed > 10000 && lexed > 10000);
+    // The prelude's own shapes, and texts whose bytes keep them with the lexer.
+    String8 direct_texts[] = {
+        S8(""), S8("1"), S8("unsigned long long int"), S8("(-16381)"), S8("1.18973149535723176502e+4932L"), S8("6.5504e+4F16"),
+        S8("4294967295U"), S8("__builtin_buster_simd_compress_store_u8"), S8("__attribute__((always_inline)) __inline"), S8("0x1p-3"),
+        S8("struct __buster_sve_float32"), S8("1-2"), S8("e-1"),
+    };
+    String8 lexed_texts[] = {
+        S8("\"18.0.0 (buster)\""), S8("a$b"), S8(".5"), S8("+1"), S8("1--"), S8("a->b"), S8("a-=b"), S8("x\ty"), S8("a/**/b"), S8("u8\"x\""),
+        S8("L'x'"), S8("1'000"), S8("a\\\nb"), S8("a\nb"), S8("?\?="),
+        S8("0123456789012345678901234567890123456789012345678901234567890123"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(direct_texts); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        BUSTER_TEST_RAW(arguments, c_test_predefined_text_compare(temporary.arena, direct_texts[index]) == C_TEST_PREDEFINED_TEXT_AGREES, direct_texts[index]);
+        c_test_scratch_end(temporary);
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(lexed_texts); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        BUSTER_TEST_RAW(arguments, c_test_predefined_text_compare(temporary.arena, lexed_texts[index]) == C_TEST_PREDEFINED_TEXT_LEXED, lexed_texts[index]);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// The prelude across targets, dialect classes and PIC: every object-like
+// text it defines takes the direct path unless it is a string literal, and
+// agrees with the lexer. The same unit, which stringifies and expands
+// multi-token, signed and string predefined macros, is then preprocessed with
+// every text lexed; its tokens, spelling space and identifier table must
+// match the direct path's byte for byte. The dialect only selects texts
+// through GNU-ness (`linux`, `unix`) and GNU89's inline macro, so GNU89,
+// GNU17 and C17 cover every text set; PIC adds its level texts under GNU17.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_predefined_text_prelude_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 triples[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"), S8("aarch64-apple-macos"), S8("aarch64-apple-ios"), S8("x86_64-linux-android"),
+        S8("aarch64-linux-android"), S8("x86_64-unknown-uefi"), S8("wasm32-unknown-wasi"), S8("wasm64-unknown-freestanding"),
+        S8("bpfel-unknown-linux"), S8("i386-unknown-linux-gnu"),
+    };
+    CpuModel i386_models[] = {CPU_MODEL_X86_I386, CPU_MODEL_AMD_K6_2};
+    CPreprocessDialect mode_dialects[] = {C_PREPROCESS_DIALECT_GNU89, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    u8 mode_pic_levels[] = {0, 0, 0, 2};
+    String8 source = S8("#define S_(x) #x\n#define S(x) S_(x)\n"
+                        "S(__INT64_TYPE__) S(__UINT_LEAST16_TYPE__) S(__FLT_MIN_EXP__) S(__LDBL_MIN__) S(__WCHAR_TYPE__) S(__REGISTER_PREFIX__)\n"
+                        "S(__clang_version__) S(__forceinline) S(__uint128_t) S(__SVBool_t) S(__INTMAX_TYPE__) S(__ANDROID_API__)\n"
+                        "__SIZE_TYPE__ __UINTMAX_MAX__ __DBL_MIN_10_EXP__ __DATE__ __USER_LABEL_PREFIX__ __VERSION__ __BYTE_ORDER__ __GNUC__ __PIE__\n");
+    u32 const configurations = BUSTER_ARRAY_LENGTH(triples) + BUSTER_ARRAY_LENGTH(i386_models);
+    for (u32 configuration = 0; configuration < configurations; configuration += 1)
+    {
+        bool i386_model = configuration >= BUSTER_ARRAY_LENGTH(triples);
+        TargetParseResult parsed = target_parse_triple(i386_model ? S8("i386-unknown-linux-gnu") : triples[configuration]);
+        BUSTER_TEST_RAW(arguments, parsed.error == TARGET_PARSE_ERROR_NONE, i386_model ? S8("i386") : triples[configuration]);
+        Target target = parsed.target;
+        if (i386_model)
+        {
+            target.cpu_model = i386_models[configuration - BUSTER_ARRAY_LENGTH(triples)];
+        }
+        if (target.os == OPERATING_SYSTEM_ANDROID)
+        {
+            target.os_version_major = 24;
+        }
+        for (u32 mode = 0; parsed.error == TARGET_PARSE_ERROR_NONE && mode < BUSTER_ARRAY_LENGTH(mode_dialects); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessOptions options = {
+                .target = target,
+                .data_layout = target_data_layout(target),
+                .dialect = mode_dialects[mode],
+                .source_path = S8("predefined-text.c"),
+                .position_independent_level = mode_pic_levels[mode],
+                .position_independent_executable = mode_pic_levels[mode] != 0,
+            };
+            c_test_predefined_text_mode(false, true);
+            CPreprocessResult direct = c_preprocess(temporary.arena, source, options);
+            CTestPredefinedTextCounts counts = c_test_predefined_text_take();
+            c_test_predefined_text_mode(true, false);
+            CPreprocessResult lexed = c_preprocess(temporary.arena, source, options);
+            c_test_predefined_text_mode(false, false);
+            String8 label = string_format(temporary.arena, S8("predefined texts configuration={u32} mode={u32}"), configuration, mode);
+            BUSTER_TEST_RAW(arguments, counts.disagreements == 0 && counts.lexed_unquoted == 0 && counts.direct > 150 && counts.lexed <= 4, label);
+            bool same = direct.diagnostic_count == 0 && lexed.diagnostic_count == 0 && direct.token_count == lexed.token_count && direct.token_count &&
+                        direct.recovery && lexed.recovery && direct.symbols && lexed.symbols;
+            same = same && memcmp(direct.tokens, lexed.tokens, sizeof(*direct.tokens) * direct.token_count) == 0;
+            u64 direct_space = same ? direct.recovery->spelling_arena->position : 0;
+            same = same && direct_space == lexed.recovery->spelling_arena->position &&
+                   memcmp(direct.spelling_base, lexed.spelling_base, direct_space - arena_minimum_position) == 0;
+            u32 symbol_count = same ? c_test_symbol_count(direct.symbols) : 0;
+            same = same && symbol_count == c_test_symbol_count(lexed.symbols);
+            for (u32 symbol = 1; same && symbol <= symbol_count; symbol += 1)
+            {
+                same = string_equal(c_test_symbol_name(direct.symbols, symbol), c_test_symbol_name(lexed.symbols, symbol));
+            }
+            BUSTER_TEST_RAW(arguments, same, label);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -57209,11 +57358,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
 // The work for `{int i=x;do ` D times, `x--;`, then D closers
 // `while(--i>0);}`: `scope_levels` takes the scope levels semantic analysis
 // descends and `ssa_steps` the direct SSA read walk's steps in lowering, each
-// UINT64_MAX when its stage did not finish cleanly.
-BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, u64* scope_levels)
+// UINT64_MAX when its stage did not finish cleanly; `exit_blocks` counts
+// blocks indexed by the optional loop-exit shortcut.
+BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, u64* scope_levels, u64* exit_blocks)
 {
     *ssa_steps = UINT64_MAX;
     *scope_levels = UINT64_MAX;
+    *exit_blocks = UINT64_MAX;
     TemporalArena temporary = scratch_begin(0, 0);
     u64 capacity = (u64)depth * 32 + 256;
     char8* bytes = arena_allocate(temporary.arena, char8, capacity);
@@ -57239,11 +57390,13 @@ BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, 
     }
     CParseResult parse = c_parse(temporary.arena, tokens);
     u64 steps_before = c_test_ir_ssa_forward_steps();
+    u64 exit_blocks_before = c_test_ir_ssa_loop_exit_blocks();
     CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("nested-do-while.c"), tokens, parse, target_native);
     if (!tokens.diagnostic_count && !parse.diagnostic_count && !direct.diagnostic_count && direct.program &&
         ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE)
     {
         *ssa_steps = c_test_ir_ssa_forward_steps() - steps_before;
+        *exit_blocks = c_test_ir_ssa_loop_exit_blocks() - exit_blocks_before;
     }
     c_test_scratch_end(temporary);
 }
@@ -57261,10 +57414,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_do_while_work(UnitTe
     enum { SHALLOW = 250, DEEP = 1000 };
     u64 shallow_steps;
     u64 shallow_levels;
+    u64 shallow_exit_blocks;
     u64 deep_steps;
     u64 deep_levels;
-    c_test_nested_do_while_work(SHALLOW, &shallow_steps, &shallow_levels);
-    c_test_nested_do_while_work(DEEP, &deep_steps, &deep_levels);
+    u64 deep_exit_blocks;
+    u64 ordinary_steps;
+    u64 ordinary_levels;
+    u64 ordinary_exit_blocks;
+    c_test_nested_do_while_work(4, &ordinary_steps, &ordinary_levels, &ordinary_exit_blocks);
+    c_test_nested_do_while_work(SHALLOW, &shallow_steps, &shallow_levels, &shallow_exit_blocks);
+    c_test_nested_do_while_work(DEEP, &deep_steps, &deep_levels, &deep_exit_blocks);
+    BUSTER_TEST(arguments, ordinary_steps != UINT64_MAX && ordinary_levels != UINT64_MAX && ordinary_exit_blocks == 0);
+    BUSTER_TEST(arguments, shallow_exit_blocks >= SHALLOW && deep_exit_blocks >= DEEP && deep_exit_blocks <= shallow_exit_blocks * 5);
+    BUSTER_TEST(arguments, c_test_ir_ssa_loop_exits_refusal());
     BUSTER_TEST_RAW(arguments, shallow_steps != UINT64_MAX && deep_steps != UINT64_MAX && shallow_steps >= SHALLOW &&
                                    deep_steps <= shallow_steps * 5 && deep_steps <= (u64)DEEP * 16,
                     string_format(arguments->arena, S8("SSA read-walk steps shallow={u64} deep={u64}"), shallow_steps, deep_steps));
@@ -66321,6 +66483,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     C_TEST_FIXTURE(arguments, c_test_pp_class_masks);
     C_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
+    C_TEST_FIXTURE(arguments, c_test_predefined_text_direct_tokens);
+    C_TEST_FIXTURE(arguments, c_test_predefined_text_prelude_identity);
     C_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     C_TEST_FIXTURE(arguments, c_test_promoted_designator_continuation_runtime);
     C_TEST_FIXTURE(arguments, c_test_promoted_member_search);

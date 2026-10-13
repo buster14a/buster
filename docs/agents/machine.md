@@ -557,10 +557,14 @@ hosts execute its independent expected-value fixture.
   close their touched rows through a block-level liveness fixed point over
   covering writes and upward-exposed reads. That solve
   (`machine_fast_solve_liveness`, shared with the prepass value liveness)
-  always visits the lowest-ranked pending block in reverse postorder of the
-  reversed CFG, so a value carried through a deep loop nest reaches every inner
-  block in one pass instead of one pass per nesting level (#3771); the order
-  changes only the work, never the least fixed point. Allocator-created spill homes use
+  starts on a layout-order stack, which settles ordinary functions without
+  setup. Once that stack spends `MACHINE_FAST_LIVENESS_STACK_BUDGET` word
+  updates per word of every block and edge, it re-pends every block and always
+  visits the lowest-ranked pending one in reverse postorder of the reversed
+  CFG, so a value carried through a deep loop nest reaches every inner block in
+  one pass instead of one pass per nesting level (#3771). Building that order
+  for every function cost the self-host more than it saved. The order changes
+  only the work, never the least fixed point. Allocator-created spill homes use
   the same closure on a direct acyclic block chain: a spill covers the previous
   contents of a home, while a reload before that spill reads the value arriving
   from a predecessor. Retroactive edge repairs at one machine point have no
@@ -719,6 +723,15 @@ hosts execute its independent expected-value fixture.
   valid canonical-only inline-assembly transaction. Current unsupported assembly
   controls require structured refusal and preserve existing output artifacts;
   ABI retirement no longer doubles as a negative test.
+- X86 vector places retain their general-register subobject address when an
+  address is taken or a vector array decays. Only canonical vector rvalues
+  take the ZMM-to-frame snapshot path in `machine_x64_select_place_address_offset`;
+  the canonical type alone does not distinguish a place from its stored value.
+  `compiler_driver_test_wide_vector_place_address` checks member addresses,
+  vector-array decay and indexed addresses, pointer identity, scalar writes,
+  guard storage and immutable rvalue lane snapshots on Linux/macOS/Windows
+  objects, both allocators/frontend forms, O0/O2 and baseline/Haswell/Zen 5.
+  Matching desktop hosts execute every supported CPU profile.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;

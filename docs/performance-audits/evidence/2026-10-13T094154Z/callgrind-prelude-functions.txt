@@ -1,0 +1,60 @@
+# callgrind_annotate --auto=no --inclusive=yes on empty_x86_64_c (paths shortened); c_macro_define_object_text is called 229 times (callgrind_annotate --tree=caller)
+## base
+10,880,281 (100.0%)  PROGRAM TOTALS
+ 2,126,070 (19.54%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess
+ 2,126,070 (19.54%)  base-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess
+ 2,125,970 (19.54%)  base-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess_run
+   632,635 ( 5.81%)  base-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_object_text
+   389,217 ( 3.58%)  base-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+   117,747 ( 1.08%)  base-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_punctuator_dispatch_build
+## candidate
+10,467,777 (100.0%)  PROGRAM TOTALS
+ 1,713,566 (16.37%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess
+ 1,713,566 (16.37%)  cand-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess
+ 1,713,466 (16.37%)  cand-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess_run
+   220,040 ( 2.10%)  cand-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_object_text
+     6,415 ( 0.06%)  cand-tree/src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+# self Ir per function, |delta| > 4,000, base -> candidate
+## empty_x86_64_c (delta base candidate function)
+-412504	10880281	10467777	PROGRAM TOTALS
+-157811	161446	3635	src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+-117745	117745	0	src/buster/lib/compiler/frontend/c/c_source.c:c_punctuator_dispatch_build
+-102420	105149	2729	src/buster/lib/simd.h:c_symbols_intern_tokens
+-27924	28668	744	src/buster/lib/arena.h:c_lex_dispatch
+-27450	28182	732	src/buster/lib/compiler/frontend/c/c_source.c:c_source_trim_row_pair
+-7650	7854	204	src/buster/lib/arena.c:c_source_trim_row_pair
+-7425	7623	198	src/buster/lib/integer.h:c_lex_dispatch
+-6953	475288	468335	./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms
+-6951	557937	550986	./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms
+-4050	4158	108	src/buster/lib/arena.c:c_lex_dispatch
+4275	0	4275	src/buster/lib/arena.h:c_macro_define_object_text
+56878	17809	74687	src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_object_text
+## observables_compile_link (delta base candidate function)
+-291980	27146592	26854612	PROGRAM TOTALS
+-157799	207572	49773	src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+-102420	106760	4340	src/buster/lib/simd.h:c_symbols_intern_tokens
+-27913	28657	744	src/buster/lib/arena.h:c_lex_dispatch
+-27450	28182	732	src/buster/lib/compiler/frontend/c/c_source.c:c_source_trim_row_pair
+-7650	7854	204	src/buster/lib/arena.c:c_source_trim_row_pair
+-7425	7623	198	src/buster/lib/integer.h:c_lex_dispatch
+-6953	530552	523599	./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms
+-6951	802700	795749	./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms
+-4050	4158	108	src/buster/lib/arena.c:c_lex_dispatch
+4283	0	4283	src/buster/lib/arena.h:c_macro_define_object_text
+56878	17809	74687	src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_object_text
+## four_input_c (delta base candidate function)
+-1167910	70155788	68987878	PROGRAM TOTALS
+-631196	1305649	674453	src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+-409680	447572	37892	src/buster/lib/simd.h:c_symbols_intern_tokens
+-111611	114711	3100	src/buster/lib/arena.h:c_lex_dispatch
+-109800	112850	3050	src/buster/lib/compiler/frontend/c/c_source.c:c_source_trim_row_pair
+-30600	31450	850	src/buster/lib/arena.c:c_source_trim_row_pair
+-29700	30525	825	src/buster/lib/integer.h:c_lex_dispatch
+-27812	2156293	2128481	./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms
+-27804	3682738	3654934	./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms
+-16200	16650	450	src/buster/lib/arena.c:c_lex_dispatch
+-12624	61916	49292	src/buster/lib/compiler/frontend/c/c_source.c:c_symbols_intern_tokens
+-7200	7400	200	src/buster/lib/integer.h:c_source_trim_row_pair
+5400	0	5400	src/buster/lib/integer.h:c_macro_define_object_text
+17100	0	17100	src/buster/lib/arena.h:c_macro_define_object_text
+227512	71236	298748	src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_object_text
