@@ -1558,6 +1558,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_directive_tests(UnitTestA
     return result;
 }
 
+// A failed reservation in either half of the macro arena pair is a
+// preprocessing diagnostic, and a later unit can still expand macros normally.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_reservation_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 failed_sources[] = {
+        S8("#define F(x) x\nF(7)\n"),
+        S8("#define F(x) x\n#if F(1)\nint value;\n#endif\n"),
+    };
+    String8 follow_up_source = S8("#define F(x) (x+1)\nint value = F(7);\n");
+    String8 follow_up_expected = S8("int value = (7+1);");
+    for (u32 failure_index = 0; failure_index < BUSTER_ARRAY_LENGTH(failed_sources); failure_index += 1)
+    {
+        // c_preprocess first reserves spelling, token, shape and phase arenas;
+        // the next two PREPROCESS reservations are the macro argument and
+        // expansion arenas respectively.
+        u32 reservation_ordinal = 5 + failure_index;
+        String8 failed_storage = failure_index == 0 ? S8("argument") : S8("expansion");
+        TemporalArena failed_scope = scratch_begin(&arguments->arena, 1);
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_PREPROCESS, reservation_ordinal);
+        CPreprocessResult failed = c_preprocess(failed_scope.arena, failed_sources[failure_index],
+                                                 (CPreprocessOptions){.source_path = S8("macro-arena-reservation.c")});
+        bool reservation_pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_PREPROCESS, 0);
+        BUSTER_TEST(arguments, !reservation_pending);
+        BUSTER_TEST(arguments, failed.error_count > 0);
+        String8 expected_message = string_format(failed_scope.arena, S8("could not reserve {u64} bytes for C macro {S8} arena"),
+                                                 BUSTER_GB(8), failed_storage);
+        bool resource_diagnostic = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < failed.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = failed.diagnostics[diagnostic_index];
+            resource_diagnostic = resource_diagnostic ||
+                                  (diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                                   string_equal(diagnostic.message, expected_message));
+        }
+        BUSTER_TEST(arguments, resource_diagnostic);
+        c_test_scratch_end(failed_scope);
+
+        TemporalArena follow_up_scope = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult follow_up = c_preprocess(follow_up_scope.arena, follow_up_source,
+                                                    (CPreprocessOptions){.source_path = S8("macro-arena-recovery.c")});
+        BUSTER_TEST(arguments, follow_up.error_count == 0);
+        UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, follow_up_scope.arena, follow_up, follow_up_expected);
+        result.test_count += compared.test_count;
+        result.succeeded_test_count += compared.succeeded_test_count;
+        c_test_scratch_end(follow_up_scope);
+    }
+    return result;
+}
+
 // Every fixture ends each scratch that holds a unit with c_test_scratch_end,
 // after the last read of the unit's tokens, and C_TEST_BOUNDED_FIXTURE checks
 // that it returned every reservation it made (GitHub #3431).
@@ -1579,6 +1630,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_trigraph_preprocess_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_reservation_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_demand_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_conditional_directive_tests);
     return result;

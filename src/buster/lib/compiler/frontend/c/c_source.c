@@ -5801,6 +5801,8 @@ struct CMacroExpansionStorage
 {
     Arena* argument_arena;
     Arena* expansion_arena;
+    // Stop retrying after a resource failure until this storage is destroyed.
+    bool failed;
 };
 
 typedef struct CMacroExpansionMark CMacroExpansionMark;
@@ -6535,21 +6537,47 @@ BUSTER_C_INTERNAL void c_preprocess_output_push(Arena* arena, CPreprocessTokenNo
 #define C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE BUSTER_GB(8)
 
 // Both arenas are created together and only when an invocation first needs
-// them, so a unit that never expands a function-like macro reserves nothing.
-BUSTER_C_INTERNAL void c_macro_expansion_storage_ensure(CMacroExpansionStorage* storage)
+// transient storage. A failed reservation is reported once for this storage
+// owner; subsequent expansions stop without retrying the large reservation.
+BUSTER_C_INTERNAL bool c_macro_expansion_storage_ensure(CMacroExpansionStorage* storage, Arena* arena,
+                                                        CSourceLocation location, CPreprocessResult* result)
 {
-    if (!storage->expansion_arena)
+    bool success = !storage->failed;
+    if (success && !storage->expansion_arena)
     {
-        storage->argument_arena = arena_create((ArenaCreation){
+        Arena* argument_arena = c_frontend_arena_create((ArenaCreation){
             .reserved_size = C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE,
             .flags = {.pool_reuse = 1},
-        });
-        storage->expansion_arena = arena_create((ArenaCreation){
-            .reserved_size = C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE,
-            .flags = {.pool_reuse = 1},
-        });
-        BUSTER_CHECK(storage->argument_arena && storage->expansion_arena);
+        }, C_FRONTEND_RESERVATION_PREPROCESS);
+        Arena* expansion_arena = argument_arena ? c_frontend_arena_create((ArenaCreation){
+                                                       .reserved_size = C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE,
+                                                       .flags = {.pool_reuse = 1},
+                                                   }, C_FRONTEND_RESERVATION_PREPROCESS)
+                                                : 0;
+        success = argument_arena && expansion_arena;
+        if (success)
+        {
+            storage->argument_arena = argument_arena;
+            storage->expansion_arena = expansion_arena;
+        }
+        else
+        {
+            storage->failed = true;
+            if (argument_arena)
+            {
+                arena_destroy(argument_arena, 1);
+            }
+            if (expansion_arena)
+            {
+                arena_destroy(expansion_arena, 1);
+            }
+            String8 failed_storage = argument_arena ? S8("expansion") : S8("argument");
+            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                         string_format(arena, S8("could not reserve {u64} bytes for C macro {S8} arena"),
+                                                       C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE, failed_storage));
+        }
     }
+    return success;
 }
 
 // Releases the arenas and, in a test build, records the largest peak of live
@@ -6569,8 +6597,8 @@ BUSTER_C_INTERNAL void c_macro_expansion_storage_destroy(CMacroExpansionStorage*
 #endif
         arena_destroy(storage->expansion_arena, 1);
         arena_destroy(storage->argument_arena, 1);
-        *storage = (CMacroExpansionStorage){0};
     }
+    *storage = (CMacroExpansionStorage){0};
 }
 
 BUSTER_C_INTERNAL CMacroExpansionMark c_macro_expansion_mark(CMacroExpansionStorage const* storage)
@@ -7871,12 +7899,19 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
                     bool scoped = definition->function_like || definition->builtin || definition->has_paste || definition->has_stringify || definition->has_va_opt;
                     bool deferred = false;
                     CMacroExpansionMark mark = {0};
-                    if (scoped)
+                    bool storage_ready = !scoped ||
+                                         c_macro_expansion_storage_ensure(storage, arena, c_pp_stamp_location(stamps, token.stamp), result);
+                    if (storage_ready && scoped)
                     {
-                        c_macro_expansion_storage_ensure(storage);
                         mark = c_macro_expansion_mark(storage);
                     }
-                    if (macro->definition.function_like)
+                    if (!storage_ready)
+                    {
+                        scoped = false;
+                        ok = false;
+                        done = true;
+                    }
+                    if (storage_ready && macro->definition.function_like)
                     {
                         invoked = c_macro_invocation_arguments(arena, storage, space->base, symbols, first_macro, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
                                                                &argument_count, result);
@@ -7893,7 +7928,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
                             invoked = false;
                         }
                     }
-                    if (invoked)
+                    if (storage_ready && invoked)
                     {
                         expansion_count += 1;
                         result->detail->preprocessed.expansions += 1;
