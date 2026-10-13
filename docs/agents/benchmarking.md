@@ -1453,8 +1453,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    would self-build with `-fcanonical-inline`. The #48 profile above times
    one head against itself, inliner off against on; this one times base
    against head, both with the inliner on. It cannot be combined with any
-   other opt-in profile, `canonical-inline-self-host-v1` and the scaling leg
-   included; both the harness and the publisher refuse the combination. The
+   other opt-in profile, the scaling leg included; both the harness and the
+   publisher refuse the combination. The #48 `canonical-inline-self-host-v1`
+   leg is the exception: `inline_acceptance_requested` selects it whenever its
+   line is anywhere in the request file, as it has been on main since #48, so
+   it runs beside this leg (its 12-pair stages add a few minutes). The
    trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
    two parts:
    - **Stage 1, untimed.** Right after each role's Clang Release build, with
