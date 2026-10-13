@@ -2116,6 +2116,21 @@ not split. Empty comma fields and missing operands fail with a diagnostic.
 The driver and native linker share `link_validate_linker_arguments`, and the
 linker checks the actual static/dynamic image before publishing output.
 
+When no link happens (`-c`, `-S`, `-E`, `-fsyntax-only`), `-Wl,...` and
+`-Xlinker` arguments are accepted and ignored, as GCC does and Clang does with
+an unused-argument warning (#4041); build-system probes such as
+`-Wl,--enable-new-dtags -c` therefore succeed. The same arguments are still
+validated on a link, and a leading `--version` stays a linker query that a
+non-link action refuses.
+
+Accepted and ignored options (no effect on output):
+
+- `-fcolor-diagnostics`, `-fno-color-diagnostics`: the driver never colors
+  diagnostics, so both spellings are presentation-only no-ops (#4041).
+- `-fcomment-block-commands=<names>`: a Clang doc-comment option that only
+  feeds `-Wdocumentation`, which is not implemented; an empty list is refused
+  (#4041).
+
 The supported subset is:
 
 - Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
