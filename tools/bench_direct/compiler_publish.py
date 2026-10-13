@@ -65,6 +65,7 @@ Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reu
 validate_real_source_bundle, validate_production_profile_bundle,
 validate_compiler_probes_bundle, validate_frontend_selector_bundle and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
+validate_selfhost_inline_bundle (#58),
 decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
 (sealed raw evidence), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
@@ -94,6 +95,7 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
+from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
 from compiler_receipt import EVIDENCE_INVENTORY, EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity
@@ -115,6 +117,8 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_frontend_selector,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
+                              SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, selfhost_inline_digest,
+                              validate_selfhost_inline,
                               wild_linker_digest,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number, _number,
@@ -475,6 +479,38 @@ def validate_link_tls_bundle(record: object, bundle: object, binaries: object) -
     return problems
 
 
+SELFHOST_INLINE_BUNDLE_FILES = {name: f"selfhost_inline/{name}" for name in (
+    "stage1-baseline/stage1.json", "stage1-candidate/stage1.json", "compare/result.json", "compare/lab/summary.json",
+    "compare/lab/compare.json", "compare/lab/a/lab.json", "compare/lab/b/lab.json")}
+
+
+def validate_selfhost_inline_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-validate the requested #58 self-built inline-mode result from its exported raw documents."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt self-host inline record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt self-host inline run did not complete successfully")
+    if record.get("request_line") != SELFHOST_INLINE_REQUEST_LINE:
+        problems.append("receipt self-host inline request selector is not the exact supported line")
+    if record.get("profile") != SELFHOST_INLINE_PROFILE:
+        problems.append("receipt self-host inline profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(SELFHOST_INLINE_BUNDLE_FILES):
+        return [*problems, "requested self-host inline evidence bundle is incomplete"]
+    stage1 = {role: bundle[f"stage1-{role}/stage1.json"] for role in ("baseline", "candidate")}
+    problems.extend(validate_selfhost_inline(stage1, bundle["compare/result.json"], binaries))
+    expected = {role: (stage1[role].get("stage1") or {}).get("sha256") if isinstance(stage1[role], dict) else None
+                for role in stage1}
+    problems.extend(validate_selfhost_inline_documents(
+        bundle["compare/lab/summary.json"], bundle["compare/lab/compare.json"],
+        {"a": bundle["compare/lab/a/lab.json"], "b": bundle["compare/lab/b/lab.json"]}, expected))
+    if record.get("digest") != selfhost_inline_digest(bundle["compare/lab/summary.json"]):
+        problems.append("receipt self-host inline digest does not match the exported summary")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -579,6 +615,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the wild-linker leg")
                 if receipt.get("link_tls") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the link-tls leg")
+                if receipt.get("selfhost_inline") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the self-host inline leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -636,7 +674,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                         reasons.append("issue #3011 constant-reuse comparison is valid only in pull mode")
                     others = [key for key in ("inline_acceptance", "ast_pilot_acceptance", "throughput_real_source",
                                               "production_profile", "compiler_probes", "frontend_selector", "wild_linker",
-                                              "link_tls")
+                                              "link_tls", "selfhost_inline")
                               if receipt.get(key) is not None and
                               (key != "inline_acceptance" or (receipt.get(key) or {}).get("requested") is True)]
                     if others:
@@ -707,6 +745,21 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                        "frontend-selector probes or the wild-linker leg")
                     reasons.extend(validate_link_tls_bundle(receipt["link_tls"], corpus.get("link_tls_bundle"),
                                                             receipt.get("binaries")))
+                if receipt.get("selfhost_inline") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the self-host inline leg is valid only in pull mode")
+                    inline_record = receipt.get("inline_acceptance")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker", "link_tls", "constant_reuse_acceptance")) or \
+                            (isinstance(inline_record, dict) and inline_record.get("requested") is True) or \
+                            "scaling_profile" in receipt:
+                        reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
+                                       "scaling leg included")
+                    reasons.extend(validate_selfhost_inline_bundle(receipt["selfhost_inline"],
+                                                                   corpus.get("selfhost_inline_bundle"),
+                                                                   receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -1133,7 +1186,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
             "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or \
             "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
-            "link_tls" in receipt:
+            "link_tls" in receipt or "selfhost_inline" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1529,6 +1582,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["link_tls_bundle"] = (bundle if not problem and
                                                  len(bundle) == len(LINK_TLS_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("selfhost_inline") is not None and not problem:
+                bundle = {}
+                for key, member in SELFHOST_INLINE_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required self-host inline evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["selfhost_inline_bundle"] = (bundle if not problem and
+                                                        len(bundle) == len(SELFHOST_INLINE_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
@@ -1601,6 +1671,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_selector_count = head_lines.count(FRONTEND_SELECTOR_REQUEST_LINE)
     head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
     head_link_tls_count = head_lines.count(LINK_TLS_REQUEST_LINE)
+    head_selfhost_count = head_lines.count(SELFHOST_INLINE_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
@@ -1611,6 +1682,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     linker_deltas = []
     selector_deltas = []
     link_tls_deltas = []
+    selfhost_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1630,6 +1702,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         selector_deltas.append(head_selector_count - parent_lines.count(FRONTEND_SELECTOR_REQUEST_LINE))
         linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
         link_tls_deltas.append(head_link_tls_count - parent_lines.count(LINK_TLS_REQUEST_LINE))
+        selfhost_deltas.append(head_selfhost_count - parent_lines.count(SELFHOST_INLINE_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1678,6 +1751,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit link-tls request")
     if link_tls_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in link_tls_deltas):
         return "a fresh link-tls selector has no link-tls record in the receipt"
+    selfhost_record = receipt.get("selfhost_inline")
+    if selfhost_record is not None and not all(delta == 1 for delta in selfhost_deltas):
+        return ("the exact self-host inline selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit self-host inline request")
+    if selfhost_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selfhost_deltas):
+        return "a fresh self-host inline selector has no self-host inline record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
