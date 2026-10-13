@@ -28,10 +28,11 @@ WidthWide width_tied(WidthWide value)
     return result;
 }
 
-WidthWide width_dialect(WidthWide input)
+WidthWide width_dialect(WidthWide input, WidthWide source_value)
 {
     register WidthWide bound __asm__("r10") = input;
-    __asm__ volatile("{movw $0x1357, %w0|mov %w0, 0x1357}" : "+r"(bound));
+    register WidthWide source __asm__("r8") = source_value;
+    __asm__ volatile("{movw %w1, %w0|mov %w0, %w1}" : "+r"(bound) : "r"(source));
     return bound;
 }
 
@@ -43,15 +44,15 @@ void* width_pointer(void* value)
 
 struct WidthGuard
 {
-    unsigned short value;
-    unsigned short guard;
+    unsigned char value;
+    unsigned char guard;
 };
 
 int width_narrow_guard(void)
 {
-    struct WidthGuard pair = {1, 0x5a5a};
+    volatile struct WidthGuard pair = {1, 0x5a};
     __asm__ volatile("movw $0xabcd, %w0" : "+r"(pair.value));
-    return pair.value == 0xabcd && pair.guard == 0x5a5a ? 0 : 1;
+    return pair.value == 0xcd && pair.guard == 0x5a ? 0 : 1;
 }
 
 // Source-linked Linux port-I/O shapes. Keep them compile-only.
@@ -88,7 +89,7 @@ int main(void)
     if (!status && width_named(input) != 0x1122334455661357ULL) status = 2;
     if (!status && width_r10(input) != 0x1122334455662468ULL) status = 3;
     if (!status && width_tied(input) != input) status = 4;
-    if (!status && width_dialect(input) != 0x1122334455661357ULL) status = 5;
+    if (!status && width_dialect(input, 0xaabbccddeeffbeefULL) != 0x112233445566beefULL) status = 5;
     if (!status && width_pointer(&anchor) != &anchor) status = 6;
     if (!status && width_narrow_guard()) status = 7;
     return status;

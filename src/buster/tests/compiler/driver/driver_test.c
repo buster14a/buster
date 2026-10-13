@@ -16453,6 +16453,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArgum
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_tls_cross_link(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     String8 clang = executable_resolve_in_path(temporary.arena, S8("clang"));
@@ -19205,6 +19206,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_constrai
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_width_modifier(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_width_modifier.c");
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};

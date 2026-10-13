@@ -401,19 +401,15 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   layouts; the registered driver fixture executes the nonprivileged union and
   numeric-clobber cases on matching desktop hosts. The separate
   `machine_test_inline_assembly_width_modifier` and driver fixture are
-  registrations, not validation results.
-
-## Current source-linked GNU asm demand slice
-
-Linux v6.12's [shared x86 I/O header](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/arch/x86/include/asm/shared/io.h)
-(`GPL-2.0`, as identified by that file's SPDX tag) expands its word I/O
-helpers with `%w` views of both data and port operands, and its dword forms
-with a `%w` port view. These are source-level demands; the corresponding
-fixture functions compile but are never executed because port I/O is
-privileged. The byte forms also use `%b` for the data register, so this slice
-does not establish support for the complete helper family. The broader
-source-linked Linux and FFmpeg census, including enabled and preprocessed
-cells, remains pending.
+  registrations, not validation results. The bounded Linux demand slice is
+  pinned to v6.12's [shared x86 I/O header](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/arch/x86/include/asm/shared/io.h)
+  (`GPL-2.0` per the file's SPDX tag): word I/O uses `%w` on both operands,
+  while dword forms use it on the port. These source-level demands are
+  compile-only because port I/O is privileged. Byte forms also use `%b` for
+  data, so this slice does not establish support for the complete helper
+  family. The broader Linux and FFmpeg census, including enabled and
+  preprocessed cells, remains pending; companion Linux mechanism accounting
+  is in [PR #4093](https://github.com/buster14a/buster/pull/4093).
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives

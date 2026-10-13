@@ -6869,7 +6869,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_constraint_union
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if BUSTER_CPU_ARCH_X86_64
+    BUSTER_UNUSED(arguments);
     String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_width_modifier.c");
     String8 names[] = {S8("width_numeric"), S8("width_named"), S8("width_r10"), S8("width_tied"),
                        S8("width_dialect"), S8("width_pointer"), S8("width_narrow_guard"), S8("width_outw"),
@@ -6921,7 +6921,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(U
                     }
                     else if (name == 6 && descriptor->operand_count)
                     {
-                        BUSTER_TEST(arguments, operands[0].byte_size == 2);
+                        BUSTER_TEST(arguments, operands[0].byte_size == 1);
                     }
                     else if (name == 3 && descriptor->operand_count == 2)
                     {
@@ -6948,7 +6948,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(U
                     {
                         BUSTER_TEST(arguments, operands[0].physical_register == MACHINE_X64_R10);
                         BUSTER_TEST(arguments, operands[0].byte_size == 8);
-                        BUSTER_TEST(arguments, string_equal(descriptor->source, S8("movw $0x1357, %r10w")));
+                        BUSTER_TEST(arguments, descriptor->operand_count == 2);
+                        if (descriptor->operand_count == 2)
+                        {
+                            BUSTER_TEST(arguments, operands[1].physical_register == MACHINE_X64_R8);
+                            BUSTER_TEST(arguments, operands[1].byte_size == 8);
+                        }
+                        BUSTER_TEST(arguments, string_equal(descriptor->source, S8("movw %r8w, %r10w")));
                         IrInstruction* instruction = 0;
                         IrInstructionExtra extra = {0};
                         for (u32 row = 0; row < function->instruction_count; row += 1)
@@ -6981,7 +6987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(U
                                 has_percent |= intel_source.pointer[character] == '%';
                             }
                             BUSTER_TEST(arguments, resolved && !has_percent &&
-                                                       string_equal(intel_source, S8("mov r10w, 0x1357")));
+                                                       string_equal(intel_source, S8("mov r10w, r8w")));
                         }
                     }
                 }
@@ -7014,6 +7020,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(U
         "BadVector bad_vector(BadVector value) { __asm__ volatile(\"movw $1, %w0\" : \"+x\"(value)); return value; }\n");
     String8 invalid_names[] = {S8("bad_malformed"), S8("bad_empty"), S8("bad_name"), S8("bad_index"),
                                S8("bad_memory"), S8("bad_vector")};
+    String8 invalid_failure_details[] = {
+        S8("inline assembly template contains an unsupported operand reference"),
+        S8("inline assembly template contains an unsupported operand reference"),
+        S8("inline assembly template contains an unsupported operand reference"),
+        S8("inline assembly template contains an unsupported operand reference"),
+        S8("inline assembly %w requires a scalar general-register operand"),
+        S8("inline assembly %w requires a scalar general-register operand")};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     IrProgram* invalid_program = machine_test_compile_c(temporary.arena, S8("width-modifier-invalid.c"), invalid_source, target);
@@ -7027,10 +7040,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_width_modifier(U
             if (!function) continue;
             MachineSelectResult selected = machine_select_canonical_function(temporary.arena, invalid_program, function, target);
             BUSTER_TEST_RAW(arguments, !selected.supported, invalid_names[name]);
+            BUSTER_TEST_RAW(arguments, string_equal(selected.failure_detail, invalid_failure_details[name]), selected.failure_detail);
         }
     }
     c_test_scratch_end(temporary);
-#endif
     return result;
 }
 
