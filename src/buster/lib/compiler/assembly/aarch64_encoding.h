@@ -312,6 +312,8 @@ struct BusterAarch64ArmM1FixedSpelling
     bool system;
 };
 
+// True for an explicit Apple M1 target, or native when the host is an Apple M1.
+BUSTER_F_DECL bool a64_target_is_m1_profile(Target target);
 BUSTER_F_DECL u32 buster_aarch64_arm_m1_fixed_spelling_count(void);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpelling* result);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1FixedSpelling* result);

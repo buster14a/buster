@@ -565,6 +565,8 @@ captures (#2741).
   being published. Sealed raw evidence for this route (#2918) follows
   [compiler-evidence-v1.md](../compiler-evidence-v1.md): an ordinary attempt
   seals its lab and corpus last, and the publisher verifies the seal natively.
+  A pull `snapshot-v1` attempt also seals its closure records and owned-phase
+  population.
   An artifact without a seal is `legacy-unsealed`, and its raw bytes are
   reported unverified.
   Optional facts keep the collector's own `unknown` or
@@ -618,9 +620,14 @@ captures (#2741).
   plus one maintained report comment on the commit (#2804). The linked
   Actions `compare` job supplies live preparation/measurement state; a queued
   custom check does not prove that the physical job has not started. During merge bursts only
-  the newest pending commit is measured; the others' checks read
-  **Not measured** and name the range comparison that covers their change.
-  A range result does not isolate one commit. See the
+  the newest pending commit is measured; displaced commits remain
+  **Not measured**. Native recovery reports verified pre-execution pending
+  replacement as neutral, retaining the native cancellation and its exact
+  attempt. It claims no successor result or range coverage from a request
+  alone. A validated range result does not isolate one commit. A range since the last actual
+  measurement that changes only reviewed prose is completed as neutral
+  **Not measured** without allocating the 9700X
+  ([unchanged-input skip](../compiler-main-unchanged-skip.md), #3923). See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An explicitly requested owner experiment can compare a pull request head
   with its merge base before merging by adding a fresh request line to
@@ -1257,6 +1264,37 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `compare-pull` job next to the roughly 14-minute ordinary comparison. No
    job timeout changed.
 
+   **Issue #2676 opt-in deep-nesting leg.** The same route accepts one fresh
+   exact line `profile: frontend-nesting-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:benchmark_frontend_scaling.py@frontend-nesting`. It cannot be
+   combined with any other opt-in profile; both the harness and the
+   publisher refuse the combination. After the corpus leg,
+   `measure_frontend_nesting` runs the merge base's
+   `tools/benchmark_frontend_scaling.py --suite nesting --warmups 1
+   --repetitions 11 --cpu 2` from the base checkout on `ide-base` and
+   `ide-cand`. Each of the eleven families in `NESTING_FAMILIES` is one
+   function whose statements nest 2,000, 8,000 and 32,000 levels deep, timed
+   with `-fsyntax-only` and `-c`. Each depth is four times the last, so a
+   term growing with the square of the depth shows as a sixteenfold step.
+   The 68 cells alternate the order of the binaries, and any `-c` object
+   that differs between them fails the run.
+
+   `compiler_publish.py` re-validates the receipt's `frontend_nesting`
+   record against `frontend_nesting/provenance.json` and `results.json`
+   (`validate_frontend_nesting`, sharing `frontend_scaling_problems` with
+   the frontend-selector leg). It refuses a tool exit other than 0, binary
+   hashes that are not the measured binaries, an observed CPU other than the
+   Ryzen 7 9700X, affinity other than CPU 2, a population that is not exactly
+   the 68 profile cells with eleven samples per binary, a reported median its
+   samples do not give, an object cell without its identical-object hash, and
+   a frozen profile or cell digest that changed. Every timing is report-only.
+
+   Cost: on a hosted 4-vCPU 2.1 GHz Xeon (diagnostic, not Zen 5), the whole
+   leg took 190 s and exported 196 KB. Its 20-minute timeout keeps it inside
+   the unchanged 90-minute `compare-pull` job next to the roughly 14-minute
+   ordinary comparison. No job timeout changed.
+
    **Issue #2761 opt-in host Wild linker leg.** The same route accepts one
    fresh exact line `profile: wild-linker-v1`, selected by the same
    every-parent freshness rule. It is the Zen 5 route for
@@ -1450,8 +1488,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    would self-build with `-fcanonical-inline`. The #48 profile above times
    one head against itself, inliner off against on; this one times base
    against head, both with the inliner on. It cannot be combined with any
-   other opt-in profile, `canonical-inline-self-host-v1` and the scaling leg
-   included; both the harness and the publisher refuse the combination. The
+   other opt-in profile, the scaling leg included; both the harness and the
+   publisher refuse the combination. The #48 `canonical-inline-self-host-v1`
+   leg is the exception: `inline_acceptance_requested` selects it whenever its
+   line is anywhere in the request file, as it has been on main since #48, so
+   it runs beside this leg (its 12-pair stages add a few minutes). The
    trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
    two parts:
    - **Stage 1, untimed.** Right after each role's Clang Release build, with

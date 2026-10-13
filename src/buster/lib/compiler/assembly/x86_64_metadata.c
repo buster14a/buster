@@ -2936,6 +2936,20 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFormFacts const* buster_x86_metadata_form_f
     return &buster_x86_metadata_form_facts[form.id];
 }
 
+// Publishes a parse of the published normalized row of `form_id`.  A lane
+// that loses the claim waits for the winner's copy of the same parse, so the
+// entry is published when this returns either way.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_pattern_semantics_store(u32 form_id, BusterX86MetadataPatternSemantics const* pattern)
+{
+    u8* cache_state = &buster_x86_metadata_pattern_semantics_cached[form_id];
+    if (once_claim_u8(cache_state, BUSTER_X86_METADATA_ENTRY_PENDING, BUSTER_X86_METADATA_ENTRY_BUSY, BUSTER_X86_ONCE_LEVEL_PATTERN))
+    {
+        buster_x86_metadata_pattern_semantics_cache[form_id] = *pattern;
+        buster_x86_metadata_pattern_semantics_results[form_id] = !pattern->has_unsupported_token;
+        once_publish_u8(cache_state, BUSTER_X86_METADATA_ENTRY_READY);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86MetadataForm form,
                                                                   BusterX86MetadataPatternSemantics* result)
 {
@@ -4051,16 +4065,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         pattern.has_sib = 0;
     }
     *result = pattern;
-    // A lane that loses the claim waits for the winner's copy of the same
-    // parse, so the entry is published when this returns either way.
-    u8* cache_state = cacheable ? &buster_x86_metadata_pattern_semantics_cached[form.id] : 0;
-    if (cache_state &&
-        once_claim_u8(cache_state, BUSTER_X86_METADATA_ENTRY_PENDING, BUSTER_X86_METADATA_ENTRY_BUSY, BUSTER_X86_ONCE_LEVEL_PATTERN))
-    {
-        buster_x86_metadata_pattern_semantics_cache[form.id] = pattern;
-        buster_x86_metadata_pattern_semantics_results[form.id] = !pattern.has_unsupported_token;
-        once_publish_u8(cache_state, BUSTER_X86_METADATA_ENTRY_READY);
-    }
+    if (cacheable) buster_x86_metadata_pattern_semantics_store(form.id, &pattern);
     return !pattern.has_unsupported_token;
 }
 
@@ -12241,8 +12246,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_string_unchecked
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void buster_x86_metadata_copy_form(BusterX86GeneratedForm source, u32 form_id,
-                                                       BusterX86MetadataForm* destination)
+// Returns true when normalization left every field the parse reads unchanged,
+// so `pattern` is also the parse of the normalized row.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_copy_form(BusterX86GeneratedForm source, u32 form_id,
+                                                       BusterX86MetadataForm* destination,
+                                                       BusterX86MetadataPatternSemantics* pattern_result)
 {
     *destination = (BusterX86MetadataForm){
         .id = form_id,
@@ -12298,6 +12306,11 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_copy_form(BusterX86GeneratedForm so
     memcpy(destination->fixed_bytes, source.fixed_bytes, sizeof(destination->fixed_bytes));
     BusterX86MetadataPatternSemantics pattern = {0};
     buster_x86_metadata_emit_parse_pattern(*destination, &pattern);
+    // The fields below are the only ones this function changes after the
+    // parse; the parse reads the rest of the row as copied above.
+    u16 parsed_field_flags = destination->field_flags;
+    u8 parsed_prefix_kind = destination->prefix_kind;
+    u8 parsed_encoder_family = destination->encoder_family;
     // Older packed snapshots classified UISA_VMODRM_* rows as ordinary
     // MODRM+memory fields even though the pattern carries their VSIB index
     // contract.  Normalize that source-semantic field here, generically for
@@ -12333,6 +12346,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_copy_form(BusterX86GeneratedForm so
         destination->prefix_kind = pattern.has_w ? BUSTER_X86_METADATA_PREFIX_REX : BUSTER_X86_METADATA_PREFIX_LEGACY;
         destination->encoder_family = pattern.has_w ? BUSTER_X86_METADATA_ENCODER_REX : BUSTER_X86_METADATA_ENCODER_LEGACY;
     }
+    *pattern_result = pattern;
+    return destination->field_flags == parsed_field_flags && destination->prefix_kind == parsed_prefix_kind &&
+           destination->encoder_family == parsed_encoder_family;
 }
 
 // buster_x86_metadata_copy_form re-tokenizes the form's whole pattern string
@@ -12357,8 +12373,14 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_normalized_form(u32 form_id, Buster
         if (BUSTER_UNLIKELY(!buster_x86_metadata_entry_ready(row_state)) &&
             once_claim_u8(row_state, BUSTER_X86_METADATA_ENTRY_PENDING, BUSTER_X86_METADATA_ENTRY_BUSY, BUSTER_X86_ONCE_LEVEL_ROW))
         {
-            buster_x86_metadata_copy_form(buster_x86_metadata_form_record(form_id), form_id, &buster_x86_metadata_normalized_forms[form_id]);
+            BusterX86MetadataPatternSemantics pattern;
+            bool pattern_reusable = buster_x86_metadata_copy_form(buster_x86_metadata_form_record(form_id), form_id,
+                                                                  &buster_x86_metadata_normalized_forms[form_id], &pattern);
             once_publish_u8(row_state, BUSTER_X86_METADATA_ENTRY_READY);
+            // The facts below parse the published row again; when that row is
+            // the one copy_form parsed, publish its parse instead (the pattern
+            // claim ranks above the row claim, so only after the row's).
+            if (pattern_reusable) buster_x86_metadata_pattern_semantics_store(form_id, &pattern);
         }
         u8* facts_state = &buster_x86_metadata_form_facts_filled[form_id];
         if (BUSTER_UNLIKELY(!buster_x86_metadata_entry_ready(facts_state)) &&

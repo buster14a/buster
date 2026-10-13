@@ -727,6 +727,95 @@ FAKE_RUNTIME_ORDER
     echo "Android runtime-order batch evidence passed: $case_name"
 )
 
+# With AArch64 package coverage on, test_ci.sh hands both ABI builds to the
+# native driver's android_packages command (tools/android_packages.c, whose
+# own --self-test covers the concurrency). A fake driver checks the exact
+# hand-off: arguments, the x86-64 APKs the payloads install, the coverage and
+# timing records, and fail-closed attribution when the driver or an APK fails.
+test_android_aarch64_packages() (
+    set -euo pipefail
+    local case_name=$1
+    local expected_status=$2
+    local state="$test_root/android-aarch64-packages-$case_name"
+    local batch_status
+    setup_android_fixture "$state"
+    export BUSTER_ANDROID_AARCH64_PACKAGE=1
+    export BUSTER_ANDROID_AARCH64_BUILD_DIRECTORY="$state/build-arm64"
+    export BUSTER_ANDROID_HOST_DRIVER="$state/driver"
+    export FAKE_DRIVER_CASE=$case_name
+    cat >"$BUSTER_ANDROID_HOST_DRIVER" <<'FAKE_DRIVER'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$FAKE_ANDROID_STATE_DIR/driver.args"
+if [[ $FAKE_DRIVER_CASE == driver-failure ]]; then
+    echo 'ANDROID_PACKAGES_RESULT batches=2 status=fail'
+    exit 1
+fi
+for config in Debug Release; do
+    if [[ $FAKE_DRIVER_CASE == missing-apk && $config == Release ]]; then
+        continue
+    fi
+    for directory in "$BUSTER_ANDROID_BUILD_DIRECTORY" "$BUSTER_ANDROID_AARCH64_BUILD_DIRECTORY"; do
+        mkdir -p "$directory/$config"
+        printf '%s %s\n' "$config" "$directory" >"$directory/$config/buster.apk"
+    done
+done
+echo 'ANDROID_PACKAGES_RESULT batches=2 status=pass'
+FAKE_DRIVER
+    chmod +x "$BUSTER_ANDROID_HOST_DRIVER"
+    bash "$repo_root/android/start_emulator_ci.sh" start
+    set +e
+    timeout --kill-after=1s 15s bash "$repo_root/android/test_ci.sh" --all >"$state/run.log" 2>&1
+    batch_status=$?
+    set -e
+    assert_case_status "aarch64-packages-$case_name" "$batch_status" "$expected_status" "$state/run.log"
+    local expected_arguments
+    expected_arguments=$(printf '%s\n' android_packages --script "$repo_root/android/test_ci.sh" --configs Debug Release \
+        --package x86_64 "$state/build" --package arm64-v8a "$state/build-arm64" \
+        --emulator-marker "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER")
+    if [[ $(<"$state/driver.args") != "$expected_arguments" ]]; then
+        echo "assertion failed: aarch64-packages $case_name passed the wrong android_packages arguments" >&2
+        cat "$state/driver.args" >&2
+        exit 1
+    fi
+    # The parent never builds inline once the driver owns both ABIs.
+    if grep -qE '^(TIMING_ANDROID (configure_seconds|build_seconds)|Building and packaging Android (Debug|Release) )' "$state/run.log" ||
+       grep -qF ' apk' "$state/cmake.log" 2>/dev/null; then
+        echo "assertion failed: aarch64-packages $case_name also built inline" >&2
+        cat "$state/run.log" >&2
+        exit 1
+    fi
+    if [[ $expected_status -eq 0 ]]; then
+        assert_file_contains 'ANDROID_AARCH64_COVERAGE abi=arm64-v8a execution=compile-link-package runtime=not-run reason=github-hosted-x86_64-kvm status=0' "$state/run.log"
+        assert_file_contains 'TIMING_ANDROID packages_seconds=' "$state/run.log"
+        assert_file_contains 'ANDROID_CONFIG_RESULT config=Debug status=0' "$state/run.log"
+        assert_file_contains 'ANDROID_CONFIG_RESULT config=Release status=0' "$state/run.log"
+        assert_file_contains 'ANDROID_BATCH_RESULT phase=tests config=none status=0 cleanup_status=not-run' "$state/run.log"
+        assert_file_contains "install -r $state/build/Debug/buster.apk" "$state/adb.log"
+        assert_file_contains "install -r $state/build/Release/buster.apk" "$state/adb.log"
+    else
+        if grep -qF 'ANDROID_AARCH64_COVERAGE' "$state/run.log"; then
+            echo "assertion failed: aarch64-packages $case_name claimed AArch64 coverage after a failure" >&2
+            exit 1
+        fi
+        assert_file_contains 'ANDROID_CONFIG_RESULT config=Debug status=not-run' "$state/run.log"
+        assert_file_contains 'ANDROID_CONFIG_RESULT config=Release status=not-run' "$state/run.log"
+        assert_file_contains "ANDROID_BATCH_RESULT phase=build config=none status=$expected_status cleanup_status=0" "$state/run.log"
+        if [[ $case_name == missing-apk ]]; then
+            assert_file_contains "expected Android APK not found at '$state/build/Release/buster.apk' after the concurrent package batches" "$state/run.log"
+        fi
+        if grep -qF 'install -r' "$state/adb.log" 2>/dev/null; then
+            echo "assertion failed: aarch64-packages $case_name installed an APK after a failed build" >&2
+            exit 1
+        fi
+    fi
+    if [[ -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]; then
+        bash "$repo_root/android/start_emulator_ci.sh" stop
+    fi
+    [[ ! -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]
+    assert_android_owned_process_stopped "$state/emulator.pid"
+    echo "Android AArch64 package hand-off evidence passed: $case_name"
+)
+
 test_android_workflow_body() (
     set -euo pipefail
     local case_name=$1
@@ -1148,6 +1237,9 @@ test_android_batch_status missing-marker 1 1 0
 test_android_runtime_order_batch pass 0
 test_android_runtime_order_batch failure 1
 test_android_runtime_order_batch build-failure 1
+test_android_aarch64_packages pass 0
+test_android_aarch64_packages driver-failure 1
+test_android_aarch64_packages missing-apk 1
 bash "$repo_root/android/runtime_order_test.sh"
 for workflow_case in all-pass debug-failure debug-timeout missing-marker cleanup-exit7 \
     cleanup-timeout failure-and-cleanup7 already-stopped pid-reused interruption payload-23-cleanup7; do

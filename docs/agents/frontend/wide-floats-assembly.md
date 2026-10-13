@@ -2,6 +2,14 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+Bare `asm` is a keyword in GNU C dialects. Its spelling, interned-symbol and
+cached-token classification agree, so a statement such as
+`asm volatile("pause" ::: "memory")` is not bound as an undeclared identifier
+(#3778). ISO C dialects keep `asm` available as an ordinary identifier;
+`__asm` and `__asm__` retain their existing extension behavior.
+`c_test_inline_assembly_volatile_ir` checks the dialect boundary in both
+canonical frontend forms.
+
 Generic `__builtin_isfinite`, `__builtin_isinf`, `__builtin_isinf_sign` and
 `__builtin_isnan` retain a wide argument's original floating format. Narrower
 floating arguments keep their existing exact binary64 widening. Their

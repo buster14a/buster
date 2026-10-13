@@ -2145,6 +2145,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* ar
     BUSTER_TEST(arguments, active_relative_absolute.length &&
                            os_file_delete(active_relative_absolute) && os_test_image_retention_exists(active_relative_absolute));
     BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_elf, 3));
+    // The followed probe reports the size of the file it reached.
+    BUSTER_TEST(arguments, os_path_followed_stats(active_elf).size == 64);
     BUSTER_TEST(arguments, os_file_delete(active_elf) && os_test_image_retention_exists(active_elf));
     BUSTER_TEST(arguments, os_test_image_retention_write_macho(active_macho, 6));
     BUSTER_TEST(arguments, os_file_delete(active_macho) && os_test_image_retention_exists(active_macho));

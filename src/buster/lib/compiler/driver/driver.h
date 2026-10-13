@@ -35,6 +35,28 @@
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
+// Minimum-work gate for -fcompile-jobs translation-unit lanes (#53). Entering
+// the multi-lane path costs a fixed native-family preparation; a link whose
+// native C inputs cannot repay it keeps the one-worker path. Estimated work is
+// each eligible input's file size plus a per-input charge for the fixed cost of
+// a translation unit, in bytes. Calibration pending: the gate is disabled until
+// the 9700X scaling-v1 size series measures both values
+// (docs/agents/driver.md, "Opt-in native translation-unit lanes").
+#define COMPILER_DRIVER_LANE_MIN_WORK_BYTES ((u64)0)
+#define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)0)
+
+// What the minimum-work gate decided for one invocation. NONE: lanes were not
+// requested or cannot apply (one worker, fewer than two eligible inputs, an
+// embedding gang or a source cache). LANES: lanes were permitted. SERIAL: the
+// population was too small, so the one-worker path ran.
+typedef enum CompilerDriverLaneGate
+{
+    COMPILER_DRIVER_LANE_GATE_NONE,
+    COMPILER_DRIVER_LANE_GATE_LANES,
+    COMPILER_DRIVER_LANE_GATE_SERIAL,
+    COMPILER_DRIVER_LANE_GATE_COUNT,
+} CompilerDriverLaneGate;
+
 typedef enum CompilerDriverError
 {
     COMPILER_DRIVER_ERROR_NONE,
@@ -341,6 +363,8 @@ struct CompilerDriverInvocation
     bool disable_direct_ssa;
     // -fcanonical-intern-constants: CIRLowerOptions.intern_block_constants.
     bool intern_block_constants;
+    // -fcanonical-construction-fold: CIRLowerOptions.construction_fold.
+    bool construction_fold;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
@@ -590,6 +614,7 @@ struct CompilerDriverResult
     IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
     CIRConstantInternStatistics constant_interning;
+    CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
@@ -644,6 +669,7 @@ struct CompilerDriverResult
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
+    CompilerDriverLaneGate lane_gate;
     bool has_object;
     bool has_wasm;
     bool has_wasm64;

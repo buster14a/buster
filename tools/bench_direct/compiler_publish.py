@@ -56,14 +56,16 @@ Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
 artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
 with the strict sampling_archive reader and verified by the trusted native
 `./build.sh compiler_evidence verify` under the identity this publisher
-authorized (verify_evidence_bundle); the receipt's evidence_bundle must name
-the verified manifest (evidence_bundle_problems). An artifact with neither is
+authorized (verify_evidence_bundle); a pull snapshot-v1 receipt's route selects
+the snapshot inventory (#3211). The receipt's evidence_bundle must name the
+verified inventory and manifest (evidence_bundle_problems). An artifact with neither is
 legacy-unsealed: its outcome stands and its raw bytes are reported unverified.
 Anything else fails closed.
 
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle,
-validate_compiler_probes_bundle, validate_frontend_selector_bundle and
+validate_compiler_probes_bundle, validate_frontend_selector_bundle,
+validate_frontend_nesting_bundle (#2676 deep nesting) and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 validate_selfhost_inline_bundle (#58),
 decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
@@ -93,12 +95,12 @@ from datetime import datetime
 
 from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
-                             owned_checks, parse_chain, run_url)
+                             measured, owned_checks, parse_chain, run_url, stamp)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
-from compiler_receipt import EVIDENCE_INVENTORY, EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity
+from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
@@ -115,6 +117,8 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
                               validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
                               SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, selfhost_inline_digest,
@@ -124,6 +128,7 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number, _number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
                               THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows,
+                              render_inventory_coverage,
                               HARNESS_ADMISSIONS, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_HISTORICAL_HARNESS_REVISION,
                               THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE)
 
@@ -428,6 +433,33 @@ def validate_frontend_selector_bundle(record: object, bundle: object, binaries: 
     return problems
 
 
+FRONTEND_NESTING_BUNDLE_FILES = {
+    "provenance": "frontend_nesting/provenance.json",
+    "results": "frontend_nesting/results.json",
+}
+
+
+def validate_frontend_nesting_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2676 deep-nesting families from their exported records."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt frontend-nesting record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt frontend-nesting run did not complete successfully")
+    if record.get("request_line") != FRONTEND_NESTING_REQUEST_LINE:
+        problems.append("receipt frontend-nesting request selector is not the exact supported line")
+    if record.get("profile") != FRONTEND_NESTING_PROFILE:
+        problems.append("receipt frontend-nesting profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(FRONTEND_NESTING_BUNDLE_FILES):
+        return [*problems, "requested frontend-nesting evidence bundle is incomplete"]
+    problems.extend(validate_frontend_nesting(record.get("exit"), bundle["provenance"], bundle["results"], binaries))
+    if record.get("cells") != frontend_scaling_digest(bundle["results"]):
+        problems.append("receipt frontend-nesting cells do not match the exported evidence")
+    return problems
+
+
 WILD_LINKER_BUNDLE_FILES = {key: f"wild_linker/{name}" for key, name in wild_linker_bundle_files().items()}
 
 
@@ -617,6 +649,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the link-tls leg")
                 if receipt.get("selfhost_inline") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the self-host inline leg")
+                if receipt.get("frontend_nesting") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-nesting leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -750,17 +784,28 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
                         reasons.append("the self-host inline leg is valid only in pull mode")
-                    inline_record = receipt.get("inline_acceptance")
+                    # The #48 inline leg is selected by presence, not freshness, so it runs beside this one.
                     if any(receipt.get(key) is not None for key in
                            ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
                             "frontend_selector", "wild_linker", "link_tls", "constant_reuse_acceptance")) or \
-                            (isinstance(inline_record, dict) and inline_record.get("requested") is True) or \
                             "scaling_profile" in receipt:
                         reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
                                        "scaling leg included")
                     reasons.extend(validate_selfhost_inline_bundle(receipt["selfhost_inline"],
                                                                    corpus.get("selfhost_inline_bundle"),
                                                                    receipt.get("binaries")))
+                if receipt.get("frontend_nesting") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the frontend-nesting leg is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker", "link_tls", "selfhost_inline",
+                            "constant_reuse_acceptance")):
+                        reasons.append("the frontend-nesting leg cannot be combined with another opt-in leg")
+                    reasons.extend(validate_frontend_nesting_bundle(receipt["frontend_nesting"],
+                                                                    corpus.get("frontend_nesting_bundle"),
+                                                                    receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -779,19 +824,25 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     return conclusion, title, reasons
 
 
-def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str) -> dict:
+def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str,
+                           receipt: dict | None = None) -> dict:
     """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
 
     {"state": "legacy-unsealed"} when read_evidence found neither control file; {"state": "verified",
     "members", "payload_bytes", "manifest_sha256"} when `compiler_evidence verify` reproduces the sealed
     manifest from the extracted bytes; otherwise {"state": "refused", "reason"}. The identity comes from
-    the authorized expected identity and admitted profiles, never from the receipt.
+    the authorized expected identity and admitted profiles, never from the receipt; only a snapshot-v1
+    receipt's route lines (its declared policy and owned-phase count) come from it, and validate_closure
+    binds that policy to its closure records, so a receipt cannot select the weaker ordinary inventory
+    for a snapshot attempt (#3211).
     """
     import tempfile
     result: dict = {"state": "legacy-unsealed"}
     if "sealed_files" in throughput:
         files = throughput.get("sealed_files")
-        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile},
+        route = {key: receipt[key] for key in ("preparation_policy", "closure", "phase_ownership")
+                 if isinstance(receipt, dict) and key in receipt}
+        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile, **route},
                                      request_attempt)
         result = {"state": "refused", "reason": throughput.get("sealed_problem") or "sealed evidence archive is unreadable"}
         if isinstance(files, dict) and not identity:
@@ -819,7 +870,7 @@ def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dic
                 if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
                         fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
                         re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
-                    result = {"state": "verified", "members": int(fields["members"]),
+                    result = {"state": "verified", "inventory": evidence_inventory(route), "members": int(fields["members"]),
                               "payload_bytes": int(fields["payload_bytes"]), "manifest_sha256": fields["manifest_sha256"]}
                 else:
                     result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
@@ -837,7 +888,7 @@ def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
             problems.append("receipt names sealed raw evidence that the artifact does not carry")
     elif bundle.get("state") != "verified":
         problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
-    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != EVIDENCE_INVENTORY or \
+    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != bundle.get("inventory") or \
             any(claimed.get(key) != bundle.get(key) for key in ("manifest_sha256", "members", "payload_bytes")):
         problems.append("receipt evidence_bundle does not name the verified sealed manifest")
     return problems
@@ -850,7 +901,7 @@ def evidence_bundle_note(bundle: dict) -> str:
         note = ("raw evidence: legacy-unsealed (no v1 manifest or seal, #2918); the outcome stands but its "
                 "retained raw bytes are unverified")
     elif bundle.get("state") == "verified":
-        note = (f"raw evidence: sealed {EVIDENCE_INVENTORY} verified natively, {bundle['members']} members, "
+        note = (f"raw evidence: sealed {bundle['inventory']} verified natively, {bundle['members']} members, "
                 f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}")
     return note
 
@@ -1187,7 +1238,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
             "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or \
             "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
-            "link_tls" in receipt or "selfhost_inline" in receipt:
+            "link_tls" in receipt or "selfhost_inline" in receipt or "frontend_nesting" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1434,6 +1485,28 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                     closure_files[operation] = archive.read(info)
                 throughput["closure"] = closure_files
+            # A non-owned pull snapshot-v1 attempt's native phase population (#3211): validate_closure
+            # replays every declared phase's five retained members, as for the owned routes.
+            ownership = receipt.get("phase_ownership") if isinstance(receipt, dict) and not problem else None
+            if isinstance(ownership, dict):
+                owned: dict = {}
+                phases = ownership.get("phases")
+                for phase in phases if isinstance(phases, list) else []:
+                    name = phase.get("file") if isinstance(phase, dict) else None
+                    if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+                        problem = "native phase population is ambiguous"
+                        break
+                    infos = {label: members.get("owned-phases/" + name + suffix) for label, suffix in
+                             (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"), ("stderr", ".stderr"),
+                              ("bootstrap", ".bootstrap.complete"))}
+                    if any(info is None or info.file_size > MEMBER_LIMIT for info in infos.values()):
+                        problem = f"required native phase evidence owned-phases/{name} missing or oversized"
+                        break
+                    owned[name] = {label: archive.read(info) for label, info in infos.items()}
+                throughput.setdefault("closure", {})["owned_phases"] = owned
+                corpus_raw = {key: members.get(f"throughput/{key}.json") for key in ("summary", "metadata")}
+                if all(info is not None and info.file_size <= MEMBER_LIMIT for info in corpus_raw.values()):
+                    throughput["closure"]["owned_throughput"] = {key: archive.read(info) for key, info in corpus_raw.items()}
             receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
             if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
                 bundle: dict = {}
@@ -1552,6 +1625,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["frontend_selector_bundle"] = (bundle if not problem and
                                                           len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("frontend_nesting") is not None and not problem:
+                bundle = {}
+                for key, member in FRONTEND_NESTING_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frontend-nesting evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["frontend_nesting_bundle"] = (bundle if not problem and
+                                                         len(bundle) == len(FRONTEND_NESTING_BUNDLE_FILES) else None)
             if isinstance(receipt, dict) and receipt.get("wild_linker") is not None and not problem:
                 bundle = {}
                 for key, member in WILD_LINKER_BUNDLE_FILES.items():
@@ -1673,6 +1763,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
     head_link_tls_count = head_lines.count(LINK_TLS_REQUEST_LINE)
     head_selfhost_count = head_lines.count(SELFHOST_INLINE_REQUEST_LINE)
+    head_nesting_count = head_lines.count(FRONTEND_NESTING_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
@@ -1684,6 +1775,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     selector_deltas = []
     link_tls_deltas = []
     selfhost_deltas = []
+    nesting_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1704,6 +1796,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
         link_tls_deltas.append(head_link_tls_count - parent_lines.count(LINK_TLS_REQUEST_LINE))
         selfhost_deltas.append(head_selfhost_count - parent_lines.count(SELFHOST_INLINE_REQUEST_LINE))
+        nesting_deltas.append(head_nesting_count - parent_lines.count(FRONTEND_NESTING_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1758,6 +1851,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit self-host inline request")
     if selfhost_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selfhost_deltas):
         return "a fresh self-host inline selector has no self-host inline record in the receipt"
+    nesting_record = receipt.get("frontend_nesting")
+    if nesting_record is not None and not all(delta == 1 for delta in nesting_deltas):
+        return ("the exact frontend-nesting selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit frontend-nesting request")
+    if nesting_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in nesting_deltas):
+        return "a fresh frontend-nesting selector has no frontend-nesting record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
@@ -4594,9 +4693,50 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
             "control_failures": controls, "authenticated_attempt_history": history, "problems": []}
 
 
+PREPARATION_FAILURE_TAIL_BYTES = 512
+
+
+def preparation_failure_problems(files: dict[str, bytes]) -> list[str]:
+    """Diagnostics only (#3960): name the retained failed controller phase.
+
+    Reads the artifact's raw controller.tsv, preparation.tsv and the failed
+    phase's stderr log as data. Never raises and never changes the packet
+    state, qualification or publication refusal."""
+    def clean(raw: bytes) -> str:
+        return "".join(chr(byte) if 32 <= byte <= 126 else " " if byte in (9, 10, 13) else "?" for byte in raw)
+    problems = []
+    try:
+        rows = sampling_tsv(files.get("controller.tsv", b""), True)
+    except (ValueError, UnicodeError, TypeError):
+        rows = None
+        problems.append("controller phase table is missing or malformed in the retained artifact")
+    for row in (rows or [])[:32]:
+        if row.get("state") != "failed":
+            continue
+        stem = f"controller-{row.get('stage')}-{row.get('phase')}"
+        error = files.get(stem + ".stderr.log", b"")
+        error = error if isinstance(error, bytes) else b""
+        problems.append(("failed controller phase " + " ".join(
+            f"{key}={clean(str(row.get(key, '')).encode('ascii', 'replace'))}" for key in
+            ("stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled")) +
+            f" stderr_bytes={len(error)} stderr_tail=\"" +
+            clean(error[-PREPARATION_FAILURE_TAIL_BYTES:]).replace('"', "?") + "\"")[:1000])
+    try:
+        terminal = sampling_tsv(files.get("preparation.tsv", b""))
+    except (ValueError, UnicodeError, TypeError):
+        terminal = None
+        problems.append("worker preparation.tsv is missing or malformed in the retained artifact")
+    if terminal is not None and terminal.get("process_state") != "complete":
+        problems.append(("worker preparation.tsv " + " ".join(
+            f"{key}={clean(str(terminal[key]).encode('ascii', 'replace'))}" for key in
+            ("process_state", "reason", "cleanup_proven", "tools_before", "tools_after", "exported")
+            if key in terminal))[:1000])
+    return problems
+
+
 def preparation_publish(environment: dict) -> int:
     api, authority = preparation_authority(environment)
-    files, artifact = {}, {}
+    files, artifact, diagnostics = {}, {}, []
     result = {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "incomplete",
               "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
               "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
@@ -4604,11 +4744,13 @@ def preparation_publish(environment: dict) -> int:
     try:
         files, artifact = preparation_read_artifact(api, authority)
         if environment.get("BQ_PREPARATION_RESULT") != "success":
+            diagnostics = preparation_failure_problems(files)
             raise ValueError("preparation physical job is failed, cancelled, skipped or unavailable")
         result = preparation_validate(api, authority, files)
     except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
             urllib.error.URLError, TimeoutError) as error:
         result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["problems"].extend(diagnostics)
         result["accounting"] = preparation_observed_costs(api, authority, files)
         result["authenticated_attempt_history"] = list(authority["history"]) + [{
             "phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
@@ -5839,6 +5981,108 @@ def utility_publish(environment: dict) -> int:
 
 
 
+UNCHANGED_SCHEMA = "buster-ci-main-unchanged-v1"
+UNCHANGED_TITLE = "Not measured: compiler/build and benchmark inputs unchanged."
+UNCHANGED_KEYS = ("schema", "event", "unchanged", "base", "head", "policy", "subject_changes", "policy_changes", "reason")
+
+
+def unchanged_proof(api: Api, environment: dict, expected: dict, route: dict | None, compare_result: str) -> tuple[dict, list[str]]:
+    """The validated #3923 unchanged-input decision for one authorized MAIN attempt, or its refusal reasons.
+
+    Every identity is re-checked here as data: the native receipt must name
+    this attempt's baseline, head and trusted policy; the compare job must not
+    have run; the route must be the non-owned legacy route; and the baseline
+    must still hold a valid main measurement in GitHub's own check records,
+    so a reference that changed or vanished while planning never anchors a skip.
+    """
+    get = lambda key: environment.get(key, "")  # noqa: E731
+    problems: list[str] = []
+    try:
+        receipt = json.loads(get("BQ_UNCHANGED_RECEIPT"), object_pairs_hook=unique_object)
+    except ValueError:
+        receipt = None
+    if not (isinstance(receipt, dict) and tuple(receipt) == UNCHANGED_KEYS):
+        problems.append("unchanged-input receipt is missing or malformed")
+        receipt = {}
+    for key, wanted in (("schema", UNCHANGED_SCHEMA), ("event", "main_push"), ("unchanged", True),
+                        ("base", expected.get("base")), ("head", expected.get("head")),
+                        ("policy", get("BQ_TRUSTED_REVISION")), ("reason", "reviewed-prose-only")):
+        if receipt and receipt.get(key) != wanted:
+            problems.append(f"unchanged-input receipt {key} {receipt.get(key)!r} is not {wanted!r}")
+    for key in ("subject_changes", "policy_changes"):
+        if receipt and not (type(receipt.get(key)) is int and receipt[key] >= 0):
+            problems.append(f"unchanged-input receipt {key} is not a count")
+    if compare_result != "skipped":
+        problems.append(f"compare job result is {compare_result!r}, not skipped")
+    if route is None or route.get("main_owned") is not False:
+        problems.append("unchanged-input skips apply only to the non-owned legacy main route")
+    if not DECIMAL.fullmatch(get("BQ_CLASSIFICATION_MS")):
+        problems.append("hosted classification time is missing")
+    reference = {"check_url": get("BQ_REFERENCE_CHECK_URL"), "measured_at": get("BQ_REFERENCE_MEASURED_AT")}
+    base = expected.get("base", "")
+    if get("BQ_BASE_MEASURED") != "true" or not SHA.fullmatch(base):
+        problems.append("the baseline is not an actual measurement")
+    elif not problems:
+        rows = [row for row in owned_checks(api, base, "main", "") if measured(row, base)]
+        if not any(row.get("html_url") == reference["check_url"] and row.get("completed_at") == reference["measured_at"]
+                   for row in rows):
+            problems.append("the baseline measurement changed or vanished while planning")
+    return ({**receipt, "reference": reference, "classification_ms": int(get("BQ_CLASSIFICATION_MS"))}
+            if not problems else {}), problems
+
+
+def unchanged_report(expected: dict, proof: dict, request_attempt: str, coverage: dict) -> str:
+    """The neutral report; it links the reference measurement and copies none of its samples or verdict."""
+    reference = proof["reference"]
+    lines = [f"**{check_name('main')}: neutral**", "", f"### {UNCHANGED_TITLE}", "",
+             "No 9700X job was allocated: no compiler was built and nothing was sampled. This is not a "
+             "measurement and carries no verdict, samples or 0% change; it makes no claim about physical host "
+             "conditions, the host toolchain or performance (docs/compiler-main-unchanged-skip.md).", "",
+             f"- Head: `{expected['head']}` (request run {expected['request_run_id']}.{request_attempt}, executor "
+             f"run {expected['run_id']} attempt {expected['run_attempt']})",
+             f"- Last actual measurement: `{expected['base']}`, [its check]({reference['check_url']}) completed "
+             f"{reference['measured_at']}; any regression or failure it reported is unchanged by this skip",
+             f"- Range: {expected.get('range', 'NA')} first-parent commits since that measurement "
+             f"(first parent `{expected.get('first_parent', 'NA')}`)",
+             f"- Classifier: `{proof['schema']}` at trusted revision `{proof['policy']}`; reason "
+             f"`{proof['reason']}`; {proof['subject_changes']} prose path changes in the measured subject, "
+             f"{proof['policy_changes']} in the measurement policy since the head",
+             f"- Observed hosted classification time: {proof['classification_ms'] / 1000:.3f} s. Avoided physical "
+             "runner time is not estimated here.", ""]
+    lines += render_inventory_coverage(coverage)
+    return "\n".join(lines)
+
+
+def unchanged_publish(api: Api, environment: dict, expected: dict, proof: dict) -> int:
+    """Complete the attempt's check as neutral and hand the commit report its entry."""
+    get = lambda key: environment.get(key, "")  # noqa: E731
+    head, attempt, mode = expected["head"], expected["run_attempt"], "main"
+    coverage = covered_inventory_rows(None, "neutral", mode)
+    shown = {"mode": mode, "identity": expected, "state": "unchanged-not-measured", "unchanged": proof,
+             "coverage": {"first_parent": expected.get("first_parent"), "range": expected.get("range")},
+             "inventory_coverage": coverage, "reasons": [UNCHANGED_TITLE]}
+    workflow_url = run_url(expected["repository"], expected["run_id"], attempt)
+    report = unchanged_report(expected, proof, get("BQ_REQUEST_ATTEMPT"), coverage)
+    marker = attempt_marker(head, mode, expected["request_run_id"], get("BQ_REQUEST_ATTEMPT"), attempt)
+    body = {"details_url": get("BQ_DETAILS_URL"), "status": "completed", "conclusion": "neutral",
+            "output": {"title": UNCHANGED_TITLE, "summary": (report + "\n\n" + links("", workflow_url, attempt, "", ""))[:TEXT_LIMIT],
+                       "text": ("```json\n" + json.dumps(shown, sort_keys=True, indent=2))[:TEXT_LIMIT - 4] + "\n```"}}
+    rows, written = complete_check(api, head, mode, marker, body)
+    check_url = rows[-1].get("html_url", "") if rows and isinstance(rows[-1].get("html_url"), str) else ""
+    print(f"BENCH_COMPILER_PUBLISHED neutral unchanged check_runs={[row.get('id') for row in rows]}"
+          + ("" if written else " (already completed by another writer; left unchanged)"))
+    link_line = links(check_url, workflow_url, attempt, "", "")
+    with open(get("GITHUB_STEP_SUMMARY") or os.devnull, "a", encoding="utf-8") as stream:
+        stream.write(report + "\n\n" + link_line + "\n")
+    entry = {"mode": mode, "head": head, "base": expected["base"], "run_id": expected["run_id"], "run_attempt": attempt,
+             "request_run_id": expected["request_run_id"], "trusted_revision": expected["trusted_revision"],
+             "conclusion": "neutral", "title": UNCHANGED_TITLE, "captured_at": stamp(), "check_url": check_url,
+             "run_url": workflow_url, "artifact_url": "", "artifact_expires_at": "NA",
+             "markdown": (report + "\n\n" + link_line)[:REPORT_MARKDOWN_LIMIT]}
+    write_output(get("GITHUB_OUTPUT"), {"comment": json.dumps(entry, sort_keys=True, separators=(",", ":")), "head": head})
+    return 0
+
+
 def main() -> int:
     if sys.argv[1:] in (["utility-queue"], ["utility-publish"]):
         try:
@@ -5918,6 +6162,13 @@ def main() -> int:
                 authorized = False
                 problem = "Main route refused: " + str(error)
                 notes.append(problem)
+        # #3923: a proven unchanged-input attempt never dispatched the 9700X;
+        # a refused proof falls through and reports the missing measurement.
+        if mode == "main" and not recover and authorized and get("BQ_UNCHANGED") == "true":
+            proof, refusals = unchanged_proof(api, environment, expected, route, compare_result)
+            if proof:
+                return unchanged_publish(api, environment, expected, proof)
+            notes.extend("unchanged-input skip refused: " + reason for reason in refusals)
         # #3714: the hosted pre-dispatch corpus disposition. An unsupported base was never
         # dispatched, so it has no evidence to read; only "historical" admits the named recipe.
         admission = get("BQ_HARNESS_ADMISSION") if mode == "pull" and not recover else "admitted"
@@ -5952,7 +6203,7 @@ def main() -> int:
                 # that names another request run, or none, cannot name a sealed bundle and refuses it.
                 request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
                     titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
-                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt)
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt, receipt)
                 if evidence_bundle_note(evidence_bundle):
                     notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):
