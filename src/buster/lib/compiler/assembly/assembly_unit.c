@@ -1471,6 +1471,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_common(AssemblyUnitBuilder* bui
 }
 
 // Only a bare symbol ref or bare `.` remains a direct MC symbol-ref expression.
+// The evaluator represents bare `.` as a location with a sentinel symbol index.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_set_expression_is_pure_alias(String8 expression)
 {
     String8 text = assembly_unit_trim(expression);
@@ -1508,7 +1509,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
             assembly_unit_evaluate(builder, parts[1], builder->section_offsets[builder->current_section], &value) &&
             !value.has_subtract_symbol;
     bool pure_alias = valid && assembly_unit_set_expression_is_pure_alias(parts[1]) &&
-                      (!value.has_symbol || value.symbol < builder->result.symbol_count);
+                      (value.location || !value.has_symbol || value.symbol < builder->result.symbol_count);
     if (valid && !value.has_symbol)
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,

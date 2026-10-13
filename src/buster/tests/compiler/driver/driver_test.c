@@ -9400,8 +9400,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
           S8(".text\n_a:\n    .byte 0\n.globl _s\n.weak_definition _s\n.set _s, _a+1\n")},
          true, true, true},
         {S8("set dot addend keeps weak_definition"),
-         {S8(".text\n.globl _s\n.set _s, .+1\n.weak_definition _s\n"),
-          S8(".text\n.globl _s\n.set _s, .+1\n.weak_definition _s\n")},
+         {S8(".text\n.globl _s\n.set _s, .+1\n.weak_definition _s\n.byte 0\n"),
+          S8(".text\n.globl _s\n.set _s, .+1\n.weak_definition _s\n.byte 0\n")},
          true, true, true},
         {S8("same-section weak difference"),
          {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n"),
@@ -9470,6 +9470,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
                         if (BUSTER_REQUIRE(arguments, symbol != 0))
                         {
                             BUSTER_TEST_RAW(arguments, symbol->section == OBJECT_SECTION_TEXT && symbol->value == 0, weak_case->name);
+                        }
+                    }
+                    else if (string_equal(weak_case->name, S8("set dot addend keeps weak_definition")))
+                    {
+                        if (BUSTER_REQUIRE(arguments, symbol != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, symbol->section == OBJECT_SECTION_TEXT && symbol->value == 1, weak_case->name);
                         }
                     }
                     if (string_first_sequence(weak_case->text[index], S8(".weak_definition _w, _x")) != BUSTER_STRING_NO_MATCH)

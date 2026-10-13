@@ -913,8 +913,10 @@ are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
 out-of-range values are diagnosed. Numeric Mach-O `@PAGEOFF` remains
-refused. Mach-O unit symbols currently receive the
-object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
+refused. Standalone Mach-O assembly preserves the spellings written in assembly in
+the serialized symbol table. C-generated names use the platform's C-level
+underscore convention; the canonical Mach-O reader strips a leading platform
+underscore when exposing `ObjectSymbol` names.
 
 A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
