@@ -16319,6 +16319,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_label_declarations(UnitTestArgum
         "}\n"));
 }
 
+// A `case c:` label prefixes the statement after it, so the body of a
+// braceless `switch (x) case 0:` runs to that statement's grammatical end:
+// past an if's `else`, a compound statement and a nested switch. The analysis
+// walk once read such a body to the next `;`, which refused `else continue;`
+// as a statement outside its loop and cost a braceless nest of them the
+// square of its depth (#2676).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braceless_case_bodies(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("braceless-case-bodies"), S8(
+        "static int loop(int x) { int n = 0; for (; n < 5; n++) switch (x) case 0: if (n == 2) break; else continue; return n * 10 + x; }\n"
+        "static int choose(int x, int a) { switch (x) case 0: if (a) x = 1; else x = 2; return x; }\n"
+        "static int block(int x) { switch (x) case 0: { x += 1; } x += 2; return x; }\n"
+        "static int ternary(int x) { switch (x) case 1 ? 2 : 3: x = 5; return x; }\n"
+        "static int nested(int x) { switch (x) case 0: switch (x) case 0: case 1: while (x < 3) x += 1; return x; }\n"
+        "static int outer(int x) { if (x) switch (x) case 1: x = 4; else x = 6; return x; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures |= (loop(0) != 50 || loop(3) != 53) << 0;\n"
+        "    failures |= (choose(0, 1) != 1 || choose(0, 0) != 2 || choose(4, 1) != 4) << 1;\n"
+        "    failures |= (block(0) != 3 || block(5) != 7) << 2;\n"
+        "    failures |= (ternary(2) != 5 || ternary(3) != 3) << 3;\n"
+        "    failures |= (nested(0) != 3 || nested(1) != 1) << 4;\n"
+        "    failures |= (outer(0) != 6 || outer(1) != 4 || outer(2) != 2) << 5;\n"
+        "    return failures;\n"
+        "}\n"));
+}
+
 // A parameter-list ellipsis inside a cast or initializer is not a GNU range
 // designator: `(int(*)(int, ...))0` was refused as one in a function body
 // (#2840), while `[0 ... 2] = 1` in a static initializer must keep working.
@@ -43970,6 +43998,7 @@ enum
     C_TEST_NESTED_CONTROL_BRACELESS_FOR,
     C_TEST_NESTED_CONTROL_BRACELESS_IF_WHILE,
     C_TEST_NESTED_CONTROL_BRACELESS_SWITCH,
+    C_TEST_NESTED_CONTROL_BRACELESS_SWITCH_CASE,
     C_TEST_NESTED_CONTROL_ALL_FAMILIES,
 };
 
@@ -43983,6 +44012,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_nested_control_source(Arena* arena, u32 famil
                      : family == C_TEST_NESTED_CONTROL_BRACELESS_WHILE    ? S8("while (x > 1) ")
                      : family == C_TEST_NESTED_CONTROL_BRACELESS_FOR      ? S8("for (int i = 0; i < x; i += 1) ")
                      : family == C_TEST_NESTED_CONTROL_BRACELESS_SWITCH   ? S8("switch (x) ")
+                     : family == C_TEST_NESTED_CONTROL_BRACELESS_SWITCH_CASE ? S8("switch (x) case 0: ")
                                                                            : S8("if (x > 1) while (x > 1) ");
     // The innermost if of the last family takes the else, as the grammar says.
     String8 core = family == C_TEST_NESTED_CONTROL_BRACELESS_IF_WHILE ? S8("x -= 1; else x += 1; ") : S8("x -= 1; ");
@@ -44305,7 +44335,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
 // Braceless nests (#2676): `while (c) while (c) ... x;` has no block for a
 // delimiter table to skip, so each statement's end used to be found by walking
 // the prefix of every statement inside it. The walk's steps must grow with the
-// depth, not its square.
+// depth, not its square. `switch (x) case 0:` nests also need the `case` label
+// peeled as a prefix; read as a simple statement, each level ran to the final
+// `;` of the whole nest.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braceless_control_work_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -66041,6 +66073,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
+    C_TEST_FIXTURE(arguments, c_test_braceless_case_bodies);
     C_TEST_FIXTURE(arguments, c_test_local_labels);
     C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
     C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
