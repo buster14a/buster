@@ -7574,10 +7574,13 @@ BUSTER_C_SHARED bool c_parse_update_operand_modifiable(CParseResult* result, CPr
     CEntityId entity = C_ENTITY_ID_INVALID;
     if (identifier)
     {
+        // Only an unbound operand needs its scope: the descent costs the
+        // token's nesting depth, so a deep nest of `i++` paid Θ(depth²) (#3723).
         u32 use = c_parse_identifier_use_index(result, start);
-        CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
-        entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                                                : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        entity = use != C_ID_UNDERLYING_INVALID
+                     ? result->identifier_uses[use].entity
+                     : c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, (CScopeId){.value = 0}, start),
+                                                   &preprocess.tokens[start]);
     }
     if (valid)
     {
