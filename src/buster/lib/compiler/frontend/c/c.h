@@ -482,10 +482,6 @@ struct CPreprocessDetail
     // `#define` listing of the macros defined at the end of preprocessing,
     // filled only when CPreprocessOptions.dump_macros asked for it (`-dM`).
     String8 macro_dump;
-    // Caller-arena-owned copy that survives option-array expiry through
-    // parser/lowering source-name expansion.
-    CMacroPrefixMap* macro_prefix_maps;
-    u32 macro_prefix_map_count;
 #if BUSTER_INCLUDE_TESTS
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
@@ -501,6 +497,10 @@ struct CPreprocessDetail
     u64 macro_expansion_peak_bytes;
 #endif
     u32 lexed_file_count;
+    // Caller-arena-owned copy that survives option-array expiry through
+    // parser/lowering source-name expansion.
+    CMacroPrefixMap* macro_prefix_maps;
+    u32 macro_prefix_map_count;
 };
 
 typedef struct CLexResult CLexResult;

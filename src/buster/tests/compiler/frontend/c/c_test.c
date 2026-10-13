@@ -24602,17 +24602,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArgum
             .data_layout = target_data_layout(targets[0]),
             .dialect = C_PREPROCESS_DIALECT_GNU17,
         };
-        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("int probe;\n"), options);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("const char* probe_file = __builtin_FILE();\n"), options);
         old_prefix[0] = 'X';
         new_prefix[0] = 'X';
         map.old_prefix = (String8){0};
         map.new_prefix = (String8){0};
-        String8 file = c_semantic_source_file(temporary.arena, &preprocess, 0);
-        BUSTER_TEST(arguments, !preprocess.diagnostic_count);
-        BUSTER_TEST(arguments, string_equal(file, S8("mapped/probe.c")));
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("source-location-probe.c"), preprocess, syntax, targets[0],
+            (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count);
         BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, &map, (char8*)&map + sizeof(map)) == 0);
         BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, old_prefix, old_prefix + sizeof(old_prefix)) == 0);
         BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, new_prefix, new_prefix + sizeof(new_prefix)) == 0);
+        bool mapped_file = false;
+        if (lowered.program && lowered.program->module_count == 1)
+        {
+            IrModule* module = lowered.program->modules;
+            IrGlobal* file = c_test_find_ir_global(module, lowered.program, S8("probe_file"));
+            if (file && file->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS)
+            {
+                for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                {
+                    IrGlobal* literal = module->globals + global_index;
+                    if (literal->symbol.value == file->initializer_symbol.value &&
+                        literal->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
+                    {
+                        String8 expected = S8("mapped/probe.c");
+                        mapped_file = literal->bytes.pointer && literal->bytes.length == expected.length + 1 &&
+                                      !literal->bytes.pointer[expected.length] &&
+                                      !memcmp(literal->bytes.pointer, expected.pointer, expected.length);
+                        break;
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, mapped_file);
         c_preprocess_release(&preprocess);
         scratch_end(temporary);
     }
