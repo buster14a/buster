@@ -31,6 +31,18 @@ instruction rather than failing. `object_relocation_kind_is_x86_got` answers
 the parts that are genuinely shared: one rip-relative 32-bit field, addend -4,
 and a value taken from the slot holding the symbol's address.
 
+The x86-64 ELF standalone assembler also preserves the printer's
+`@GOTPCREL` suffix, but assigns a relaxable kind only when the four-byte
+PC-relative field is attached to a RIP-relative `MOV r32` or `MOV r64`
+(`8b /r` with ModRM `mod=00,r/m=101`). One immediately preceding REX byte
+selects type 42; without it, the assembler uses type 41. For these instruction
+fields it requires addend -4. Other `@GOTPCREL` instruction shapes, including
+the REX2 and ALU rows above, are refused instead of inheriting a boundary
+promise the assembler has not verified. An independent assembler that sees
+the printer's raw `.byte`/ `.long` spelling may emit generic type 9; the
+registered round-trip checks prove the linked behavior as well as the Buster
+object's exact type 41/42 classification.
+
 ## The vocabulary
 
 Each row is a source operand shape and the direct instruction that replaces
