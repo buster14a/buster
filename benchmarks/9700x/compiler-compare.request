@@ -176,3 +176,5 @@ request: issue #3723 owner-requested 9700X validation (2026-10-12 session): decl
 request: issue #3723 owner-requested 9700X validation, head after merging main into PR #3937 (request-file conflict; statement-extent part dropped in favor of #3845's memo, which already covers braceless nests): name-chain lookup filter and bound-operand scope skip; byte-identical output; supersedes the ba3e2a1b line; fresh exact-head compiler-compare-v1
 request: issue #3011 owner-requested constant-reuse comparison, retried after PR #3939 let the profile run beside the inline leg (first attempt run 38320654813 refused itself); one candidate binary, default vs -fcanonical-intern-constants and vs -fcanonical-fast-cse on the -g0 unity -c compile; base 446f742ed4ae
 profile: constant-reuse-acceptance-v1
+request: issue #58 owner-approved 9700X comparison ("i approve", 2026-10-13), retry after the #3969 harness fix; variant A helper-based register-load selection vs production C on main db42293b; fresh exact-head compiler-compare-v1 and self-host-inline-compare-v1
+profile: self-host-inline-compare-v1
