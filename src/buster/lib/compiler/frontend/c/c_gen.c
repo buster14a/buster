@@ -63272,13 +63272,9 @@ BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, bo
             continue;
         }
         u32 member_index = aggregate->member_count - 1;
-        u32 named_member_count = 0;
-        for (u32 index = 0; index < aggregate->member_count; index += 1)
-        {
-            named_member_count += parse->members[aggregate->member_start + index].name.length != 0;
-        }
         CMember* member = parse->members + aggregate->member_start + member_index;
-        if (!member->name.length || named_member_count < 2 || member->is_bit_field || member->type.value >= parse->type_count)
+        if (!member->name.length || aggregate->effective_named_member_count < 2 || member->is_bit_field ||
+            member->type.value >= parse->type_count)
         {
             continue;
         }

@@ -2031,13 +2031,9 @@ BUSTER_C_INTERNAL bool c_parse_type_is_flexible_array_member(CParseResult* resul
     {
         return false;
     }
-    u32 named_member_count = 0;
-    for (u32 index = 0; index < aggregate->member_count; index += 1)
-    {
-        named_member_count += result->members[aggregate->member_start + index].name.length != 0;
-    }
     CMember* member = result->members + aggregate->member_start + member_index;
-    if (!member->name.length || named_member_count < 2 || member->is_bit_field || !c_parse_type_is_incomplete_array(result, member->type))
+    if (!member->name.length || aggregate->effective_named_member_count < 2 || member->is_bit_field ||
+        !c_parse_type_is_incomplete_array(result, member->type))
     {
         return false;
     }
@@ -2051,11 +2047,52 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
     {
         return;
     }
+    // C11/C17 anonymous structure and union members promote their named
+    // descendants into the containing aggregate. Publish the count once at
+    // completion so both the parser's layout query and IR mapping use the
+    // same rule. The MSVC target has a broader dialect fact for declarator-
+    // less named tags; keep its established direct-member rule unchanged.
     u32 named_member_count = 0;
+    bool promote_anonymous_members = preprocess && preprocess->target.os != OPERATING_SYSTEM_WINDOWS;
     for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
     {
-        named_member_count += result->members[aggregate->member_start + member_index].name.length != 0;
+        CMember* member = result->members + aggregate->member_start + member_index;
+        if (member->name.length)
+        {
+            if (named_member_count < UINT8_MAX)
+            {
+                named_member_count += 1;
+            }
+            continue;
+        }
+        if (!promote_anonymous_members || member->is_bit_field || member->type.value >= result->type_count)
+        {
+            continue;
+        }
+        CTypeId promoted_type_id = member->type;
+        for (u32 qualification_depth = 0; qualification_depth < result->type_count; qualification_depth += 1)
+        {
+            if (promoted_type_id.value >= result->type_count)
+            {
+                break;
+            }
+            CType* promoted_type = result->types + promoted_type_id.value;
+            if (promoted_type->has_unqualified_type)
+            {
+                promoted_type_id = promoted_type->unqualified_type;
+                continue;
+            }
+            if (promoted_type->is_complete &&
+                (promoted_type->kind == C_TYPE_STRUCT || promoted_type->kind == C_TYPE_UNION))
+            {
+                u32 promoted_count = promoted_type->effective_named_member_count;
+                u32 remaining = UINT8_MAX - named_member_count;
+                named_member_count += BUSTER_MIN(promoted_count, remaining);
+            }
+            break;
+        }
     }
+    aggregate->effective_named_member_count = (u8)named_member_count;
     for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
     {
         CMember* member = result->members + aggregate->member_start + member_index;
@@ -2076,7 +2113,7 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
         {
             message = S8("flexible array member must be the last structure member");
         }
-        else if (named_member_count < 2)
+        else if (aggregate->effective_named_member_count < 2)
         {
             message = S8("structure with a flexible array member must have another named member");
         }

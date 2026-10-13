@@ -1026,6 +1026,10 @@ struct CType
     // For enums, element_type is the resolved compatible integer type. This
     // flag distinguishes a written fixed base from ordinary range selection.
     bool has_fixed_underlying_type;
+    // Saturated count of names this complete aggregate contributes to the
+    // C flexible-array rule. Anonymous aggregates promote their names;
+    // named aggregate members contribute one without promoting their fields.
+    u8 effective_named_member_count;
 };
 
 typedef struct CMember CMember;
