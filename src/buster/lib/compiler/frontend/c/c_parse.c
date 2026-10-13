@@ -181,6 +181,8 @@
 //   c_parse_validate_one_switch                  per-switch label and range validation
 //   c_parse_validate_bit_field_addresses         unary address member constraints
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
+//   c_parse_assignment_conversion_classify,      assignment-conversion admission and the
+//   c_parse_pointer_sign_warning                 -Wpointer-sign warning class (#4051)
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
 //   c_parse_ast_from_tree, c_parser_tree_*       the declaration split read from
 //                                                the syntax tree, and its probe
@@ -6268,7 +6270,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
     }
     if (indirect)
     {
-        if (type_value->kind != C_TYPE_POINTER || type_value->element_type.value >= result->type_count)
+        if ((type_value->kind != C_TYPE_POINTER && type_value->kind != C_TYPE_ARRAY) || type_value->element_type.value >= result->type_count)
         {
             type = C_TYPE_ID_INVALID;
             break;
@@ -7850,6 +7852,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         tail_end = index;
                         statement = index + 1;
                     }
+                }
+                while (tail_start < tail_end && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+                {
+                    tail_start += 1;
                 }
                 // The final statement belongs to the body's parsed scope:
                 // a local value there can shadow an enclosing typedef name.
@@ -16395,6 +16401,7 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
         frame->alignment_count = 0;
         frame->index = frame->start;
         frame->depth = 0;
+        frame->pending_index = 0;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
     else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
@@ -16440,7 +16447,29 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
             frame->index += 1;
             continue;
         }
-        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !c_parse_alignment_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])))
+        u32 c23_attribute_end = 0;
+        if (!frame->depth && c_parse_c23_attribute_at(preprocess, index, frame->end, &c23_attribute_end))
+        {
+            frame->pending_index = c23_attribute_end - 2;
+            frame->index = index + 2;
+            continue;
+        }
+        CAttributeGroup attribute = {0};
+        if (!frame->depth && c_parse_attribute_group_at(preprocess, index, frame->end, &attribute))
+        {
+            frame->pending_index = attribute.payload_end;
+            frame->index = attribute.payload_start;
+            continue;
+        }
+        if (!frame->depth && index < frame->pending_index && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            frame->index = close < frame->pending_index ? close + 1 : frame->pending_index;
+            continue;
+        }
+        String8 word = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+        bool alignment = c_parse_alignas_word(word) || (index < frame->pending_index && c_parse_aligned_attribute_word(word));
+        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !alignment)
         {
             frame->index += 1;
             continue;
@@ -20978,7 +21007,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
         {
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
             {
-                valid = record->kind == C_TYPE_POINTER && record->element_type.value < result->type_count;
+                valid = (record->kind == C_TYPE_POINTER || record->kind == C_TYPE_ARRAY) && record->element_type.value < result->type_count;
                 record = valid ? &result->types[record->element_type.value] : record;
             }
             valid = valid && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
@@ -26242,19 +26271,23 @@ struct CParseDeclaratorHint
     bool plain;
 };
 
-// A block declaration's declarator hints, in source order, and whether its
-// specifiers hold no `auto` or `__auto_type` word, so it infers no type.
+// A block declaration's declarator hints, in source order; the storage-class
+// words its specifiers spell (C_PARSE_STORAGE_CLASS_KEYWORDS bits); and
+// whether no `auto` or `__auto_type` word stands where the auto-inference
+// scan reads, so it infers no type.
 typedef struct CParseDeclaratorHints CParseDeclaratorHints;
 struct CParseDeclaratorHints
 {
     CParseDeclaratorHint const* declarators;
+    u64 storage_class_bits;
     u32 count;
     bool no_auto;
     CAstStatementStatistics* statistics;
 };
 
 // The block-declaration split. `hints`, from the planned walk alone, replaces
-// the auto-inference scan, the `,` and `=` scans of each declarator it states
+// the auto-inference scan, the storage-class scan, the `,` and `=` scans of
+// each declarator it states
 // (each checked against the token there; a refused one returns the rest of
 // the declaration to the scans), and the per-token tests of a plain
 // initializer. Without hints it is the token split, and both callers below
@@ -26280,8 +26313,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
     // -- `int v = ({ static int s = 3; s; });` declares an automatic `v` and a
     // static `s` -- and an array parameter's `[static 3]` is a bound qualifier
     // rather than a storage class.
+    // A hint carries the set its DECL_SPECIFIERS items spell; in a
+    // declaration the tree accepts, no storage-class word stands outside
+    // them and outside every delimiter.
     u32 specifier_depth = 0;
-    for (u32 token_index = start; token_index < end; token_index += 1)
+    for (u32 token_index = hints ? end : start; token_index < end; token_index += 1)
     {
         CToken specifier_token = preprocess.tokens[token_index];
         if (c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -26302,6 +26338,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         }
         storage_class_bits |= c_token_well_known_bit(preprocess.spelling_base, specifier_token, C_PARSE_STORAGE_CLASS_KEYWORDS);
     }
+    storage_class_bits |= hints ? hints->storage_class_bits : 0;
     bool is_typedef = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF)) != 0;
     bool is_static_storage = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
     bool is_register = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(REGISTER)) != 0;
@@ -28356,7 +28393,10 @@ struct CParseStatementPlanEntry
     u32 separator;
     u32 loop_end;
     CParseStatementPlanKind kind;
-    // A declaration whose specifiers hold no `auto` or `__auto_type` word.
+    // A declaration's storage-class words (CParseDeclaratorHints).
+    u64 storage_class_bits;
+    // A declaration with no `auto` or `__auto_type` word where the
+    // auto-inference scan reads.
     bool no_auto;
 };
 
@@ -28391,6 +28431,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_planned_local_declarations(CTypeParseMachine* m
     {
         hints = (CParseDeclaratorHints){
             .declarators = plan->declarators + entry->separator,
+            .storage_class_bits = entry->storage_class_bits,
             .count = entry->loop_end,
             .no_auto = entry->no_auto,
             .statistics = plan->statistics,
@@ -28864,25 +28905,40 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocess
 // the last, the `;`) past its greatest anchor's closers, and its `=` follows
 // the closers of the child before its initializer. A declaration any of whose
 // declarators those tokens do not confirm gets none, and is split from
-// tokens. Returns whether its specifiers hold no `auto` or `__auto_type`
-// word.
+// tokens. Stores the storage-class words its DECL_SPECIFIERS items spell,
+// folded by the split's own test, in `storage_class_bits`. Returns whether no
+// `auto` or `__auto_type` word stands where c_parse_auto_declaration_info
+// reads: the specifiers and the first declarator up to its initializer, any
+// depth (`int (*f)(__auto_type x);` reads one in a parameter).
 BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessResult const* preprocess, CParseDeclaratorHint* declarators,
-                                                  u32* declarator_count, u32 declarator_capacity, u32 node, u32 terminator, u32 limit)
+                                                  u32* declarator_count, u32 declarator_capacity, u32 node, u32 terminator, u32 limit,
+                                                  u64* storage_class_bits)
 {
     u32 floor = c_ast_subtree_begin(ast, node);
     u32 count = 0;
     u32 specifiers = node - 1;
+    u32 first = node;
     while (specifiers > floor && ast->kinds[specifiers] == C_AST_INIT_DECLARATOR)
     {
         count += 1;
+        first = specifiers;
         specifiers = c_ast_subtree_begin(ast, specifiers) - 1;
     }
     bool no_auto = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS;
+    u64 storage = 0;
     for (u32 cursor = specifiers; no_auto && cursor > c_ast_subtree_begin(ast, specifiers); cursor = c_ast_subtree_begin(ast, cursor - 1))
     {
-        no_auto = !(ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD &&
-                    (ast->data[cursor - 1] == C_AST_WORD_AUTO || ast->data[cursor - 1] == C_AST_WORD_AUTO_TYPE));
+        if (ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD)
+        {
+            storage |= c_token_well_known_bit(preprocess->spelling_base, preprocess->tokens[ast->tokens[cursor - 1]], C_PARSE_STORAGE_CLASS_KEYWORDS);
+        }
     }
+    u32 stop = first == node ? node : (ast->data[first] & 4) ? c_ast_subtree_begin(ast, first - 1) : first;
+    for (u32 cursor = floor; no_auto && cursor < stop; cursor += 1)
+    {
+        no_auto = !(ast->kinds[cursor] == C_AST_SPECIFIER_WORD && (ast->data[cursor] == C_AST_WORD_AUTO || ast->data[cursor] == C_AST_WORD_AUTO_TYPE));
+    }
+    *storage_class_bits = storage;
     bool confirmed = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && *declarator_count + count <= declarator_capacity;
     u32 declarator = node - 1;
     for (u32 slot = count; slot && confirmed; slot -= 1)
@@ -29249,14 +29305,16 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                     {
                         u32 first_declarator = plan.declarator_count;
                         u32 declarator_count = first_declarator;
+                        u64 storage_class_bits = 0;
                         bool no_auto = c_parse_plan_declarators(ast, &preprocess, plan.declarators, &declarator_count, plan.declarator_capacity, node,
-                                                                terminator, limit);
+                                                                terminator, limit, &storage_class_bits);
                         plan.declarator_count = declarator_count;
                         ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_DECLARATION, anchor, terminator, first_declarator,
                                                       plan.declarator_count - first_declarator);
                         if (ordered)
                         {
                             plan.entries[plan.count - 1].no_auto = no_auto;
+                            plan.entries[plan.count - 1].storage_class_bits = storage_class_bits;
                         }
                     }
                     else
@@ -35493,7 +35551,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                     if (valid && c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_ARROW))
                     {
                         CType pointer = query.types[aggregate.value];
-                        aggregate = pointer.kind == C_TYPE_POINTER ? pointer.element_type : C_TYPE_ID_INVALID;
+                        aggregate = pointer.kind == C_TYPE_POINTER || pointer.kind == C_TYPE_ARRAY ? pointer.element_type : C_TYPE_ID_INVALID;
                     }
                     valid &= aggregate.value < query.type_count &&
                         (query.types[aggregate.value].kind == C_TYPE_STRUCT || query.types[aggregate.value].kind == C_TYPE_UNION);
@@ -36271,11 +36329,41 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, 
     return name;
 }
 
-BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachine* machine, CParseResult* result,
-                                                                  CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
-                                                                  CTypeId source, u32 start, u32 end)
+// The integer rank class whose signed and unsigned members -Wpointer-sign
+// pairs: plain, signed and unsigned char share one, and so does each
+// signed/unsigned pair. Zero for every other kind, _Bool and enums included,
+// which GCC and Clang keep under -Wincompatible-pointer-types.
+BUSTER_C_INTERNAL u32 c_parse_pointer_sign_rank(CTypeKind kind)
+{
+    u32 rank = 0;
+    switch (kind)
+    {
+    case C_TYPE_CHAR: case C_TYPE_SIGNED_CHAR: case C_TYPE_UNSIGNED_CHAR: rank = 1; break;
+    case C_TYPE_SHORT: case C_TYPE_UNSIGNED_SHORT: rank = 2; break;
+    case C_TYPE_INT: case C_TYPE_UNSIGNED_INT: rank = 3; break;
+    case C_TYPE_LONG: case C_TYPE_UNSIGNED_LONG: rank = 4; break;
+    case C_TYPE_LONG_LONG: case C_TYPE_UNSIGNED_LONG_LONG: rank = 5; break;
+    case C_TYPE_INT128: case C_TYPE_UNSIGNED_INT128: rank = 6; break;
+    default: break;
+    }
+    return rank;
+}
+
+// The assignment-conversion constraint (C17 6.5.16.1p1) of a value of type
+// `source`, spelled by [start, end), converted to `destination`: the error
+// message of a refused conversion, or empty. A conversion between pointers
+// whose immediate pointees are integer types of one rank class differing only
+// in signedness, with no qualifier lost, is still a constraint violation but
+// is GCC/Clang's separate -Wpointer-sign class: it returns empty and sets
+// *pointer_sign, and the caller decides whether that is a warning
+// (c_parse_assignment_conversion_message) or a refusal. Deeper levels
+// (`char **` to `unsigned char **`) stay incompatible, as in both compilers.
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_classify(CTypeParseMachine* machine, CParseResult* result,
+                                                                   CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                                   CTypeId source, u32 start, u32 end, bool* pointer_sign)
 {
     String8 message = {0};
+    *pointer_sign = false;
     if (destination.value < result->type_count && source.value < result->type_count)
     {
         CType target = result->types[destination.value];
@@ -36344,7 +36432,11 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                     compatible = c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                                           target_element.element_type, source_element.element_type);
                 }
-                if (!compatible || drops_qualifier)
+                u32 sign_rank = c_parse_pointer_sign_rank(target_element.kind);
+                *pointer_sign = !compatible && !drops_qualifier && sign_rank && target_element.kind != source_element.kind &&
+                                sign_rank == c_parse_pointer_sign_rank(source_element.kind) &&
+                                !source_qualifiers.is_atomic && !target_qualifiers.is_atomic;
+                if ((!compatible || drops_qualifier) && !*pointer_sign)
                 {
                     String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, source, true);
                     String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, destination, false);
@@ -36356,6 +36448,63 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                 }
             }
         }
+    }
+    return message;
+}
+
+// Publishes the -Wpointer-sign warning of the conversion whose source starts
+// at token `start`, once: the checks re-ask the same conversion (a reference
+// recheck, a retyped initializer), and each asks with the same start token.
+BUSTER_C_INTERNAL void c_parse_pointer_sign_warning(CParseResult* result, CPreprocessResult preprocess, CTypeId destination,
+                                                     CTypeId source, u32 start)
+{
+    bool seen = false;
+    for (u32 index = 0; index < result->warning_count && !seen; index += 1)
+    {
+        seen = result->warning_tokens[index] == start;
+    }
+    if (!seen && start < preprocess.token_count)
+    {
+        if (result->warning_count == result->warning_capacity)
+        {
+            u32 capacity = result->warning_capacity ? result->warning_capacity * 2 : 8;
+            CDiagnostic* warnings = arena_allocate(result->arena, CDiagnostic, capacity);
+            u32* tokens = arena_allocate(result->arena, u32, capacity);
+            if (result->warning_count)
+            {
+                memcpy(warnings, result->warnings, sizeof(CDiagnostic) * result->warning_count);
+                memcpy(tokens, result->warning_tokens, sizeof(u32) * result->warning_count);
+            }
+            result->warnings = warnings;
+            result->warning_tokens = tokens;
+            result->warning_capacity = capacity;
+        }
+        String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, source, true);
+        String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, destination, false);
+        result->warning_tokens[result->warning_count] = start;
+        result->warnings[result->warning_count] = (CDiagnostic){
+            .message = c_parse_message(result->arena, S8("pointer targets in conversion from '{S8}' to '{S8}' differ in signedness"),
+                                       source_name, target_name),
+            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
+            .kind = C_DIAGNOSTIC_POINTER_SIGN,
+            .severity = C_DIAGNOSTIC_WARNING,
+        };
+        result->warning_count += 1;
+    }
+}
+
+// The assignment-conversion message every value conversion the source spells
+// (assignment, initializer, argument, return) asks for; a signedness-only
+// pointer conversion is admitted with a -Wpointer-sign warning.
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachine* machine, CParseResult* result,
+                                                                  CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                                  CTypeId source, u32 start, u32 end)
+{
+    bool pointer_sign = false;
+    String8 message = c_parse_assignment_conversion_classify(machine, result, preprocess, scope, destination, source, start, end, &pointer_sign);
+    if (pointer_sign)
+    {
+        c_parse_pointer_sign_warning(result, preprocess, destination, source, start);
     }
     return message;
 }
@@ -36420,9 +36569,12 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_source(CTypeParseMachine* 
                     // as an ordinary parameter, including qualifier addition.
                     // Keep pointee identity and every qualifier-loss check at
                     // the shared assignment-conversion owner.
+                    // A member reached only through -Wpointer-sign is not
+                    // selected: the trial must not publish a warning.
+                    bool pointer_sign = false;
                     compatible |= a.value < result->type_count && b.value < result->type_count &&
-                                  !c_parse_assignment_conversion_message(machine, result, preprocess, scope, field, source,
-                                                                         start, end).length;
+                                  !c_parse_assignment_conversion_classify(machine, result, preprocess, scope, field, source,
+                                                                          start, end, &pointer_sign).length && !pointer_sign;
                 }
                 else if (!source_pointer && field_pointer)
                     compatible |= c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end);
@@ -37763,7 +37915,8 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
         {
             cursor += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        else if (token.kind == C_TOKEN_STRING_LITERAL || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
         // A label address, as in the GNU difference `&&b - &&a`, is an
         // address constant like `&object`: IR lowering decides it.
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
@@ -42975,6 +43128,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         // array may report the missing work, not the source -- and the
         // function gets the one exhaustion diagnostic instead (#1256).
         u32 body_diagnostic_mark = result->diagnostic_count;
+        u32 body_warning_mark = result->warning_count;
         u64 validation_mark = machine->scratch_arena->position;
         c_parse_body_scratch_guard_begin(machine->scratch_arena);
         machine->expression_query_start = declaration->body_start;
@@ -43079,6 +43233,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         if (exhausted)
         {
             result->diagnostic_count = body_diagnostic_mark;
+            result->warning_count = body_warning_mark;
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                c_parse_message(arena, S8("in function '{S8}': C function body is too large for semantic validation"), declaration->name));
         }
@@ -44177,6 +44332,8 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
         WORK_LEDGER_PHASE(LOWER);
         result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
     }
+    result.warnings = analysis.warnings;
+    result.warning_count = analysis.warning_count;
     if (analysis.type_layout_statistics)
     {
         result.type_layout = *analysis.type_layout_statistics;

@@ -1059,17 +1059,28 @@ given tokens the plan tells it what it would otherwise scan for:
   anchor and closers, the `=` past the closers of the child before its
   initializer, and whether that initializer is plain (expressions, type names
   as above, initializer lists, designators and compound literals). It also
-  says whether `DECL_SPECIFIERS` holds an `auto` or `__auto_type` word. The
-  split (`c_parse_planned_local_declarations`, the hinted caller of the
-  always-inline `c_parse_local_declarations_split`) then skips the two
-  auto-inference scans of a declaration that cannot infer, the `,` and `=`
-  scans of each declarator whose hinted tokens it confirms, and, in a plain
-  initializer, the statement-expression, type-definition, attributed
-  definition and attribute tests; `__builtin_offsetof` is a call in the tree,
-  so its test stays, as does the use filter. A hint the tokens refuse
-  (`declarator_declines`) returns that declarator and the rest of the
-  declaration to the scans. The specifiers and declarators themselves are
-  still read by the type machine from tokens; that is the next row's.
+  carries two specifier facts:
+  - the storage-class words its `DECL_SPECIFIERS` items spell, folded by the
+    split's own test. In a declaration the tree accepts, no such word stands
+    outside those items and outside every delimiter.
+  - whether an `auto` or `__auto_type` word stands where the auto-inference
+    scan reads: any node of the specifiers, or of the first declarator up to
+    its initializer. A parameter's specifier counts, as in
+    `int (*f)(__auto_type x);` ([#3550](https://github.com/buster14a/buster/issues/3550)).
+
+  The split (`c_parse_planned_local_declarations`, the hinted caller of the
+  always-inline `c_parse_local_declarations_split`) then skips:
+  - the storage-class scan of the whole declaration;
+  - the two auto-inference scans of a declaration that cannot infer;
+  - the `,` and `=` scans of each declarator whose hinted tokens it confirms;
+  - in a plain initializer, the statement-expression, type-definition,
+    attributed definition and attribute tests. `__builtin_offsetof` is a call
+    in the tree, so its test stays, as does the use filter.
+
+  A hint the tokens refuse (`declarator_declines`) returns that declarator
+  and the rest of the declaration to the scans. The specifiers and
+  declarators themselves are still read by the type machine from tokens;
+  that is the next row's.
 - **Loop hints.** A `FOR` gives its header's first `;` and `)` and one past
   its body, in place of the loop's scans and `c_parse_statement_end`.
 
@@ -1433,6 +1444,21 @@ walker's answer, field by field. There are floors on the answers: about 3,000
 from the fixtures, and about 19,100 with the frontend sources. Today there are
 0 differences, and no corpus body's table is refused. On the whole corpus,
 the `do` mutation gives 1 difference and the dropped-`else` mutation 1,088.
+
+Beside the specifier model comparison, the runs without and with the tree
+must also end with the same whole analysis model, field by field
+(`c_ast_corpus_models_differ`). It compares every row
+of the type, entity, scope, array-bound, alignment, declaration,
+identifier-use, member, enum-member and parameter tables, with names compared
+by content; entities include their merged inline hints, and enumerators
+their declaration-point integer constant field by field. That is about
+125,700 rows from the fixtures and 497,400 with the
+frontend sources, and floors guard both counts. `c_ast_test_declaration_hints`
+holds the declaration hints' specifier facts to the walker in every layout:
+storage classes in each position the walker folds, and auto words in the
+specifiers and the first declarator. It also mutates a copy of one analysis in
+an entity's inline hints and in each field of an enumerator's constant, and
+the comparator must name each mutated field.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -2030,7 +2056,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)); so do members' plain runs inside tag definitions ([members](#members)); the statement plan's [declaration hints](#statement-plan-from-the-tree) give block declarations their storage-class set and auto precheck from it. The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification and the switch label scan stay on tokens: by census neither pays for a tree read ([keyword gate](#statement-keyword-gate-in-lowerings-classification)), and the classification skips its typedef probe for statement keywords instead. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
@@ -4413,6 +4439,60 @@ the shipped one. Both are diagnostic only. There were two candidates:
     first-token table over its 155,771 statements would cost at least about
     62 M at the extent table's per-entry cost.
 - Zen 5 validation stays incomplete (#2761).
+
+For the storage-class hint (the plan's declaration hint also carries the
+storage-class set its `DECL_SPECIFIERS` items spell, and the hinted split
+skips its scan of the whole declaration for it), these budgets were declared
+before the measured runs. The input, flags and four Callgrind arms are the
+declarator hints' (`-g0 -fsyntax-only`, the self-host unity input,
+`--cache-sim=no --branch-sim=no`, tests-off `-march=x86-64-v3` builds). The
+base is main `680e16d3`, which carries the declarator hints (#3499). On the
+superseded block-declaration split's base (#3503, audit
+[`2026-10-11T104857Z`](../../performance-audits/2026-10-11T104857Z.md)) that
+scan was about 7 M Ir over 41.6 K declarations. The budgets:
+- **Correctness.**
+  - A new field-by-field model differential in the corpus gate
+    (`c_ast_corpus_models_differ`) shows 0 differences. It runs beside the
+    binding differential and compares every row of the type, entity, scope,
+    array-bound, alignment, declaration, identifier-use, member, enum-member
+    and parameter tables with and without the tree, over the corpus and the
+    frontend sources.
+  - A one-off run of the same comparison on the self-host unity input also
+    shows 0 differences.
+  - `-c` objects (`-g0` and `-g`) are byte-identical across the four arms.
+- **The hint's own effect (C against B).** The whole compile costs at least
+  2 M fewer instructions, with the hint's construction charged. A smaller
+  gain, or a loss, is recorded as a negative result. The code change then
+  does not ship, and only the differential does.
+- **The default path (D against A).** The split stays one always-inline
+  worker with a hintless and a hinted caller, so the default path runs no
+  hint code. The difference must stay within ±0.05% Ir, or else meet the
+  walk's work-equivalence criterion: identical callees and call counts, and
+  identical objects.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The storage-class hint's hosted census is
+[`2026-10-11T144221Z`](../../performance-audits/2026-10-11T144221Z.md),
+diagnostic only:
+- **Correctness.** 0 model differences over the corpus and the self-host
+  unity input, and objects byte-identical at `-g0` and `-g` across the four
+  arms. The `-v` counters are identical in B and C, so the wider auto check
+  skips no fewer self-host declarations.
+- **Ship.** C against B is −8.46 M Ir (−0.092%). The hinted split falls by
+  11.3 M, with the plan's added folding charged.
+- **Default path.** −76 Ir on `-fsyntax-only` and +28 Ir on `-c`.
+- **Acceptance.** Zen 5 validation is incomplete (#2761).
+
+The same four arms and budgets were re-taken on main `cc48e7cb`, because the
+default path had changed since `680e16d3`. The re-measurement is audit
+[`2026-10-13T113236Z`](../../performance-audits/2026-10-13T113236Z.md), also
+diagnostic only. Every budget still passes:
+- **Objects.** Byte-identical at `-g0` and `-g` across the four arms.
+- **Counters.** The `-v` counters are identical in B and C.
+- **Ship.** C against B is −6.87 M Ir on `-fsyntax-only` (−0.074%) and on
+  `-c` (−0.030%).
+- **Default path.** −4,417 Ir on both workloads.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
