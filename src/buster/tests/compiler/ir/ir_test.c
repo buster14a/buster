@@ -1802,6 +1802,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArgum
 // under 16 MiB while the pair exceeds it (asserted from the row layout).
 #define IR_TEST_INLINE_SPREAD_STATEMENTS 16384u
 
+// One translation unit lowered for the inliner tests; direct SSA is optional
+// so a test can keep LOCAL rows for promotion to rewrite.
+BUSTER_GLOBAL_LOCAL IrProgram* ir_test_inline_lower(Arena* arena, String8 source, bool disable_direct_ssa)
+{
+    IrProgram* result = 0;
+    CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult analysis = c_parse(arena, preprocess);
+    if (!preprocess.error_count && !analysis.diagnostic_count)
+    {
+        CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("canonical-inline-splice.c"), preprocess, analysis, target_native,
+                                                            (CIRLowerOptions){.disable_direct_ssa = disable_direct_ssa});
+        if (!lowered.diagnostic_count && lowered.program && lowered.program->module_count == 1)
+        {
+            result = lowered.program;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrFunction* ir_test_inline_find_function(IrModule* module, String8 name)
 {
     IrFunction* result = 0;
@@ -2039,78 +2058,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         c_test_scratch_end(pointer_temporary);
     }
 
-    // With FAST selected, a caller whose splices were all optional defers its
-    // strict output check to the FAST input guard's module scan (#48). The
-    // normal path proves and clears it; a deferred caller that fails that scan
-    // is an inlining-output error, while the same defect in an unlisted
-    // function keeps the legacy FAST validation skip.
-    for (u32 variant = 0; variant < 3; variant += 1)
+    // Each spliced caller is proven by ir_validate_canonical_splice over what
+    // its splices rewrote, and the FAST input guard reuses every proof the pass
+    // leaves standing (#3854). A defect planted inside the rewritten region is
+    // refused by the splice proof and reported, at the full validator's
+    // location, as an inlining-output error. One planted outside it passes the
+    // splice proof (the write set it trusts) and is caught by the full check
+    // this checked build still runs.
+    for (u32 fault = IR_INLINE_SPLICE_FAULT_NONE; fault < IR_INLINE_SPLICE_FAULT_COUNT; fault += 1)
     {
-        TemporalArena deferred_temporary = scratch_begin(&arguments->arena, 1);
-        String8 deferred_source = S8(
-            "static int small_leaf(int value) { return value + 1; }\n"
-            "int small_caller(int value) { return small_leaf(value); }\n");
-        CPreprocessResult deferred_preprocess = c_preprocess(deferred_temporary.arena, deferred_source,
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult deferred_analysis = c_parse(deferred_temporary.arena, deferred_preprocess);
-        CIRLowerResult deferred_lowered = {0};
-        if (!deferred_preprocess.error_count && !deferred_analysis.diagnostic_count)
+        TemporalArena splice_temporary = scratch_begin(&arguments->arena, 1);
+        String8 splice_source = S8(
+            "static int splice_leaf(int value) { return value * 3 + 1; }\n"
+            "int splice_caller(int value, int flag)\n"
+            "{\n"
+            "    int result = value - 2;\n"
+            "    if (flag) result = splice_leaf(result);\n"
+            "    return result + value;\n"
+            "}\n");
+        IrProgram* splice_program = ir_test_inline_lower(splice_temporary.arena, splice_source, false);
+        BUSTER_TEST(arguments, splice_program != 0);
+        IrModule* splice_module = splice_program ? splice_program->modules : 0;
+        IrFunction* splice_caller = splice_module ? ir_test_inline_find_function(splice_module, S8("splice_caller")) : 0;
+        if (BUSTER_REQUIRE(arguments, splice_caller != 0))
         {
-            deferred_lowered = c_lower_to_ir(deferred_temporary.arena, S8("canonical-inline-deferred.c"),
-                deferred_preprocess, deferred_analysis, target_native);
-        }
-        BUSTER_TEST(arguments, deferred_lowered.diagnostic_count == 0 && deferred_lowered.program != 0);
-        if (BUSTER_REQUIRE(arguments, deferred_lowered.program && deferred_lowered.program->module_count == 1))
-        {
-            IrProgram* deferred_program = deferred_lowered.program;
-            IrModule* deferred_module = deferred_program->modules;
-            deferred_program->fast_passes = IR_FAST_ALL;
-            deferred_program->inline_options = (IrInlineOptions){.tiny = true};
-            IrFunction* deferred_caller = ir_test_inline_find_function(deferred_module, S8("small_caller"));
-            BUSTER_TEST(arguments, deferred_caller != 0);
-            if (variant == 0)
+            splice_program->fast_passes = IR_FAST_ALL;
+            splice_program->inline_options = (IrInlineOptions){.tiny = true};
+            if (fault == IR_INLINE_SPLICE_FAULT_NONE)
             {
-                IrValidationResult prepared = ir_prepare_canonical_module(deferred_program, deferred_module, true);
+                IrValidationResult prepared = ir_prepare_canonical_module(splice_program, splice_module, true);
                 BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
-                BUSTER_TEST(arguments, deferred_module->inlining.inlined == 1);
-                BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
-                BUSTER_TEST(arguments, deferred_module->fast.validation_skips == 0);
-                BUSTER_TEST(arguments, deferred_caller &&
-                                           ir_test_direct_call_count(deferred_program, deferred_caller, S8("small_leaf")) == 0);
-                BUSTER_TEST(arguments, ir_validate_canonical_module(deferred_program, deferred_module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, splice_module->inlining.inlined == 1);
+                BUSTER_TEST(arguments, splice_module->inlining.splice_proofs == 1);
+                BUSTER_TEST(arguments, splice_module->inlining.splice_fallbacks == 0);
+                // The callee and the spliced caller were proven and promotion
+                // left both unchanged, so the guard checks neither again.
+                BUSTER_TEST(arguments, splice_module->local_promotion.promoted_locals != 0 ||
+                                           splice_module->inlining.reused_proofs == 2);
+                BUSTER_TEST(arguments, splice_module->fast.validation_skips == 0);
+                BUSTER_TEST(arguments, splice_module->inline_proven == 0);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(splice_program, splice_caller, S8("splice_leaf")) == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(splice_program, splice_module).error == IR_VALIDATION_NONE);
             }
-            else if (deferred_caller)
+            else
             {
-                // Stand in for a defective splice: keep the earlier stages
-                // complete and give the caller's return an out-of-range value.
-                IrInstruction* tail = deferred_caller->instructions +
-                                      deferred_caller->blocks[deferred_caller->entry.value].last_instruction.value;
-                BUSTER_TEST(arguments, tail->opcode == IR_OPCODE_RETURN && tail->operand_count == 1);
-                tail->operands[0].value = deferred_caller->value_count + 7u;
-                u32 caller_index = (u32)(deferred_caller - deferred_module->functions);
-                deferred_module->inline_complete = true;
-                deferred_module->local_promotion_complete = true;
-                deferred_module->fast_complete = false;
-                if (variant == 1)
-                {
-                    deferred_module->inline_unchecked_callers = arena_allocate(deferred_temporary.arena, u32, 1);
-                    deferred_module->inline_unchecked_callers[0] = caller_index;
-                    deferred_module->inline_unchecked_count = 1;
-                }
-                IrValidationResult prepared = ir_prepare_canonical_module(deferred_program, deferred_module, true);
-                if (variant == 1)
-                {
-                    BUSTER_TEST(arguments, prepared.error != IR_VALIDATION_NONE);
-                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_INLINE_OUTPUT);
-                }
-                else
-                {
-                    BUSTER_TEST(arguments, deferred_module->fast.validation_skips == 1);
-                }
-                BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
+                IrValidationResult inlined = ir_test_inline_module(splice_program, splice_module, (IrInlineSpliceFault)fault);
+                IrValidationResult full = ir_validate_canonical_module(splice_program, splice_module);
+                BUSTER_TEST(arguments, splice_module->inlining.inlined == 1);
+                BUSTER_TEST(arguments, inlined.error != IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, inlined.boundary == IR_VALIDATION_BOUNDARY_INLINE_OUTPUT);
+                BUSTER_TEST(arguments, inlined.error == full.error && inlined.block.value == full.block.value &&
+                                           inlined.instruction.value == full.instruction.value);
+                bool outside = fault == IR_INLINE_SPLICE_FAULT_OUTSIDE;
+                BUSTER_TEST(arguments, splice_module->inlining.splice_proofs == (outside ? 1u : 0u));
+                BUSTER_TEST(arguments, splice_module->inlining.splice_fallbacks == (outside ? 0u : 1u));
+                BUSTER_TEST(arguments, splice_module->inline_proven == 0);
             }
         }
-        c_test_scratch_end(deferred_temporary);
+        c_test_scratch_end(splice_temporary);
+    }
+
+    // A legacy certified caller that fails the strict check keeps its optional
+    // site as a call, and the guard checks it rather than reusing a proof: it
+    // is declined while the proven callee is not checked again.
+    {
+        TemporalArena legacy_temporary = scratch_begin(&arguments->arena, 1);
+        String8 legacy_source = S8(
+            "static int legacy_leaf(int value) { return value * 3 + 1; }\n"
+            "int legacy_caller(int value) { return legacy_leaf(value) + value; }\n");
+        IrProgram* legacy_program = ir_test_inline_lower(legacy_temporary.arena, legacy_source, false);
+        BUSTER_TEST(arguments, legacy_program != 0);
+        IrModule* legacy_module = legacy_program ? legacy_program->modules : 0;
+        IrFunction* legacy_caller = legacy_module ? ir_test_inline_find_function(legacy_module, S8("legacy_caller")) : 0;
+        if (BUSTER_REQUIRE(arguments, legacy_caller != 0))
+        {
+            // Stand in for a legacy shape: a value alignment the strict
+            // validator refuses and no planner or splice reads.
+            IrInstruction* tail = legacy_caller->instructions + legacy_caller->blocks[legacy_caller->entry.value].last_instruction.value;
+            BUSTER_TEST(arguments, tail->opcode == IR_OPCODE_RETURN && tail->operand_count == 1);
+            legacy_caller->values[tail->operands[0].value].alignment = 3;
+            legacy_program->fast_passes = IR_FAST_ALL;
+            legacy_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrValidationResult prepared = ir_prepare_canonical_module(legacy_program, legacy_module, true);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, legacy_module->inlining.inlined == 0);
+            BUSTER_TEST(arguments, legacy_module->inlining.shape_skips == 1);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(legacy_program, legacy_caller, S8("legacy_leaf")) == 1);
+            BUSTER_TEST(arguments, legacy_module->inlining.reused_proofs == 1);
+            BUSTER_TEST(arguments, legacy_module->fast.validation_skips == 1);
+        }
+        c_test_scratch_end(legacy_temporary);
+    }
+
+    // Promotion clears the proof of a function it rewrites. Lowered without
+    // direct SSA, the caller keeps LOCAL rows that promotion rewrites after the
+    // splice; the parameterless leaf has none and keeps its proof. A third,
+    // invalid function keeps the guard running in this checked build (its
+    // defect excludes it from the promotion output proof).
+    {
+        TemporalArena promoted_temporary = scratch_begin(&arguments->arena, 1);
+        String8 promoted_source = S8(
+            "static int promoted_leaf(void) { return 7; }\n"
+            "int promoted_caller(int value) { int local = promoted_leaf(); return local + value; }\n"
+            "int promoted_broken(int value) { int local = value; return local; }\n");
+        IrProgram* promoted_program = ir_test_inline_lower(promoted_temporary.arena, promoted_source, true);
+        BUSTER_TEST(arguments, promoted_program != 0);
+        IrModule* promoted_module = promoted_program ? promoted_program->modules : 0;
+        IrFunction* promoted_caller = promoted_module ? ir_test_inline_find_function(promoted_module, S8("promoted_caller")) : 0;
+        IrFunction* promoted_broken = promoted_module ? ir_test_inline_find_function(promoted_module, S8("promoted_broken")) : 0;
+        if (BUSTER_REQUIRE(arguments, promoted_caller != 0 && promoted_broken != 0))
+        {
+            // The argument survives promotion, unlike the local's rows.
+            IrInstruction* argument = 0;
+            for (u32 row = 0; row < promoted_broken->instruction_count && !argument; row += 1)
+            {
+                if (promoted_broken->instructions[row].opcode == IR_OPCODE_ARGUMENT) argument = promoted_broken->instructions + row;
+            }
+            if (BUSTER_REQUIRE(arguments, argument && argument->result.value < promoted_broken->value_count))
+            {
+                promoted_broken->values[argument->result.value].alignment = 3;
+            }
+            promoted_program->fast_passes = IR_FAST_ALL;
+            promoted_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrValidationResult prepared = ir_prepare_canonical_module(promoted_program, promoted_module, true);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, promoted_module->inlining.inlined == 1);
+            BUSTER_TEST(arguments, promoted_module->inlining.splice_proofs == 1);
+            BUSTER_TEST(arguments, promoted_module->local_promotion.promoted_locals != 0);
+            BUSTER_TEST(arguments, promoted_module->inlining.reused_proofs == 1);
+            BUSTER_TEST(arguments, promoted_module->fast.validation_skips == 1);
+        }
+        c_test_scratch_end(promoted_temporary);
     }
 
     // A tiny site in a caller much larger than its growth stays a call by

@@ -35,25 +35,36 @@
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
-// Minimum-work gate for -fcompile-jobs translation-unit lanes (#53). Entering
-// the multi-lane path costs a fixed native-family preparation; a link whose
-// native C inputs cannot repay it keeps the one-worker path. Estimated work is
-// each eligible input's file size plus a per-input charge for the fixed cost of
-// a translation unit, in bytes. Calibration pending: the gate is disabled until
-// the 9700X scaling-v1 size series measures both values
+// Lane gate for -fcompile-jobs translation-unit lanes (#53). Estimated work is
+// each eligible input's file size plus a per-input charge for the fixed cost
+// of a translation unit, in bytes. Below COMPILER_DRIVER_LANE_MIN_WORK_BYTES a
+// link keeps the one-worker path; otherwise the worker count is capped so each
+// worker keeps at least COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES (never below
+// two). Values fitted from the 9700X scaling-v1 receipt of #3943 (check run
+// 115115906751, main 10e44760 with the one-family prewarm and lane-safe x86
+// fills): two equal TUs already gain 1.20x, so the serial minimum is 0; serial
+// time is ~5.6 ms + 0.067 us/byte + 0.035 ms/input, so the per-input charge is
+// 513 bytes; tiny TUs lose at 10.8 KB/worker (0.93x, 7 workers) and gain most
+// at 37.8 KB/worker (2 workers: 1.15x there, 1.09x in the validation run
+// 115276385855, ahead of 4 workers' 1.11x and 1.04x), so the floor is 32 KiB.
+// Re-derive all three whenever the lane entry cost changes
 // (docs/agents/driver.md, "Opt-in native translation-unit lanes").
 #define COMPILER_DRIVER_LANE_MIN_WORK_BYTES ((u64)0)
-#define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)0)
+#define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)513)
+#define COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES ((u64)32 * 1024)
 
-// What the minimum-work gate decided for one invocation. NONE: lanes were not
+// What the lane gate decided for one invocation. NONE: lanes were not
 // requested or cannot apply (one worker, fewer than two eligible inputs, an
-// embedding gang or a source cache). LANES: lanes were permitted. SERIAL: the
-// population was too small, so the one-worker path ran.
+// embedding gang or a source cache). LANES: lanes were permitted at the
+// requested width. SERIAL: the population was too small, so the one-worker
+// path ran. CAPPED: lanes ran with fewer workers than requested so each keeps
+// the per-worker minimum.
 typedef enum CompilerDriverLaneGate
 {
     COMPILER_DRIVER_LANE_GATE_NONE,
     COMPILER_DRIVER_LANE_GATE_LANES,
     COMPILER_DRIVER_LANE_GATE_SERIAL,
+    COMPILER_DRIVER_LANE_GATE_CAPPED,
     COMPILER_DRIVER_LANE_GATE_COUNT,
 } CompilerDriverLaneGate;
 
@@ -182,6 +193,9 @@ typedef enum CompilerDriverWarningGroup
     // GNU `member: value` designator in a strict ISO dialect (Clang
     // -Wgnu-designator).
     COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR,
+    // Implicit pointer conversions whose pointees differ only in integer
+    // signedness (GCC/Clang -Wpointer-sign), published by semantic analysis.
+    COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN,
     COMPILER_DRIVER_WARNING_GROUP_COUNT,
 } CompilerDriverWarningGroup;
 
@@ -669,6 +683,10 @@ struct CompilerDriverResult
     u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;
     u32 analysis_diagnostic_count;
+    // Published semantic-analysis warnings (-Wpointer-sign), less any that
+    // -Werror promoted; like tokenizer_warning_count it still counts one -w
+    // or -Wno-pointer-sign dropped.
+    u32 analysis_warning_count;
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;

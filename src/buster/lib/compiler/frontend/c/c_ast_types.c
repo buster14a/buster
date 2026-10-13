@@ -1185,7 +1185,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_member(CAstTypeBody* body, CTypeParseMachin
         {
             aggregate = base;
         }
-        else if (value->kind == C_TYPE_POINTER && value->element_type.value < result->type_count)
+        else if ((value->kind == C_TYPE_POINTER || value->kind == C_TYPE_ARRAY) && value->element_type.value < result->type_count)
         {
             aggregate = value->element_type;
         }
@@ -2580,7 +2580,7 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CAstTypeAnswer c_ast_types_decline(CAst
     {
         CTypeId base = body->types[relative - 1];
         CType const* value = result->types + base.value;
-        aggregate = !arrow ? base : value->kind == C_TYPE_POINTER && value->element_type.value < result->type_count ? value->element_type : C_TYPE_ID_INVALID;
+        aggregate = !arrow ? base : (value->kind == C_TYPE_POINTER || value->kind == C_TYPE_ARRAY) && value->element_type.value < result->type_count ? value->element_type : C_TYPE_ID_INVALID;
         value = aggregate.value < result->type_count ? result->types + aggregate.value : 0;
         bool qualified = value && (value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION) && (value->is_const || value->is_volatile) &&
                          !value->is_restrict && !value->is_atomic;

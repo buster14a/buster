@@ -119,6 +119,7 @@ jobs:
           rm -rf .cache/bootstrap-driver
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
+          ./build.sh test_openssl_controls
           ./build.sh qemu_input_self_test
           ./build.sh compiler_profile_qualification --self-test
           ./build.sh compiler_profile_qualification --self-test-main-route
