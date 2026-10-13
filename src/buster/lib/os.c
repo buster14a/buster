@@ -6281,39 +6281,44 @@ bool os_linux_process_group_filter_self_test(void)
     pid_t process_id = getpid();
     pid_t own_group = getpgrp();
     pid_t other_group = own_group == 1 ? 2 : 1;
-    // An invalid descriptor makes any attempted stat read fail. Only a known
-    // unrelated group in the same PID coordinate system can avoid that read.
+    // A valid non-directory descriptor makes a relative stat open fail.
+    // Only a known unrelated group in the same PID coordinate can skip it.
+    int descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
     u32 coordinates[][2] = {{1, 0}, {2, 1}, {2, 0}, {0, 0}, {1, 1}};
     // A new PID namespace can inherit a group outside its visible namespace,
     // so getpgrp legitimately returns zero until it creates a local group.
-    bool result = process_id > 0 && own_group >= 0;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coordinates); index += 1)
+    bool result = descriptor >= 0 && process_id > 0 && own_group >= 0;
+    if (descriptor >= 0)
     {
-        OsLinuxProcContext context = {
-            .descriptor = -1,
-            .current_namespace_depth = coordinates[index][0],
-            .current_namespace_index = coordinates[index][1],
-        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coordinates); index += 1)
+        {
+            OsLinuxProcContext context = {
+                .descriptor = descriptor,
+                .current_namespace_depth = coordinates[index][0],
+                .current_namespace_index = coordinates[index][1],
+            };
+            pid_t group = -1;
+            char state = '?';
+            bool vanished = true;
+            bool accepted = os_linux_process_group_stat_at(&context, process_id, other_group, &group, &state, &vanished);
+            bool expected = index == 0;
+            bool observed = expected ? accepted && group == own_group && state == 0 && !vanished :
+                !accepted && group == -1 && state == '?' && !vanished && errno == ENOTDIR;
+            result = observed && result;
+        }
+        OsLinuxProcContext context = {.descriptor = descriptor, .current_namespace_depth = 1};
         pid_t group = -1;
         char state = '?';
         bool vanished = true;
-        bool accepted = os_linux_process_group_stat_at(&context, process_id, other_group, &group, &state, &vanished);
-        bool expected = index == 0;
-        bool observed = expected ? accepted && group == own_group && state == 0 && !vanished :
-            !accepted && group == -1 && state == '?' && !vanished && errno == EBADF;
-        result = observed && result;
+        bool member = !os_linux_process_group_stat_at(&context, process_id, own_group, &group, &state, &vanished) &&
+            !vanished && errno == ENOTDIR;
+        // getpgid(-1) fails; the stat fallback must still run, not report success
+        // or disappearance based on the failed membership query.
+        bool failed_query = !os_linux_process_group_stat_at(&context, -1, other_group, &group, &state, &vanished) &&
+            !vanished && errno == ENOTDIR;
+        bool closed = close(descriptor) == 0;
+        result = member && failed_query && closed && result;
     }
-    OsLinuxProcContext context = {.descriptor = -1, .current_namespace_depth = 1};
-    pid_t group = -1;
-    char state = '?';
-    bool vanished = true;
-    bool member = !os_linux_process_group_stat_at(&context, process_id, own_group, &group, &state, &vanished) &&
-        !vanished && errno == EBADF;
-    // getpgid(-1) fails; the stat fallback must still run, not report success
-    // or disappearance based on the failed membership query.
-    bool failed_query = !os_linux_process_group_stat_at(&context, -1, other_group, &group, &state, &vanished) &&
-        !vanished && errno == EBADF;
-    result = member && failed_query && result;
     return result;
 }
 
