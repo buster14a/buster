@@ -46,9 +46,12 @@ before C23, `true` and `false` may still name ordinary objects. The bit-field
 validator continues to reject selected bit-fields before lowering (#3758).
 Register-address validation uses the shared unary-address classification and
 full prefix-operand extent, then normalizes through the retained selected
-range. This keeps parenthesized selections and a surrounding `(void)` cast
-under the register-address constraint without misclassifying binary `&` or
-following member, postfix, or dereference expressions to different objects.
+range. Under [WG14 DR 017.06](https://open-std.org/JTC1/SC22/WG14/issues/c90/issue0017.06.html),
+member access and array subscripting retain the register root, so `&(v.i)`
+and an array member's element remain non-addressable. Arrow access, pointer
+subscripts and unary dereference reach another object and retain their valid
+pointee behavior. Parenthesized selections and a surrounding `(void)` cast
+stay under the register-address constraint without misclassifying binary `&`.
 `c_parse_validate_bit_field_addresses` checks unary address operands against
 semantic member widths before constant folding, including parenthesized,
 indirect and promoted anonymous members. GNU `__extension__` prefixes before
@@ -57,9 +60,12 @@ unselected operands retain this constraint; binary `&` remains a value
 operation. The registered `compiler_driver_test_bit_field_addresses` matrix
 covers selected ordinary object/member positives beside selected-bit-field
 negatives, selected-enumerator and C23 keyword-constant address/update
-refusals, direct/parenthesized/cast selected-register address refusals,
-C17 objects named `true`/`false`, and selected update/function-address plus
-binary/pointee controls. It checks syntax-only/object diagnostic parity and no
+refusals, direct, selected, and Generic-postfix register-member and array-subobject
+refusals, adjusted register array-parameter address controls, a wide promoted
+anonymous-member lookup followed by cache reuse, and
+direct/parenthesized/cast selected-register address refusals, C17 objects named
+`true`/`false`, and valid pointer-member, arrow/dereference, selected
+update/function-address, binary and pointee controls. It checks syntax-only/object diagnostic parity and no
 object on refusal across four C dialects, three frontend routes and three
 target layouts (#3743, #3758).
 

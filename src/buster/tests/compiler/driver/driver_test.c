@@ -4891,6 +4891,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
          S8("address of register variable 'x' requested")},
         {S8("int f(register int x,int y){return y & x;}"), true},
         {S8("int *f(register int *p){return &*p;}"), true},
+        {S8("struct S{int i;}; int *f(void){register struct S v={0}; return &(v.i);}"), false,
+         S8("address of register variable 'v' requested")},
+        {S8("struct S{int i;}; int *f(void){register struct S v={0}; return &_Generic(0,int:v.i);}"), false,
+         S8("address of register variable 'v' requested")},
+        {S8("struct S{int a[2]; int *p;}; int *f(void){register struct S v={0}; return &v.a[0];}"), false,
+         S8("address of register variable 'v' requested")},
+        {S8("int *f(register int p[2]){return &p[0];} int *g(register int p[const 2][3]){return &p[0][0];}"), true},
+        {S8("void f(register int p[2]){(void)&p;}"), false,
+         S8("address of register variable 'p' requested")},
+        {S8("struct S{int i; int a[2];}; int f(void){register struct S v={0}; (void)&_Generic(0,int:v).i; (void)&_Generic(0,int:v.a)[0]; return 0;}"), false,
+         S8("address of register variable 'v' requested")},
+        {S8("struct S{int *p;}; int *f(void){int x=0; register struct S v={.p=&x}; return &_Generic(0,int:v.p)[0];}"), true},
+        {S8("struct S{"
+            "struct{int x0;int x1;int x2;int x3;int x4;int x5;int x6;int x7;int x8;int x9;int x10;int x11;int x12;int x13;int x14;int x15;};"
+            "struct{int y1;};struct{int y2;};struct{int y3;};struct{int y4;};struct{int y5;};"
+            "struct{int y6;};struct{int y7;};struct{int y8;};struct{int y9;};struct{int y10;};"
+            "struct{int y11;};struct{int y12;};struct{int y13;};struct{int y14;};struct{int y15;};"
+            "struct{int y16;};struct{int y17;};struct{int y18;};struct{int y19;};struct{int y20;};"
+            "struct{int y21;};struct{int y22;};struct{int y23;};struct{int y24;};struct{int y25;};"
+            "struct{int y26;};struct{int y27;};struct{int y28;};struct{int y29;};struct{int y30;};"
+            "struct{int y31;};struct{int y32;};struct{int y33;};struct{int y34;};struct{int y35;};"
+            "struct{int y36;};struct{int y37;};struct{int y38;};struct{int y39;};struct{int y40;};"
+            "struct{int y41;};struct{int y42;};struct{int y43;};struct{int y44;};struct{int y45;};"
+            "struct{int y46;};struct{int y47;};struct{int y48;};struct{int y49;};struct{int y50;};"
+            "struct{int y51;};struct{int y52;};struct{int y53;};struct{int y54;};struct{int y55;};"
+            "struct{int y56;};struct{int y57;};struct{int y58;};struct{int y59;};struct{int y60;};"
+            "struct{int y61;};struct{int y62;};struct{int y63;};struct{int i;};};"
+            "int f(void){register struct S v={0}; (void)&_Generic(0,int:v).i; (void)&v.i; return 0;}"),
+         false, S8("address of register variable 'v' requested")},
+        {S8("struct S{int a[2]; int *p;}; int *f(void){int x=0; register struct S v={.p=&x}; return &v.p[0];}"), true},
+        {S8("struct S{int i;}; int *f(register struct S *p){return &p->i;}"), true},
+        {S8("struct S{int i; struct S *p;}; int *f(void){register struct S v={0}; return &v.p->i;}"), true},
         {S8("_Bool *f(void){return &_Generic(0,int:true);}"), false,
          S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
         {S8("_Bool *f(void){return &_Generic(0,int:false);}"), false,

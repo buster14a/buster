@@ -40789,11 +40789,202 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* m
     }
 }
 
-// C17 6.5.3.2p1: the operand of unary '&' is not declared `register`. An
-// operand-ending token before the '&' makes it the binary operator, and '->',
-// '[' or '(' after the name address a pointee or a call result instead.
-BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration,
-                                                           u8 const* skipped, CParseLoweringConstraintDiagnostic* diagnostic)
+// C17 6.5.3.2p1 and WG14 DR 017.06: the address operand may not name any part
+// of a register object. Dot access and array subscripting preserve that root;
+// unary dereference, arrow access and pointer subscripting reach another object.
+typedef struct CParseRegisterAddressContinuation CParseRegisterAddressContinuation;
+struct CParseRegisterAddressContinuation
+{
+    u32 start;
+    u32 end;
+};
+
+// C17 6.5.3.2p1 and WG14 DR 017.06: the address operand may not name any part
+// of a register object. Dot access and array subscripting preserve that root;
+// unary dereference, arrow access and pointer subscripting reach another object.
+// A selected _Generic result is followed before its retained postfix suffix.
+BUSTER_C_INTERNAL CEntityId c_parse_register_address_root(Arena* scratch, CParseResult* result, CPreprocessResult preprocess,
+                                                           CScopeId scope, u32 start, u32 end)
+{
+    CEntityId root = C_ENTITY_ID_INVALID;
+    CTypeId type = C_TYPE_ID_INVALID;
+    CParseRegisterAddressContinuation* continuations = 0;
+    u32 continuation_count = 0;
+    u32 continuation_capacity = end - start;
+    u32 cursor = start;
+    u32 range_end = end;
+    u64 scratch_mark = scratch ? scratch->position : 0;
+    bool found_root = false;
+    bool parameter_array_root = false;
+    bool valid = scratch && start < end && end <= preprocess.token_count;
+    while (valid)
+    {
+        while (cursor < range_end &&
+               (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                c_parse_complex_part_token(preprocess, preprocess.tokens[cursor])))
+        {
+            cursor += 1;
+        }
+        if (cursor >= range_end)
+        {
+            if (continuation_count)
+            {
+                CParseRegisterAddressContinuation continuation = continuations[--continuation_count];
+                cursor = continuation.start;
+                range_end = continuation.end;
+            }
+            else
+            {
+                break;
+            }
+        }
+        else if (!found_root)
+        {
+            CToken first = preprocess.tokens[cursor];
+            if (first.kind == C_TOKEN_IDENTIFIER &&
+                string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Generic")))
+            {
+                CTypeIdentityQuery* selection = c_parse_type_identity_find(result, cursor);
+                bool selected = selection && selection->result_start != UINT32_MAX && selection->result_start > cursor &&
+                                selection->result_start < selection->result_end && selection->result_end <= selection->token_end &&
+                                selection->token_end <= range_end;
+                if (selected)
+                {
+                    if (selection->token_end < range_end)
+                    {
+                        if (!continuations)
+                        {
+                            continuations = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CParseRegisterAddressContinuation, continuation_capacity);
+                        }
+                        if (continuations && continuation_count < continuation_capacity)
+                        {
+                            continuations[continuation_count++] =
+                                (CParseRegisterAddressContinuation){.start = selection->token_end, .end = range_end};
+                        }
+                        else
+                        {
+                            valid = false;
+                        }
+                    }
+                    if (valid)
+                    {
+                        cursor = selection->result_start;
+                        range_end = selection->result_end;
+                    }
+                }
+                else
+                {
+                    valid = false;
+                }
+            }
+            else if (first.kind == C_TOKEN_IDENTIFIER)
+            {
+                root = c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, scope, cursor), &first);
+                if (root.value < result->entity_count && result->entities[root.value].is_register)
+                {
+                    type = result->entities[root.value].type;
+                    // Match the adjusted-parameter test used by modifiable-place
+                    // validation: the binder retains array spelling on parameters.
+                    parameter_array_root = result->entities[root.value].kind == C_ENTITY_PARAMETER &&
+                                           type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY;
+                    found_root = true;
+                    cursor += 1;
+                }
+                else
+                {
+                    root = C_ENTITY_ID_INVALID;
+                    valid = false;
+                }
+            }
+            else
+            {
+                valid = false;
+            }
+        }
+        else
+        {
+            CToken token = preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                cursor += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT))
+            {
+                bool member_found = false;
+                if (cursor + 1 < range_end && preprocess.tokens[cursor + 1].kind == C_TOKEN_IDENTIFIER && type.value < result->type_count)
+                {
+                    CType aggregate = result->types[type.value];
+                    if (aggregate.kind == C_TYPE_STRUCT || aggregate.kind == C_TYPE_UNION)
+                    {
+                        CToken member = preprocess.tokens[cursor + 1];
+                        String8 member_name = c_token_spelling(preprocess.spelling_base, member);
+                        // The cache belongs to result; promoted-search work stays
+                        // in this body's guarded scratch arena.
+                        type = c_parse_member_type(scratch, result, type, member.symbol, member_name, 0, 0, 0);
+                        member_found = type.value < result->type_count;
+                    }
+                }
+                if (member_found)
+                {
+                    cursor += 2;
+                }
+                else
+                {
+                    root = C_ENTITY_ID_INVALID;
+                    valid = false;
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                if (close < range_end && close > cursor && type.value < result->type_count)
+                {
+                    CType base = result->types[type.value];
+                    if (parameter_array_root)
+                    {
+                        // A declared array parameter is adjusted to a pointer;
+                        // its first subscript reaches the pointed-to object.
+                        root = C_ENTITY_ID_INVALID;
+                        valid = false;
+                    }
+                    else if (base.kind == C_TYPE_ARRAY)
+                    {
+                        type = base.element_type;
+                        cursor = close + 1;
+                    }
+                    else
+                    {
+                        root = C_ENTITY_ID_INVALID;
+                        valid = false;
+                    }
+                }
+                else
+                {
+                    root = C_ENTITY_ID_INVALID;
+                    valid = false;
+                }
+            }
+            else
+            {
+                root = C_ENTITY_ID_INVALID;
+                valid = false;
+            }
+        }
+    }
+    if (!found_root || !valid)
+    {
+        root = C_ENTITY_ID_INVALID;
+    }
+    if (scratch && scratch->position != scratch_mark)
+    {
+        arena_set_position(scratch, scratch_mark);
+    }
+    return root;
+}
+
+BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                           CDeclaration const* declaration, u8 const* skipped,
+                                                           CParseLoweringConstraintDiagnostic* diagnostic)
 {
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
@@ -40811,19 +41002,14 @@ BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result,
         u32 normalized_end = 0;
         bool place = unary && c_parse_expression_place_shape_range(result, preprocess, operand_start, operand_end,
                                                                     &normalized_start, &normalized_end);
-        bool identifier = place && normalized_start + 1 == normalized_end &&
-                          preprocess.tokens[normalized_start].kind == C_TOKEN_IDENTIFIER;
-        if (identifier)
+        CEntityId entity = place ? c_parse_register_address_root(machine->scratch_arena, result, preprocess, scope,
+                                                                  normalized_start, normalized_end)
+                                 : C_ENTITY_ID_INVALID;
+        if (entity.value < result->entity_count)
         {
-            CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base,
-                                                           c_parse_scope_for_token(result, declaration->scope, normalized_start),
-                                                           &preprocess.tokens[normalized_start]);
-            if (entity.value < result->entity_count && result->entities[entity.value].is_register)
-            {
-                c_parse_lowering_constraint_consider(diagnostic,
-                    c_parse_message(result->arena, S8("address of register variable '{S8}' requested"), result->entities[entity.value].name),
-                    index, index + 1);
-            }
+            c_parse_lowering_constraint_consider(diagnostic,
+                c_parse_message(result->arena, S8("address of register variable '{S8}' requested"), result->entities[entity.value].name),
+                index, index + 1);
         }
     }
 }
@@ -43713,7 +43899,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                 declaration->body_start, declaration->body_start + declaration->body_token_count, false, skipped);
             c_parse_lowering_constraint_consider(&diagnostic, compound.message, compound.token, compound.token);
             c_parse_validate_builtin_calls(machine, result, preprocess, declaration, skipped, &diagnostic);
-            c_parse_validate_register_addresses(result, preprocess, declaration, skipped, &diagnostic);
+            c_parse_validate_register_addresses(machine, result, preprocess, declaration, skipped, &diagnostic);
             c_parse_validate_atomic_accesses(machine, result, preprocess, declaration, skipped, &diagnostic);
             c_parse_validate_assembly(machine, result, preprocess, declaration, skipped, &diagnostic);
             c_parse_validate_return_statements(machine, result, preprocess, declaration, &diagnostic);
