@@ -217,6 +217,11 @@ must call it before starting their own gang, or before calling the driver from
 more than one thread, because the driver cannot release a gang it does not
 own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
+The x86-64 target prewarm is the existing one: every x86-64 process that
+generates code pays it once, on the first `codegen_prewarm_for_target`. On the
+Ryzen 7 9700X it costs 1.74 ms of the compiler's own time and 6.6 M retired
+instructions above an AArch64 compile of the same one-function unit
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md), #1125).
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
@@ -319,10 +324,15 @@ the batch.
 
 **Setup stays outside every input.** With metrics requested, before the first
 interval opens the driver runs `compiler_prewarm()` and
-`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and x86
-metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
-and primes first-touch page faults: it commits and touches a pooled TU arena
-(`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
+`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and target
+tables that used to land in input 0's `codegen` phase), and primes first-touch
+page faults. On the 9700X this setup put an x86-64 one-function input's
+`start_ns` at 2.4 ms and an AArch64 one's at 0.7 ms
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md)). It runs
+for every action, so a measured `-fsyntax-only` or `-E` pays a target prewarm
+that the same command without `-fmetrics-out` never runs; compare such runs
+only with each other (#4135). The priming commits and touches a pooled TU
+arena (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
 reuses) and the calling thread's scratch arenas once per thread, plus the
 result arena when a single input compiles in it. No warm-up input is needed.
 `compiler_driver_test_input_metrics` observes the completed setup calls and
