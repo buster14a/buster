@@ -281,6 +281,13 @@ BUSTER_GLOBAL_LOCAL int cm_controller_tests(void)
 BUSTER_GLOBAL_LOCAL int cm_self_test(void)
 {
     int failures = cm_inventory_tests() + cm_publication_tests() + cm_controller_tests();
+    char copied[4] = "old";
+    cm_copy(copied, sizeof(copied), "abcdef");
+    failures += cm_test_check(cm_equal(copied, "abc"), "bounded copy retains the intended prefix");
+    cm_copy(copied, 0, "changed");
+    failures += cm_test_check(cm_equal(copied, "abc"), "zero-capacity copy preserves the destination");
+    cm_copy(copied, sizeof(copied), NULL);
+    failures += cm_test_check(!copied[0], "null copy source becomes empty");
     failures += cm_test_check(cm_http_status("gh: Not Found (HTTP 404)\n") == 404, "GitHub API absent response");
     failures += cm_test_check(cm_http_status("gh: HTTP 404\n") == 404, "redirected expired log blob is absent");
     failures += cm_test_check(cm_http_status("notice\ngh: HTTP 404\r\n") == 404, "redirected status line after notice");
