@@ -2,10 +2,11 @@
 // alternate GPT headers and one partition entry, then compares the result with
 // a reference image. Not part of ide; built by the disk_builder CMake target.
 //
-// Map (search symbols): MBRPartitionRecord, ProtectiveMBR, GPTHeader,
-// VerificationError, verify_disk, FileWriter, crc32_compute, GPTPartitionEntry,
-// process_arguments, entry_point.
+// Map (search symbols): GPTHeader, FileWriter, crc32_compute,
+// GPTPartitionEntry, process_arguments, entry_point. MBR declarations and
+// verification helpers are in disk_builder_verification.h/.c.
 #include <buster/lib/base.h>
+#include <buster/apps/disk_builder_verification.h>
 #include <buster/lib/entry_point.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/os.h>
@@ -16,6 +17,7 @@
 #include <string.h>
 
 #if BUSTER_UNITY_BUILD
+#include <buster/apps/disk_builder_verification.c>
 #include <buster/lib/os.c>
 #include <buster/lib/entry_point.c>
 #include <buster/lib/arena.c>
@@ -27,31 +29,6 @@
 #include <buster/lib/float.c>
 #include <buster/lib/target.c>
 #endif
-
-typedef struct MBRPartitionRecord MBRPartitionRecord;
-struct MBRPartitionRecord
-{
-    u32 boot_indicator : 8;
-    u32 starting_chs : 24;
-    u32 os_type : 8;
-    u32 ending_chs : 24;
-    u32 starting_lba;
-    u32 size_in_lba;
-}
-BUSTER_PACKED;
-BUSTER_CT_CHECK(sizeof(MBRPartitionRecord) == 16);
-
-typedef struct ProtectiveMBR ProtectiveMBR;
-struct ProtectiveMBR
-{
-    u8 boot_code[440];
-    u32 unique_mbr_disk_signature;
-    u16 unknown;
-    MBRPartitionRecord partition_records[4];
-    u8 signature[2];
-};
-
-BUSTER_CT_CHECK(sizeof(ProtectiveMBR) == 512);
 
 typedef struct GPTHeader GPTHeader;
 struct GPTHeader
@@ -76,104 +53,6 @@ struct GPTHeader
 BUSTER_CT_CHECK(sizeof(GPTHeader) == 96);
 #define GPT_HEADER_SIZE (sizeof(GPTHeader) - sizeof(u32))
 BUSTER_CT_CHECK(GPT_HEADER_SIZE == 92);
-
-typedef enum VerificationError
-{
-    VERIFICATION_ERROR_DISK_SUCCESS,
-    VERIFICATION_ERROR_DISK_EMPTY,
-    VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED,
-    VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO,
-    VERIFICATION_ERROR_UNKNOWN_NOT_ZERO,
-    VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED,
-    VERIFICATION_ERROR_MBR_BAD_SIGNATURE,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA,
-} VerificationError;
-
-// The three records after the protective entry must be entirely zero; the scan
-// stops at the first non-zero one because that is already the whole answer.
-BUSTER_GLOBAL_LOCAL bool verify_disk_reserved_partitions_zeroed(ProtectiveMBR const* mbr)
-{
-    MBRPartitionRecord zero_record;
-    memset(&zero_record, 0, sizeof(zero_record));
-
-    bool result = true;
-    for (int i = 1; i < 4 && result; i += 1)
-    {
-        result = memcmp(&mbr->partition_records[i], &zero_record, sizeof(zero_record)) == 0;
-    }
-
-    return result;
-}
-
-// Reports the first thing wrong with the image. The checks are ordered so that
-// each one only runs once its predecessors have vouched for the bytes it reads:
-// the sector-size check guards the MBR cast, and the MBR checks guard the
-// protective partition record.
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL VerificationError verify_disk(u8* disk, u64 disk_size)
-{
-    VerificationError result = VERIFICATION_ERROR_DISK_SUCCESS;
-    if (disk_size == 0)
-    {
-        result = VERIFICATION_ERROR_DISK_EMPTY;
-    }
-    else if (disk_size % 512 != 0)
-    {
-        result = VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED;
-    }
-    else
-    {
-        ProtectiveMBR* mbr = (ProtectiveMBR*)disk;
-        MBRPartitionRecord* gpt_partition_record = &mbr->partition_records[0];
-
-        if (mbr->unique_mbr_disk_signature != 0)
-        {
-            result = VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO;
-        }
-        else if (mbr->unknown != 0)
-        {
-            result = VERIFICATION_ERROR_UNKNOWN_NOT_ZERO;
-        }
-        else if (!verify_disk_reserved_partitions_zeroed(mbr))
-        {
-            result = VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED;
-        }
-        else if (mbr->signature[0] != 0x55 || mbr->signature[1] != 0xaa)
-        {
-            result = VERIFICATION_ERROR_MBR_BAD_SIGNATURE;
-        }
-        else if (gpt_partition_record->boot_indicator != 0)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO;
-        }
-        else if (gpt_partition_record->starting_chs != 0x200)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512;
-        }
-        else if (gpt_partition_record->os_type != 0xee)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE;
-        }
-        else if (gpt_partition_record->ending_chs != 0xffffff)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS;
-        }
-        else if (gpt_partition_record->starting_lba != 1)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA;
-        }
-        else if (gpt_partition_record->size_in_lba != 0xffffff)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA;
-        }
-    }
-
-    return result;
-}
 
 typedef struct FileWriter FileWriter;
 struct FileWriter
@@ -298,7 +177,7 @@ ProcessResult entry_point(void)
     Arena* arena = arena_create((ArenaCreation){0});
     ByteSlice minimal_gpt = file_read(arena, S8("build/minimal_fat32.img"), (FileReadOptions){0});
     u8* minimal = (u8*)minimal_gpt.pointer;
-    u64 sector_size = 512;
+    u64 sector_size = DISK_BUILDER_SECTOR_SIZE;
 
     if (minimal_gpt.length)
         BUSTER_CHECK(minimal_gpt.length % sector_size == 0);
@@ -320,7 +199,7 @@ ProcessResult entry_point(void)
         .os_type = 0xee,
         .ending_chs = 0xffffff,
         .starting_lba = 1,
-        .size_in_lba = size_in_lba_u64_minus_1 == (u64)(u32)size_in_lba_u64_minus_1 ? (u32)size_in_lba_u64_minus_1 : UINT32_MAX,
+        .size_in_lba = disk_builder_protective_mbr_size_in_lba(expected_size),
     };
     file_write_byte(writer, 0x55);
     file_write_byte(writer, 0xaa);
