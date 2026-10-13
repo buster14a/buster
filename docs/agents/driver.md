@@ -2526,6 +2526,8 @@ replacement and its restoration. Backend time, not memory, is the next limit
 for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
 function take about 10 s and 42 s.
 
+Windows ARM64 stores function length in 18 bits of four-byte instructions. Larger functions therefore use aligned `.pdata`/`.xdata` fragments strictly shorter than 1 MiB; epilogs remain whole, their scopes are relative to each fragment, and continuation records carry the parent's unwind state through `end_c`. The large C fixture compiles, links and runs across those fragment boundaries on native Windows ARM64.
+
 ## ELF TLS companion lookup
 
 The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link

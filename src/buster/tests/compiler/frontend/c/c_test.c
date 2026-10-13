@@ -6010,10 +6010,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtim
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_large_function_machine_scratch_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    // Not on Windows AArch64: the function is over 1 MiB of code, past what
-    // one PE ARM64 unwind record describes; the object writer refuses it
-    // there (#3578).
-#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64)
+    // This function crosses PE ARM64 unwind fragments; compile, link and
+    // run its result on native Windows ARM64 as well.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     u32 const entry_count = 5000;
     String8 prefix = S8("typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
                         "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"

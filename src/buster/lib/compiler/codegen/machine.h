@@ -1782,6 +1782,8 @@ struct MachineEncodeResult
     // instruction, one per return row; the AArch64 encoder fills these for
     // the Windows unwind data, the x86-64 encoder leaves them empty.
     u32* epilog_offsets;
+    // Exclusive function-relative offset after each emitted epilogue.
+    u32* epilog_end_offsets;
     u32 call_site_count;
     u32 inline_assembly_relocation_count;
     u32 epilog_count;
