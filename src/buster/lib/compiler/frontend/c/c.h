@@ -293,6 +293,9 @@ typedef enum CDiagnosticKind
     // GCC/Clang -Wpointer-sign. Semantic analysis publishes it as a warning
     // in CParseResult.warnings; every other pointee mismatch stays an error.
     C_DIAGNOSTIC_POINTER_SIGN,
+    // Evaluated signed arithmetic overflow reported while the evaluator keeps
+    // the wrapped bits and is published through CParseResult.warnings.
+    C_DIAGNOSTIC_SIGNED_OVERFLOW,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -2206,9 +2209,9 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     // Warning-severity findings of semantic analysis (C_DIAGNOSTIC_POINTER_SIGN
-    // today). They never fail analysis: the driver applies the -W policy to
-    // them. warning_tokens holds each warning's source token, so a conversion
-    // checked more than once is reported once.
+    // and C_DIAGNOSTIC_SIGNED_OVERFLOW today). They never fail analysis: the
+    // driver applies the -W policy to them. warning_tokens holds each warning's
+    // source token, so a finding checked more than once is reported once.
     CDiagnostic* warnings;
     u32* warning_tokens;
     CDeferredStaticAssert* deferred_static_asserts;

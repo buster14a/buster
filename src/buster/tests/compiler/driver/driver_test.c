@@ -2603,11 +2603,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
         S8("#warning policy-warning\nint main(void) { return 0; }\n"),
         S8("#ifdef POLICY_UNDEFINED\n#endif policy-extra\nint main(void) { return 0; }\n"),
         S8("struct policy_record { int a; };\nstruct policy_record policy_value = { a: 1 };\nint main(void) { return 0; }\n"),
+        S8("enum { policy_overflow = 2147483647 + 1 }; int main(void) { return policy_overflow; }\n"),
     };
-    String8 markers[] = {S8("policy-warning"), S8("extra tokens at end of '#endif' directive"), S8("GNU obsolete field designator")};
+    String8 markers[] = {S8("policy-warning"), S8("extra tokens at end of '#endif' directive"), S8("GNU obsolete field designator"),
+                         S8("integer overflow in expression")};
     // The temporary path is a function of its stem, so each file needs its own.
-    String8 stems[] = {S8("warning-policy-cpp"), S8("warning-policy-extra"), S8("warning-policy-designator")};
-    String8 source_paths[3];
+    String8 stems[] = {S8("warning-policy-cpp"), S8("warning-policy-extra"), S8("warning-policy-designator"),
+                       S8("warning-policy-overflow")};
+    String8 source_paths[4];
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
     {
         source_paths[index] = buster_test_temporary_path(arena, stems[index], S8(".c"));
@@ -2618,7 +2621,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
     String8 cpp_tag = S8("policy-warning [-Werror=cpp]");
     String8 extra_tag = S8("[-Werror=extra-tokens]");
     String8 designator_tag = S8("[-Werror=gnu-designator]");
-    // sources: 0 is #warning (cpp), 1 extra tokens after #endif, 2 the GNU designator.
+    String8 overflow_tag = S8("integer overflow in expression [-Werror=overflow]");
+    // Sources 0-2 are the preprocessor, directive-token, and designator warnings;
+    // source 3 is the semantic signed-overflow warning.
     CompilerDriverWarningPolicyCase cases[] = {
         {0, {none, none, none}, false, true, none},
         {0, {S8("-Wall"), S8("-Wextra"), none}, false, true, none},
@@ -2695,6 +2700,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
         {2, {S8("-Werror=gnu"), none, none}, true, false, designator_tag},
         {2, {S8("-Werror=gnu-designator"), S8("-Wno-gnu"), none}, false, false, none},
         {2, {S8("-Wno-gnu"), S8("-Wgnu"), S8("-Werror")}, true, false, designator_tag},
+        {3, {none, none, none}, false, true, none},
+        {3, {S8("-Wno-overflow"), none, none}, false, false, none},
+        {3, {S8("-Werror"), none, none}, true, false, overflow_tag},
+        {3, {S8("-Werror=overflow"), none, none}, true, false, overflow_tag},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
@@ -2718,10 +2727,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
         String8 run_text = string_format(arena, S8("diagnostic='{S8}' warning='{S8}' error={u32}"), run.diagnostic, run.warning, (u32)run.error);
         String8 label = string_format(arena, S8("policy case {u32} source {u32}: {S8}"), index, row->source, run_text);
         bool marker = string_first_sequence(run.warning, markers[row->source]) != BUSTER_STRING_NO_MATCH;
+        bool semantic_warning = row->source == 3;
         if (row->promoted)
         {
-            BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_TOKENIZE, run.diagnostic);
-            BUSTER_TEST_RAW(arguments, object.length == 0 && run.tokenizer_error_count == 1 && run.tokenizer_warning_count == 0, label);
+            CompilerDriverError expected_error = semantic_warning ? COMPILER_DRIVER_ERROR_ANALYSIS : COMPILER_DRIVER_ERROR_TOKENIZE;
+            BUSTER_TEST_RAW(arguments, run.error == expected_error, run.diagnostic);
+            BUSTER_TEST_RAW(arguments, object.length == 0 &&
+                                       (semantic_warning ? run.analysis_warning_count == 0 && run.analysis_diagnostic_count == 0 &&
+                                                           run.tokenizer_error_count == 0 && run.tokenizer_warning_count == 0
+                                                         : run.tokenizer_error_count == 1 && run.tokenizer_warning_count == 0), label);
             // The promoted warning is an error record and text naming its option, and no longer a warning.
             BUSTER_TEST_RAW(arguments, string_first_sequence(run.diagnostic, row->tag) != BUSTER_STRING_NO_MATCH, label);
             BUSTER_TEST_RAW(arguments, !marker && string_first_sequence(run.warning, S8("warning:")) == BUSTER_STRING_NO_MATCH, label);
@@ -2733,9 +2747,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
             BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_NONE, run.diagnostic);
             BUSTER_TEST_RAW(arguments, object.length != 0, label);
             BUSTER_TEST_RAW(arguments, marker == row->shown, label);
-            BUSTER_TEST_RAW(arguments, row->shown ? run.tokenizer_warning_count == 1 && run.diagnostic_count == 1 &&
-                                                run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_WARNING
-                                              : run.warning.length == 0 && run.diagnostic_count == 0, label);
+            BUSTER_TEST_RAW(arguments, row->shown ?
+                                            (semantic_warning ? run.analysis_warning_count == 1 && run.tokenizer_warning_count == 0
+                                                              : run.tokenizer_warning_count == 1) &&
+                                                run.diagnostic_count == 1 && run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_WARNING
+                                          : run.warning.length == 0 && run.diagnostic_count == 0, label);
         }
         c_test_scratch_end(attempt);
     }
