@@ -22568,17 +22568,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         : string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
             ? 2
             : 1;
-    // eBPF has no floating point or libm to import, and Wasm64 lowers no
-    // long double; refuse those calls instead of emitting an import the
-    // target cannot satisfy (#1394).
+    // eBPF has no floating point or libm to import, and Wasm32/Wasm64 lower
+    // no long double; refuse those calls instead of emitting an import the
+    // target cannot satisfy (#1394, #3317).
     bool libm_refused = libm.arity && (builder->target.cpu_arch == CPU_ARCH_BPFEL ||
-                                       (builder->target.cpu_arch == CPU_ARCH_WASM64 && libm.argument_kind == C_TYPE_LONG_DOUBLE));
+                                       !c_semantic_math_long_double_builtin_supported_on_target(builder->target, link_name));
     if (libm_refused)
     {
-        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"), link_name,
-                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF") : S8("Wasm64"),
-                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
-                                                                                            : S8("the target lowers no long double"));
+        String8 target_name = builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF")
+                             : builder->target.cpu_arch == CPU_ARCH_WASM32 ? S8("Wasm32")
+                             : builder->target.cpu_arch == CPU_ARCH_WASM64 ? S8("Wasm64")
+                             : cpu_arch_to_string_os(builder->target.cpu_arch);
+        String8 reason = builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
+                                                                    : S8("the target lowers no long double");
+        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"),
+                                                 link_name, target_name, reason);
     }
     if (argument_count != expected_count || libm_refused)
     {
@@ -35130,6 +35134,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
     bool ok = true;
     u32 ternary_depth = 0;
     bool previous_is_operand = false;
+    bool size_operator_operand = false;
     for (u32 index = start; ok && index < end && operators->first[stop] == UINT32_MAX; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
@@ -35148,7 +35153,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             // the pointer and predicted the whole conditional arm as one.
             // The type-name test runs only when the next token is
             // sign-ambiguous, so ordinary grouped operands pay one compare.
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
+            if (!size_operator_operand && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
             {
                 u32 following = builder->preprocess.tokens[index + 1].punctuator;
                 if ((following == C_PUNCTUATOR_STAR || following == C_PUNCTUATOR_AMPERSAND || following == C_PUNCTUATOR_PLUS ||
@@ -35158,6 +35163,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
                     previous_is_operand = false;
                 }
             }
+            size_operator_operand = false;
         }
         else if (scan == C_IR_GROUP_SCAN_UNCLOSED)
         {
@@ -35168,15 +35174,27 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             // The sizeof/alignof words and __real__/__imag__ are prefix
             // operators, so a `*` after one dereferences rather than multiplies.
             CConditionalOperator complex_part = C_CONDITIONAL_REAL_PART;
-            previous_is_operand =
-                token.kind != C_TOKEN_IDENTIFIER || (!c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) &&
-                                                     !c_ir_complex_part_operator(builder, token, &complex_part));
+            bool size_operator = token.kind == C_TOKEN_IDENTIFIER &&
+                                 c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
+            bool extension = token.kind == C_TOKEN_IDENTIFIER &&
+                             c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_EXTENSION);
+            bool complex_operator = c_ir_complex_part_operator(builder, token, &complex_part);
+            previous_is_operand = token.kind != C_TOKEN_IDENTIFIER || (!size_operator && !extension && !complex_operator);
+            if (size_operator)
+            {
+                size_operator_operand = true;
+            }
+            else
+            {
+                size_operator_operand = false;
+            }
         }
         else if (punctuator == C_PUNCTUATOR_QUESTION)
         {
             tier = ternary_depth ? C_IR_SIZEOF_TIER_NONE : C_IR_SIZEOF_TIER_QUESTION;
             ternary_depth += 1;
             previous_is_operand = false;
+            size_operator_operand = false;
         }
         else if (punctuator == C_PUNCTUATOR_COLON)
         {
@@ -35184,12 +35202,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             ternary_depth -= ok ? 1 : 0;
             tier = ok && !ternary_depth ? C_IR_SIZEOF_TIER_COLON : C_IR_SIZEOF_TIER_NONE;
             previous_is_operand = false;
+            size_operator_operand = false;
         }
         else if (punctuator != C_PUNCTUATOR_PLUS_PLUS && punctuator != C_PUNCTUATOR_MINUS_MINUS)
         {
             // A postfix `++`/`--` after an operand or a prefix one before it carries the operand state over.
             bool binary_allowed = previous_is_operand;
             previous_is_operand = false;
+            size_operator_operand = false;
             switch (ternary_depth ? C_PUNCTUATOR_NONE : punctuator)
             {
             case C_PUNCTUATOR_NONE: break;
@@ -35232,6 +35252,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             case C_PUNCTUATOR_DOT:
             case C_PUNCTUATOR_ARROW: break;
             default: ok = false; break;
+            }
+        }
+        else
+        {
+            // A prefix increment/decrement consumes the unary operand after a
+            // size operator; a postfix form follows an operand already seen.
+            if (!previous_is_operand)
+            {
+                size_operator_operand = false;
             }
         }
         if (ok && tier != C_IR_SIZEOF_TIER_NONE)
@@ -61457,6 +61486,17 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             }
         }
     }
+    bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+    if (builder->function && !aggregate_type)
+    {
+        u32 statement_tail_start = start;
+        u32 statement_tail_end = end;
+        if (c_parse_block_static_single_statement_expression_tail(&parse, preprocess, start, end, &statement_tail_start, &statement_tail_end))
+        {
+            start = statement_tail_start;
+            end = statement_tail_end;
+        }
+    }
     if (type->is_complex)
     {
         u8* complex_bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
@@ -61476,7 +61516,6 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             return true;
         }
     }
-    bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
     if (!aggregate_type)
     {
         // `static int v = (int){5};`.  An aggregate destination finds its own

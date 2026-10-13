@@ -365,6 +365,14 @@ certified, validated canonical IR, the expected import symbols with the target's
 long double and `long` types, successful object writing, and the two refusals.
 `c_test_generic_float_builtins_runtime` runs the values on x86-64 Linux only.
 
+Explicit long-double math builtins—including the inline `fabsl`, `fmaxl`,
+`fminl`, `copysignl`, `powil` and `signbitl` spellings, special values,
+and the `l` libm forms—are available only on x86-64 and AArch64. The shared
+`c_semantic_math_long_double_builtin_supported_on_target` predicate drives
+both `__has_builtin` and parser validation. Wasm32, Wasm64, eBPF and other
+unsupported routes answer 0 and reject a call with a builtin- and target-specific
+diagnostic before its arguments reach IR lowering.
+
 ## Target ABI predefined macros
 
 The prelude exposes C library typedef identities, rather than choosing a
