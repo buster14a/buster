@@ -62289,6 +62289,15 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             return false;
         }
     }
+    if (!aggregate_type && start < end &&
+        c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+        c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)
+    {
+        builder->failure_message = S8("too many braces around scalar initializer");
+        builder->failure_token_index = start;
+        return false;
+    }
     if (c_ir_ext80_static_scalar_target(builder->target, type))
     {
         // A scalar x87 object, at file scope or as a function-local static:
