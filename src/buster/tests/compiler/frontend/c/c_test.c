@@ -12349,8 +12349,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
             u64 limit = limit_bits ? (UINT64_MAX >> (64 - limit_bits)) : 0;
             TemporalArena boundary = scratch_begin(0, 0);
             String8 accepted_source = string_format(boundary.arena,
-                S8("struct Boundary { char bytes[{u64}ULL]; };\n"
-                   "struct Recovery { int value; };\n"
+                S8("struct Boundary {{ char bytes[{u64}ULL]; }};\n"
+                   "struct Recovery {{ int value; }};\n"
                    "_Static_assert(sizeof(struct Recovery) == sizeof(int), \"recovery\");\n"),
                 limit);
             CPreprocessResult accepted_tokens = c_preprocess(boundary.arena, accepted_source,
@@ -12363,8 +12363,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
 
             TemporalArena recovery = scratch_begin(0, 0);
             String8 rejected_source = string_format(recovery.arena,
-                S8("struct TooLarge { char bytes[{u64}ULL]; char extra; };\n"
-                   "struct Recovery { int value; };\n"
+                S8("struct TooLarge {{ char bytes[{u64}ULL]; char extra; }};\n"
+                   "struct Recovery {{ int value; }};\n"
                    "_Static_assert(sizeof(struct Recovery) == sizeof(int), \"recovery\");\n"),
                 limit);
             CPreprocessResult rejected_tokens = c_preprocess(recovery.arena, rejected_source,
