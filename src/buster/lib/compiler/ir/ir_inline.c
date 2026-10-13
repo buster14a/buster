@@ -957,12 +957,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 if (required) result = ir_inline_callsite_error(caller, block, row);
                                 continue;
                             }
-                            if (caller->label_metadata_count)
-                            {
-                                module->inlining.shape_skips += 1;
-                                if (required) result = ir_inline_callsite_error(caller, block, row);
-                                continue;
-                            }
+                            // Existing caller label values and destination IDs
+                            // survive the splice. Only callee-owned computed
+                            // labels need a cloning contract and remain refused.
                             u64 caller_rows_remaining = original_instructions - caller_rows_scanned;
                             if (!required)
                             {
