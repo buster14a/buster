@@ -218,11 +218,17 @@ map on every row the C builder commits through `c_ir_append_instruction`:
 
 - `fold_birth_scalar_rows`: committed `CAST`, `UNARY` and `BINARY` rows probed.
 - `fold_birth_<rule>`: rows a rule already folds from the operands committed
-  before them. `fold_birth_metadata_mismatches` counts identities rejected by
-  the replacement metadata check. `fold_birth_avoidable_bytes` is logical
-  row/value/operand/source storage: an identity needs none of it, while a
-  constant still needs its row and immediate. This is not an arena-call or RSS
-  figure.
+  before them (direct). `fold_birth_metadata_mismatches` counts identities
+  rejected by the replacement metadata check. `fold_birth_avoidable_bytes` is
+  logical row/value/operand/source storage for direct birth folds: an identity
+  needs none of it, while a constant still needs its row and immediate. This
+  is not an arena-call or RSS figure.
+- `fold_birth_cascade_<rule>`: rows no rule folds directly but one does once
+  earlier birth folds are applied: identity birth folds are followed to their
+  replacement, and constant birth folds supply their folded bits.
+  `fold_birth_cascade_uncached` counts rows that stayed unfoldable while an
+  operand's birth-constant bits had left the bounded cache, so it bounds the
+  cascades the census may have missed.
 - `fold_late_<rule>`: folds FAST actually applied. `fold_late_replaced_roots`
   counts the folds whose operand had to be followed through the replacement map
   (an earlier identity or a parameter sweep).
@@ -230,17 +236,54 @@ map on every row the C builder commits through `c_ir_append_instruction`:
 The rules are `cast_identity`, `cast_constant`, `unary_constant`,
 `binary_constant`, `binary_right_identity` and `binary_left_identity`. Probes
 suppress `ir_semantics` recording, so those counters keep measuring only the
-compiler's own semantic work. Rows that SSA construction inserts behind a commit
-(`ir_block_insert_instruction_after`) are not probed, and neither is
-inlined-callee output.
+compiler's own semantic work, and they allocate nothing, so `allocation.*` is
+unchanged.
 
-`fold_birth_*` and `fold_late_*` count independent populations. Birth counts
-include functions that FAST later skips or does not run (`-fno-canonical-fast`,
-budget and provenance skips) and rows that later passes delete. Late counts
-include rows that SSA insertion, promotion and inlining add after commit. No
-per-row birth classification reaches FAST, so neither a birth/late ratio nor
-late minus birth attributes or bounds the late folds that were available at
-commit; that needs a matched per-row association.
+### Matched birth/late association
+
+Taken alone, `fold_birth_*` and `fold_late_*` count independent populations.
+Birth counts include functions that FAST later skips or does not run
+(`-fno-canonical-fast`, budget and provenance skips) and rows that later passes
+delete. Late counts include rows that SSA insertion, promotion and inlining add
+after commit. Neither a birth/late ratio nor late minus birth attributes or
+bounds anything.
+
+The `fold_match_*` counters join them per row. The census stores its answer in
+the committed row: the diagnostic-only `IrInstruction.fold_birth` byte, which
+exists only under `BUSTER_BENCH_ALLOCATIONS` and occupies the row's existing
+padding, so `sizeof(IrInstruction)` stays 64. Whole-row copies carry it through
+promotion, `ir_rewrite_compact` renumbering, CFG publication and inlining; rows
+created after commit start zeroed. Each fold `ir_fast_fold` applies is counted
+once, by rule, in exactly one class:
+
+- `fold_match_direct_<rule>`: the row's birth tag names the same rule, decided
+  from its committed operands.
+- `fold_match_cascade_<rule>`: the birth tag names the same rule, decided
+  through earlier birth folds.
+- `fold_match_post_<rule>`: anything else, so the fold needed a fact
+  construction did not have: SSA insertion, promotion, inlining, or a root the
+  late scan supplied. The causes split as `fold_match_post_unprobed` (a row the
+  C builder never committed, such as SSA or promotion output),
+  `fold_match_post_unfoldable_at_birth` (committed, but no rule folded it) and
+  `fold_match_post_rule_changed` (committed and foldable, but late facts chose
+  another rule).
+
+For each rule, `fold_late_<rule>` equals the sum of the three
+`fold_match_*_<rule>` counters. An inlined copy keeps its callee row's tag
+and the inliner adds a clone bit: a callee row foldable at its own commit
+stays direct or cascade, while one that folds only with the caller's
+arguments is post. `fold_match_clone_{direct,cascade,post}` count the clone
+share of each class; they are a split, not further folds.
+
+Survival follows each committed, non-clone birth-foldable row (direct or
+cascade) into FAST. `fold_survival_reached` counts those in functions FAST
+admits and `fold_survival_skipped` those in functions it declines (budget or
+provenance). `fold_survival_unfolded` counts reached rows that the fold pass
+did not fold in that run, for example because `fold` was not among the
+selected passes. Birth folds in functions that never reach
+`ir_fast_function` (`-fno-canonical-fast`, validation skips) or in rows
+deleted before FAST appear in neither; they stay in `fold_birth_*` only.
+These are hosted diagnostic counts, not performance evidence.
 
 #### End-of-body breakdown and net account
 
@@ -294,6 +337,10 @@ rows committed outside a function body are absent.
   - FAST immediates spared: at most `min(fold_net_constant_rows, Σ fold_late_*_constant)`.
   - DCE deletions spared: at most `min(fold_net_dead_literals, fold_late_dce_constants)`.
 
+  The late folds themselves are attributed per row by the
+  [matched association](#matched-birthlate-association):
+  `fold_match_direct_*` plus `fold_match_cascade_*` are exactly the late folds
+  a birth fold would replace. The immediates and DCE deletions remain bounds.
   Whether FAST would skip a whole function's compaction is not measured.
 
 Scratch is a per-thread arena created on first use and carved with the raw

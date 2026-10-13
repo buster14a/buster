@@ -879,6 +879,11 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         row.result = source->result.value == IR_ID_UNDERLYING_INVALID
                          ? IR_VALUE_ID_INVALID : value_map[source->result.value];
         row.canonical_local = ir_inline_cfg_local(source->canonical_local, old_local_count);
+#if BUSTER_BENCH_ALLOCATIONS
+        // The #3010 census keeps the callee's birth verdict on the clone and
+        // reports clone matches as their own split (fold_match_clone_*).
+        row.fold_birth = (u8)(row.fold_birth | IR_FAST_BIRTH_CLONE);
+#endif
         if (source->operand_count)
         {
             row.operands = arena_allocate(arena, IrValueId, source->operand_count);
