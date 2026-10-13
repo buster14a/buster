@@ -1906,7 +1906,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
                     (!left.data.length || memcmp(left.data.pointer, right.data.pointer, left.data.length) == 0);
             if (!valid)
             {
-                mismatch = string_format(arena, S8("section {S8}: kind={u32}/{u32} align={u64}/{u64} vsize={u64}/{u64} bytes={u64}/{u64}"),
+                mismatch = string_format(arena, S8("section {S8}: kind={u32}/{u32} align={u32}/{u32} vsize={u64}/{u64} bytes={u64}/{u64}"),
                                          left.name, (u32)left.kind, (u32)right.kind, left.alignment, right.alignment,
                                          left.virtual_size, right.virtual_size, left.data.length, right.data.length);
             }
