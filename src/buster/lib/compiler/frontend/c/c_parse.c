@@ -3919,12 +3919,12 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                 if (inherited_copy)
                 {
                     u64 ignored_size = 0;
-                    u32 inherited_alignment = 0;
+                    u32 folded_alignment = 0;
                     CLayoutAlignmentFold inherited_fold = c_parse_layout_alignment_fold_operand(
-                        context, agenda, type_start, type_end, &ignored_size, &inherited_alignment, provisional_out);
+                        context, agenda, type_start, type_end, &ignored_size, &folded_alignment, provisional_out);
                     if (inherited_fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE)
                     {
-                        requested_alignment = inherited_alignment;
+                        requested_alignment = folded_alignment;
                         spelled = 0;
                     }
                     else if (inherited_fold == C_LAYOUT_ALIGNMENT_FOLD_WAIT)
