@@ -35298,7 +35298,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
             {
                 size_operator_operand = true;
             }
-            else if (!extension)
+            else
             {
                 size_operator_operand = false;
             }
@@ -36872,7 +36872,7 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
             {
                 size_operator_operand = true;
             }
-            else if (prefix && !extension)
+            else if (prefix)
             {
                 size_operator_operand = false;
             }
