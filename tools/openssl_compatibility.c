@@ -270,7 +270,7 @@ BUSTER_GLOBAL_LOCAL OpensslRoute openssl_route(SliceString8 arguments)
 
 BUSTER_GLOBAL_LOCAL ProcessResult openssl_proxy(Arena* arena, SliceString8 arguments)
 {
-    bool valid = arguments.length >= 5;
+    bool valid = arguments.length >= 7;
     bool reference = valid && string_equal(arguments.pointer[0], S8("reference"));
     valid = valid && (reference || string_equal(arguments.pointer[0], S8("buster")));
     bool stopped = false;
@@ -280,7 +280,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_proxy(Arena* arena, SliceString8 argum
         String8 ide = arguments.pointer[1];
         String8 clang = arguments.pointer[2];
         String8 logs = arguments.pointer[3];
-        SliceString8 forwarded = {.pointer = arguments.pointer + 4, .length = arguments.length - 4};
+        SliceString8 forwarded = {.pointer = arguments.pointer + 6, .length = arguments.length - 6};
         OpensslRoute route = openssl_route(forwarded);
         valid = route != OPENSSL_ROUTE_INVALID;
         // Queries go to the actual C compiler too; a trusted --version response
@@ -290,8 +290,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_proxy(Arena* arena, SliceString8 argum
         String8 prefix = path_join(arena, logs, string_format(arena, S8("action-{u64}"), os_get_current_process_id()));
         String8 kinds[] = {S8("c"), S8("external-assembly"), S8("external-link"), S8("compiler-probe"), S8("invalid")};
         String8 kind = kinds[route];
-        String8 compiler_digest = {0};
-        valid = stage_object_sha256_file(arena, compiler, &compiler_digest) && valid;
+        // openssl_main hashes both compilers once and again after the cells.
+        String8 compiler_digest = arguments.pointer[external ? 5 : 4];
         String8 attribution = string_format(arena, S8("mode={S8}\nkind={S8}\ncompiler={S8}\ncompiler_sha256={S8}\n"),
                                             reference ? S8("reference") : S8("buster"), kind, compiler, compiler_digest);
         valid = clang_suite_write(arena, string_format(arena, S8("{S8}.provenance"), prefix), attribution) && valid;
@@ -446,6 +446,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
                                                               path_join(arena, output, S8("source-inventory")), RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) && valid;
             String8 versions[] = {clang, S8("--version")};
             valid = openssl_step(arena, output, S8("reference-compiler"), (SliceString8)BUSTER_ARRAY_TO_SLICE(versions), &stopped) && valid;
+            String8 digests[4] = {0};
+            valid = stage_object_sha256_file(arena, ide, &digests[0]) && stage_object_sha256_file(arena, clang, &digests[1]) && valid;
             // Both trusted cells complete before any Buster attempt. Build
             // failures are retained independently; no failing feature is removed.
             for (u32 cell = 0; cell < 4 && !stopped; cell += 1)
@@ -458,9 +460,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
                 make_directory_recursive(arena, directory);
                 String8 logs = path_join(arena, directory, S8("actions"));
                 make_directory_recursive(arena, logs);
-                String8 cc = string_format(arena, S8("CC={S8} test_openssl --cc-proxy {S8} {S8} {S8} {S8}"),
+                String8 cc = string_format(arena, S8("CC={S8} test_openssl --cc-proxy {S8} {S8} {S8} {S8} {S8} {S8}"),
                                            openssl_shell_word(arena, driver), reference ? S8("reference") : S8("buster"),
-                                           openssl_shell_word(arena, ide), openssl_shell_word(arena, clang), openssl_shell_word(arena, logs));
+                                           openssl_shell_word(arena, ide), openssl_shell_word(arena, clang), openssl_shell_word(arena, logs),
+                                           digests[0], digests[1]);
                 String8 configure_args[] = {perl, path_join(arena, source, S8("Configure")), S8("linux-x86_64"), S8("--debug"), S8("shared"),
                                             string_format(arena, S8("--prefix={S8}/prefix"), directory),
                                             string_format(arena, S8("--openssldir={S8}/prefix/ssl"), directory), cc, S8("AR=ar"), S8("RANLIB=ranlib"), S8("no-asm")};
@@ -482,7 +485,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
                 {
                     String8 list[] = {make, S8("list-tests")};
                     bool listed = openssl_step(arena, directory, S8("test-inventory"), (SliceString8)BUSTER_ARRAY_TO_SLICE(list), &stopped);
-                    String8 test[] = {make, S8("test"), S8("HARNESS_JOBS=2"), S8("V=1")};
+                    // V=1 would make run_tests.pl ignore HARNESS_JOBS.
+                    String8 test[] = {make, S8("test"), S8("HARNESS_JOBS=4"), S8("HARNESS_TIMER=1")};
                     tested = openssl_step(arena, directory, S8("tests"), (SliceString8)BUSTER_ARRAY_TO_SLICE(test), &stopped) && listed;
                 }
                 valid = configured && built && tested && valid;
@@ -492,12 +496,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
                 string_print(S8("OPENSSL_CELL name={S8} configure={u32} build={u32} tests={u32}\n"), name, (u32)configured, (u32)built, (u32)tested);
             }
             bool pristine = openssl_git_verify(arena, git, source, S8(BUSTER_OPENSSL_COMMIT), &stopped);
-            valid = pristine && valid;
-            String8 receipt = string_format(arena, S8("BUSTER_OPENSSL_INTAKE_V1\nupstream={S8}\npristine={u32}\nbuild_test_cells={S8}\n"
+            bool compilers = stage_object_sha256_file(arena, ide, &digests[2]) && stage_object_sha256_file(arena, clang, &digests[3]) &&
+                             string_equal(digests[0], digests[2]) && string_equal(digests[1], digests[3]);
+            valid = compilers && pristine && valid;
+            String8 receipt = string_format(arena, S8("BUSTER_OPENSSL_INTAKE_V1\nupstream={S8}\npristine={u32}\ncompilers_unchanged={u32}\nbuild_test_cells={S8}\n"
                                                      "target=x86_64-linux\nconfiguration=debug-shared\nlinker=external-clang\n"
                                                      "tls_interoperability=not-run\nmixed_abi=not-run\nproviders=not-qualified\n"
                                                      "performance=incomplete\nsecurity=not-qualified\nissue_complete=0\n"),
-                                            S8(BUSTER_OPENSSL_COMMIT), (u32)pristine, valid ? S8("pass") : S8("fail"));
+                                            S8(BUSTER_OPENSSL_COMMIT), (u32)pristine, (u32)compilers, valid ? S8("pass") : S8("fail"));
             valid = clang_suite_write(arena, path_join(arena, output, S8("summary.tsv")),
                                       string_join_arena(arena, string8_list_to_slice(arena, summary), false)) && valid;
             valid = clang_suite_write(arena, path_join(arena, output, S8("receipt.txt")), receipt) && valid;

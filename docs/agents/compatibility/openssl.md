@@ -60,7 +60,9 @@ There is no source patch, compiler-flag removal, disabled failing feature,
 replacement C object, or fabricated successful compiler probe.
 
 The native compiler proxy preserves upstream arguments and explicitly pins
-both C compilers to Linux x86-64 with the baseline instruction set. Reference C actions use Clang;
+both C compilers to Linux x86-64 with the baseline instruction set. The driver hashes both compilers once per run, passes the digests
+to the proxy for per-action provenance and re-hashes them after the cells;
+`receipt.txt` records `compilers_unchanged`. Reference C actions use Clang;
 candidate C actions and compiler identity/preprocessor queries use `ide cc`.
 Assembly-only actions and object-only links use external Clang, explicitly
 attributed in per-action provenance. Mixed C/assembly input is refused.
@@ -68,8 +70,12 @@ The normal configuration's assembly is upstream-generated external assembly;
 it is not evidence for Buster intrinsic or SIMD code generation.
 Archiving remains upstream make's explicitly configured ar/ranlib stage.
 
-Each successful build runs upstream `list-tests` and `make test` with verbose
-results and two test jobs. Failed builds record tests as not run. The raw
+Each successful build runs upstream `list-tests` and
+`make test HARNESS_JOBS=4 HARNESS_TIMER=1`. Verbose `V=1` is not passed:
+upstream's `test/run_tests.pl` then ignores `HARNESS_JOBS` and runs every
+recipe serially. Without it, upstream still prints the full output of
+failing tests, each recipe's result, skip reason and timing, and the final
+`Files=`/`Tests=` summary. Failed builds record tests as not run. The raw
 inventory and upstream test log retain the denominator, failures and skips;
 the intake does not synthesize pass counts. Shared and static artifacts
 produced by upstream are distinct and require subsequent qualified clients.
