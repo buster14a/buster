@@ -435,6 +435,21 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                 self.jobs[-1]["conclusion"] = check["conclusion"]
                 self.assertFalse(self.gate()["success"], case)
 
+    def test_terminal_first_reports_keep_known_baselines_and_allow_no_prior_report(self):
+        for form in ("current", "superseded"):
+            for history in (False, True):
+                with self.subTest(form=form, history=history):
+                    self.setUp()
+                    self.recovered_announcement(form)
+                    check = self.checks[-1]
+                    summary = check["output"]["summary"].replace("\nBaseline: unavailable.\n",
+                        "\nBaseline `0123456789012345678901234567890123456789` (first parent).\n", 1)
+                    if not history:
+                        summary = summary.split("\n\nPrior report (historical; not current execution state):\n\n")[0] + "\n"
+                    check["output"]["summary"] = summary
+                    result = self.gate()
+                    self.assertTrue(result["success"], result["errors"])
+
     def test_retained_terminal_announcement_replays_without_measurement_promotion(self):
         self.HEAD = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
         self.setUp()
@@ -525,14 +540,18 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                 self.assertFalse(result["success"], case)
 
     def test_recovered_failure_and_skips_remain_not_measured(self):
-        for outcome, conclusion in (("failure", "failure"), ("timed_out", "failure"),
-                                    ("success", "failure"), ("skipped", "skipped")):
-            with self.subTest(outcome=outcome):
+        outcomes = (("failure", "failure"), ("timed_out", "failure"), ("success", "failure"), ("skipped", "skipped"))
+        for form, (outcome, conclusion) in ((form, pair) for form in ("legacy", "current") for pair in outcomes):
+            with self.subTest(form=form, outcome=outcome):
                 self.setUp()
-                self.recovered_announcement()
+                self.recovered_announcement(form)
                 self.benchmark_reads["actions/runs/38261019120/attempts/1"]["conclusion"] = outcome
                 self.checks[-1]["conclusion"] = conclusion
                 self.checks[-1]["output"]["summary"] = self.checks[-1]["output"]["summary"].replace("`cancelled`", "`" + outcome + "`")
+                if form == "current":
+                    self.checks[-1]["output"]["summary"] = self.checks[-1]["output"]["summary"].replace(
+                        "\n\nCancellation cause is not established as pre-execution supersession; "
+                        "the native cancellation classification is preserved.", "", 1)
                 self.jobs[-1]["conclusion"] = conclusion
                 result = self.gate()
                 self.assertTrue(result["success"], result["errors"])
