@@ -108,6 +108,35 @@ as **skipped**, never as successful executions. The workflow independently
 requires each native/mobile/UEFI group result to be skipped; all source coverage
 and retained main execution checks remain required.
 
+## Terminal benchmark announcement provenance (#3209)
+
+A report-only compiler benchmark can be announced on the same SHA after the
+queue execution finishes. GitHub may then attach its custom check to the source
+run's jobs listing. The reuse decision and finish authenticate this display
+metadata separately from the twenty-three actual workload jobs.
+
+When the native lifecycle controller closes an announced check as cancelled,
+skipped or failed with **Not measured**, the reader preserves that verdict. It
+requires the exact original request/head/check/app/attempt, the completed
+executor's canonical request title and trusted harness, and the existing native
+terminal summary. A single read of the exact executor-attempt lifecycle artifact
+name discovers the controller; the snapshot must be complete within 100 rows.
+Only one artifact uploaded within the existing five-minute controller window
+may bind the write. Its unexpired digest and repository/run/head identity must
+match a successful trusted-main automatic lifecycle run. The unique controller
+job must have successful checkout, native compilation, reconciliation and
+artifact upload steps; the check's completion must fall inside its reconciliation
+step. Later no-op replay artifacts cannot stand in for the original write.
+
+Missing, expired, ambiguous, moving or in-progress controller evidence still
+fails closed under the existing metadata-read budget. The reader does not poll,
+wait for the physical runner, or turn bookkeeping into measurement acceptance.
+Request-only recovery and manual controller replay remain outside this narrow
+announcement path. Normal terminal measurement publication keeps its existing
+independent publisher proof. The retained #3785 public payload and its negative
+identity controls exercise the ordinary inventory and a queued-to-cancelled
+transition between the full reuse decision and finish.
+
 ## Qualification and measurement
 
 Run `python3 -B tools/main_ci_reuse_test.py -v` and the existing workflow

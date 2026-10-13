@@ -379,7 +379,7 @@ class ZigCacheWorkflowTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", bootstrap)
         self.assertIn('if [[ "$BUSTER_MATRIX_SHARD" != release ]]', bootstrap)
         self.assertIn("BOOTSTRAP_WRAPPERS owned-by-release-shard", bootstrap)
-        for command in ("tools/bootstrap_wrapper_cases.py --jobs 2",
+        for command in ("tools/bootstrap_wrapper_cases.py --jobs 4",
                         "tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v"):
             self.assertIn(command + ' 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"',
                           bootstrap)

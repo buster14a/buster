@@ -5,6 +5,7 @@ import argparse
 import copy
 from datetime import datetime, timezone
 import io
+import json
 from pathlib import Path
 import re
 import sys
@@ -339,6 +340,139 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                              "status": "in_progress", "conclusion": None}]}
         self.benchmark_reads = {"actions/runs/500/attempts/1": request, "actions/runs/600/attempts/1": publisher,
                                 "actions/runs/600/attempts/1/jobs?per_page=100": {"total_count": 1, "jobs": [writer]}}
+
+    def recovered_announcement(self):
+        """Replay the retained #3785 cancellation through the ordinary inventory."""
+        payload = (ROOT / "tools/fixtures/compiler_terminal_announcement.json").read_text(encoding="utf-8")
+        recorded_head = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
+        fixture = json.loads(payload.replace(recorded_head, self.HEAD))
+        check = fixture["check"]
+        self.checks.append(check)
+        self.jobs.append({"id": check["id"], "name": check["name"], "run_id": self.RUN, "run_attempt": 1,
+                          "head_sha": self.HEAD, "status": "completed", "conclusion": "cancelled",
+                          "steps": [], "runner_id": None})
+        self.benchmark_reads = fixture["reads"]
+
+    def test_retained_terminal_announcement_replays_without_measurement_promotion(self):
+        self.HEAD = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
+        self.setUp()
+        self.recovered_announcement()
+        result = self.gate()
+        self.assertTrue(result["success"], result["errors"])
+        metadata = result["reconciled_checks"][-1]
+        self.assertEqual((metadata["check"]["status"], metadata["check"]["conclusion"]), ("completed", "cancelled"))
+        proof = metadata["publisher_provenance"]["terminal_recovery"]
+        self.assertEqual(proof["executor"]["id"], 38261019120)
+        self.assertEqual(proof["controller"]["id"], 38261177183)
+        self.assertEqual(proof["writer"]["id"], 114851763130)
+        self.assertEqual(proof["artifact"]["id"], 11752441561)
+        self.assertEqual(len(result["jobs"]), 25)
+
+    def test_terminal_announcement_rejects_forged_incomplete_or_moving_provenance(self):
+        cases = ("check-id", "app", "head", "marker-attempt", "measurement-success", "title", "protocol",
+                 "summary-request", "summary-executor", "summary-harness", "request-head", "request-attempt",
+                 "executor-title", "executor-attempt", "executor-repository", "executor-running",
+                 "artifact-expired", "artifact-digest", "artifact-repository", "artifact-head", "artifact-duplicate",
+                 "artifact-incomplete", "artifact-time", "controller-workflow", "controller-event", "controller-repository",
+                 "controller-head", "controller-failure", "controller-attempt", "writer-run", "writer-duplicate",
+                 "checkout-skipped", "compile-failure", "reconcile-skipped", "upload-failure", "write-time",
+                 "write-duplicate", "completion-time", "missing-workload")
+        for case in cases:
+            with self.subTest(case=case):
+                self.setUp()
+                self.recovered_announcement()
+                check = self.checks[-1]
+                reads = self.benchmark_reads
+                request = reads["actions/runs/38260981679/attempts/1"]
+                executor = reads["actions/runs/38261019120/attempts/1"]
+                artifacts = reads["actions/artifacts?name=9700x-lifecycle-38261019120-1&per_page=100"]
+                artifact = artifacts["artifacts"][0]
+                controller = reads["actions/runs/38261177183"]
+                batch = reads["actions/runs/38261177183/attempts/1/jobs?per_page=100"]
+                writer = batch["jobs"][0]
+                steps = {step["name"]: step for step in writer["steps"]}
+                names = github_ci_time.COMPILER_BENCHMARK_LIFECYCLE_STEPS
+                if case == "check-id": check["id"] += 1
+                elif case == "app": check["app"]["id"] = 1
+                elif case == "head": check["head_sha"] = "f" * 40
+                elif case == "marker-attempt":
+                    check["external_id"] = check["external_id"].replace("38260981679.1", "38260981679.2")
+                    reads["actions/runs/38260981679/attempts/2"] = request
+                elif case == "measurement-success": check["conclusion"] = "success"
+                elif case == "title": check["output"]["title"] = "Successful measurement"
+                elif case == "protocol": check["output"]["summary"] = check["output"]["summary"].replace("terminal-native-v1", "unknown")
+                elif case == "summary-request": check["output"]["summary"] = check["output"]["summary"].replace("request 38260981679 attempt 1.", "request 38260981678 attempt 1.")
+                elif case == "summary-executor":
+                    check["output"]["summary"] = check["output"]["summary"].replace("Executor identity run 38261019120", "Executor identity run 38261019121")
+                    reads["actions/runs/38261019121/attempts/1"] = executor
+                elif case == "summary-harness": check["output"]["summary"] = check["output"]["summary"].replace("Trusted harness `" + self.HEAD, "Trusted harness `" + "f" * 40)
+                elif case == "request-head": request["head_sha"] = "f" * 40
+                elif case == "request-attempt": request["run_attempt"] = 2
+                elif case == "executor-title": executor["display_title"] += " foreign"
+                elif case == "executor-attempt": executor["run_attempt"] = 2
+                elif case == "executor-repository": executor["repository"]["id"] += 1; executor["head_repository"]["id"] += 1
+                elif case == "executor-running": executor["status"] = "in_progress"
+                elif case == "artifact-expired": artifact["expired"] = True
+                elif case == "artifact-digest": artifact["digest"] = "sha256:invalid"
+                elif case == "artifact-repository": artifact["workflow_run"]["repository_id"] += 1
+                elif case == "artifact-head": artifact["workflow_run"]["head_sha"] = "f" * 40
+                elif case == "artifact-duplicate":
+                    artifacts["artifacts"].append(dict(artifact, id=artifact["id"] + 1))
+                    artifacts["total_count"] = 2
+                elif case == "artifact-incomplete": artifacts["total_count"] = 101
+                elif case == "artifact-time": artifact["created_at"] = "2026-10-12T14:20:00Z"
+                elif case == "controller-workflow": controller["path"] = github_ci_time.COMPILER_BENCHMARK_WORKFLOW
+                elif case == "controller-event": controller["event"] = "pull_request"
+                elif case == "controller-repository": controller["repository"]["id"] += 1; controller["head_repository"]["id"] += 1
+                elif case == "controller-head": controller["head_sha"] = "f" * 40
+                elif case == "controller-failure": controller["conclusion"] = "failure"
+                elif case == "controller-attempt":
+                    controller["run_attempt"] = 2
+                    reads["actions/runs/38261177183/attempts/2/jobs?per_page=100"] = batch
+                elif case == "writer-run": writer["run_id"] += 1
+                elif case == "writer-duplicate": batch["jobs"].append(copy.deepcopy(writer)); batch["total_count"] = 2
+                elif case == "checkout-skipped": steps[names[0]]["conclusion"] = "skipped"
+                elif case == "compile-failure": steps[names[1]]["conclusion"] = "failure"
+                elif case == "reconcile-skipped": steps[names[2]]["conclusion"] = "skipped"
+                elif case == "upload-failure": steps[names[3]]["conclusion"] = "failure"
+                elif case == "write-time": steps[names[2]]["started_at"] = "2026-10-12T14:12:28Z"
+                elif case == "write-duplicate": writer["steps"].append(copy.deepcopy(steps[names[2]]))
+                elif case == "completion-time": check["completed_at"] = None
+                elif case == "missing-workload": self.jobs.pop(0)
+                result = self.gate()
+                self.assertFalse(result["success"], case)
+
+    def test_recovered_failure_and_skips_remain_not_measured(self):
+        for outcome, conclusion in (("failure", "failure"), ("timed_out", "failure"),
+                                    ("success", "failure"), ("skipped", "skipped")):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                self.recovered_announcement()
+                self.benchmark_reads["actions/runs/38261019120/attempts/1"]["conclusion"] = outcome
+                self.checks[-1]["conclusion"] = conclusion
+                self.checks[-1]["output"]["summary"] = self.checks[-1]["output"]["summary"].replace("`cancelled`", "`" + outcome + "`")
+                self.jobs[-1]["conclusion"] = conclusion
+                result = self.gate()
+                self.assertTrue(result["success"], result["errors"])
+                self.assertEqual(result["reconciled_checks"][-1]["check"]["conclusion"], conclusion)
+                self.assertNotEqual(conclusion, "success")
+
+    def test_later_noop_replay_artifact_cannot_replace_the_actual_write(self):
+        self.recovered_announcement()
+        artifacts = self.benchmark_reads["actions/artifacts?name=9700x-lifecycle-38261019120-1&per_page=100"]
+        artifacts["artifacts"].append(dict(artifacts["artifacts"][0], id=11752441562,
+                                            created_at="2026-10-13T14:12:29Z"))
+        artifacts["total_count"] = 2
+        self.assertTrue(self.gate()["success"])
+        artifacts["artifacts"].pop(0)
+        artifacts["total_count"] = 1
+        self.assertFalse(self.gate()["success"])
+
+    def test_lifecycle_writer_names_match_the_existing_workflow(self):
+        workflow = (ROOT / github_ci_time.COMPILER_BENCHMARK_LIFECYCLE_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn("    name: Reconcile the exact completed benchmark attempt\n", workflow)
+        for name in github_ci_time.COMPILER_BENCHMARK_LIFECYCLE_STEPS:
+            self.assertEqual(workflow.count("      - name: " + name + "\n"), 1)
 
     def test_names_and_namespaces_match_the_trusted_publisher(self):
         self.assertEqual({name: prefix for name, (prefix, _, _) in github_ci_time.COMPILER_BENCHMARK_CHECKS.items()},

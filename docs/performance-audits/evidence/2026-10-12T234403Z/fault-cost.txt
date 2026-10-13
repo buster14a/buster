@@ -1,0 +1,4 @@
+# faultcost.c: mmap anonymous, touch one byte per page, best of 10, clang -O2
+pages=421 best=443us per_page=1.05us
+pages=1400 best=1622us per_page=1.16us
+pages=4096 best=5090us per_page=1.24us

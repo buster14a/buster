@@ -1,0 +1,136 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 0032312b..5de6ba99 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -48315,6 +48315,70 @@ u64 c_test_ir_first_token_typedef_probes(void)
+      C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
+      C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
+ 
++__attribute__((noinline)) static void census_tw1_call(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_true(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_bound(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_predefined(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_nosymbol(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_stmt_keyword(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_mismatch(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_call(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_true(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_bound(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_predefined(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_nosymbol(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_stmt_keyword(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_mismatch(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_label_call(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_label_shape(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_label_default(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_label_proven(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_label_true(void) { __asm__ volatile(""); }
++
++__attribute__((noinline)) static bool census_type_word(CIntegerIrBuilder* builder, CToken first, CEntityId entity, u32 site)
++{
++    bool answer = c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect);
++    bool token_answer = c_parse_type_word_for_dialect_token(builder->preprocess, first);
++    bool predefined = first.symbol && builder->preprocess.symbols && first.symbol <= builder->preprocess.symbols->predefined_limit;
++    bool stmt = c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_KEYWORD_SET);
++    if (site == 1)
++    {
++        census_tw1_call();
++        if (answer) census_tw1_true();
++        if (entity.value != C_ID_UNDERLYING_INVALID) census_tw1_bound();
++        if (predefined) census_tw1_predefined();
++        if (!first.symbol) census_tw1_nosymbol();
++        if (stmt) census_tw1_stmt_keyword();
++        if (answer != token_answer) census_tw1_mismatch();
++    }
++    else
++    {
++        census_tw2_call();
++        if (answer) census_tw2_true();
++        if (entity.value != C_ID_UNDERLYING_INVALID) census_tw2_bound();
++        if (predefined) census_tw2_predefined();
++        if (!first.symbol) census_tw2_nosymbol();
++        if (stmt) census_tw2_stmt_keyword();
++        if (answer != token_answer) census_tw2_mismatch();
++    }
++    return answer;
++}
++
++__attribute__((noinline)) static bool census_label(CIntegerIrBuilder* builder, u32 start, u32 index, u32 end)
++{
++    CPreprocessResult const* preprocess = &builder->preprocess;
++    census_label_call();
++    bool shape = end <= preprocess->token_count && index < end && index + 1 < end && preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER &&
++                 preprocess->tokens[index + 1].punctuator == C_PUNCTUATOR_COLON;
++    if (shape) census_label_shape();
++    if (shape && c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT)) census_label_default();
++    bool proven = c_ir_named_label_at(preprocess, start, index, end);
++    if (proven) census_label_proven();
++    bool result = proven && c_parse_label_candidate_at(&builder->parse, preprocess, start, index);
++    if (result) census_label_true();
++    return result;
++}
++
+ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
+ {
+     if (!state->initialized && !c_ir_lower_body_initialize(builder, state))
+@@ -48879,8 +48943,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
+                              !c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first));
+             }
+ #endif
+-            if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
+-                c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
++            if (census_label(builder, task.start, index, task.end))
+             {
+                 CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, first));
+                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
+@@ -49599,7 +49662,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
+                 (first_is_typedef_name || first_is_unbound_typedef_name ||
+                  (first.kind == C_TOKEN_IDENTIFIER &&
+                   (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
+-                   c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect))));
++                   census_type_word(builder, first, first_entity, 1))));
+             // A declaration's commas separate declarators. Retain its full
+             // range for the automatic-declaration-list frame even when this
+             // task also permits a trailing statement-expression value.
+@@ -49780,7 +49843,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
+                 continue;
+             }
+             if (first.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF) ||
+-                                                     c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect) ||
++                                                     census_type_word(builder, first, first_entity, 2) ||
+                                                       first_is_typedef_name || first_is_unbound_typedef_name))
+             {
+                 if (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF))
+diff --git a/src/buster/lib/compiler/frontend/c/c_internal.h b/src/buster/lib/compiler/frontend/c/c_internal.h
+index 0f3431df..48a7c7c9 100644
+--- a/src/buster/lib/compiler/frontend/c/c_internal.h
++++ b/src/buster/lib/compiler/frontend/c/c_internal.h
+@@ -162,6 +162,7 @@ BUSTER_C_EXTERN u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsi
+ BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
+ BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
+ BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
++BUSTER_C_EXTERN bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
+ BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
+ // GNU `_Alignof(object)` answers the object's alignment, which its alignment
+ // records raise; a record may itself spell `_Alignof(object)`, so each layout
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 6419d8f4..557d0c20 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -269,7 +269,6 @@ enum
+ // because every specifier-word spelling is interned into the predefined
+ // range. Defined after the spelling ladders they derive from.
+ BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
+-BUSTER_C_INTERNAL bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
+ BUSTER_C_INTERNAL bool c_parse_auto_type_word_token(CPreprocessResult preprocess, CToken token);
+ BUSTER_C_INTERNAL bool c_parse_type_qualifier_word_token(CPreprocessResult preprocess, CToken token, CType* type);
+ BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult preprocess, CToken token, CType* qualifiers);
+@@ -15698,7 +15697,7 @@ BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CTok
+     return bits;
+ }
+ 
+-BUSTER_C_INTERNAL bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token)
++BUSTER_C_SHARED bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token)
+ {
+     u16 mask = C_WORD_TYPE;
+     if (c_preprocess_dialect_is_gnu(preprocess.dialect))
