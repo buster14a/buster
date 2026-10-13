@@ -24737,13 +24737,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArgum
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 mapped_source = string_format(temporary.arena,
                 S8("#line 1 \"{S8}\"\n"
-                   "static int same(const char* a, const char* b) { while (*a && *a == *b) { a += 1; b += 1; } return *a == *b; }\n"
+                   "static int same(const char* a, const char* b) {{ while (*a && *a == *b) {{ a += 1; b += 1; }} return *a == *b; }}\n"
                    "#define FILE_HERE() __builtin_FILE()\n"
                    "static const char* builtin_file = __builtin_FILE();\n"
                    "static const char* macro_builtin_file = FILE_HERE();\n"
                    "static const char* macro_file = __FILE__;\n"
-                   "int main(void) { return !(same(builtin_file, macro_builtin_file) && same(builtin_file, macro_file) && "
-                   "same(__builtin_FILE(), \"{S8}\")); }\n"),
+                   "int main(void) {{ return !(same(builtin_file, macro_builtin_file) && same(builtin_file, macro_file) && "
+                   "same(__builtin_FILE(), \"{S8}\")); }}\n"),
                 source_paths[map_case], expected_paths[map_case]);
             bool source_written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(mapped_source));
             if (BUSTER_REQUIRE(arguments, source_written))
