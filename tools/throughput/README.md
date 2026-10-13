@@ -461,13 +461,17 @@ set:
 | `skewed` | 4 × max W | One TU eight times larger than the others |
 | `tiny` | 16 × max W | One small function per TU |
 | `count-wW-nN` | W−1, W or W+1 | Equal TUs, measured at 1 and W workers |
+| `size-nN` | 2, 4, 8, 16, 32, 64 | Equal TUs, measured at 1, 2 and max W workers |
 | `diagnostic` | max(3, max W + 1) | Two TUs reference undeclared identifiers |
 
 - `equal`, `skewed` and `tiny` keep the same inputs at every W, so they are
   strong-scaling series. Their points are: the compiler default with no
   `-fcompile-jobs`, the explicit one-worker reference, then each listed W.
-- `--shape equal|skewed|tiny|count|all` selects series (repeatable; default
-  all). The diagnostic series always runs.
+- `size` brackets the population at which a multi-lane compile repays its
+  fixed entry cost (#53). Each series records its total `input_bytes`. It needs
+  a maximum W of at least 2 and always adds a two-worker point.
+- `--shape equal|skewed|tiny|count|size|all` selects series (repeatable;
+  default all). The diagnostic series always runs.
 - `--profile` and `--scale` size the functions as in `generate`.
 
 **Each sample** is a fresh process:
@@ -476,7 +480,11 @@ run in the series directory. After every sample, `scale` checks:
 - exit status 0 and a nonempty executable;
 - the `CC_METRICS` header reports every input `ok`;
 - `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
-  one-worker points;
+  one-worker points. It must be 1 when the header reports `lane_gate=serial`
+  (the compiler kept one worker for a population too small to repay the
+  multi-lane entry cost). A compiler without the gate omits the field and gets
+  the same check as before; an unknown value is invalid;
+- every sample of one point reports the same `lane_gate`;
 - the executable is byte-identical across every worker count and repeat;
 - peak RSS stays under `--max-rss-mib`, when given.
 
@@ -497,7 +505,7 @@ excess makes the run invalid: exit 2 and a `scaling.json` with
 | `scaling-metadata.json` | Compiler path and SHA-256, requested set, per-CPU package/core/sibling topology, placements, input hashes per series |
 | `scaling.csv` | One row per timed sample: wall, user and system time, peak RSS, observed workers, interval kind, artifact hash |
 | `commands.jsonl` | Exact argv, working directory and CPU set of every launch |
-| `scaling.json`, `scaling.md` | Per point: median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency, CPU-work (user+system) inflation and peak-RSS inflation |
+| `scaling.json`, `scaling.md` | Per series: inputs and input bytes. Per point: observed workers and `lane_gate` (`null`/`-` when absent), median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency over the participating workers, CPU-work (user+system) inflation and peak-RSS inflation |
 
 Peak RSS is the compiler process's own high-water mark. It is not a sum over a
 process tree.

@@ -2,7 +2,8 @@
 // keeps its POSIX and Windows paths side by side inside one function
 // rather than in per-platform files, so the contract stays in one place:
 // virtual memory (os_reserve/os_commit/os_decommit, the advisory os_prefault
-// hint, and protection flags),
+// hint, os_discard for abandoned ranges inside a live mapping, and
+// protection flags),
 // threads, mutexes, and TLS, directory listing (os_directory_entry_names),
 // checked file IO (os_file_write_checked,
 // os_file_close_checked, os_file_flush), replacement publication
@@ -758,6 +759,31 @@ bool os_decommit(void* address, u64 size)
 #if BUSTER_BENCH_ALLOCATIONS
     arena_benchmark_event(ARENA_BENCHMARK_OS_DECOMMIT, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
 #endif
+    return result;
+}
+
+u64 os_discard(void* address, u64 size)
+{
+    u64 page_size = os_get_page_size();
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    u64 start = ((u64)address + page_size - 1u) & ~(page_size - 1u);
+    u64 end = ((u64)address + size) & ~(page_size - 1u);
+    u64 result = 0;
+    if (address && size && end > start)
+    {
+        result = end - start;
+#if defined(__linux__) || defined(__APPLE__)
+        // The range stays mapped and writable. Linux refills it with zero
+        // pages on the next touch; Darwin may keep the old contents.
+        if (madvise((void*)start, result, MADV_DONTNEED) != 0) result = 0;
+#elif defined(_WIN32)
+        // MEM_RESET keeps the range committed and accessible with undefined
+        // contents; the pages need not be paged out or kept resident.
+        if (!VirtualAlloc((void*)start, (SIZE_T)result, MEM_RESET, PAGE_READWRITE)) result = 0;
+#else
+        result = 0;
+#endif
+    }
     return result;
 }
 

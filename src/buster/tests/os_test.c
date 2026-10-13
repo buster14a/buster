@@ -2777,6 +2777,41 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
     }
 
+    // os_discard releases only the complete pages inside an abandoned range
+    // and leaves the whole mapping writable: the partial pages at either end
+    // keep their bytes, and the released page accepts new writes (#3854).
+    {
+        u64 page_size = os_get_page_size();
+        u64 size = 4 * page_size;
+        u8* reservation = (u8*)os_reserve(0, size, (ProtectionFlags){0},
+                                          (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+        BUSTER_TEST(arguments, reservation != 0);
+        if (reservation)
+        {
+            bool committed = os_commit(reservation, size, (ProtectionFlags){.read = true, .write = true}, false);
+            BUSTER_TEST(arguments, committed);
+            if (committed)
+            {
+                memset(reservation, 0x5a, size);
+                BUSTER_TEST(arguments, os_discard(0, size) == 0);
+                BUSTER_TEST(arguments, os_discard(reservation + 1, page_size - 2) == 0);
+                // From mid first page to mid third page: only page two is whole.
+                u64 released = os_discard(reservation + page_size / 2, 2 * page_size);
+                BUSTER_TEST(arguments, released == 0 || released == page_size);
+                BUSTER_TEST(arguments, reservation[page_size - 1] == 0x5a && reservation[2 * page_size] == 0x5a);
+                BUSTER_TEST(arguments, reservation[0] == 0x5a && reservation[size - 1] == 0x5a);
+                reservation[page_size] = 0xc3;
+                reservation[2 * page_size - 1] = 0x3c;
+                BUSTER_TEST(arguments, reservation[page_size] == 0xc3 && reservation[2 * page_size - 1] == 0x3c);
+#if defined(__linux__)
+                BUSTER_TEST(arguments, released == page_size);
+                BUSTER_TEST(arguments, reservation[page_size + 1] == 0);
+#endif
+            }
+            BUSTER_TEST(arguments, os_unreserve(reservation, size));
+        }
+    }
+
     // Releasing the selected context must clear TLS before its arenas go
     // away. Direct scratch users still require a selected context; POSIX file
     // path operations retain their prior teardown behavior with private arenas.
