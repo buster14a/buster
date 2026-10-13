@@ -10,9 +10,6 @@
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
-BUSTER_C_SHARED bool c_test_parse_type_replay_effective_member_count(void);
-BUSTER_C_SHARED bool c_test_ast_type_replay_effective_member_count(void);
-BUSTER_C_SHARED bool c_test_flexible_array_postorder_work(Arena* arena);
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/wasm/wasm.h>

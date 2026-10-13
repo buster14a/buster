@@ -2296,23 +2296,27 @@ BUSTER_C_SHARED bool c_test_flexible_array_postorder_work(Arena* arena)
             members[member_count++] = (CMember){.name = {.length = 1}, .type = {.value = INTEGER_TYPE}};
         }
     }
+    // Keep the full anonymous parent row contiguous before the children's named rows.
+    u32 wide_parent_start = member_count;
+    u32 wide_child_start = wide_parent_start + WIDE_COUNT;
     types[WIDE_ROOT] = (CType){
         .kind = C_TYPE_STRUCT,
         .is_complete = true,
-        .member_start = member_count,
+        .member_start = wide_parent_start,
         .member_count = WIDE_COUNT,
     };
     for (u32 index = 0; index < WIDE_COUNT; index += 1)
     {
-        members[member_count++] = (CMember){.type = {.value = WIDE_FIRST + index}};
+        members[wide_parent_start + index] = (CMember){.type = {.value = WIDE_FIRST + index}};
         types[WIDE_FIRST + index] = (CType){
             .kind = C_TYPE_STRUCT,
             .is_complete = true,
-            .member_start = member_count,
+            .member_start = wide_child_start + index,
             .member_count = 1,
         };
-        members[member_count++] = (CMember){.name = {.length = 1}, .type = {.value = INTEGER_TYPE}};
+        members[wide_child_start + index] = (CMember){.name = {.length = 1}, .type = {.value = INTEGER_TYPE}};
     }
+    member_count = wide_child_start + WIDE_COUNT;
     types[INTEGER_TYPE].kind = C_TYPE_INT;
     CParseResult result = {
         .types = types,
