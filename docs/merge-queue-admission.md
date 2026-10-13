@@ -151,7 +151,11 @@ for the predecessor and the five gates, and did almost no verification. The
   Every pass enumerates the live `gh-readonly-queue/main/*` refs itself and never
   trusts a delivery payload. Duplicate, out-of-order, missed and coalesced events
   therefore converge to the same result. One global concurrency group
-  serializes passes; each job has a 10-minute limit and never waits on prerequisites.
+  serializes passes and retains only the latest pending delivery (`queue: single`,
+  #4054). The running pass is never cancelled by a later delivery. Coalesced
+  workflow runs retain their cancellation outcome; they are delivery hints, not
+  the exact-group admission checks published by the running pass. Each job has a
+  10-minute limit and never waits on prerequisites.
   Only transient GET recovery uses bounded backoff, as described below.
 - **Trust.** The job checks out live `main` and runs only that code. It fetches
   group commits as data and never checks out or executes them. The job has read
@@ -193,6 +197,31 @@ for the predecessor and the five gates, and did almost no verification. The
   decision in its `merge-queue-reconcile-*` artifact and job log. This
   deterministic split lets both versions coexist during rollout without racing.
   `run_gate` (`check-group`) remains in the tool only for such groups.
+
+### Delivery capacity and recovery (#4054)
+
+A burst previously filled the 100-pending `queue: max` backlog. GitHub rejected
+new invocations before jobs existed with `Queue is full for concurrency group
+'merge-queue-admission-reconcile'`. A draining queue can still be overloaded:
+run 38408503052 waited 103 minutes 26 seconds between creation and job start,
+while the observed pending population was 100. This was orchestration wait, not
+a compiler or gate failure, and the pass itself subsequently succeeded.
+
+The single-pending policy coalesces redundant deliveries instead of retaining
+one pass per event. Each started pass enumerates all current queue refs and
+checks exact current evidence; no event-specific work or approval is discarded.
+If a prerequisite changes after that enumeration, its completion or the
+scheduled sweep causes another full pass. A failed or cancelled **required
+gate** remains terminal failure; coalescing delivery workflows cannot admit it.
+
+For a capacity incident, retain the failed run's annotation and exact job count,
+read the group's running/pending inventory, and distinguish a stalled active
+job from accumulated deliveries. Inspect actual job start/end times separately
+from workflow creation. Do not cancel a live writer or weaken admission to
+clear the display. After rollout, verify the single-pending occupancy and a
+successful trusted-main reconciliation artifact. Existing failed attempts stay
+visible; local lifecycle tests do not reproduce GitHub's scheduler or establish
+an admission-latency improvement.
 
 ### Activation and measurement
 
