@@ -2382,8 +2382,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
     {
         IrType* aggregate = ir_type_from_id(&program->types, definition->canonical_type);
         valid = aggregate && (definition->opcode != IR_OPCODE_ARRAY || aggregate->kind == IR_TYPE_ARRAY || aggregate->kind == IR_TYPE_VECTOR) &&
-                (definition->opcode != IR_OPCODE_AGGREGATE || (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
-                                                                    (!aggregate->field_count || aggregate->fields));
+                (definition->opcode != IR_OPCODE_AGGREGATE || ((aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
+                                                                     (!aggregate->field_count || aggregate->fields)));
         TemporalArena temporary = scratch_begin(0, 0);
         u32 operand_count = definition->operand_count;
         IrValueLabelMetadata* sources = arena_allocate(temporary.arena, IrValueLabelMetadata, operand_count ? operand_count : 1);
@@ -6107,7 +6107,7 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
     IrInstruction* field_instruction = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
     if (access_type && access_type->kind == IR_TYPE_INTEGER && access_type->layout.resolved && field_instruction &&
         field_instruction->opcode == IR_OPCODE_FIELD && field_instruction->operand_count == 1 && field_instruction->immediate_count == 1 &&
-        field_instruction->operands[0].value < function->value_count)
+        field_instruction->operands && field_instruction->immediates && field_instruction->operands[0].value < function->value_count)
     {
         IrType* aggregate = ir_type_from_id(&program->types, function->values[field_instruction->operands[0].value].canonical_type);
         u64 field_index = field_instruction->immediates[0];

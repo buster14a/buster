@@ -1201,14 +1201,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_case(UnitTestA
 // A later FIELD definition can be consulted by an earlier mismatched LOAD.
 // This verifies that its narrow-bit-field probe also refuses missing backing
 // before the canonical walk reaches the FIELD row itself.
-BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_precheck(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_precheck(UnitTestArguments* arguments, u32 variant)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
     IrValidateTestBuilder builder = ir_validate_test_builder(temporary.arena);
     u32 block = ir_validate_test_block(&builder);
+    IrField* fields = 0;
+    if (variant != 0)
+    {
+        fields = arena_allocate(temporary.arena, IrField, 1);
+        fields[0] = (IrField){.type = builder.i32_type};
+    }
     IrTypeId aggregate_type = ir_program_add_type(&builder.program, (IrType){
-        .kind = IR_TYPE_STRUCT, .field_count = 1,
+        .kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 1,
         .layout = {.size = 4, .alignment = 4, .resolved = true},
     });
     IrSymbolId symbol = ir_program_add_symbol(&builder.program, (IrSymbol){
@@ -1225,10 +1231,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_precheck(UnitT
     ir_validate_test_row(&builder, block, (IrInstruction){
         .opcode = IR_OPCODE_LOAD, .canonical_type = builder.i64_type, .result = loaded, .operands = load_operands, .operand_count = 1,
     });
-    IrValueId* field_operands = arena_allocate(temporary.arena, IrValueId, 1);
-    field_operands[0] = base;
-    u64* field_immediates = arena_allocate(temporary.arena, u64, 1);
-    field_immediates[0] = 0;
+    IrValueId* field_operands = variant == 1 ? 0 : arena_allocate(temporary.arena, IrValueId, 1);
+    if (field_operands)
+    {
+        field_operands[0] = base;
+    }
+    u64* field_immediates = variant == 2 ? 0 : arena_allocate(temporary.arena, u64, 1);
+    if (field_immediates)
+    {
+        field_immediates[0] = 0;
+    }
     ir_validate_test_row(&builder, block, (IrInstruction){
         .opcode = IR_OPCODE_FIELD, .canonical_type = builder.i32_type, .result = field_place,
         .operands = field_operands, .operand_count = 1, .immediates = field_immediates, .immediate_count = 1,
@@ -1236,7 +1248,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_precheck(UnitT
     ir_validate_test_unreachable(&builder, block);
     IrValidationResult validation = ir_validate_canonical_module(&builder.program, builder.program.modules);
     BUSTER_TEST_RAW(arguments, validation.error == IR_VALIDATION_OPERAND_TYPE,
-                    string_format(temporary.arena, S8("field storage precheck returned {u32}"), (u32)validation.error));
+                    string_format(temporary.arena, S8("field storage precheck variant {u32} returned {u32}"),
+                                  variant, (u32)validation.error));
     scratch_end(temporary);
     return result;
 }
@@ -1306,7 +1319,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_storage_guard_tests(UnitTest
     test = ir_validate_test_field_storage_case(arguments, false, false);
     result.test_count += test.test_count;
     result.succeeded_test_count += test.succeeded_test_count;
-    test = ir_validate_test_field_storage_precheck(arguments);
+    test = ir_validate_test_field_storage_precheck(arguments, 0);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_precheck(arguments, 1);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_precheck(arguments, 2);
     result.test_count += test.test_count;
     result.succeeded_test_count += test.succeeded_test_count;
     test = ir_validate_test_bytes_storage_case(arguments, 0);
