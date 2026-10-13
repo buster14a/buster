@@ -291,7 +291,7 @@ typedef struct BusterX86MetadataString BusterX86MetadataString;
 struct BusterX86MetadataString
 {
     // Logical offset into the generated string pool. The pool is chunked in
-    // the generated ABI, but the one-time decode flattens it into a
+    // the generated ABI, but its chunks are copied on first use into one
     // contiguous host array, so prefer buster_x86_metadata_string_span() and
     // scan the bytes directly; buster_x86_metadata_string_byte() remains for
     // one-off reads and costs a call per byte.
@@ -1073,10 +1073,13 @@ BUSTER_F_DECL void buster_x86_metadata_prewarm_all_forms(void);
 // a fixed-template row reaches shapes and dense tables, a shape reaches the
 // selector's forms and an exact plan, a TLS or GOT recipe group reaches the
 // encoder's forms, a plan reaches its form's facts, the facts reach the parsed
-// pattern, operand views and records.
+// pattern, operand views and records, and nearly everything reaches the
+// string pool's chunks.
 typedef enum BusterX86OnceLevel
 {
-    BUSTER_X86_ONCE_LEVEL_MEMO = 1,
+    BUSTER_X86_ONCE_LEVEL_POOL_CHUNK = 1,
+    BUSTER_X86_ONCE_LEVEL_NAME_INDEXES,
+    BUSTER_X86_ONCE_LEVEL_MEMO,
     BUSTER_X86_ONCE_LEVEL_RECORD,
     BUSTER_X86_ONCE_LEVEL_OPERAND_VIEW,
     BUSTER_X86_ONCE_LEVEL_ROW,

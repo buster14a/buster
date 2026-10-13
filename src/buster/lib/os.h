@@ -13,7 +13,8 @@
 // globals state BUSTER_CHECK_SERIAL_INITIALIZATION() and are filled by
 // their module's prewarm entry point before lanes run, unless each entry is
 // filled through a once-claim (once_claim_u8, over the plain-object
-// atomic_u8_load_acquire family), which any thread may take.
+// atomic_u8_load_acquire family), which any thread may take; lane_release
+// joins a parked gang when a later serial prewarm is still needed.
 
 #include <buster/lib/base.h>
 
@@ -895,6 +896,11 @@ BUSTER_F_DECL LaneRange lane_range(u64 item_count);
 // context is saved and restored. Nested gangs retain the old independent-gang
 // behavior so an outer lane can safely narrow and invoke another lane region.
 BUSTER_F_DECL void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument);
+// Joins the calling context's parked resident workers, if any; the next
+// lane_run recreates them. Parked workers are live threads, so a caller must
+// release them before serial initialization (BUSTER_CHECK_SERIAL_INITIALIZATION).
+// Only outside an active lane region. A no-op in single-threaded builds.
+BUSTER_F_DECL void lane_release(void);
 
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
 BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);

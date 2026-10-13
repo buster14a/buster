@@ -38,10 +38,11 @@
 - **A global built on first use is prewarmed, never raced — unless each
   entry is filled through a once-claim.** Several hot tables are derived once
   and read forever after through plain loads — the C frontend's character
-  classes, compact lexer tables, punctuator dispatch and declaration
-  keywords, the codegen ABI target cache, the font provider's resolved paths,
-  and the x86 metadata decode. That shape is sound only while no other
-  thread can be reading, so every such build states
+  classes, compact lexer tables, punctuator dispatch, declaration keywords
+  and symbol-table prototype (built on a process's second serial table, so a
+  one-compile process never builds it), the codegen ABI target cache, the
+  font provider's resolved paths, and the x86 metadata decode. That shape is
+  sound only while no other thread can be reading, so every such build states
   `BUSTER_CHECK_SERIAL_INITIALIZATION()` (`<buster/lib/os.h>`, always
   compiled in, over `os_is_only_live_thread()`), and every owning module
   publishes a prewarm entry point that fills it on the calling thread:
@@ -57,8 +58,9 @@
   The exception is a table whose entries are filled one at a time on first
   use, where a compile reaches a few hundred of thousands of entries and a
   complete prewarm would cost more than the work (#53): the x86 per-form
-  metadata caches (records, validity, NUL distances, normalized rows, parsed
-  patterns, operand views, form facts, the physical-view memo, exact plans)
+  metadata caches (string-pool chunks, the iclass/iform name indexes,
+  records, validity, NUL distances, normalized rows, parsed patterns, operand
+  views, form facts, the physical-view memo, exact plans)
   and the machine encoder's closed expansion shapes, dense GPR tables,
   variable-memory cells and fixed-template rows. Their entries fill from
   whichever thread reaches them, serial or on a lane, under this contract:
@@ -131,6 +133,12 @@ Its x86 part is the serial compile's own `codegen_prewarm_for_target` plus
 `buster_x86_metadata_prewarm_for_lanes()` (the serially built forwarding and
 NOP recipes, which every compile reaches); the per-form caches, TLS/GOT
 recipe groups and machine tables fill on the lanes.
+
+The driver's own cohorts prepare only their target family. To prepare another
+family later, the owner of a parked gang calls `lane_release()` outside any lane
+region. The calling thread is then the only live thread again, the serial
+prewarm runs, and the next `lane_run` recreates the workers. Releasing never
+helps while another caller's threads are alive.
 
 `buster_x86_metadata_exact_plan_prepare` claims the form's slot entry on an
 unprepared key and builds the plan in local storage before it publishes the

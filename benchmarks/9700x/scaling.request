@@ -7,4 +7,6 @@
 # compiler_receipt.SCALING_PROFILE names. See README.md in this directory.
 #
 # request: issue #424 scaling-v1, first 9700X run
+# request: issue #53 prewarm only the cohort native family, claude/clever-johnson-db6ay6 (count/tiny entry cost)
+# request: issue #53 re-request on docs-only head after 8cedbf9b run 38314166940 was cancelled by a push; same compiler source
 # request: issue #53 owner-approved scaling-v1 of lane-safe on-demand x86 fills (no complete x86 prewarm before -fcompile-jobs lanes; candidate 3e752da0 plus this request line), against the 826c2e3b count-w2-n2 0.456x / tiny 0.41-0.46x / W+-1 0.46-0.90x / equal-TU RSS finding
