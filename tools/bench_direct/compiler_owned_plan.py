@@ -10,7 +10,8 @@ from __future__ import annotations
 import hashlib
 import re
 from compiler_receipt import (PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE,
-                              AST_PILOT_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, named_main_profile)
+                              AST_PILOT_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, PROCESS_FLOOR_PROFILE,
+                              named_main_profile)
 
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 COMMIT = re.compile(r"[a-f0-9]{40}\Z")
@@ -24,6 +25,7 @@ SCALING_TIMEOUT = 1200
 INLINE_TIMEOUT = 10800
 AST_PILOT_TIMEOUT = 7200
 CONSTANT_REUSE_TIMEOUT = 7200
+PROCESS_FLOOR_TIMEOUT = 3600
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
 UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
 MAIN_POPULATION_SCHEMA = "buster-compiler-main-owned-phases-v1"
@@ -99,6 +101,10 @@ def _commands(receipt: dict, ownership: dict, *, utility: bool = False,
             "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--head-revision", head,
             "--cpu", str(CONSTANT_REUSE_ACCEPTANCE_PROFILE["cpu"]), "--output", work + "/constant-reuse-acceptance"],
             CONSTANT_REUSE_TIMEOUT)
+    if receipt.get("process_floor") is not None:
+        add("process-floor", [python, "-B", trusted + "/tools/bench_direct/process_floor_acceptance.py",
+            "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--head-revision", head,
+            "--cpu", str(PROCESS_FLOOR_PROFILE["cpu"]), "--output", work + "/process-floor"], PROCESS_FLOOR_TIMEOUT)
     if legacy:
         build("closure", base)
     else:
@@ -223,6 +229,11 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
         if reuse is not None and (restricted or receipt["mode"] != "pull" or not isinstance(reuse, dict) or
                                   reuse.get("requested") is not True or
                                   not _same(reuse.get("profile"), CONSTANT_REUSE_ACCEPTANCE_PROFILE)):
+            return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
+        floor = receipt.get("process_floor")
+        if floor is not None and (restricted or receipt["mode"] != "pull" or not isinstance(floor, dict) or
+                                  floor.get("requested") is not True or
+                                  not _same(floor.get("profile"), PROCESS_FLOOR_PROFILE)):
             return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
         planned = _commands(receipt, ownership, utility=utility, main_profile=profile if main else None)
         if len(core_rows) != len(planned):

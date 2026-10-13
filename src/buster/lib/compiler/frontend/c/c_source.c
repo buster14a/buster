@@ -1498,7 +1498,8 @@ BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 firs
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_C17;
+    return dialect == C_PREPROCESS_DIALECT_C89 || dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 ||
+           dialect == C_PREPROCESS_DIALECT_C17;
 }
 
 BUSTER_C_INTERNAL char8 c_translate_trigraph_character(char8 third)
@@ -12040,6 +12041,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
     case C_PREPROCESS_DIALECT_GNU89:
+    case C_PREPROCESS_DIALECT_C89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -13299,11 +13301,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
+    // -fshort-wchar narrows only wchar_t; wint_t keeps the ABI's own width.
+    Target wint_abi_target = options.target;
+    wint_abi_target.short_wchar = false;
+    bool short_wint_target = target_uses_16_bit_wchar(wint_abi_target);
     String8 signed_pointer_type = i386_target ? S8("int") : layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = i386_target ? S8("unsigned int")
                                  : layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
     bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
-    bool unsigned_wint_target = !short_wchar_target && !apple_target && !wasm_target;
+    bool unsigned_wint_target = !short_wint_target && !apple_target && !wasm_target;
     // Equal widths do not select the platform's typedef identity. Darwin
     // uses long long for int64_t but long for intmax_t; Wasm uses long long
     // for both, including its LP64 target. Literal constructors must agree.
@@ -13341,7 +13347,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     C_DEFINE_TYPE_MACRO("__STDC_UTF_16__", S8("1"));
     C_DEFINE_TYPE_MACRO("__STDC_UTF_32__", S8("1"));
-    if (options.dialect == C_PREPROCESS_DIALECT_GNU89)
+    if (options.dialect == C_PREPROCESS_DIALECT_GNU89 || options.dialect == C_PREPROCESS_DIALECT_C89)
     {
         C_DEFINE_TYPE_MACRO("__GNUC_GNU_INLINE__", S8("1"));
     }
@@ -13449,12 +13455,16 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", i386_target ? S8("long long int") : signed_64_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", i386_target ? S8("unsigned long long int") : unsigned_64_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", i386_target ? S8("long int") : short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
-    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : i386_target ? S8("long int") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wint_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
+    if (unsigned_wchar_target)
+    {
+        C_DEFINE_TYPE_MACRO("__WCHAR_UNSIGNED__", S8("1"));
+    }
     C_DEFINE_TYPE_MACRO("__SIZEOF_WCHAR_T__", short_wchar_target ? S8("2") : S8("4"));
-    C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wchar_target ? S8("2") : S8("4"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wint_target ? S8("2") : S8("4"));
     C_DEFINE_TYPE_MACRO("__WCHAR_MAX__", short_wchar_target ? S8("65535") : unsigned_wchar_target ? S8("4294967295U") : S8("2147483647"));
-    C_DEFINE_TYPE_MACRO("__WINT_MAX__", short_wchar_target ? S8("65535") : unsigned_wint_target ? S8("4294967295U") : S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__WINT_MAX__", short_wint_target ? S8("65535") : unsigned_wint_target ? S8("4294967295U") : S8("2147483647"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
@@ -13650,7 +13660,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
-    C_DEFINE_TYPE_MACRO("__WINT_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
+    C_DEFINE_TYPE_MACRO("__WINT_WIDTH__", short_wint_target ? S8("16") : S8("32"));
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
@@ -15022,12 +15032,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registr
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
-BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+void c_test_unit_registry_prewarm(void)
 {
     if (!c_test_unit_registry_arena)
     {
         c_test_unit_registry_arena = arena_create((ArenaCreation){.reserved_size = C_TEST_UNIT_REGISTRY_RESERVED_SIZE, .flags = {.no_pool = 1}});
     }
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+{
+    c_test_unit_registry_prewarm();
     if (c_test_unit_registry_arena)
     {
         CTestUnitEntry* entry = arena_allocate(c_test_unit_registry_arena, CTestUnitEntry, 1);

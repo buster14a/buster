@@ -221,6 +221,8 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
             required += ["ast-pilot-acceptance"]
         if receipt.get("constant_reuse_acceptance") is not None:
             required += ["constant-reuse-acceptance"]
+        if receipt.get("process_floor") is not None:
+            required += ["process-floor"]
         required += ["build-closure"] * 2 + ["lab", "throughput"]
         if receipt.get("scaling_profile") is not None:
             from compiler_receipt import SCALING_PROFILE

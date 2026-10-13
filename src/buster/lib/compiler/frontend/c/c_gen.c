@@ -30,7 +30,9 @@
 // implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
 // c_ir_root_conditional answers from its conditional nodes through
 // c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
-// question still reads tokens. No node id reaches the IR. The prepared control
+// question still reads tokens. The caller may also pass the facts semantic
+// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062);
+// no lowering consumer reads them yet. No node id reaches the IR. The prepared control
 // expressions of a function are answered by token-indexed tables, not scans of
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
@@ -2017,7 +2019,7 @@ BUSTER_C_SHARED bool c_ir_declaration_has_gnu_inline_semantics(CPreprocessResult
     u32 end = declaration.body_token_count ? declaration.body_start : declaration.token_start + declaration.token_count;
     end = end < limit ? end : limit;
 
-    return preprocess.dialect == C_PREPROCESS_DIALECT_GNU89 ||
+    return preprocess.dialect == C_PREPROCESS_DIALECT_GNU89 || preprocess.dialect == C_PREPROCESS_DIALECT_C89 ||
            c_ir_attribute_marker_in_range(preprocess, declaration.token_start, end, C_IR_ATTRIBUTE_MARKER_GNU_INLINE);
 }
 
@@ -2162,12 +2164,24 @@ BUSTER_C_INTERNAL u32 c_ir_local_declarator_start(CPreprocessResult preprocess, 
    or UINT32_MAX: one in the shared specifiers before
    c_ir_declarator_list_specifier_end, or one in the declaration's own
    declarator range. */
+BUSTER_C_INTERNAL u32 c_ir_attribute_marker_outside_parameters(CPreprocessResult preprocess, u32 start, u32 end,
+                                                                u32 parameter_open, u32 parameter_after, CIrAttributeMarker marker)
+{
+    u32 result = c_ir_attribute_marker_find(preprocess, start, BUSTER_MIN(end, parameter_open), marker);
+    if (result == UINT32_MAX && parameter_after < end)
+    {
+        result = c_ir_attribute_marker_find(preprocess, BUSTER_MAX(start, parameter_after), end, marker);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult preprocess, CDeclaration declaration, CIrAttributeMarker marker)
 {
     u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
     u32 body = declaration.body_token_count ? declaration.body_start : UINT32_MAX;
     u32 specifier_end = declaration.token_start + declaration.token_count;
-    u32 declarator_end = declaration.declarator_start + declaration.declarator_count;
+    u32 declarator_start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+    u32 declarator_end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count : specifier_end;
     specifier_end = specifier_end < limit ? specifier_end : limit;
     declarator_end = declarator_end < limit ? declarator_end : limit;
     specifier_end = body < specifier_end ? body : specifier_end;
@@ -2181,6 +2195,55 @@ BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult prepro
     if (result == UINT32_MAX && declaration.declarator_count != 0)
     {
         result = c_ir_attribute_marker_find(preprocess, declaration.declarator_start, declarator_end, marker);
+    }
+    // The usual negative answer needs no parameter walk. Only a retained
+    // marker can belong to a callback rather than the enclosing declaration.
+    if (result != UINT32_MAX && declaration.kind == C_DECLARATION_FUNCTION && declaration.name.length)
+    {
+        u32 parameter_open = limit;
+        u32 parameter_after = limit;
+        u32 name_token = UINT32_MAX;
+        CParserDeclaration* syntax = declaration.syntax_declaration;
+        if (syntax)
+        {
+            name_token = syntax->function_name_token < limit ? syntax->function_name_token : syntax->name_token;
+        }
+        if (name_token < declarator_start || name_token >= declarator_end ||
+            !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_token]), declaration.name))
+        {
+            name_token = UINT32_MAX;
+        }
+        if (name_token == UINT32_MAX)
+        {
+            for (u32 index = declarator_start; index < declarator_end && name_token == UINT32_MAX; index += 1)
+            {
+                CToken token = preprocess.tokens[index];
+                if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), declaration.name))
+                {
+                    name_token = index;
+                }
+            }
+        }
+        u32 after_name = name_token < limit ? c_parse_skip_attributes(preprocess, name_token + 1, declarator_end) : declarator_end;
+        while (after_name < declarator_end && c_token_is_punctuator(&preprocess.tokens[after_name], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            after_name = c_parse_skip_attributes(preprocess, after_name + 1, declarator_end);
+        }
+        if (after_name < declarator_end && c_token_is_punctuator(&preprocess.tokens[after_name], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parameter_open = after_name;
+            parameter_after = c_ir_skip_balanced_group(preprocess, after_name, declarator_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
+        if (result >= parameter_open && result < parameter_after)
+        {
+            // Parameter declarations own their callbacks' attributes. A
+            // noreturn callback does not terminate its returning setter.
+            result = c_ir_attribute_marker_outside_parameters(preprocess, declaration.token_start, specifier_end, parameter_open, parameter_after, marker);
+            if (result == UINT32_MAX && declaration.declarator_count != 0)
+            {
+                result = c_ir_attribute_marker_outside_parameters(preprocess, declaration.declarator_start, declarator_end, parameter_open, parameter_after, marker);
+            }
+        }
     }
 
     return result;
@@ -4229,7 +4292,7 @@ BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32
     return c_parse_label_address_prefix_with_typedef(&builder->parse, &builder->preprocess, scope, expression_start, index);
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer);
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer, bool named_parameter);
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
@@ -4251,7 +4314,7 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
     {
         switch (left.kind)
         {
-        case C_IR_QUERY_FRAME_TYPE_NAME: return left.start == right.start && left.end == right.end && left.flag == right.flag;
+        case C_IR_QUERY_FRAME_TYPE_NAME: return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third;
         case C_IR_QUERY_FRAME_ARRAY_BOUND:
             return left.bound.inferred_count == right.bound.inferred_count && left.bound.token_start == right.bound.token_start &&
                    left.bound.token_count == right.bound.token_count && left.bound.is_static == right.bound.is_static && left.bound.is_star == right.bound.is_star &&
@@ -4363,7 +4426,7 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
         switch (frame->kind)
         {
         case C_IR_QUERY_FRAME_TYPE_NAME:
-            frame->result_type = c_ir_type_name_internal_attempt(builder, frame->start, frame->end, frame->flag);
+            frame->result_type = c_ir_type_name_internal_attempt(builder, frame->start, frame->end, frame->flag, frame->third != 0);
             frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
             break;
         case C_IR_QUERY_FRAME_ARRAY_BOUND: frame->success = c_ir_array_bound_evaluate_attempt(builder, frame->bound, &frame->integer); break;
@@ -32105,7 +32168,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
 // list, when a pointer, another group or an array bound follows it; a
 // parameter list starts with a specifier or `)`.
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_function_pointer,
-                                                       CType* qualifiers)
+                                                       bool named_parameter, CType* qualifiers)
 {
     CToken const* tokens = builder->preprocess.tokens;
     // Without function-pointer shapes a type name may carry only its array
@@ -32135,6 +32198,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
                 type = c_ir_add_qualified_type(builder->program, type, pointer_qualifiers.is_atomic, pointer_qualifiers.is_volatile);
             }
         }
+        // A parameter's declarator names its parameter (C17 6.7.6.3p6), in the
+        // prototype's own scope; the name adds nothing to the type.
+        index += named_parameter && index < end && tokens[index].kind == C_TOKEN_IDENTIFIER;
         bool group = index + 1 < end && c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                      (c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_STAR) ||
                       c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -32188,7 +32254,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
     return allow_function_pointer ? type : plain;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer)
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer, bool named_parameter)
 {
     u32 index = start;
     CType qualifiers = {
@@ -32203,7 +32269,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
     {
         return type;
     }
-    return c_ir_type_name_declarator(builder, type, index, end, allow_function_pointer, &qualifiers);
+    return c_ir_type_name_declarator(builder, type, index, end, allow_function_pointer, named_parameter, &qualifiers);
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end)
@@ -32289,7 +32355,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix_bounds(CIntegerIrBuilder* build
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     IrTypeId type = IR_TYPE_ID_INVALID;
-    c_ir_query_type_name(builder, start, end, true, &type);
+    CIrQueryFrame frame = {0};
+    if (c_ir_query_request(builder, (CIrQueryFrame){.start = start, .end = end, .third = 1, .kind = C_IR_QUERY_FRAME_TYPE_NAME, .flag = true}, &frame) &&
+        frame.success)
+    {
+        type = frame.result_type;
+    }
     IrType* value = ir_type_from_id(&builder->program->types, type);
     if (value && value->kind == IR_TYPE_FUNCTION)
     {
@@ -34139,6 +34210,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
+        u32 conditional_depth = 0;
         while (end < close)
         {
             CToken token = builder->preprocess.tokens[end];
@@ -34166,7 +34238,14 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             {
                 braces -= 1;
             }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!parentheses && !brackets && !braces &&
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ||
+                      c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)))
+            {
+                conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
+            }
+            else if (!parentheses && !brackets && !braces && !conditional_depth &&
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
             {
                 break;
             }

@@ -732,8 +732,11 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
-`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
+`C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
+Except under `-fsyntax-only`, the flag also retains semantic analysis's
+per-node facts for lowering
+([retained facts](frontend/ast.md#retained-facts)).
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -813,6 +816,25 @@ the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
 and `unsigned char` keep their specified behavior. The options apply to C
 frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
 pipelines reject them because their toolchains do not use Buster's C frontend.
+
+## Short wchar_t and x86-64 code models
+
+`-fshort-wchar` (#4052) sets `Target.short_wchar`, which makes
+`target_uses_16_bit_wchar` and `target_uses_unsigned_wchar` true on any
+native target, so `wchar_t` is `unsigned short`. The type layer, wide
+character and `L"..."` literals, `<stddef.h>` `wchar_t`, `__WCHAR_TYPE__`,
+`__SIZEOF_WCHAR_T__`, `__WCHAR_MAX__`, `__WCHAR_WIDTH__` and
+`__WCHAR_UNSIGNED__` all follow it. `wint_t` keeps the ABI's own width, as in
+GCC. External GPU pipelines reject the option.
+
+`-mcmodel=small` is the x86-64 default and a no-op. The backend emits only the
+small model (rip-relative or GOT-relative references; no kernel-model
+sign-extended absolute addressing, no large-model `movabs`), so
+`-mcmodel=kernel`, `medium` and `large` fail with
+`unsupported option: -mcmodel=<model> (the x86-64 backend implements only the
+small code model)` rather than aliasing small. Unknown values report
+`invalid value for -mcmodel`, and non-x86-64 or GPU targets report
+`unsupported option ... for this target`.
 
 ## C input phase selection
 
@@ -2133,6 +2155,21 @@ not split. Empty comma fields and missing operands fail with a diagnostic.
 The driver and native linker share `link_validate_linker_arguments`, and the
 linker checks the actual static/dynamic image before publishing output.
 
+When no link happens (`-c`, `-S`, `-E`, `-fsyntax-only`), `-Wl,...` and
+`-Xlinker` arguments are accepted and ignored, as GCC does and Clang does with
+an unused-argument warning (#4041); build-system probes such as
+`-Wl,--enable-new-dtags -c` therefore succeed. The same arguments are still
+validated on a link, and a leading `--version` stays a linker query that a
+non-link action refuses.
+
+Accepted and ignored options (no effect on output):
+
+- `-fcolor-diagnostics`, `-fno-color-diagnostics`: the driver never colors
+  diagnostics, so both spellings are presentation-only no-ops (#4041).
+- `-fcomment-block-commands=<names>`: a Clang doc-comment option that only
+  feeds `-Wdocumentation`, which is not implemented; an empty list is refused
+  (#4041).
+
 The supported subset is:
 
 - Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
@@ -2217,7 +2254,36 @@ switches, runtime paths, and other `-z` modes are refused.
 `-Wp,` and `-Wa,` are never warning options. Only the exact
 `-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
 supported; other pass-through requests, including macro/include operations,
-are refused. Direct `-D`, `-U`, and `-I` remain available.
+are refused. The one accepted `-Wa,` value is `--noexecstack` (alone or as a
+comma-separated list of it): every Linux and Android ELF object already ends
+in an empty non-allocated `.note.GNU-stack` marking a non-executable stack
+unless an assembly input requests `"x"`, so the option changes nothing, for
+`-c`, `-S` and `-E` alike. Any other `-Wa,` value, including `--execstack`,
+an empty item and `-Wa,` alone, is refused with `unsupported pass-through
+option`.
+
+## C90 dialects, `-P` and `-Qunused-arguments`
+
+`-std=c89`, `-std=c90`, `-std=iso9899:1990` and `-ansi` select a strict ISO C90
+preprocessing dialect (`C_PREPROCESS_DIALECT_C89`), separate from the existing
+`-std=gnu89`/`-std=gnu90`. Like the other strict dialects it defines
+`__STRICT_ANSI__`, leaves out the GNU `linux`/`unix` macros and the GNU
+keywords (`typeof`, `asm`), and replaces trigraphs by default. Like `gnu89` it
+leaves `__STDC_VERSION__` undefined and defines `__GNUC_GNU_INLINE__`, with
+GNU inline semantics for `inline`. `-ansi` is exactly `-std=c90`; the last of
+`-ansi` and `-std=` wins. `-std=iso9899:199409` and `-std=c88` stay refused.
+
+The dialect is a preprocessing and keyword switch only. The frontend has no
+C90 language-rule switches, so `//` comments, mixed declarations and
+statements, and compound literals and other C99 constructs that GCC and Clang
+diagnose or reject under `-std=c90 -pedantic` are accepted. What the dialect
+supplies is the predefined-macro and header-selection behavior real C90
+projects (SDL's tests, parson) depend on, not a conformance check.
+
+`-P` (suppress linemarkers) and `-Qunused-arguments` (suppress Clang's
+unused-argument warning) are accepted for every action. The `-E` serializer
+never writes linemarkers, so `-P` already holds, and no unused-argument
+warning exists to suppress. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
 ## Macro filename prefix maps
@@ -2540,6 +2606,8 @@ allocators; `codegen_test_machine_scratch_plan` checks the plan, the
 replacement and its restoration. Backend time, not memory, is the next limit
 for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
 function take about 10 s and 42 s.
+
+Windows ARM64 stores function length in 18 bits of four-byte instructions. Larger functions therefore use aligned `.pdata`/`.xdata` fragments strictly shorter than 1 MiB; epilogs remain whole, their scopes are relative to each fragment, and continuation records carry the parent's unwind state through `end_c`. A registered large C fixture exercises compilation, linking, and execution across those fragment boundaries on native Windows ARM64.
 
 ## ELF TLS companion lookup
 

@@ -1151,6 +1151,41 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    their hosted census are described in
    [the canonical FAST pipeline guide](../canonical-fast-pipeline.md).
 
+   **Issue #1125 opt-in per-process floor profile.** The same route accepts
+   one fresh exact line `profile: process-floor-v1`, selected by the same
+   every-parent freshness rule. It cannot be combined with an analyzer profile
+   or another opt-in leg; like the constant-reuse profile, it runs beside
+   issue #48's inline profile. `process_floor_acceptance.py` runs it after the
+   tests-off candidate build. It writes `int main(void){return 0;}` as
+   `tiny.c` into an otherwise empty directory and runs
+   `uarch_lab.py compare --process-floor-pair CELL` there, with the one
+   candidate binary as both A and B. A is always `cc -g0 -c tiny.c -o OUT`,
+   the native x86-64 object compile. B depends on the cell:
+   - `aa`: the same command, the A/A calibration;
+   - `aarch64`: `cc -g0 -target aarch64-unknown-linux -c tiny.c -o OUT`;
+   - `syntax-only`: `cc -g0 -fsyntax-only tiny.c`.
+
+   Each cell is 100 ABBA pairs after two warmups on CPU 2, with fresh copies
+   of the binary. It records:
+   - wall time with its 95% CI (the harness span, which includes the pinned
+     `perf stat` wrapper);
+   - task-clock, the compiler process's own CPU time;
+   - the compiler's own `wall_ns` when `-fmetrics-out` works for both
+     commands;
+   - retired instructions when perf can count them (NA needs a recorded
+     reason);
+   - peak RSS, which is NA when the compiler stays near the wrapper's own
+     footprint.
+
+   Diagnostics must be identical in every cell, and the A/A objects must be
+   byte-identical. The report applies the issue's stop rule
+   (`process_floor_verdict`): a control resolves the floor only when its wall
+   ratio's 95% CI lies wholly outside the A/A cell's. Each control also
+   reports A's median minus its own, in wall time and in task-clock. The
+   profile is report-only and accepts no request flags, sources, pair counts
+   or compiler arguments. `compiler_publish.py` re-validates every raw cell
+   document and the recomputed verdict on the 9700X evidence.
+
    **Issue #2761 opt-in real-source throughput profile.** The same route
    accepts one fresh exact line `profile: throughput-real-source-v1`, selected
    by the same every-parent freshness rule; it cannot be combined with an

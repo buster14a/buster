@@ -101,6 +101,7 @@ jobs:
           "$RUNNER_TEMP/external-project-policy"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
           "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          "$RUNNER_TEMP/external-project-driver" test_ffmpeg --harness-self-test
           python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
@@ -166,6 +167,19 @@ jobs:
           gcc --version
           gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Build and self-test Linux assembly census
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This first-party control exercises only the Linux harness fixtures;
+          # it reads no upstream tree and starts no external project workload.
+          for compiler in clang gcc; do
+            "$compiler" --version
+            "$compiler" -O2 -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror \
+              -fwrapv -fno-strict-aliasing -funsigned-char \
+              tools/linux-kernel/frontier.c -o "$RUNNER_TEMP/linux-frontier-$compiler"
+            "$RUNNER_TEMP/linux-frontier-$compiler" self-test
+          done
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
@@ -260,6 +274,7 @@ jobs:
           "$RUNNER_TEMP/external-project-policy"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
           "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          "$RUNNER_TEMP/external-project-driver" test_ffmpeg --harness-self-test
           python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
@@ -325,6 +340,19 @@ jobs:
           gcc --version
           gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Build and self-test Linux assembly census
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This first-party control exercises only the Linux harness fixtures;
+          # it reads no upstream tree and starts no external project workload.
+          for compiler in clang gcc; do
+            "$compiler" --version
+            "$compiler" -O2 -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror \
+              -fwrapv -fno-strict-aliasing -funsigned-char \
+              tools/linux-kernel/frontier.c -o "$RUNNER_TEMP/linux-frontier-$compiler"
+            "$RUNNER_TEMP/linux-frontier-$compiler" self-test
+          done
       - name: Validate every GitHub workflow
         id: lint
         shell: bash

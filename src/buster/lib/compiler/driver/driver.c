@@ -187,6 +187,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* i
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU89;
     }
+    else if (string_equal(dialect, S8("c89")) || string_equal(dialect, S8("c90")) || string_equal(dialect, S8("iso9899:1990")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_C89;
+    }
     else if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU99;
@@ -248,6 +252,8 @@ BUSTER_GLOBAL_LOCAL CPreprocessDialect compiler_driver_preprocess_dialect(Compil
         return C_PREPROCESS_DIALECT_C23;
     case COMPILER_DRIVER_C_DIALECT_GNU89:
         return C_PREPROCESS_DIALECT_GNU89;
+    case COMPILER_DRIVER_C_DIALECT_C89:
+        return C_PREPROCESS_DIALECT_C89;
     case COMPILER_DRIVER_C_DIALECT_COUNT:
         return C_PREPROCESS_DIALECT_COUNT;
     }
@@ -2201,6 +2207,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     bool x86_execution_mode_seen = false;
     bool x86_regparm_seen = false;
     bool x86_preferred_stack_boundary_seen = false;
+    String8 code_model_value = {0};
+    bool code_model_seen = false;
+    bool short_wchar_requested = false;
     bool options_ended = false;
     bool action_seen = false;
     // Whether the code model in force came from -fPIE/-fpie, which is what
@@ -2441,6 +2450,22 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-w")))
         {
             invocation.suppress_warnings = true;
+            continue;
+        }
+        // -P suppresses -E linemarkers. The -E serializer never writes
+        // linemarkers, so the request is already satisfied. -Qunused-arguments
+        // is Clang's unused-argument warning switch; no unused-argument
+        // warning exists to suppress.
+        if (string_equal(argument, S8("-P")) || string_equal(argument, S8("-Qunused-arguments")))
+        {
+            continue;
+        }
+        // -ansi is -std=c90 for C.
+        if (string_equal(argument, S8("-ansi")))
+        {
+            invocation.c_dialect = COMPILER_DRIVER_C_DIALECT_C89;
+            invocation.c_dialect_explicit = true;
+            invocation.trigraph_mode = C_TRIGRAPH_MODE_DIALECT;
             continue;
         }
         if (string_equal(argument, S8("-v")) || string_equal(argument, S8("--verbose")))
@@ -3185,6 +3210,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             x86_regparm_seen = true;
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-mcmodel=")))
+        {
+            code_model_value = string_slice(argument, S8("-mcmodel=").length, argument.length);
+            code_model_seen = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fshort-wchar")))
+        {
+            short_wchar_requested = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-mpreferred-stack-boundary=")))
         {
             x86_preferred_stack_boundary_value =
@@ -3244,7 +3280,31 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
-        if (string_starts_with_sequence(argument, S8("-Wp,")) || string_starts_with_sequence(argument, S8("-Wa,")))
+        if (string_starts_with_sequence(argument, S8("-Wa,")))
+        {
+            // The assembler pass-through accepts only the comma-separated
+            // --noexecstack: every ELF object already carries a non-executable
+            // .note.GNU-stack, so it has nothing to change.
+            String8 list = string_slice(argument, 4, argument.length);
+            bool supported = list.length != 0;
+            u64 start = 0;
+            while (supported && start <= list.length)
+            {
+                u64 end = start;
+                while (end < list.length && list.pointer[end] != ',')
+                {
+                    end += 1;
+                }
+                supported = string_equal(string_slice(list, start, end), S8("--noexecstack"));
+                start = end + 1;
+            }
+            if (!supported)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-Wp,")))
         {
             String8 passthrough_prefix = string_starts_with_sequence(argument, S8("-Wp,-MMD,")) ? S8("-Wp,-MMD,")
                                         : string_starts_with_sequence(argument, S8("-Wp,-MD,")) ? S8("-Wp,-MD,")
@@ -3436,7 +3496,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             // translation units that run before thread-local storage exists,
             // where the canary's own load would fault; accepting the flag lets
             // one flag set drive this compiler and the reference one.
-            string_equal(argument, S8("-fno-stack-protector"));
+            string_equal(argument, S8("-fno-stack-protector")) ||
+            // Presentation-only options (#4041). No diagnostic here is colored,
+            // and doc-comment commands only affect Clang's -Wdocumentation, so
+            // both are accepted and ignored for build-system probes.
+            string_equal(argument, S8("-fcolor-diagnostics")) || string_equal(argument, S8("-fno-color-diagnostics")) ||
+            (string_starts_with_sequence(argument, S8("-fcomment-block-commands=")) && argument.length > 25);
         if (warning_option)
         {
             compiler_driver_warning_policy_apply(&invocation.warning_policy, argument);
@@ -3602,6 +3667,41 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
         }
     }
+    // The x86-64 backend emits only the small code model: every symbol
+    // reference is rip-relative or GOT-relative, and the object writer has no
+    // large-code-model (movabs/GOTOFF64) or kernel-model (sign-extended
+    // 32-bit absolute, top 2 GiB) addressing. small is the default, so it is
+    // a no-op; the rest are named and refused rather than aliased to small.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && code_model_seen)
+    {
+        bool known_model = string_equal(code_model_value, S8("small")) || string_equal(code_model_value, S8("kernel")) ||
+                           string_equal(code_model_value, S8("medium")) || string_equal(code_model_value, S8("large"));
+        if (invocation.has_gpu_target || invocation.target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mcmodel={S8} for this target"), code_model_value);
+        }
+        else if (!known_model)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mcmodel: {S8}"), code_model_value);
+        }
+        else if (!string_equal(code_model_value, S8("small")))
+        {
+            compiler_driver_argument_error(arena, &invocation,
+                                           S8("unsupported option: -mcmodel={S8} (the x86-64 backend implements only the small code model)"),
+                                           code_model_value);
+        }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && short_wchar_requested)
+    {
+        if (invocation.has_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-fshort-wchar"));
+        }
+        else
+        {
+            invocation.target.short_wchar = true;
+        }
+    }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.no_asynchronous_unwind_tables &&
         invocation.target.cpu_arch != CPU_ARCH_I386)
     {
@@ -3695,6 +3795,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 invocation.input_paths[input_index] = resolved;
             }
         }
+    }
+    // GCC ignores linker arguments when nothing is linked and Clang warns and
+    // ignores them, so -c/-S/-E/-fsyntax-only probes drop them (#4041). A
+    // leading --version stays so the linker query keeps rejecting it.
+    if (invocation.action != COMPILER_DRIVER_ACTION_LINK && invocation.linker_argument_count && invocation.linker_arguments &&
+        !string_equal(invocation.linker_arguments[0], S8("--version")))
+    {
+        invocation.linker_argument_count = 0;
     }
     compiler_driver_validate_linker_query(&invocation);
     compiler_driver_consume_linker_as_needed(&invocation);
@@ -7450,6 +7558,30 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
     return layout;
 }
 
+// Adds one unit's fact counts (GitHub #4062) to the invocation's, as the
+// other -v rows sum theirs over the inputs.
+BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* total, CAstFactStatistics unit)
+{
+    total->nodes += unit.nodes;
+    total->regions += unit.regions;
+    total->candidates += unit.candidates;
+    total->tree += unit.tree;
+    total->machine += unit.machine;
+    total->completed += unit.completed;
+    total->bound += unit.bound;
+    total->bit_fields += unit.bit_fields;
+    total->strings += unit.strings;
+    for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+    {
+        total->gaps[gap] += unit.gaps[gap];
+    }
+    total->uncovered += unit.uncovered;
+    total->outside += unit.outside;
+    total->stale += unit.stale;
+    total->completion_queries += unit.completion_queries;
+    total->retained_bytes += unit.retained_bytes;
+}
+
 // The -fc-ast-pilot hook (GitHub #3102): builds the syntax tree of one
 // preprocessed unit. Its columns live in private arenas that the unit's end
 // label releases (c_ast_release); its storage record lives in the unit's
@@ -8571,6 +8703,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // preprocessing result by index, so the end label releases its column
     // arenas first.
     CAst pilot_tree = {0};
+    // The semantic facts the pilot retains for lowering (GitHub #4062), over
+    // the same tree; released right after lowering, and again, idempotently,
+    // at the end label.
+    CAstFacts pilot_facts = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -8731,6 +8867,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_statement_statistics = &result.c_ast.statements;
         syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
+        // Nothing lowers a -fsyntax-only unit, so it retains no facts.
+        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY && c_ast_facts_create(&pilot_facts, &pilot_tree))
+        {
+            syntax.ast_facts = &pilot_facts;
+        }
     }
     // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
     // not decoded (CParserResult.string_literal_lengths_only).
@@ -8788,7 +8929,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     // from the pilot's tree; it is released at `end:`, after lowering.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0,
-                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0,
+                                                                    .syntax_facts = syntax.ast_facts});
+    // Lowering was the facts' last reader.
+    if (syntax.ast_facts)
+    {
+        compiler_driver_c_ast_facts_add(&result.c_ast.facts, pilot_facts.statistics);
+        c_ast_facts_release(&pilot_facts);
+    }
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     // Semantic warnings (-Wpointer-sign) publish ahead of any error; one that
     // -Werror promotes fails the unit as an analysis error.
@@ -8957,10 +9105,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         investigation_digest(bytes, investigation->input_sha256);
         compiler_driver_investigation_tokens(investigation, preprocess);
         TargetCpuFeatures features = target_cpu_features_effective(invocation.target);
-        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32}"),
+        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32} wchar={u32}"),
                                               (u32)invocation.target.cpu_arch, (u32)invocation.target.cpu_model, (u32)invocation.target.os,
                                               invocation.target.os_version_major, invocation.target.os_version_minor, invocation.target.os_version_patch,
-                                              (u32)invocation.target.plain_char_policy);
+                                              (u32)invocation.target.plain_char_policy, (u32)invocation.target.short_wchar);
         for (u32 word = 0; word < TARGET_CPU_FEATURE_WORD_COUNT; word += 1)
         {
             investigation->target = string_format(arena, S8("{S8} features{u32}={u64:x}"), investigation->target, word, features.words[word]);
@@ -9181,6 +9329,7 @@ end:
     {
         compiler_driver_detach_object(arena, &preprocess, &result.object);
     }
+    c_ast_facts_release(&pilot_facts);
     c_ast_release(&pilot_tree);
     c_preprocess_release(&preprocess);
     file_map_unmap(source_file);
@@ -11097,6 +11246,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
         result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
+        compiler_driver_c_ast_facts_add(&result.c_ast.facts, unit.c_ast.facts);
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;
         for (u32 reason = 0; reason < C_AST_STATEMENT_FALLBACK_COUNT; reason += 1)

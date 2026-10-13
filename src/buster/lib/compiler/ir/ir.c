@@ -2385,7 +2385,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
     {
         IrType* aggregate = ir_type_from_id(&program->types, definition->canonical_type);
         valid = aggregate && (definition->opcode != IR_OPCODE_ARRAY || aggregate->kind == IR_TYPE_ARRAY || aggregate->kind == IR_TYPE_VECTOR) &&
-                (definition->opcode != IR_OPCODE_AGGREGATE || aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION);
+                (definition->opcode != IR_OPCODE_AGGREGATE || ((aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
+                                                                     (!aggregate->field_count || aggregate->fields)));
         TemporalArena temporary = scratch_begin(0, 0);
         u32 operand_count = definition->operand_count;
         IrValueLabelMetadata* sources = arena_allocate(temporary.arena, IrValueLabelMetadata, operand_count ? operand_count : 1);
@@ -2645,7 +2646,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_field(IrProgram* program, IrIns
     {
         IrType* aggregate = ir_type_from_id(&program->types, first_slot->canonical_type);
         u64 field_index = definition->immediate_count == 1 && definition->immediates ? definition->immediates[0] : UINT64_MAX;
-        bool addressable = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) && field_index < aggregate->field_count;
+        bool addressable = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) && aggregate->fields &&
+                           field_index < aggregate->field_count;
         IrField* field = addressable ? aggregate->fields + field_index : 0;
         IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
         if (!field_type || !field_type->layout.resolved)
@@ -5773,7 +5775,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             break;
             case IR_GLOBAL_INITIALIZER_BYTES:
             {
-                initializer_valid = global->bytes.length == type->layout.size;
+                initializer_valid = global->bytes.length == type->layout.size && (!global->bytes.length || global->bytes.pointer);
             }
             break;
             case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
@@ -6108,11 +6110,11 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
     IrInstruction* field_instruction = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
     if (access_type && access_type->kind == IR_TYPE_INTEGER && access_type->layout.resolved && field_instruction &&
         field_instruction->opcode == IR_OPCODE_FIELD && field_instruction->operand_count == 1 && field_instruction->immediate_count == 1 &&
-        field_instruction->operands[0].value < function->value_count)
+        field_instruction->operands && field_instruction->immediates && field_instruction->operands[0].value < function->value_count)
     {
         IrType* aggregate = ir_type_from_id(&program->types, function->values[field_instruction->operands[0].value].canonical_type);
         u64 field_index = field_instruction->immediates[0];
-        IrField* field = aggregate && field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
+        IrField* field = aggregate && aggregate->fields && field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
         IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
         // Boolean bit-fields use a raw unsigned integer unit even when the
         // layout did not narrow it. Truth conversion belongs to the field value.
@@ -6663,7 +6665,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         complete |= aggregate && (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1
                                                                     : instruction->operand_count == aggregate->field_count);
         bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
-                     instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                     (!aggregate->field_count || aggregate->fields) && instruction->operand_count == instruction->immediate_count &&
+                     instruction->result.value != IR_ID_UNDERLYING_INVALID &&
                      function->values[instruction->result.value].category == IR_VALUE_VALUE && complete;
         for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
         {
@@ -6686,7 +6689,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValue* base = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
         u64 field_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
-        bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) &&
+        bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) && base_type->fields &&
                            field_index < base_type->field_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
                            function->values[instruction->result.value].category == IR_VALUE_PLACE &&
                            instruction->canonical_type.value == base_type->fields[field_index].type.value;
