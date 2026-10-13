@@ -1,0 +1,2948 @@
+{
+  "baseline_revision": "e0d55a13095724aaa7380cf478cbe4b7a6873458",
+  "candidate_revision": "5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86",
+  "config": "Release, tests=1, x86-64-v2, generic runtime",
+  "profiles": {
+    "baseline-compatible": {
+      "Ir": 28481091118,
+      "Dr": 7708057494,
+      "Dw": 4512946275,
+      "I1mr": 246874587,
+      "D1mr": 168417783,
+      "D1mw": 47433145,
+      "ILmr": 1334547,
+      "DLmr": 53780891,
+      "DLmw": 20882493,
+      "Bc": 5140241959,
+      "Bcm": 264846207,
+      "Bi": 49705352,
+      "Bim": 18788889
+    },
+    "baseline-repeat": {
+      "Ir": 28481062328,
+      "Dr": 7708033503,
+      "Dw": 4512931631,
+      "I1mr": 246874585,
+      "D1mr": 167835485,
+      "D1mw": 47456869,
+      "ILmr": 1333732,
+      "DLmr": 53731685,
+      "DLmw": 20881449,
+      "Bc": 5140241511,
+      "Bcm": 264851356,
+      "Bi": 49705354,
+      "Bim": 18788889
+    },
+    "proof": {
+      "Ir": 28481356737,
+      "Dr": 7708019176,
+      "Dw": 4512949643,
+      "I1mr": 249892680,
+      "D1mr": 168254743,
+      "D1mw": 47347079,
+      "ILmr": 1309988,
+      "DLmr": 53755868,
+      "DLmw": 20883196,
+      "Bc": 5140395953,
+      "Bcm": 264697850,
+      "Bi": 49705353,
+      "Bim": 18938417
+    },
+    "combined": {
+      "Ir": 27309815774,
+      "Dr": 7416728203,
+      "Dw": 4296575298,
+      "I1mr": 248679597,
+      "D1mr": 164414230,
+      "D1mw": 47400964,
+      "ILmr": 1338358,
+      "DLmr": 50665285,
+      "DLmw": 20836651,
+      "Bc": 5014478508,
+      "Bcm": 260512863,
+      "Bi": 47941627,
+      "Bim": 16889227
+    },
+    "final-1": {
+      "Ir": 27303065956,
+      "Dr": 7416779291,
+      "Dw": 4296558595,
+      "I1mr": 246656522,
+      "D1mr": 164184391,
+      "D1mw": 47329518,
+      "ILmr": 1314362,
+      "DLmr": 50655393,
+      "DLmw": 20840358,
+      "Bc": 5014907058,
+      "Bcm": 260104114,
+      "Bi": 47775311,
+      "Bim": 16895015
+    },
+    "final-2": {
+      "Ir": 27303065956,
+      "Dr": 7416779291,
+      "Dw": 4296558595,
+      "I1mr": 246656522,
+      "D1mr": 164184391,
+      "D1mw": 47329518,
+      "ILmr": 1314362,
+      "DLmr": 50655393,
+      "DLmw": 20840358,
+      "Bc": 5014907058,
+      "Bcm": 260104114,
+      "Bi": 47775311,
+      "Bim": 16895015
+    }
+  },
+  "comparison": {
+    "Ir": {
+      "baseline": [
+        28481091118,
+        28481062328
+      ],
+      "candidate": [
+        27303065956,
+        27303065956
+      ],
+      "baseline_mean": 28481076723,
+      "candidate_mean": 27303065956,
+      "change_percent": -4.136117389300431,
+      "baseline_spread_percent": 0.00010108466151053386,
+      "candidate_spread_percent": 0.0
+    },
+    "Dr": {
+      "baseline": [
+        7708057494,
+        7708033503
+      ],
+      "candidate": [
+        7416779291,
+        7416779291
+      ],
+      "baseline_mean": 7708045498.5,
+      "candidate_mean": 7416779291,
+      "change_percent": -3.7787297383841456,
+      "baseline_spread_percent": 0.0003112462167571363,
+      "candidate_spread_percent": 0.0
+    },
+    "Dw": {
+      "baseline": [
+        4512946275,
+        4512931631
+      ],
+      "candidate": [
+        4296558595,
+        4296558595
+      ],
+      "baseline_mean": 4512938953,
+      "candidate_mean": 4296558595,
+      "change_percent": -4.794666186569174,
+      "baseline_spread_percent": 0.00032448921096673206,
+      "candidate_spread_percent": 0.0
+    },
+    "I1mr": {
+      "baseline": [
+        246874587,
+        246874585
+      ],
+      "candidate": [
+        246656522,
+        246656522
+      ],
+      "baseline_mean": 246874586,
+      "candidate_mean": 246656522,
+      "change_percent": -0.08832986964482092,
+      "baseline_spread_percent": 8.101279408322734e-07,
+      "candidate_spread_percent": 0.0
+    },
+    "D1mr": {
+      "baseline": [
+        168417783,
+        167835485
+      ],
+      "candidate": [
+        164184391,
+        164184391
+      ],
+      "baseline_mean": 168126634,
+      "candidate_mean": 164184391,
+      "change_percent": -2.3448057611145656,
+      "baseline_spread_percent": 0.34634488667631325,
+      "candidate_spread_percent": 0.0
+    },
+    "D1mw": {
+      "baseline": [
+        47433145,
+        47456869
+      ],
+      "candidate": [
+        47329518,
+        47329518
+      ],
+      "baseline_mean": 47445007,
+      "candidate_mean": 47329518,
+      "change_percent": -0.24341655171428167,
+      "baseline_spread_percent": 0.05000315417805713,
+      "candidate_spread_percent": 0.0
+    },
+    "ILmr": {
+      "baseline": [
+        1334547,
+        1333732
+      ],
+      "candidate": [
+        1314362,
+        1314362
+      ],
+      "baseline_mean": 1334139.5,
+      "candidate_mean": 1314362,
+      "change_percent": -1.4824161941086378,
+      "baseline_spread_percent": 0.06108806462892374,
+      "candidate_spread_percent": 0.0
+    },
+    "DLmr": {
+      "baseline": [
+        53780891,
+        53731685
+      ],
+      "candidate": [
+        50655393,
+        50655393
+      ],
+      "baseline_mean": 53756288,
+      "candidate_mean": 50655393,
+      "change_percent": -5.768432150672309,
+      "baseline_spread_percent": 0.09153533815430114,
+      "candidate_spread_percent": 0.0
+    },
+    "DLmw": {
+      "baseline": [
+        20882493,
+        20881449
+      ],
+      "candidate": [
+        20840358,
+        20840358
+      ],
+      "baseline_mean": 20881971,
+      "candidate_mean": 20840358,
+      "change_percent": -0.19927716593419742,
+      "baseline_spread_percent": 0.004999528061790719,
+      "candidate_spread_percent": 0.0
+    },
+    "Bc": {
+      "baseline": [
+        5140241959,
+        5140241511
+      ],
+      "candidate": [
+        5014907058,
+        5014907058
+      ],
+      "baseline_mean": 5140241735,
+      "candidate_mean": 5014907058,
+      "change_percent": -2.4383031666894928,
+      "baseline_spread_percent": 8.715543414029729e-06,
+      "candidate_spread_percent": 0.0
+    },
+    "Bcm": {
+      "baseline": [
+        264846207,
+        264851356
+      ],
+      "candidate": [
+        260104114,
+        260104114
+      ],
+      "baseline_mean": 264848781.5,
+      "candidate_mean": 260104114,
+      "change_percent": -1.7914628389558929,
+      "baseline_spread_percent": 0.0019441282572032524,
+      "candidate_spread_percent": 0.0
+    },
+    "Bi": {
+      "baseline": [
+        49705352,
+        49705354
+      ],
+      "candidate": [
+        47775311,
+        47775311
+      ],
+      "baseline_mean": 49705353,
+      "candidate_mean": 47775311,
+      "change_percent": -3.8829660861678272,
+      "baseline_spread_percent": 4.02371149039018e-06,
+      "candidate_spread_percent": 0.0
+    },
+    "Bim": {
+      "baseline": [
+        18788889,
+        18788889
+      ],
+      "candidate": [
+        16895015,
+        16895015
+      ],
+      "baseline_mean": 18788889,
+      "candidate_mean": 16895015,
+      "change_percent": -10.079755114844735,
+      "baseline_spread_percent": 0.0,
+      "candidate_spread_percent": 0.0
+    }
+  },
+  "selected_edges": {
+    "baseline-compatible": [
+      {
+        "caller": "compiler_driver_execute_c_single",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 16,
+          "D1mr": 10,
+          "D1mw": 4,
+          "ILmr": 16,
+          "DLmr": 8,
+          "DLmw": 4,
+          "Bc": 7,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_prepare_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 5722,
+        "cost": {
+          "Ir": 689767183,
+          "Dr": 207576614,
+          "Dw": 78807526,
+          "I1mr": 600,
+          "D1mr": 3444821,
+          "D1mw": 31971,
+          "ILmr": 237,
+          "DLmr": 3016903,
+          "DLmw": 701,
+          "Bc": 116068308,
+          "Bcm": 6007342,
+          "Bi": 2113721,
+          "Bim": 1805159
+        }
+      },
+      {
+        "caller": "ir_validate_promotion_output",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 698256335,
+          "Dr": 210139810,
+          "Dw": 79808752,
+          "I1mr": 35,
+          "D1mr": 3430873,
+          "D1mw": 38181,
+          "ILmr": 35,
+          "DLmr": 3058619,
+          "DLmw": 3501,
+          "Bc": 117478780,
+          "Bcm": 6018430,
+          "Bi": 2142440,
+          "Bim": 1827594
+        }
+      },
+      {
+        "caller": "ir_program_initialize",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 0,
+          "D1mr": 10,
+          "D1mw": 2,
+          "ILmr": 0,
+          "DLmr": 10,
+          "DLmw": 2,
+          "Bc": 7,
+          "Bcm": 1,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 647467893,
+          "Dr": 195085546,
+          "Dw": 73950027,
+          "I1mr": 97,
+          "D1mr": 3252626,
+          "D1mw": 34830,
+          "ILmr": 97,
+          "DLmr": 2896424,
+          "DLmw": 2894,
+          "Bc": 109201278,
+          "Bcm": 5745976,
+          "Bi": 1911477,
+          "Bim": 1666190
+        }
+      },
+      {
+        "caller": "c_ir_decode_character_value",
+        "callee": "target_data_layout",
+        "calls": 5368,
+        "cost": {
+          "Ir": 1036024,
+          "Dr": 118096,
+          "Dw": 257664,
+          "I1mr": 53975,
+          "D1mr": 6283,
+          "D1mw": 258,
+          "ILmr": 62,
+          "DLmr": 59,
+          "DLmw": 1,
+          "Bc": 37576,
+          "Bcm": 7367,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_emit_cast",
+        "callee": "target_data_layout",
+        "calls": 150878,
+        "cost": {
+          "Ir": 29119454,
+          "Dr": 3319316,
+          "Dw": 7242144,
+          "I1mr": 1837326,
+          "D1mr": 263389,
+          "D1mw": 21701,
+          "ILmr": 932,
+          "DLmr": 796,
+          "DLmw": 104,
+          "Bc": 1056146,
+          "Bcm": 778,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_scalar_type_properties",
+        "callee": "target_data_layout",
+        "calls": 893658,
+        "cost": {
+          "Ir": 172475994,
+          "Dr": 19660476,
+          "Dw": 42895584,
+          "I1mr": 16942,
+          "D1mr": 4179,
+          "D1mw": 2283,
+          "ILmr": 143,
+          "DLmr": 144,
+          "DLmw": 61,
+          "Bc": 6255606,
+          "Bcm": 1006,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_global_initializer_impl",
+        "callee": "target_data_layout",
+        "calls": 5902,
+        "cost": {
+          "Ir": 1139086,
+          "Dr": 129844,
+          "Dw": 283296,
+          "I1mr": 5886,
+          "D1mr": 2917,
+          "D1mw": 1860,
+          "ILmr": 84,
+          "DLmr": 83,
+          "DLmw": 69,
+          "Bc": 41314,
+          "Bcm": 536,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_body_supported",
+        "callee": "target_data_layout",
+        "calls": 7,
+        "cost": {
+          "Ir": 1351,
+          "Dr": 154,
+          "Dw": 336,
+          "I1mr": 0,
+          "D1mr": 15,
+          "D1mw": 7,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 49,
+          "Bcm": 5,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_type_supported",
+        "callee": "target_data_layout",
+        "calls": 22,
+        "cost": {
+          "Ir": 4246,
+          "Dr": 484,
+          "Dw": 1056,
+          "I1mr": 16,
+          "D1mr": 14,
+          "D1mw": 10,
+          "ILmr": 8,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 154,
+          "Bcm": 7,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_binary128_aggregate",
+        "callee": "target_data_layout",
+        "calls": 8,
+        "cost": {
+          "Ir": 1544,
+          "Dr": 176,
+          "Dw": 384,
+          "I1mr": 63,
+          "D1mr": 23,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 56,
+          "Bcm": 15,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_x87_shape",
+        "callee": "target_data_layout",
+        "calls": 45,
+        "cost": {
+          "Ir": 8685,
+          "Dr": 990,
+          "Dw": 2160,
+          "I1mr": 156,
+          "D1mr": 7,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 315,
+          "Bcm": 16,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_opaque_aggregate",
+        "callee": "target_data_layout",
+        "calls": 34,
+        "cost": {
+          "Ir": 6562,
+          "Dr": 748,
+          "Dw": 1632,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 238,
+          "Bcm": 4,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_inline_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 142,
+        "cost": {
+          "Ir": 30593902,
+          "Dr": 9084124,
+          "Dw": 3585572,
+          "I1mr": 5510,
+          "D1mr": 146234,
+          "D1mw": 2767,
+          "ILmr": 463,
+          "DLmr": 37287,
+          "DLmw": 655,
+          "Bc": 5267071,
+          "Bcm": 263661,
+          "Bi": 94185,
+          "Bim": 81311
+        }
+      },
+      {
+        "caller": "c_parse_constant_convert",
+        "callee": "target_data_layout",
+        "calls": 5001,
+        "cost": {
+          "Ir": 965193,
+          "Dr": 110022,
+          "Dw": 240048,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 39,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 35007,
+          "Bcm": 428,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_enum_complete",
+        "callee": "target_data_layout",
+        "calls": 13760,
+        "cost": {
+          "Ir": 2655680,
+          "Dr": 302720,
+          "Dw": 660480,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 2,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 96320,
+          "Bcm": 302,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_member_offset",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9264,
+          "Dr": 1056,
+          "Dw": 2304,
+          "I1mr": 185,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 336,
+          "Bcm": 16,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_builtin_type_layout",
+        "callee": "target_data_layout",
+        "calls": 1442566,
+        "cost": {
+          "Ir": 278415238,
+          "Dr": 31736452,
+          "Dw": 69243168,
+          "I1mr": 13922,
+          "D1mr": 8580,
+          "D1mw": 1803,
+          "ILmr": 176,
+          "DLmr": 939,
+          "DLmw": 26,
+          "Bc": 10097962,
+          "Bcm": 1545,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_validate_array_object_sizes",
+        "callee": "target_data_layout",
+        "calls": 39351,
+        "cost": {
+          "Ir": 7594743,
+          "Dr": 865722,
+          "Dw": 1888848,
+          "I1mr": 61,
+          "D1mr": 813,
+          "D1mw": 514,
+          "ILmr": 9,
+          "DLmr": 10,
+          "DLmw": 6,
+          "Bc": 275457,
+          "Bcm": 118,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_expression_arithmetic_type",
+        "callee": "target_data_layout",
+        "calls": 38,
+        "cost": {
+          "Ir": 7334,
+          "Dr": 836,
+          "Dw": 1824,
+          "I1mr": 338,
+          "D1mr": 164,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 266,
+          "Bcm": 23,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_layout_passes_run",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 7,
+          "Bcm": 0,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_contains_wide_float",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9264,
+          "Dr": 1056,
+          "Dw": 2304,
+          "I1mr": 483,
+          "D1mr": 186,
+          "D1mw": 12,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 336,
+          "Bcm": 28,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_typed_constant",
+        "callee": "target_data_layout",
+        "calls": 24,
+        "cost": {
+          "Ir": 4632,
+          "Dr": 528,
+          "Dw": 1152,
+          "I1mr": 102,
+          "D1mr": 77,
+          "D1mw": 14,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 168,
+          "Bcm": 0,
+          "Bi": 0,
+          "Bim": 0
+        }
+      }
+    ],
+    "baseline-repeat": [
+      {
+        "caller": "ir_prepare_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 5722,
+        "cost": {
+          "Ir": 689768541,
+          "Dr": 207576614,
+          "Dw": 78808302,
+          "I1mr": 600,
+          "D1mr": 3418215,
+          "D1mw": 31230,
+          "ILmr": 235,
+          "DLmr": 3016343,
+          "DLmw": 697,
+          "Bc": 116068502,
+          "Bcm": 6007327,
+          "Bi": 2113721,
+          "Bim": 1805159
+        }
+      },
+      {
+        "caller": "ir_validate_promotion_output",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 698254837,
+          "Dr": 210139810,
+          "Dw": 79807896,
+          "I1mr": 35,
+          "D1mr": 3408285,
+          "D1mw": 38208,
+          "ILmr": 35,
+          "DLmr": 3057386,
+          "DLmw": 3500,
+          "Bc": 117478566,
+          "Bcm": 6018452,
+          "Bi": 2142440,
+          "Bim": 1827594
+        }
+      },
+      {
+        "caller": "c_ir_global_initializer_impl",
+        "callee": "target_data_layout",
+        "calls": 5902,
+        "cost": {
+          "Ir": 1139086,
+          "Dr": 129844,
+          "Dw": 283296,
+          "I1mr": 5886,
+          "D1mr": 2947,
+          "D1mw": 1906,
+          "ILmr": 86,
+          "DLmr": 82,
+          "DLmw": 69,
+          "Bc": 41314,
+          "Bcm": 536,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_body_supported",
+        "callee": "target_data_layout",
+        "calls": 7,
+        "cost": {
+          "Ir": 1351,
+          "Dr": 154,
+          "Dw": 336,
+          "I1mr": 0,
+          "D1mr": 16,
+          "D1mw": 11,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 49,
+          "Bcm": 5,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_type_supported",
+        "callee": "target_data_layout",
+        "calls": 22,
+        "cost": {
+          "Ir": 4246,
+          "Dr": 484,
+          "Dw": 1056,
+          "I1mr": 16,
+          "D1mr": 13,
+          "D1mw": 8,
+          "ILmr": 8,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 154,
+          "Bcm": 7,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_decode_character_value",
+        "callee": "target_data_layout",
+        "calls": 5368,
+        "cost": {
+          "Ir": 1036024,
+          "Dr": 118096,
+          "Dw": 257664,
+          "I1mr": 53975,
+          "D1mr": 6296,
+          "D1mw": 231,
+          "ILmr": 61,
+          "DLmr": 61,
+          "DLmw": 1,
+          "Bc": 37576,
+          "Bcm": 7367,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_binary128_aggregate",
+        "callee": "target_data_layout",
+        "calls": 8,
+        "cost": {
+          "Ir": 1544,
+          "Dr": 176,
+          "Dw": 384,
+          "I1mr": 63,
+          "D1mr": 25,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 56,
+          "Bcm": 15,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_scalar_type_properties",
+        "callee": "target_data_layout",
+        "calls": 893658,
+        "cost": {
+          "Ir": 172475994,
+          "Dr": 19660476,
+          "Dw": 42895584,
+          "I1mr": 16942,
+          "D1mr": 4485,
+          "D1mw": 2409,
+          "ILmr": 144,
+          "DLmr": 145,
+          "DLmw": 68,
+          "Bc": 6255606,
+          "Bcm": 1006,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_x87_shape",
+        "callee": "target_data_layout",
+        "calls": 45,
+        "cost": {
+          "Ir": 8685,
+          "Dr": 990,
+          "Dw": 2160,
+          "I1mr": 156,
+          "D1mr": 11,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 315,
+          "Bcm": 16,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_emit_cast",
+        "callee": "target_data_layout",
+        "calls": 150878,
+        "cost": {
+          "Ir": 29119454,
+          "Dr": 3319316,
+          "Dw": 7242144,
+          "I1mr": 1837327,
+          "D1mr": 282447,
+          "D1mw": 24260,
+          "ILmr": 980,
+          "DLmr": 795,
+          "DLmw": 197,
+          "Bc": 1056146,
+          "Bcm": 778,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_opaque_aggregate",
+        "callee": "target_data_layout",
+        "calls": 34,
+        "cost": {
+          "Ir": 6562,
+          "Dr": 748,
+          "Dw": 1632,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 238,
+          "Bcm": 4,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_enum_complete",
+        "callee": "target_data_layout",
+        "calls": 13760,
+        "cost": {
+          "Ir": 2655680,
+          "Dr": 302720,
+          "Dw": 660480,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 2,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 96320,
+          "Bcm": 302,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_member_offset",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9264,
+          "Dr": 1056,
+          "Dw": 2304,
+          "I1mr": 185,
+          "D1mr": 4,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 336,
+          "Bcm": 16,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_contains_wide_float",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9264,
+          "Dr": 1056,
+          "Dw": 2304,
+          "I1mr": 483,
+          "D1mr": 182,
+          "D1mw": 12,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 336,
+          "Bcm": 28,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_builtin_type_layout",
+        "callee": "target_data_layout",
+        "calls": 1442566,
+        "cost": {
+          "Ir": 278415238,
+          "Dr": 31736452,
+          "Dw": 69243168,
+          "I1mr": 13922,
+          "D1mr": 8567,
+          "D1mw": 1747,
+          "ILmr": 175,
+          "DLmr": 940,
+          "DLmw": 29,
+          "Bc": 10097962,
+          "Bcm": 1545,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_expression_arithmetic_type",
+        "callee": "target_data_layout",
+        "calls": 38,
+        "cost": {
+          "Ir": 7334,
+          "Dr": 836,
+          "Dw": 1824,
+          "I1mr": 338,
+          "D1mr": 160,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 266,
+          "Bcm": 23,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_layout_passes_run",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 7,
+          "Bcm": 0,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_validate_array_object_sizes",
+        "callee": "target_data_layout",
+        "calls": 39351,
+        "cost": {
+          "Ir": 7594743,
+          "Dr": 865722,
+          "Dw": 1888848,
+          "I1mr": 61,
+          "D1mr": 762,
+          "D1mw": 444,
+          "ILmr": 9,
+          "DLmr": 10,
+          "DLmw": 6,
+          "Bc": 275457,
+          "Bcm": 118,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_typed_constant",
+        "callee": "target_data_layout",
+        "calls": 24,
+        "cost": {
+          "Ir": 4632,
+          "Dr": 528,
+          "Dw": 1152,
+          "I1mr": 102,
+          "D1mr": 58,
+          "D1mw": 24,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 168,
+          "Bcm": 0,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_convert",
+        "callee": "target_data_layout",
+        "calls": 5001,
+        "cost": {
+          "Ir": 965193,
+          "Dr": 110022,
+          "Dw": 240048,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 16,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 35007,
+          "Bcm": 428,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_inline_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 142,
+        "cost": {
+          "Ir": 30593902,
+          "Dr": 9084124,
+          "Dw": 3585572,
+          "I1mr": 5511,
+          "D1mr": 145512,
+          "D1mw": 2795,
+          "ILmr": 465,
+          "DLmr": 37238,
+          "DLmw": 656,
+          "Bc": 5267071,
+          "Bcm": 263661,
+          "Bi": 94185,
+          "Bim": 81311
+        }
+      },
+      {
+        "caller": "compiler_driver_execute_c_single",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 16,
+          "D1mr": 10,
+          "D1mw": 4,
+          "ILmr": 16,
+          "DLmr": 8,
+          "DLmw": 4,
+          "Bc": 7,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_program_initialize",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 0,
+          "D1mr": 10,
+          "D1mw": 3,
+          "ILmr": 0,
+          "DLmr": 10,
+          "DLmw": 3,
+          "Bc": 7,
+          "Bcm": 1,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 647469391,
+          "Dr": 195085546,
+          "Dw": 73950883,
+          "I1mr": 97,
+          "D1mr": 3230797,
+          "D1mw": 34781,
+          "ILmr": 97,
+          "DLmr": 2895020,
+          "DLmw": 2893,
+          "Bc": 109201492,
+          "Bcm": 5745992,
+          "Bi": 1911477,
+          "Bim": 1666190
+        }
+      }
+    ],
+    "proof": [
+      {
+        "caller": "compiler_driver_execute_c_single",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 15,
+          "D1mr": 10,
+          "D1mw": 5,
+          "ILmr": 15,
+          "DLmr": 8,
+          "DLmw": 5,
+          "Bc": 7,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_program_initialize",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 1,
+          "D1mr": 10,
+          "D1mw": 3,
+          "ILmr": 1,
+          "DLmr": 10,
+          "DLmw": 3,
+          "Bc": 7,
+          "Bcm": 1,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 647468558,
+          "Dr": 195085546,
+          "Dw": 73950407,
+          "I1mr": 91,
+          "D1mr": 3252192,
+          "D1mw": 35370,
+          "ILmr": 91,
+          "DLmr": 2896618,
+          "DLmw": 3057,
+          "Bc": 109201373,
+          "Bcm": 5713407,
+          "Bi": 1911477,
+          "Bim": 1666190
+        }
+      },
+      {
+        "caller": "ir_inline_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 142,
+        "cost": {
+          "Ir": 30593902,
+          "Dr": 9084124,
+          "Dw": 3585572,
+          "I1mr": 5195,
+          "D1mr": 146231,
+          "D1mw": 2747,
+          "ILmr": 459,
+          "DLmr": 37246,
+          "DLmw": 646,
+          "Bc": 5267071,
+          "Bcm": 262772,
+          "Bi": 94185,
+          "Bim": 81311
+        }
+      },
+      {
+        "caller": "c_ir_scalar_type_properties",
+        "callee": "target_data_layout",
+        "calls": 893658,
+        "cost": {
+          "Ir": 172475994,
+          "Dr": 19660476,
+          "Dw": 42895584,
+          "I1mr": 14003,
+          "D1mr": 4121,
+          "D1mw": 2092,
+          "ILmr": 136,
+          "DLmr": 143,
+          "DLmw": 64,
+          "Bc": 6255606,
+          "Bcm": 1303,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_body_supported",
+        "callee": "target_data_layout",
+        "calls": 7,
+        "cost": {
+          "Ir": 1351,
+          "Dr": 154,
+          "Dw": 336,
+          "I1mr": 0,
+          "D1mr": 16,
+          "D1mw": 9,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 49,
+          "Bcm": 4,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_type_supported",
+        "callee": "target_data_layout",
+        "calls": 22,
+        "cost": {
+          "Ir": 4246,
+          "Dr": 484,
+          "Dw": 1056,
+          "I1mr": 15,
+          "D1mr": 15,
+          "D1mw": 13,
+          "ILmr": 8,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 154,
+          "Bcm": 8,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_x87_shape",
+        "callee": "target_data_layout",
+        "calls": 45,
+        "cost": {
+          "Ir": 8685,
+          "Dr": 990,
+          "Dw": 2160,
+          "I1mr": 139,
+          "D1mr": 15,
+          "D1mw": 6,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 315,
+          "Bcm": 40,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_opaque_aggregate",
+        "callee": "target_data_layout",
+        "calls": 34,
+        "cost": {
+          "Ir": 6562,
+          "Dr": 748,
+          "Dw": 1632,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 238,
+          "Bcm": 0,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_emit_cast",
+        "callee": "target_data_layout",
+        "calls": 150878,
+        "cost": {
+          "Ir": 29119454,
+          "Dr": 3319316,
+          "Dw": 7242144,
+          "I1mr": 1687178,
+          "D1mr": 301604,
+          "D1mw": 26634,
+          "ILmr": 939,
+          "DLmr": 824,
+          "DLmw": 138,
+          "Bc": 1056146,
+          "Bcm": 2045,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_decode_character_value",
+        "callee": "target_data_layout",
+        "calls": 5368,
+        "cost": {
+          "Ir": 1036024,
+          "Dr": 118096,
+          "Dw": 257664,
+          "I1mr": 46312,
+          "D1mr": 6883,
+          "D1mw": 245,
+          "ILmr": 72,
+          "DLmr": 58,
+          "DLmw": 3,
+          "Bc": 37576,
+          "Bcm": 6584,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_global_initializer_impl",
+        "callee": "target_data_layout",
+        "calls": 5902,
+        "cost": {
+          "Ir": 1139086,
+          "Dr": 129844,
+          "Dw": 283296,
+          "I1mr": 5318,
+          "D1mr": 2995,
+          "D1mw": 1847,
+          "ILmr": 78,
+          "DLmr": 84,
+          "DLmw": 72,
+          "Bc": 41314,
+          "Bcm": 579,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_binary128_aggregate",
+        "callee": "target_data_layout",
+        "calls": 8,
+        "cost": {
+          "Ir": 1544,
+          "Dr": 176,
+          "Dw": 384,
+          "I1mr": 57,
+          "D1mr": 24,
+          "D1mw": 2,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 56,
+          "Bcm": 9,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_expression_arithmetic_type",
+        "callee": "target_data_layout",
+        "calls": 38,
+        "cost": {
+          "Ir": 7334,
+          "Dr": 836,
+          "Dw": 1824,
+          "I1mr": 295,
+          "D1mr": 165,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 266,
+          "Bcm": 42,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_layout_passes_run",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 193,
+          "Dr": 22,
+          "Dw": 48,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 7,
+          "Bcm": 2,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_validate_array_object_sizes",
+        "callee": "target_data_layout",
+        "calls": 39351,
+        "cost": {
+          "Ir": 7594743,
+          "Dr": 865722,
+          "Dw": 1888848,
+          "I1mr": 36,
+          "D1mr": 761,
+          "D1mw": 443,
+          "ILmr": 9,
+          "DLmr": 10,
+          "DLmw": 6,
+          "Bc": 275457,
+          "Bcm": 64,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_contains_wide_float",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9264,
+          "Dr": 1056,
+          "Dw": 2304,
+          "I1mr": 444,
+          "D1mr": 203,
+          "D1mw": 10,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 336,
+          "Bcm": 43,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_typed_constant",
+        "callee": "target_data_layout",
+        "calls": 24,
+        "cost": {
+          "Ir": 4632,
+          "Dr": 528,
+          "Dw": 1152,
+          "I1mr": 41,
+          "D1mr": 22,
+          "D1mw": 28,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 168,
+          "Bcm": 0,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_convert",
+        "callee": "target_data_layout",
+        "calls": 5001,
+        "cost": {
+          "Ir": 965193,
+          "Dr": 110022,
+          "Dw": 240048,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 57,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 2,
+          "Bc": 35007,
+          "Bcm": 386,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_enum_complete",
+        "callee": "target_data_layout",
+        "calls": 13760,
+        "cost": {
+          "Ir": 2655680,
+          "Dr": 302720,
+          "Dw": 660480,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 2,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 96320,
+          "Bcm": 428,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_member_offset",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9264,
+          "Dr": 1056,
+          "Dw": 2304,
+          "I1mr": 149,
+          "D1mr": 1,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 336,
+          "Bcm": 17,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_builtin_type_layout",
+        "callee": "target_data_layout",
+        "calls": 1442566,
+        "cost": {
+          "Ir": 278415238,
+          "Dr": 31736452,
+          "Dw": 69243168,
+          "I1mr": 11722,
+          "D1mr": 8550,
+          "D1mw": 1763,
+          "ILmr": 164,
+          "DLmr": 942,
+          "DLmw": 33,
+          "Bc": 10097962,
+          "Bcm": 1291,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_promotion_output",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 698256335,
+          "Dr": 210139810,
+          "Dw": 79808752,
+          "I1mr": 33,
+          "D1mr": 3427810,
+          "D1mw": 38221,
+          "ILmr": 33,
+          "DLmr": 3058859,
+          "DLmw": 3439,
+          "Bc": 117478780,
+          "Bcm": 5993449,
+          "Bi": 2142440,
+          "Bim": 1827594
+        }
+      },
+      {
+        "caller": "ir_prepare_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 5722,
+        "cost": {
+          "Ir": 689767183,
+          "Dr": 207576614,
+          "Dw": 78807526,
+          "I1mr": 322,
+          "D1mr": 3441804,
+          "D1mw": 30884,
+          "ILmr": 206,
+          "DLmr": 3017362,
+          "DLmw": 597,
+          "Bc": 116068308,
+          "Bcm": 5969311,
+          "Bi": 2113721,
+          "Bim": 1805159
+        }
+      }
+    ],
+    "combined": [
+      {
+        "caller": "ir_prepare_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 5722,
+        "cost": {
+          "Ir": 689767183,
+          "Dr": 207576614,
+          "Dw": 78807526,
+          "I1mr": 205,
+          "D1mr": 3389699,
+          "D1mw": 30716,
+          "ILmr": 142,
+          "DLmr": 3001855,
+          "DLmw": 546,
+          "Bc": 116068308,
+          "Bcm": 6182834,
+          "Bi": 2113721,
+          "Bim": 1805159
+        }
+      },
+      {
+        "caller": "ir_validate_promotion_output",
+        "callee": "ir_validate_function_walk",
+        "calls": 727,
+        "cost": {
+          "Ir": 12308102,
+          "Dr": 3708160,
+          "Dw": 1447833,
+          "I1mr": 11,
+          "D1mr": 63917,
+          "D1mw": 733,
+          "ILmr": 11,
+          "DLmr": 59969,
+          "DLmw": 108,
+          "Bc": 2056539,
+          "Bcm": 103169,
+          "Bi": 40280,
+          "Bim": 32637
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_opaque_aggregate",
+        "callee": "target_data_layout",
+        "calls": 34,
+        "cost": {
+          "Ir": 6392,
+          "Dr": 272,
+          "Dw": 1836,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 510,
+          "Bcm": 42,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_global_initializer_impl",
+        "callee": "target_data_layout",
+        "calls": 5902,
+        "cost": {
+          "Ir": 1109576,
+          "Dr": 47216,
+          "Dw": 318708,
+          "I1mr": 6226,
+          "D1mr": 0,
+          "D1mw": 1864,
+          "ILmr": 92,
+          "DLmr": 0,
+          "DLmw": 70,
+          "Bc": 88530,
+          "Bcm": 1898,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_body_supported",
+        "callee": "target_data_layout",
+        "calls": 7,
+        "cost": {
+          "Ir": 1316,
+          "Dr": 56,
+          "Dw": 378,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 8,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 105,
+          "Bcm": 6,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_type_supported",
+        "callee": "target_data_layout",
+        "calls": 22,
+        "cost": {
+          "Ir": 4136,
+          "Dr": 176,
+          "Dw": 1188,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 10,
+          "ILmr": 8,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 330,
+          "Bcm": 11,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_x87_shape",
+        "callee": "target_data_layout",
+        "calls": 45,
+        "cost": {
+          "Ir": 8460,
+          "Dr": 360,
+          "Dw": 2430,
+          "I1mr": 229,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 675,
+          "Bcm": 59,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_emit_cast",
+        "callee": "target_data_layout",
+        "calls": 150878,
+        "cost": {
+          "Ir": 28365064,
+          "Dr": 1207024,
+          "Dw": 8147412,
+          "I1mr": 2018303,
+          "D1mr": 0,
+          "D1mw": 16793,
+          "ILmr": 907,
+          "DLmr": 0,
+          "DLmw": 183,
+          "Bc": 2263170,
+          "Bcm": 71207,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_decode_character_value",
+        "callee": "target_data_layout",
+        "calls": 5368,
+        "cost": {
+          "Ir": 1009184,
+          "Dr": 42944,
+          "Dw": 289872,
+          "I1mr": 55275,
+          "D1mr": 0,
+          "D1mw": 167,
+          "ILmr": 178,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 80520,
+          "Bcm": 10093,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_binary128_aggregate",
+        "callee": "target_data_layout",
+        "calls": 8,
+        "cost": {
+          "Ir": 1504,
+          "Dr": 64,
+          "Dw": 432,
+          "I1mr": 68,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 120,
+          "Bcm": 9,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_layout_passes_run",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 16,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 15,
+          "Bcm": 1,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_validate_array_object_sizes",
+        "callee": "target_data_layout",
+        "calls": 39351,
+        "cost": {
+          "Ir": 7397988,
+          "Dr": 314808,
+          "Dw": 2124954,
+          "I1mr": 243,
+          "D1mr": 0,
+          "D1mw": 359,
+          "ILmr": 27,
+          "DLmr": 0,
+          "DLmw": 15,
+          "Bc": 590265,
+          "Bcm": 151,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_member_offset",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9024,
+          "Dr": 384,
+          "Dw": 2592,
+          "I1mr": 189,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 720,
+          "Bcm": 58,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_typed_constant",
+        "callee": "target_data_layout",
+        "calls": 24,
+        "cost": {
+          "Ir": 4512,
+          "Dr": 192,
+          "Dw": 1296,
+          "I1mr": 195,
+          "D1mr": 0,
+          "D1mw": 48,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 360,
+          "Bcm": 48,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_convert",
+        "callee": "target_data_layout",
+        "calls": 5001,
+        "cost": {
+          "Ir": 940188,
+          "Dr": 40008,
+          "Dw": 270054,
+          "I1mr": 15263,
+          "D1mr": 0,
+          "D1mw": 267,
+          "ILmr": 150,
+          "DLmr": 0,
+          "DLmw": 64,
+          "Bc": 75015,
+          "Bcm": 2314,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_contains_wide_float",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9024,
+          "Dr": 384,
+          "Dw": 2592,
+          "I1mr": 508,
+          "D1mr": 0,
+          "D1mw": 8,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 720,
+          "Bcm": 61,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_inline_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 142,
+        "cost": {
+          "Ir": 30593902,
+          "Dr": 9084124,
+          "Dw": 3585572,
+          "I1mr": 5697,
+          "D1mr": 144351,
+          "D1mw": 2757,
+          "ILmr": 486,
+          "DLmr": 36986,
+          "DLmw": 650,
+          "Bc": 5267071,
+          "Bcm": 269035,
+          "Bi": 94185,
+          "Bim": 81311
+        }
+      },
+      {
+        "caller": "ir_program_initialize",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 1,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 1,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 15,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 647468558,
+          "Dr": 195085546,
+          "Dw": 73950407,
+          "I1mr": 101,
+          "D1mr": 3207783,
+          "D1mw": 35092,
+          "ILmr": 101,
+          "DLmr": 2880894,
+          "DLmw": 3063,
+          "Bc": 109201373,
+          "Bcm": 5892321,
+          "Bi": 1911477,
+          "Bim": 1666191
+        }
+      },
+      {
+        "caller": "compiler_driver_execute_c_single",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 17,
+          "DLmr": 0,
+          "DLmw": 5,
+          "Bc": 15,
+          "Bcm": 5,
+          "Bi": 0,
+          "Bim": 0
+        }
+      }
+    ],
+    "final-1": [
+      {
+        "caller": "c_parse_type_layout_passes_run",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 15,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_convert",
+        "callee": "target_data_layout",
+        "calls": 5001,
+        "cost": {
+          "Ir": 940188,
+          "Dr": 40008,
+          "Dw": 270054,
+          "I1mr": 14084,
+          "D1mr": 0,
+          "D1mw": 284,
+          "ILmr": 150,
+          "DLmr": 0,
+          "DLmw": 61,
+          "Bc": 75015,
+          "Bcm": 975,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_member_offset",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9024,
+          "Dr": 384,
+          "Dw": 2592,
+          "I1mr": 219,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 720,
+          "Bcm": 25,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_contains_wide_float",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9024,
+          "Dr": 384,
+          "Dw": 2592,
+          "I1mr": 519,
+          "D1mr": 0,
+          "D1mw": 6,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 720,
+          "Bcm": 39,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_validate_array_object_sizes",
+        "callee": "target_data_layout",
+        "calls": 39351,
+        "cost": {
+          "Ir": 7397988,
+          "Dr": 314808,
+          "Dw": 2124954,
+          "I1mr": 269,
+          "D1mr": 0,
+          "D1mw": 338,
+          "ILmr": 27,
+          "DLmr": 0,
+          "DLmw": 14,
+          "Bc": 590265,
+          "Bcm": 139,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_typed_constant",
+        "callee": "target_data_layout",
+        "calls": 24,
+        "cost": {
+          "Ir": 4512,
+          "Dr": 192,
+          "Dw": 1296,
+          "I1mr": 202,
+          "D1mr": 0,
+          "D1mw": 24,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 360,
+          "Bcm": 23,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_prepare_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 5722,
+        "cost": {
+          "Ir": 689767183,
+          "Dr": 207576614,
+          "Dw": 78807526,
+          "I1mr": 243,
+          "D1mr": 3388934,
+          "D1mw": 30314,
+          "ILmr": 172,
+          "DLmr": 3002277,
+          "DLmw": 589,
+          "Bc": 116068308,
+          "Bcm": 6009926,
+          "Bi": 2113721,
+          "Bim": 1805159
+        }
+      },
+      {
+        "caller": "ir_validate_promotion_output",
+        "callee": "ir_validate_function_walk",
+        "calls": 727,
+        "cost": {
+          "Ir": 12308102,
+          "Dr": 3708160,
+          "Dw": 1447833,
+          "I1mr": 13,
+          "D1mr": 63905,
+          "D1mw": 732,
+          "ILmr": 13,
+          "DLmr": 59973,
+          "DLmw": 104,
+          "Bc": 2056539,
+          "Bcm": 99251,
+          "Bi": 40280,
+          "Bim": 32637
+        }
+      },
+      {
+        "caller": "c_ir_decode_character_value",
+        "callee": "target_data_layout",
+        "calls": 5368,
+        "cost": {
+          "Ir": 1009184,
+          "Dr": 42944,
+          "Dw": 289872,
+          "I1mr": 35614,
+          "D1mr": 0,
+          "D1mw": 159,
+          "ILmr": 179,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 80520,
+          "Bcm": 7648,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_global_initializer_impl",
+        "callee": "target_data_layout",
+        "calls": 5902,
+        "cost": {
+          "Ir": 1109576,
+          "Dr": 47216,
+          "Dw": 318708,
+          "I1mr": 5193,
+          "D1mr": 0,
+          "D1mw": 1823,
+          "ILmr": 89,
+          "DLmr": 0,
+          "DLmw": 70,
+          "Bc": 88530,
+          "Bcm": 1451,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_body_supported",
+        "callee": "target_data_layout",
+        "calls": 7,
+        "cost": {
+          "Ir": 1316,
+          "Dr": 56,
+          "Dw": 378,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 8,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 105,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_type_supported",
+        "callee": "target_data_layout",
+        "calls": 22,
+        "cost": {
+          "Ir": 4136,
+          "Dr": 176,
+          "Dw": 1188,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 10,
+          "ILmr": 8,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 330,
+          "Bcm": 5,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_x87_shape",
+        "callee": "target_data_layout",
+        "calls": 45,
+        "cost": {
+          "Ir": 8460,
+          "Dr": 360,
+          "Dw": 2430,
+          "I1mr": 280,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 675,
+          "Bcm": 57,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_emit_cast",
+        "callee": "target_data_layout",
+        "calls": 150878,
+        "cost": {
+          "Ir": 28365064,
+          "Dr": 1207024,
+          "Dw": 8147412,
+          "I1mr": 1587824,
+          "D1mr": 0,
+          "D1mw": 15684,
+          "ILmr": 1198,
+          "DLmr": 0,
+          "DLmw": 185,
+          "Bc": 2263170,
+          "Bcm": 73111,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_binary128_aggregate",
+        "callee": "target_data_layout",
+        "calls": 8,
+        "cost": {
+          "Ir": 1504,
+          "Dr": 64,
+          "Dw": 432,
+          "I1mr": 76,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 120,
+          "Bcm": 11,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_opaque_aggregate",
+        "callee": "target_data_layout",
+        "calls": 34,
+        "cost": {
+          "Ir": 6392,
+          "Dr": 272,
+          "Dw": 1836,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 510,
+          "Bcm": 18,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_inline_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 142,
+        "cost": {
+          "Ir": 30593902,
+          "Dr": 9084124,
+          "Dw": 3585572,
+          "I1mr": 5233,
+          "D1mr": 144264,
+          "D1mw": 2758,
+          "ILmr": 445,
+          "DLmr": 36990,
+          "DLmw": 646,
+          "Bc": 5267071,
+          "Bcm": 263637,
+          "Bi": 94185,
+          "Bim": 81311
+        }
+      },
+      {
+        "caller": "compiler_driver_execute_c_single",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 17,
+          "DLmr": 0,
+          "DLmw": 5,
+          "Bc": 15,
+          "Bcm": 7,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_program_initialize",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 15,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 647468558,
+          "Dr": 195085546,
+          "Dw": 73950407,
+          "I1mr": 94,
+          "D1mr": 3206305,
+          "D1mw": 35113,
+          "ILmr": 94,
+          "DLmr": 2881085,
+          "DLmw": 3055,
+          "Bc": 109201373,
+          "Bcm": 5747214,
+          "Bi": 1911477,
+          "Bim": 1666191
+        }
+      }
+    ],
+    "final-2": [
+      {
+        "caller": "c_parse_type_layout_passes_run",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 15,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_convert",
+        "callee": "target_data_layout",
+        "calls": 5001,
+        "cost": {
+          "Ir": 940188,
+          "Dr": 40008,
+          "Dw": 270054,
+          "I1mr": 14084,
+          "D1mr": 0,
+          "D1mw": 284,
+          "ILmr": 150,
+          "DLmr": 0,
+          "DLmw": 61,
+          "Bc": 75015,
+          "Bcm": 975,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_constant_member_offset",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9024,
+          "Dr": 384,
+          "Dw": 2592,
+          "I1mr": 219,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 720,
+          "Bcm": 25,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_type_contains_wide_float",
+        "callee": "target_data_layout",
+        "calls": 48,
+        "cost": {
+          "Ir": 9024,
+          "Dr": 384,
+          "Dw": 2592,
+          "I1mr": 519,
+          "D1mr": 0,
+          "D1mw": 6,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 720,
+          "Bcm": 39,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_validate_array_object_sizes",
+        "callee": "target_data_layout",
+        "calls": 39351,
+        "cost": {
+          "Ir": 7397988,
+          "Dr": 314808,
+          "Dw": 2124954,
+          "I1mr": 269,
+          "D1mr": 0,
+          "D1mw": 338,
+          "ILmr": 27,
+          "DLmr": 0,
+          "DLmw": 14,
+          "Bc": 590265,
+          "Bcm": 139,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_parse_typed_constant",
+        "callee": "target_data_layout",
+        "calls": 24,
+        "cost": {
+          "Ir": 4512,
+          "Dr": 192,
+          "Dw": 1296,
+          "I1mr": 202,
+          "D1mr": 0,
+          "D1mw": 24,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 360,
+          "Bcm": 23,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_prepare_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 5722,
+        "cost": {
+          "Ir": 689767183,
+          "Dr": 207576614,
+          "Dw": 78807526,
+          "I1mr": 243,
+          "D1mr": 3388934,
+          "D1mw": 30314,
+          "ILmr": 172,
+          "DLmr": 3002277,
+          "DLmw": 589,
+          "Bc": 116068308,
+          "Bcm": 6009926,
+          "Bi": 2113721,
+          "Bim": 1805159
+        }
+      },
+      {
+        "caller": "ir_validate_promotion_output",
+        "callee": "ir_validate_function_walk",
+        "calls": 727,
+        "cost": {
+          "Ir": 12308102,
+          "Dr": 3708160,
+          "Dw": 1447833,
+          "I1mr": 13,
+          "D1mr": 63905,
+          "D1mw": 732,
+          "ILmr": 13,
+          "DLmr": 59973,
+          "DLmw": 104,
+          "Bc": 2056539,
+          "Bcm": 99251,
+          "Bi": 40280,
+          "Bim": 32637
+        }
+      },
+      {
+        "caller": "c_ir_decode_character_value",
+        "callee": "target_data_layout",
+        "calls": 5368,
+        "cost": {
+          "Ir": 1009184,
+          "Dr": 42944,
+          "Dw": 289872,
+          "I1mr": 35614,
+          "D1mr": 0,
+          "D1mw": 159,
+          "ILmr": 179,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 80520,
+          "Bcm": 7648,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_global_initializer_impl",
+        "callee": "target_data_layout",
+        "calls": 5902,
+        "cost": {
+          "Ir": 1109576,
+          "Dr": 47216,
+          "Dw": 318708,
+          "I1mr": 5193,
+          "D1mr": 0,
+          "D1mw": 1823,
+          "ILmr": 89,
+          "DLmr": 0,
+          "DLmw": 70,
+          "Bc": 88530,
+          "Bcm": 1451,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_body_supported",
+        "callee": "target_data_layout",
+        "calls": 7,
+        "cost": {
+          "Ir": 1316,
+          "Dr": 56,
+          "Dw": 378,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 8,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 105,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_signature_type_supported",
+        "callee": "target_data_layout",
+        "calls": 22,
+        "cost": {
+          "Ir": 4136,
+          "Dr": 176,
+          "Dw": 1188,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 10,
+          "ILmr": 8,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 330,
+          "Bcm": 5,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_x87_shape",
+        "callee": "target_data_layout",
+        "calls": 45,
+        "cost": {
+          "Ir": 8460,
+          "Dr": 360,
+          "Dw": 2430,
+          "I1mr": 280,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 675,
+          "Bcm": 57,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_emit_cast",
+        "callee": "target_data_layout",
+        "calls": 150878,
+        "cost": {
+          "Ir": 28365064,
+          "Dr": 1207024,
+          "Dw": 8147412,
+          "I1mr": 1587824,
+          "D1mr": 0,
+          "D1mw": 15684,
+          "ILmr": 1198,
+          "DLmr": 0,
+          "DLmw": 185,
+          "Bc": 2263170,
+          "Bcm": 73111,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_binary128_aggregate",
+        "callee": "target_data_layout",
+        "calls": 8,
+        "cost": {
+          "Ir": 1504,
+          "Dr": 64,
+          "Dw": 432,
+          "I1mr": 76,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 120,
+          "Bcm": 11,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "c_ir_type_is_f80_opaque_aggregate",
+        "callee": "target_data_layout",
+        "calls": 34,
+        "cost": {
+          "Ir": 6392,
+          "Dr": 272,
+          "Dw": 1836,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 0,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 0,
+          "Bc": 510,
+          "Bcm": 18,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_inline_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 142,
+        "cost": {
+          "Ir": 30593902,
+          "Dr": 9084124,
+          "Dw": 3585572,
+          "I1mr": 5233,
+          "D1mr": 144264,
+          "D1mw": 2758,
+          "ILmr": 445,
+          "DLmr": 36990,
+          "DLmw": 646,
+          "Bc": 5267071,
+          "Bcm": 263637,
+          "Bi": 94185,
+          "Bim": 81311
+        }
+      },
+      {
+        "caller": "compiler_driver_execute_c_single",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 17,
+          "D1mr": 0,
+          "D1mw": 5,
+          "ILmr": 17,
+          "DLmr": 0,
+          "DLmw": 5,
+          "Bc": 15,
+          "Bcm": 7,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_program_initialize",
+        "callee": "target_data_layout",
+        "calls": 1,
+        "cost": {
+          "Ir": 188,
+          "Dr": 8,
+          "Dw": 54,
+          "I1mr": 0,
+          "D1mr": 0,
+          "D1mw": 1,
+          "ILmr": 0,
+          "DLmr": 0,
+          "DLmw": 1,
+          "Bc": 15,
+          "Bcm": 3,
+          "Bi": 0,
+          "Bim": 0
+        }
+      },
+      {
+        "caller": "ir_validate_canonical_module",
+        "callee": "ir_validate_function_walk",
+        "calls": 6435,
+        "cost": {
+          "Ir": 647468558,
+          "Dr": 195085546,
+          "Dw": 73950407,
+          "I1mr": 94,
+          "D1mr": 3206305,
+          "D1mw": 35113,
+          "ILmr": 94,
+          "DLmr": 2881085,
+          "DLmw": 3055,
+          "Bc": 109201373,
+          "Bcm": 5747214,
+          "Bi": 1911477,
+          "Bim": 1666191
+        }
+      }
+    ]
+  }
+}

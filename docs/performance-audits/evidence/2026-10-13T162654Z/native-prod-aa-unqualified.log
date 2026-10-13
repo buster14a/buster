@@ -1,0 +1,10 @@
+PERFORMANCE_EVIDENCE claim=work-reduction class=work-count tool=perf-stat complete=yes
+| metric | baseline median | candidate median | change | verdict |
+|---|---|---|---|---|
+| task-clock (msec) | 2184.66 | 2178.29 | -0.291% | inconclusive |
+| instructions (count) | 2.32278e+10 | 2.32277e+10 | -0.000% | inconclusive |
+| cycles (count) | 9.62728e+09 | 9.66698e+09 | +0.412% | inconclusive |
+| branches (count) | 4.17794e+09 | 4.17794e+09 | -0.000% | inconclusive |
+| branch-misses (count) | 7.66334e+07 | 7.66715e+07 | +0.050% | inconclusive |
+Result: A/A noise control on instructions: inconclusive (-0.000%)
+not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)

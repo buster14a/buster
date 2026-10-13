@@ -1,0 +1,32 @@
+{
+  "schema": "buster-performance-evidence-v1",
+  "claim": "work-reduction",
+  "evidence_class": "work-count",
+  "zen5": "not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)",
+  "tool": "perf-stat",
+  "tool_version": "perf version 7.2.10-1",
+  "complete": true,
+  "a_a_control": false,
+  "result": "work reduction validated (instructions -1.928%); native runtime not measured",
+  "establishes": "less executed work (instructions, references, operations) for the measured workload and inputs",
+  "does_not_establish": "lower elapsed time; hardware-independent constants; Zen 5 behavior",
+  "problems": "",
+  "host": {"cpu_model": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics", "os": "Linux", "release": "7.2.9-2-cachyos", "machine": "x86_64", "logical_cpus": 16},
+  "baseline": {"path": "../bin/ide-baseline-native-prod", "sha256": "23b491d2336d4e6e0425b3a7e3d37c54129bc2a5264a981bfe533431f629636c", "revision": "e0d55a13095724aaa7380cf478cbe4b7a6873458", "processes": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]},
+  "candidate": {"path": "../bin/ide-final-native-prod", "sha256": "a07437fd7528ec3338e3267e68d5cd53b1224923ca31a097389a1956052e3f13", "revision": "5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86", "processes": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]},
+  "arguments": ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0", "-g", "-v", "-fsource-metrics=../native-production.metrics", "src/buster/apps/ide/ide.c", "-lm", "-o", "../native-production-self"],
+  "runs": 10,
+  "warmup": 1,
+  "order": "alternating, baseline first on even pairs",
+  "minimum_effect": 0.010000,
+  "cache_sim": false,
+  "branch_sim": false,
+  "model": [],
+  "metrics": [
+    {"name": "task-clock", "unit": "msec", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": -0.012856818, "sign_test_p": 0.753906, "baseline": [2255.52, 2182.7600000000002, 2149.48, 2165.6599999999999, 2183.3699999999999, 2182.0700000000002, 2269.4400000000001, 2258.5999999999999, 2294.6399999999999, 2292.6900000000001], "candidate": [2233.0300000000002, 2189.6799999999998, 2236.8600000000001, 2210.7399999999998, 2147.0100000000002, 2426.98, 2168.71, 2180.9400000000001, 2157.2800000000002, 2192.1399999999999]},
+    {"name": "instructions", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "improvement", "missing": "", "relative_change": -0.019280317, "sign_test_p": 0.00195312, "baseline": [23227816762, 23227734026, 23227816544, 23227816649, 23227816780, 23227733916, 23227816760, 23227817035, 23227816842, 23227817038], "candidate": [22779976876, 22779977048, 22780059919, 22779977200, 22779976941, 22779977348, 22779976966, 22779977068, 22780059766, 22779977125]},
+    {"name": "cycles", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": -0.010348745, "sign_test_p": 0.753906, "baseline": [9786977515, 9618039262, 9488936234, 9562289577, 9569244517, 9592564756, 9540023712, 9518709230, 9641264242, 9723408649], "candidate": [9789906668, 9474211503, 9655240752, 9607327300, 9418723827, 10530984241, 9489297099, 9412897350, 9288717244, 9420731827]},
+    {"name": "branches", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "within-effect", "missing": "", "relative_change": -0.004619198, "sign_test_p": 0.00195312, "baseline": [4177936925, 4177936747, 4177936713, 4177936938, 4177936956, 4177936807, 4177936923, 4177937099, 4177937018, 4177937180], "candidate": [4158638150, 4158638209, 4158638351, 4158638351, 4158638104, 4158638490, 4158638061, 4158638216, 4158638201, 4158638279]},
+    {"name": "branch-misses", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": 0.004025257, "sign_test_p": 0.109375, "baseline": [76592672, 76607549, 76593551, 76496960, 76469289, 76643056, 76718729, 76699563, 76946677, 76810769], "candidate": [76769985, 77198736, 77284712, 76724686, 77035803, 77702130, 76636731, 77026704, 76795265, 76840774]}
+  ]
+}

@@ -1,0 +1,13 @@
+PERFORMANCE_EVIDENCE claim=native-runtime class=native-host tool=time complete=yes
+| metric | baseline median | candidate median | change | verdict |
+|---|---|---|---|---|
+| wall_seconds (s) | 2.22043 | 2.20755 | -0.580% | inconclusive |
+| user_seconds (s) | 2.11698 | 2.10667 | -0.487% | inconclusive |
+| system_seconds (s) | 0.0652925 | 0.058344 | -10.642% | improvement |
+| max_rss_kib (KiB) | 1.0759e+06 | 1.07658e+06 | +0.063% | inconclusive |
+| minor_faults (count) | 5172.5 | 5028.5 | -2.784% | inconclusive |
+| major_faults (count) | 0 | 0 | +0.000% | within-effect |
+| voluntary_switches (count) | 124.5 | 126 | +1.205% | inconclusive |
+| involuntary_switches (count) | 2107 | 2093 | -0.664% | inconclusive |
+Result: inconclusive on wall_seconds (-0.580%): no native-runtime claim established
+not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)

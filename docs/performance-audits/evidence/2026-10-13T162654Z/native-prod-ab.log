@@ -1,0 +1,10 @@
+PERFORMANCE_EVIDENCE claim=work-reduction class=work-count tool=perf-stat complete=yes
+| metric | baseline median | candidate median | change | verdict |
+|---|---|---|---|---|
+| task-clock (msec) | 2219.44 | 2190.91 | -1.286% | inconclusive |
+| instructions (count) | 2.32278e+10 | 2.278e+10 | -1.928% | improvement |
+| cycles (count) | 9.5809e+09 | 9.48175e+09 | -1.035% | inconclusive |
+| branches (count) | 4.17794e+09 | 4.15864e+09 | -0.462% | within-effect |
+| branch-misses (count) | 7.66253e+07 | 7.69337e+07 | +0.403% | inconclusive |
+Result: work reduction validated (instructions -1.928%); native runtime not measured
+not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)

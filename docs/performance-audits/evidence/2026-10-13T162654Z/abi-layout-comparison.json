@@ -1,0 +1,7 @@
+{
+  "cases": 1512,
+  "bytes": 423360,
+  "baseline_sha256": "580bbdcdfb3b1ba0bdc2e3a0a5c9fa8dc04143c492f1ad790a2884f44133e2f7",
+  "candidate_sha256": "580bbdcdfb3b1ba0bdc2e3a0a5c9fa8dc04143c492f1ad790a2884f44133e2f7",
+  "identical": true
+}
