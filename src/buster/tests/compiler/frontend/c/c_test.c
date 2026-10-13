@@ -38049,7 +38049,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_signed_overflow_warnings(UnitTestArgum
             BUSTER_TEST_RAW(arguments, warning.kind == C_DIAGNOSTIC_SIGNED_OVERFLOW &&
                                        warning.severity == C_DIAGNOSTIC_WARNING &&
                                        string_equal(warning.message, S8("integer overflow in expression")), source);
-            BUSTER_REQUIRE(arguments, token_index < preprocess.token_count)
+            if (BUSTER_REQUIRE(arguments, token_index < preprocess.token_count))
             {
                 CToken token = preprocess.tokens[token_index];
                 String8 spelling = c_token_spelling(preprocess.spelling_base, token);
