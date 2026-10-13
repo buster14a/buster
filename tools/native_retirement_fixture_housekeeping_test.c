@@ -357,12 +357,17 @@ BUSTER_GLOBAL_LOCAL int hk_auto_argv(const CmJson *json, unsigned node,
 BUSTER_GLOBAL_LOCAL const char *hk_id_arena_copy(HkIdArena *arena,
     const char *value)
 {
+    const char *copy = NULL;
     size_t length = value ? strlen(value) : 0;
-    if (!length || !arena || !arena->bytes || arena->used > arena->capacity ||
-        length >= arena->capacity - arena->used) return NULL;
-    char *copy = arena->bytes + arena->used;
-    memcpy(copy, value, length + 1);
-    arena->used += length + 1;
+    int valid = length && arena && arena->bytes && arena->used <= arena->capacity &&
+        length < arena->capacity - arena->used;
+    if (valid)
+    {
+        char *storage = arena->bytes + arena->used;
+        memcpy(storage, value, length + 1);
+        arena->used += length + 1;
+        copy = storage;
+    }
     return copy;
 }
 
@@ -372,7 +377,8 @@ BUSTER_GLOBAL_LOCAL int hk_session_slot(HkSession *sessions, const char *sid,
     int result = -1;
     unsigned start = (unsigned)(cm_hash(sid) & (HK_SESSION_SLOTS - 1));
     *storage_failed = 0;
-    for (unsigned i = 0; i < HK_SESSION_SLOTS && result < 0; ++i)
+    for (unsigned i = 0; i < HK_SESSION_SLOTS && result < 0 &&
+        !*storage_failed; ++i)
     {
         unsigned slot = (start + i) & (HK_SESSION_SLOTS - 1);
         if (!sessions[slot].sid)
@@ -380,11 +386,7 @@ BUSTER_GLOBAL_LOCAL int hk_session_slot(HkSession *sessions, const char *sid,
             if (create)
             {
                 sessions[slot].sid = hk_id_arena_copy(identifiers, sid);
-                if (!sessions[slot].sid)
-                {
-                    *storage_failed = 1;
-                    return result;
-                }
+                if (!sessions[slot].sid) *storage_failed = 1;
                 else
                 {
                     ++*used;
@@ -405,7 +407,8 @@ BUSTER_GLOBAL_LOCAL int hk_child_slot(HkChild *children, unsigned session,
     unsigned start = (unsigned)(hash & (HK_CHILD_SLOTS - 1));
     int result = -1;
     *storage_failed = 0;
-    for (unsigned i = 0; i < HK_CHILD_SLOTS && result < 0; ++i)
+    for (unsigned i = 0; i < HK_CHILD_SLOTS && result < 0 &&
+        !*storage_failed; ++i)
     {
         unsigned slot = (start + i) & (HK_CHILD_SLOTS - 1);
         if (!children[slot].id)
@@ -413,11 +416,7 @@ BUSTER_GLOBAL_LOCAL int hk_child_slot(HkChild *children, unsigned session,
             if (create)
             {
                 children[slot].id = hk_id_arena_copy(identifiers, id);
-                if (!children[slot].id)
-                {
-                    *storage_failed = 1;
-                    return result;
-                }
+                if (!children[slot].id) *storage_failed = 1;
                 else
                 {
                     children[slot].session = session;
@@ -647,7 +646,7 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
                 record_length, token_limit);
             HkLocation location = {0};
             hk_location_set(&location, line_start, source_line, event_index + 1,
-                "json_record", "", "");
+                "record_start", "", "");
             if (json.count > report.json_tokens) report.json_tokens = json.count;
             if (json.used > report.json_arena_bytes) report.json_arena_bytes = json.used;
             valid = json.valid && json.count > 0 && json.tokens[1].kind == 'o';
@@ -950,13 +949,15 @@ BUSTER_GLOBAL_LOCAL int hk_trace_parser_controls(void)
     valid = valid && cm_equal(report.failure_phase, "json") &&
         cm_equal(report.failure_reason, "parse_failed") &&
         report.failure_offset_known && report.failure_offset == 0 &&
-        report.failure_line == 1 && report.failure_event == 1 && report.json_tokens > 0;
+        report.failure_line == 1 && report.failure_event == 1 &&
+        cm_equal(report.failure_event_type, "record_start") && report.json_tokens > 0;
     valid = valid && !hk_parse_trace_data(malformed_middle, strlen(malformed_middle), &report);
     valid = valid && cm_equal(report.failure_phase, "json") &&
         cm_equal(report.failure_reason, "parse_failed") &&
         report.failure_offset_known &&
         report.failure_offset == strlen("{\"event\":\"version\",\"sid\":\"s9\",\"exe\":\"git\"}\n") &&
-        report.failure_line == 2;
+        report.failure_line == 2 &&
+        cm_equal(report.failure_event_type, "record_start");
     valid = valid && hk_large_trace_control();
     return valid;
 }
