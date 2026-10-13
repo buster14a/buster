@@ -136,8 +136,12 @@ in both frontend forms.
   gone (GitHub #2531). A caller that needs the type -- the `sizeof`/`_Alignof`
   lowering, the conditional selection worklist, the arithmetic-plus nested
   conditional and the comma controlling-expression check -- reports it through
-  `c_ir_report_untyped_expression`; probes such as overload ranking or the
-  aggregate-initializer test treat it as "not this shape". A braced list is
+  `c_ir_report_untyped_expression`. So do the callers that read the type only
+  to choose a form: overload ranking between several `__overloadable__`
+  candidates (a sole arity-matching candidate is taken without ranking), the
+  `(*q)(...)` dereference strip, and the Windows `__builtin_va_end` cursor
+  test (`c_test_prediction_caller_checks`). The aggregate-initializer test
+  alone treats it as "not this shape". A braced list is
   not an expression, so the initializer test no longer predicts one. The walk
   has leaves for the shapes the scan still answered: atomic builtins (void,
   `_Bool`, or the pointed-to object's unqualified type), `va_arg`,

@@ -291,7 +291,7 @@ typedef struct BusterX86MetadataString BusterX86MetadataString;
 struct BusterX86MetadataString
 {
     // Logical offset into the generated string pool. The pool is chunked in
-    // the generated ABI, but the one-time decode flattens it into a
+    // the generated ABI, but its chunks are copied on first use into one
     // contiguous host array, so prefer buster_x86_metadata_string_span() and
     // scan the bytes directly; buster_x86_metadata_string_byte() remains for
     // one-off reads and costs a call per byte.

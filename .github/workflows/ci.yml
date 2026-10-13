@@ -432,9 +432,10 @@ jobs:
           retention-days: 7
 
   test:
-    # Ordinary desktop work has no full-lint ancestor. Queue work waits for
-    # the event-specific lint preflight; main still waits for exact-SHA reuse.
-    needs: [queue_lint, reuse, no_code_plan]
+    # Desktop work has no lint ancestor in any event: merge-group lint runs
+    # beside it and CI complete still requires it (#3912). Main still waits
+    # for exact-SHA reuse.
+    needs: [reuse, no_code_plan]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -443,7 +444,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success')) }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.
@@ -681,7 +682,7 @@ jobs:
             esac
           done < "$RUNNER_TEMP/buster-ci/bootstrap-wrapper-process-owner.log"
           if [[ "$RUNNER_OS" == Windows ]]; then
-            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           else
             "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           fi
@@ -923,10 +924,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Linux, macOS)
         if: ${{ always() && steps.backend_capability_report_unix.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
@@ -942,10 +946,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Windows)
         if: ${{ always() && steps.backend_capability_report_windows.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 

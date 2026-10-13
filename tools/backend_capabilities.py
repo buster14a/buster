@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import collections
 import json
 import os
 import posixpath
@@ -21,6 +22,9 @@ SCHEMA = "buster-backend-capabilities-v1"
 CATALOGUE = "docs/backend-capabilities-v1.json"
 OUTPUT = "docs/backend-capabilities.md"
 STATUSES = ["supported", "partial", "unsupported-diagnostic", "not-applicable", "unknown"]
+BRACE = re.compile(r"[{}]")
+WORD = re.compile(r"\w+")
+NOT_NEWLINE = re.compile(r"[^\n]")
 C_NONCODE = re.compile(r"/\*.*?\*/|//[^\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
 UNIT_TEST_FUNCTION = re.compile(r"\bUnitTestResult\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{", re.S)
 MODULE_TABLE = re.compile(r"\btest_descriptors\s*\[[^\]]*\]\s*=\s*\{")
@@ -103,18 +107,15 @@ def source_files(root):
 
 
 def mask_noncode(text):
-    return C_NONCODE.sub(lambda match: re.sub(r"[^\n]", " ", match.group()), text)
+    return C_NONCODE.sub(lambda match: NOT_NEWLINE.sub(" ", match.group()), text)
 
 
 def closing_brace(text, opening):
     depth = 0
-    for index in range(opening, len(text)):
-        if text[index] == "{":
-            depth += 1
-        elif text[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return index
+    for brace in BRACE.finditer(text, opening):
+        depth += 1 if brace.group() == "{" else -1
+        if depth == 0:
+            return brace.start()
     return None
 
 
@@ -266,6 +267,9 @@ def validate_catalogue(data, root, label=CATALOGUE):
         if nonempty_string(value.get("id"))
     }
     test_texts = source_files(root)
+    # A word's whole-word matches are exactly its maximal \w runs: count them
+    # once instead of rescanning every test source for each evidence symbol.
+    test_words = collections.Counter(word for text in test_texts.values() for word in WORD.findall(text))
     modules_by_symbol, module_errors = registered_test_modules(root)
     errors.extend(catalogue_error(label, "test modules", error) for error in module_errors)
 
@@ -339,8 +343,11 @@ def validate_catalogue(data, root, label=CATALOGUE):
                         errors.append(catalogue_error(
                             label, f"{entry_location}.symbol",
                             f"no UnitTestResult definition for {symbol!r} in {file_name}"))
-                    occurrence = re.compile(rf"\b{re.escape(symbol)}\b")
-                    count = sum(len(occurrence.findall(text)) for text in test_texts.values())
+                    if WORD.fullmatch(symbol):
+                        count = test_words[symbol]
+                    else:
+                        occurrence = re.compile(rf"\b{re.escape(symbol)}\b")
+                        count = sum(len(occurrence.findall(text)) for text in test_texts.values())
                     if count < 2:
                         errors.append(catalogue_error(
                             label, f"{entry_location}.symbol",

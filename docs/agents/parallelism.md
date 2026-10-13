@@ -37,8 +37,10 @@
   and merges them only after a lane barrier.
 - **A global built on first use is prewarmed, never raced.** Several hot
   tables are derived once and read forever after through plain loads — the C
-  frontend's character classes, compact lexer tables, punctuator dispatch and
-  declaration keywords, the codegen ABI target cache, the font provider's
+  frontend's character classes, compact lexer tables, punctuator dispatch,
+  declaration keywords and symbol-table prototype (built on a process's
+  second serial table, so a one-compile process never builds it), the codegen
+  ABI target cache, the font provider's
   resolved paths, and the x86 metadata decode plus the three caches over it.
   That shape is sound only while no other thread can be reading, so every such
   build states `BUSTER_CHECK_SERIAL_INITIALIZATION()` (`<buster/lib/os.h>`,
@@ -54,8 +56,9 @@
   per-invocation floor of every `ide cc`, not an optional extra. Its per-form
   caches — the normalized row, the parsed pattern, the operand views, the
   derived facts and each record's validity — fill on the first *serial* touch
-  of each form, as do each string-pool offset's NUL distance and the coverage
-  rows, so a caller about to hand the tables to a gang must call
+  of each form, as do each string-pool chunk, each string-pool offset's NUL
+  distance, the coverage rows and the iclass and iform indexes, so a caller
+  about to hand the tables to a gang must call
   `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
   them. The machine encoder's closed expansion-shape set follows the same
   rule: `machine_x86_64_exact_prewarm` registers its queries and resolves
