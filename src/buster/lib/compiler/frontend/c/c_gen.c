@@ -23,14 +23,18 @@
 // index and forward-link forest once the general walk overspends its linear
 // budget. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
-// By default lowering has no syntax tree: it re-walks token ranges directly,
-// resolving identifiers through the parse result's scopes and answering
-// structure questions from a prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). Under -fc-ast-pilot the caller also passes the
-// implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
-// c_ir_root_conditional answers from its conditional nodes through
-// c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
-// question still reads tokens. No node id reaches the IR. The prepared control
+// Lowering reads the implicit postorder tree (CIRLowerOptions.syntax_tree,
+// GitHub #3102): under -fc-ast-pilot the driver passes it, and otherwise
+// c_lower_to_ir_tree_run builds it (a placeholder for #3102 step 1). The
+// statement walker, c_ir_lower_body_advance, reads every body's statements
+// from their statement nodes (#4060; "statement nodes" below), and
+// c_ir_root_conditional answers from the conditional nodes through
+// c_ir_tree_conditionals_build / c_ir_tree_root_conditional. Expressions,
+// declarations and queries still re-walk token ranges, resolving identifiers
+// through the parse result's scopes and answering structure questions from a
+// prebuilt matching-delimiter index (c_ir_build_delimiter_index); the walker
+// hands them their ranges through one marked adapter. No node id reaches the
+// IR. The prepared control
 // expressions of a function are answered by token-indexed tables, not scans of
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
@@ -82,8 +86,8 @@
 // - CIrLowerMachine is the frame stack for statements and expressions.
 //   Each CIrLowerFrameKind pairs a *_step function (advance the frame one
 //   CIrLowerFrameStage) with a *_frame_push adapter, both dispatched by
-//   c_ir_lower_dispatch. c_ir_lower_body_advance walks statements through
-//   a CIrBodyTask list; c_ir_lower_expression_core_step evaluates
+//   c_ir_lower_dispatch. c_ir_lower_body_advance walks statement nodes
+//   through a CIrBodyTask stack; c_ir_lower_expression_core_step evaluates
 //   expressions shunting-yard style over value and operator stacks. A new
 //   construct means a new frame kind, its step, its push adapter, and a
 //   dispatch case. A push site whose child kind is statically known may run
@@ -153,6 +157,10 @@
 //   c_ir_decode_string_literal_range_for_target   analysis and read by lowering
 //   c_ir_build_function_name_index                call-target resolution
 //   CIrLowerFrameKind                             lowering-machine frame kinds
+//   c_ir_body_nodes_build, c_ir_node_*,           statement nodes (#4060):
+//   CIrNodeList, c_ir_node_expression_range       the body index, block items
+//                                                 and extents, and the marked
+//                                                 token-range adapter
 //   c_ir_emit_initializer_capture                 exact constructor types and
 //                                                 qualified subobject stores
 //   c_ir_lower_compound_literal_step              ordered evaluation and final
@@ -164,11 +172,10 @@
 //   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
-//   c_ir_statement_end, c_ir_statement_end_find,  memoized statement extents
-//   c_ir_statement_peels_file                     for controlled bodies
-//   CIrStatementExtents, c_ir_statement_extents_* controlled-body extents read
-//                                                 from the syntax tree under
-//                                                 -fc-ast-pilot (#3102)
+//   c_ir_lower_switch_cases                       a switch's case labels from
+//                                                 its body's nodes
+//   c_ir_lower_body_initialize                    a body's labels, jump targets
+//                                                 and task stack from its nodes
 //   c_ir_lower_body_advance                       the statement walker
 //   c_ir_constant_initializer_*, c_ir_infer_*     static initializer bytes,
 //                                                 relocations, and array-bound
@@ -3735,6 +3742,9 @@ struct CIntegerIrBuilder
     // structure from its statement nodes (GitHub #4060).
     CAst const* ast;
     CIrBodyNodes const* body_nodes;
+    // Receives the statement walker's counts (CAstLowerStatistics); null when
+    // the caller asked for none.
+    CAstLowerStatistics* statement_statistics;
     // The conditional nodes of the body being lowered, read from the syntax
     // tree (c_ir_tree_conditionals_build): c_ir_root_conditional answers from
     // them where they decide the scan's answer. Null without a tree, and for
@@ -20403,6 +20413,10 @@ BUSTER_C_INTERNAL bool c_ir_node_expression_range(CIntegerIrBuilder* builder, u3
     CAst const* ast = builder->ast;
     CToken const* tokens = builder->preprocess.tokens;
     u64 token_count = builder->preprocess.token_count;
+    if (builder->statement_statistics)
+    {
+        builder->statement_statistics->range_adapters += 1;
+    }
     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
     u32 capacity = ast->extents[root];
     CIrNodeRangeFrame* stack = arena_allocate(temporary.arena, CIrNodeRangeFrame, capacity);
@@ -48329,6 +48343,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         state->current_task = arena_allocate(builder->scratch_arena, CIrBodyTask, 1);
         state->declaration_source = c_ir_site_source_range(declaration.location, declaration.name.length);
         state->initialized = true;
+        if (builder->statement_statistics)
+        {
+            builder->statement_statistics->statement_bodies += 1;
+        }
     }
     return ok;
 }
@@ -48904,6 +48922,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 break;
             }
             u8 kind = ast->kinds[node];
+            if (builder->statement_statistics)
+            {
+                builder->statement_statistics->statements += 1;
+            }
             if (builder->function->blocks[builder->current_block.value].terminated)
             {
                 // Dead code matters only where a label makes it reachable
@@ -65482,6 +65504,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
             .ast = options.syntax_tree,
             .body_nodes = &body_nodes,
+            .statement_statistics = options.ast_lower_statistics,
         };
         if (tree_conditionals.body_count && declaration.body_start)
         {

@@ -7,8 +7,11 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and five consumers read it:
+included. **Status: pilot.** The default pipeline builds it only for lowering,
+whose [statement walker](#statements-from-nodes-in-lowering) reads it in every
+compile (a placeholder until #3102 step 1 retains the parse phase's tree). The
+opt-in [driver hook](#driver-pilot-hook) builds it for the parse phase too,
+and five consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
@@ -17,8 +20,10 @@ opt-in [driver hook](#driver-pilot-hook) builds it, and five consumers read it:
   each function body's statement boundaries and block declaration ends;
 - [lowering](#lowering-from-the-tree) answers its root-conditional splits from
   the conditional nodes;
-- lowering's [extent table](#statement-extents-in-lowering) gives
-  `c_ir_controlled_body_range` each controlled substatement's extent.
+- lowering's [statement walker](#statements-from-nodes-in-lowering) reads
+  every function body's statements from their statement nodes, by default
+  and under the pilot alike: lowering builds the tree itself when the driver
+  passes none.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -350,7 +355,10 @@ Under `-v` the driver prints six rows with the other verbose counters:
   index build visited> answers=<root-conditional queries
   answered true from the tree> negatives=<queries answered false because the
   range holds no `?`> fallbacks=<queries inside an indexed body handed to the
-  token scan>`
+  token scan> statement_bodies=<bodies the statement walker lowered from
+  their nodes> statements=<statement nodes it lowered>
+  range_adapters=<token ranges its temporary expression and declaration
+  adapter derived>`
 
 
 The second row's passes run only under `-v`; they are diagnostic. The third to
@@ -1300,67 +1308,81 @@ as the field-by-field model comparison.
 
 `-v` prints `C_AST_MEMBERS`.
 
-## Statement extents in lowering
+## Statements from nodes in lowering
 
-Lowering asks `c_ir_controlled_body_range` (`c_gen.c`) where each controlled
-substatement starts and ends: the then and else branches of `if`, and the
-bodies of `while`, `for`, `switch` and `do`. The token walker answers by
-skipping the label and `[[...]]` prefix (`c_ir_statement_labels_end`). It
-then matches the braces of a compound statement, or measures the statement
-(`c_ir_statement_end`, `c_ir_statement_span`, `c_ir_statement_do_tail_end`),
-walking `if`/`else` chains with explicit frames. The driver passes the
-pilot's tree to lowering as `CIRLowerOptions.syntax_tree`. Under
-`-fc-ast-pilot`, a body's **extent table** (`CIrStatementExtents`) then
-answers first. The table is built the first time lowering asks about the
-body, by one preorder walk over the body's statement nodes on an explicit
-stack. Each controlled substatement gets an entry keyed by its first token:
-- **The statement past its prefix.** A `LABELED` node without attributes, a
-  `CASE`, `CASE_RANGE` or `DEFAULT` with a statement, and an
-  `ATTRIBUTED_STATEMENT` whose groups are all `[[...]]` are peeled. Those are
-  the prefixes the walker skips.
-- **One past its end.** This comes from the [statement plan](#statement-plan-from-the-tree)'s
-  rule (`c_parse_plan_statement_last`, shared with the body binder).
-- **Whether the statement there is a compound statement.** An unlabelled
-  one hands over its interior, as in the walker.
+Lowering's statement walker, `c_ir_lower_body_advance` (`c_gen.c`), reads a
+function body from its statement nodes (#4060, step 2 of the
+[owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)).
+It has no token path and no fallback: a body without a COMPOUND_STATEMENT
+node is refused with `function body has no syntax tree node`.
 
-A statement's first token is its anchor. Two kinds differ: a `goto`'s anchor
-is its label, so its first token is the token before it. An expression
-statement's anchor is its `;`, so its first token is the least anchor of its
-expression, widened over the wrapping parentheses. The anchor checks follow
-the statement plan: a header keyword is followed by `(`, a header's
-substatement follows a `)`, an else branch follows `else`, and a `do` body
-follows its `do`. If any of these fails, the whole body is refused.
+**The tree.** The walker needs a tree in every compile. Until #3102 step 1
+retains the parse phase's tree through lowering, `c_lower_to_ir_with_options`
+builds the implicit layout itself when the caller passes none
+(`c_lower_to_ir_tree_run`, marked as step 1's placeholder) and releases it
+after lowering. Under `-fc-ast-pilot` the driver's tree is used. The unit's
+body index (`c_ir_body_nodes_build`) maps the `{` of every function
+definition, and of every statement expression, to its COMPOUND_STATEMENT
+node. It lives in the tree arena next to the
+[root-conditional records](#lowering-from-the-tree).
 
-The table holds token indices only, in a private arena reset for each body.
-No node id or `CAst` pointer reaches anything lowering publishes. The token
-walkers stay the default path, and they also answer as the fallback.
-`CAstExtentFallback` names why the walker answered:
-- **`input`:** the body has no tree, no function definition owns it, its
-  delimiters do not nest, or its table does not fit the table's arena. The
-  arrays are preflighted against the reservation before any is carved, as is
-  the unit's body index; an index that does not fit leaves every body to the
-  walker.
-- **`anchor`:** an anchor check failed, and the whole body is refused.
-- **`shape`:** the query does not start at an entry. That covers statement-expression
-  interiors, which the walk does not enter, a label shape the walker reads
-  differently, and a statement no rule measures, such as `asm`, or a
-  `return` whose expression holds a statement expression. It also covers a
-  bound shorter than the entry's end, because the walker does not see an
-  `else` at its bound.
+**Tasks.** The body is a stack of `CIrBodyTask`s, as before. Each task now
+holds a node cursor: the comma operands of a split expression statement,
+then one statement (`head_plus_one`), then the items of a block
+(`CIrNodeList`, `item` to `item_count`), stopping at the next case label of
+its switch that owns statements (`stop_plus_one`). The walker takes a
+statement from the cursor and dispatches on its kind:
+- **Blocks, `if`, loops and `switch`** split the task exactly as the token
+  walker did, in the same block-creation and push order, so the IR is
+  unchanged. A controlled substatement that is a bare block hands its items
+  over; anything else, a block under labels or `[[...]]` included, is lowered
+  as one statement.
+- **Labels and case labels** are prefixes: the walker enters the label's
+  block and then lowers the statement it carries.
+- **`switch`** collects its case labels from the CASE, CASE_RANGE and DEFAULT
+  nodes of its body, nested switches excluded (`c_ir_lower_switch_cases`). A
+  label reached from a body item through label prefixes alone owns the
+  statements up to the next such label; any other is a dispatch target inside
+  them (`if (c) case 1: ...`, Duff's device).
+- **Dead code** after a terminator is skipped statement by statement unless
+  the statement holds a label (`c_ir_node_holds_label`). A block opens as
+  usual and its own walk skips up to the label; any other statement with a
+  label inside lowers from a block nothing branches to. The token walker
+  instead jumped into the middle of such a statement, which miscompiled a
+  `goto` into a loop body after dead code.
+- The label table, the direct-SSA jump targets, the statement-expression
+  enclosures and the address-taken labels come from LABELED, GOTO, SWITCH,
+  CASE and LABEL_ADDRESS nodes of the body's span.
 
-The [corpus differential](#corpus-differential) lowers each input with the
-tree in a test-only verify mode (`c_test_ir_extent_verify_set`). The walker
-answers every query too, its answer is the one used, and the two must agree
-on the result, `content_start`, `content_end` and `after`.
-`c_ast_test_extents` covers four things in every layout:
-- one body with every controlled-substatement shape, lowered to the same IR
-  with and without the tree;
-- the two test-only mutations (`c_test_ir_extent_mutation_set`), a `do`
-  statement's end one token short and an `if ... else` measured without its
-  `else`, which the differential must report;
-- a tampered tree for `input`;
-- a tampered tree for `anchor`.
-`-v` prints `C_AST_EXTENTS`.
+**Provenance.** Tokens are read only as provenance: an anchor's source
+location, a label's spelling, and the task tokens that cleanup and loop
+targets ask the parse result's scopes about. A statement's extent comes from
+its siblings: the items of a block tile its tokens, so an item ends where the
+next starts (`c_ir_node_list_end`), and the last at the block's `}`.
+
+**Temporary adapter.** Expressions, declarations, typedefs and assembly
+still enter their token frames until steps 3 and 4. The walker hands each a
+token range derived from the node at that boundary only, and the boundary is
+marked for step 5 (#4058) to delete:
+- `c_ir_node_expression_range` gives an expression's first and last token
+  from its edge children, widened over the parentheses that wrap exactly it;
+- `c_ir_node_declaration_start` steps over a leading attribute run;
+- the statement-expression frame finds its block by its `{`.
+
+`-v` adds three fields to `C_AST_LOWER`: `statement_bodies`, `statements` and
+`range_adapters`, the token ranges the adapter derived.
+
+Tests: `c_ast_test_extents` lowers one body with every controlled-substatement
+shape alike in every layout and with or without a passed tree, and refuses a
+tree whose body brace or `if` anchor is moved. `c_test_statement_nodes_kinds`
+and `c_test_statement_nodes_deep_nesting` (blocks, `if` blocks, an `else if`
+chain, a braceless loop nest, a run of labels and nested statement
+expressions, thousands deep) lower to certified IR, and
+`tests/basic_c_statement_nodes.c` runs every statement kind under both
+register allocators.
+
+The extent table that answered controlled-body ranges from the tree before
+this (#3495) is deleted with the token walkers it fronted.
 
 ## Corpus differential
 
@@ -1436,14 +1458,6 @@ the fixtures reach fewer typed bodies: each stage-3 change alone gave about
 designator probe the const-assignment walk skips (about 1,400 in the
 fixtures, 27,600 in all), and each must fail without a diagnostic or a new
 table row.
-
-Every input whose analysis completes is also lowered with the tree in extent
-verify mode (`c_ast_corpus_extents`). Every controlled body range the
-[extent table](#statement-extents-in-lowering) answers must equal the token
-walker's answer, field by field. There are floors on the answers: about 3,000
-from the fixtures, and about 19,100 with the frontend sources. Today there are
-0 differences, and no corpus body's table is refused. On the whole corpus,
-the `do` mutation gives 1 difference and the dropped-`else` mutation 1,088.
 
 Beside the specifier model comparison, the runs without and with the tree
 must also end with the same whole analysis model, field by field
@@ -1695,7 +1709,7 @@ times, for 68.6 M Ir:
 | root splits: `c_ir_root_conditional`, `c_ir_lower_expression_step`, `c_ir_lower_logical_value_step`, `c_ir_has_root_comma`, `c_ir_group_fact` | 37.7 M | slices 1–2; slice 1 has since answered `c_ir_root_conditional` from the tree under the pilot |
 | evaluator and prepasses: the core step, both prepasses, `c_ir_unary_expression_end`, `c_ir_postfix_suffix_end`, `c_ir_unevaluated_operand_end`, `c_ir_call_argument_separator`, the `sizeof` operand scans | 21.9 M | slice 5 |
 | query machine: `c_ir_query_execute`, `c_ir_sizeof_operand_*` and the static postfix and type-name bounds | 6.1 M | slice 4 |
-| statements: `c_ir_builder_controlled_body_range`, `c_ir_lower_body_advance`, `c_ir_lower_condition_step`, `c_ir_statement_span`, the assignment statement, jump targets | 2.9 M | slice 3 |
+| statements: `c_ir_builder_controlled_body_range`, `c_ir_lower_body_advance`, `c_ir_lower_condition_step`, `c_ir_statement_span`, the assignment statement, jump targets | 2.9 M | slice 3; the walker now reads [statement nodes](#statements-from-nodes-in-lowering) (#4060) |
 
 The stream index these lookups read (`stream_matching_delimiters_plus_one`)
 is built during semantic analysis, for the parser as much as for lowering.
@@ -1962,7 +1976,8 @@ declarations, moves to attribute nodes in the same step.
 `CIRLowerOptions.syntax_tree`, but its queries arrive as token ranges. Each
 tree slice so far has built its own per-body index:
 - the [root-conditional records](#lowering-from-the-tree);
-- the [extent table](#statement-extents-in-lowering).
+- the extent table, since replaced by the
+  [statement walker's node reads](#statements-from-nodes-in-lowering).
 
 This section asks whether one shared map, from a token range to the node
 whose span it is, would let more queries answer from the tree. Its census is
@@ -2058,7 +2073,7 @@ differential tests pass.
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)); so do members' plain runs inside tag definitions ([members](#members)); the statement plan's [declaration hints](#statement-plan-from-the-tree) give block declarations their storage-class set and auto precheck from it. The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
-| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification and the switch label scan stay on tokens: by census neither pays for a tree read ([keyword gate](#statement-keyword-gate-in-lowerings-classification)), and the classification skips its typedef probe for statement keywords instead. |
+| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Retired by #4060: the walker reads [statement nodes](#statements-from-nodes-in-lowering) in every compile, and the first-token classification, `c_ir_statement_end*`, `c_ir_statement_span`, `c_ir_statement_labels_end`, `c_ir_controlled_body_range`, the switch's label scan and the extent table are deleted. Expressions and declarations still receive a token range from a marked adapter until steps 3 to 5. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. Step 4 of the owner direction deletes the query machine; see [Initializers, declarations and type queries from the tree](#initializers-declarations-and-type-queries-from-the-tree). Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
@@ -2086,22 +2101,14 @@ still find statement ends with `c_parse_statement_end`, deliberately: those
 calls cost 1.05 M instructions on the self-host unity input, less than a tree
 lookup would.
 
-Under `-fc-ast-pilot`, lowering's controlled-body extents come from the
-[extent table](#statement-extents-in-lowering), and the verify-mode
-differential passes. The row is not retired, for three reasons:
-- the walkers still run without the flag, for every query the table does
-  not hold, and for every refused body;
-- `c_ir_lower_body_advance` still classifies statements by their first
-  token;
-- `c_ir_control_substatement_position`, the switch's label scan, still reads
-  tokens.
-
-Neither of the last two is planned for the tree. The census found that a
-tree read costs more than it replaces for both; the
+The fifth row is retired: lowering reads every body's statements from their
+nodes (#4060), by default and under the pilot, with no token fallback. The
+census below found that a tree read in the token walker cost more than it
+replaced for the first-token classification and the switch label scan; the
 [keyword gate](#statement-keyword-gate-in-lowerings-classification) has the
-numbers. Retiring the row now waits on a token-to-node map, or on dropping the
-walkers as the default. The [map's census](#token-to-node-map-for-lowering)
-finds that a map pays only together with slice 5a.
+numbers. That measured the tree beside the token path. With the token path
+deleted the comparison no longer applies, and end-to-end measurement waits
+until the migrated path is complete, per the owner direction.
 
 Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
 plain specifier run of a block declaration, a file-scope declaration, a
@@ -3596,7 +3603,8 @@ diagnostic only. The second candidate passes every budget and ships:
   created them as type rows for string operands in casts. The candidate
   that ships therefore reuses a type only when its typing appended no row.
 
-For lowering's [extent table](#statement-extents-in-lowering), these budgets
+For lowering's extent table (#3495, deleted by #4060; see
+[statements from nodes](#statements-from-nodes-in-lowering)), these budgets
 were declared before its measured runs. The input is the self-host unity
 input, at `-g0 -c` (the instruction counts) and at `-g -c` (objects). The
 four Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on
@@ -4357,8 +4365,8 @@ No AST construction defect was found on these inputs.
 
 ### Statement-keyword gate in lowering's classification
 
-Two map-row follow-ups were left open after the
-[extent table](#statement-extents-in-lowering):
+Two map-row follow-ups were left open after the extent table (#3495, deleted
+by #4060; see [statements from nodes](#statements-from-nodes-in-lowering)):
 - `c_ir_lower_body_advance`'s first-token classification;
 - `c_ir_control_substatement_position`, the switch label scan.
 
@@ -4403,7 +4411,7 @@ The base is main `b71dfc89`, which the candidate branches from. The budgets:
   measured.
 - **The tree reads.** Each is built only if its census ceiling, net of the
   gate, clears 1 M and the cost of the per-body table that answers it. The
-  [extent table](#statement-extents-in-lowering) measured that cost at about
+  extent table measured that cost at about
   400 to 700 Ir per entry. A read that does not clear the bar is recorded as
   a negative result, with no code.
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
@@ -4800,8 +4808,9 @@ Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 ### Statement-expression interiors in lowering
 
 This section has its own anchor because other open AST branches append to
-the plan's end. [The extent table](#statement-extents-in-lowering) does not
-enter expressions. So a `({ ... })` body lowered by
+the plan's end. This census predates #4060, which reads statement-expression
+bodies from their [statement nodes](#statements-from-nodes-in-lowering).
+The extent table did not enter expressions. So a `({ ... })` body lowered by
 `c_ir_lower_statement_expression_step` asks the token walkers
 (`c_ir_lower_body_advance`, `c_ir_controlled_body_range`,
 `c_ir_statement_end*`), and its controlled substatements are walked as

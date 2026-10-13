@@ -96,8 +96,9 @@ Two upstream constructs stay outside the harness for reasons worth keeping.
 A `SQLITE_DEBUG` build is not part of the matrix: `assert()` expands to a GNU
 statement expression, and `if( p->apCsr ) for(i=0; i<p->nCursor; i++) assert(
 p->apCsr[i]==0 );` was measured as ending at the assert's closing brace rather
-than at its semicolon until the statement-extent walk in `c_gen.c` (today
-`c_ir_statement_end`) learned to find the body past the header. That shape
+than at its semicolon until the statement-extent walk in `c_gen.c` learned to
+find the body past the header; lowering now reads the body from its statement
+nodes (#4060). That shape
 now compiles, but the debug build
 still fails an internal assertion of its own, so it is a documented gap rather
 than a passing configuration. And the harness never builds `testfixture`, as

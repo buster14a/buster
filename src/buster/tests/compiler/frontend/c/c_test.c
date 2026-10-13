@@ -44479,7 +44479,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_statement_nodes_lower(String8 source)
     return lowered_cleanly;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_nodes_kinds(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
@@ -44517,6 +44517,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
         "    T y = x;\n"
         "    return y;\n"
         "}\n")));
+    return result;
+}
+
+// Deep statement nesting lowers without recursion (#4060): the walker keeps
+// its place on the body task stack, so blocks, `if` blocks, an `else if`
+// chain, a braceless loop nest, a run of labels and nested statement
+// expressions each lower at a depth no C stack frame per level could reach
+// on every host.
+BUSTER_GLOBAL_LOCAL String8 c_test_statement_nodes_deep_source(Arena* arena, u32 family, u32 depth)
+{
+    String8 prefix = family == 5 ? S8("int f(int x) { return ") : S8("int f(int x) { ");
+    String8 open = family == 0 ? S8("{ ")
+                   : family == 1 ? S8("if (x > 0) { ")
+                   : family == 2 ? S8("if (x == 1) x = 2; else ")
+                   : family == 3 ? S8("while (x > 0) ")
+                   : family == 4 ? S8("L: ")
+                                 : S8("({ ");
+    String8 core = family == 5 ? S8("x; ") : S8("x -= 1; ");
+    String8 close = family == 0 || family == 1 ? S8("} ") : family == 5 ? S8("}); ") : S8("");
+    String8 suffix = family == 5 ? S8("}\n") : S8("return x; }\n");
+    u64 capacity = prefix.length + (open.length + close.length + 8) * (u64)depth + core.length + suffix.length;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, prefix);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        // Each label needs its own name.
+        String8 piece = family == 4 ? string_format(arena, S8("L{u32}: "), level) : open;
+        c_test_append_source(bytes, capacity, &length, piece);
+    }
+    c_test_append_source(bytes, capacity, &length, core);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, close);
+    }
+    c_test_append_source(bytes, capacity, &length, suffix);
+    return (String8){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_nodes_deep_nesting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { DEPTH = 6000, FAMILIES = 6 };
+    for (u32 family = 0; family < FAMILIES; family += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = family == 5 ? DEPTH / 4 : DEPTH;
+        String8 source = c_test_statement_nodes_deep_source(temporary.arena, family, depth);
+        BUSTER_TEST_RAW(arguments, c_test_statement_nodes_lower(source),
+                        string_format(temporary.arena, S8("deep statement nest family={u32} depth={u32} did not lower"), family, depth));
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
@@ -66876,7 +66928,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
-    C_TEST_FIXTURE(arguments, c_test_statement_keyword_typedef_probes);
+    C_TEST_FIXTURE(arguments, c_test_statement_nodes_kinds);
+    C_TEST_FIXTURE(arguments, c_test_statement_nodes_deep_nesting);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_tag_scan_growth);

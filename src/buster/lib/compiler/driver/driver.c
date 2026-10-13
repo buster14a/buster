@@ -11107,6 +11107,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
         result.c_ast.lower.fallbacks += unit.c_ast.lower.fallbacks;
+        result.c_ast.lower.statement_bodies += unit.c_ast.lower.statement_bodies;
+        result.c_ast.lower.statements += unit.c_ast.lower.statements;
+        result.c_ast.lower.range_adapters += unit.c_ast.lower.range_adapters;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

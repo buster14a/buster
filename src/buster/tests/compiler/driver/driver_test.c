@@ -44131,7 +44131,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // parsing defects.  The seventh joined them later: `noreturn` spelled on a
     // function pointer type or typedef rather than on a declaration, which the
     // assembly assertion below is what actually gates -- running it only proves
-    // the bodies lower.
+    // the bodies lower. The eighth runs every statement kind the walker reads
+    // from its statement node (#4060), labels and gotos across blocks included.
     String8 c_lz4_regression_paths[] = {
         S8("tests/basic_c_builtin_memory.c"),
         S8("tests/basic_c_case_substatement.c"),
@@ -44140,6 +44141,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_address_of_array.c"),
         S8("tests/basic_c_local_typedef_scope.c"),
         S8("tests/basic_c_goto_into_loop.c"),
+        S8("tests/basic_c_statement_nodes.c"),
     };
     String8 c_lz4_regression_names[] = {
         S8("buster-c-builtin-memory"),
@@ -44149,6 +44151,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-address-of-array"),
         S8("buster-c-local-typedef-scope"),
         S8("buster-c-goto-into-loop"),
+        S8("buster-c-statement-nodes"),
     };
     String8 c_lz4_regression_allocators[] = {
         S8("-fregister-allocator=fast"),

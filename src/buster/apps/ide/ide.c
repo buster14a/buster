@@ -2216,9 +2216,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
-            // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
-            string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
-                         tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
+            // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended, and the bodies and
+            // statements the statement walker lowered from their nodes with the token ranges its adapter derived.
+            string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64} "
+                            "statement_bodies={u64} statements={u64} range_adapters={u64}\n"),
+                         tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks,
+                         tree.lower.statement_bodies, tree.lower.statements, tree.lower.range_adapters);
         }
         // Also report disabled passes: -O0 must expose its selected policy.
         {

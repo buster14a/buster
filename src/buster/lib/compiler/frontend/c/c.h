@@ -1650,6 +1650,13 @@ struct CAstLowerStatistics
     u64 answers;
     u64 negatives;
     u64 fallbacks;
+    // The statement walker (#4060): bodies and statements it lowered from
+    // their statement nodes, and the token ranges it derived at the
+    // temporary expression and declaration adapter (#4058). It has no token
+    // fallback to count.
+    u64 statement_bodies;
+    u64 statements;
+    u64 range_adapters;
 };
 
 typedef struct CParserResult CParserResult;
