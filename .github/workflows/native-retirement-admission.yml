@@ -108,9 +108,25 @@ jobs:
       - name: Test native-retirement merge admission
         shell: bash
         working-directory: validation
+        env:
+          GIT_CONFIG_COUNT: '3'
+          GIT_CONFIG_KEY_0: maintenance.auto
+          GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: gc.auto
+          GIT_CONFIG_VALUE_1: '0'
+          GIT_CONFIG_KEY_2: receive.autogc
+          GIT_CONFIG_VALUE_2: 'false'
+          GIT_CONFIG_PARAMETERS: ''
         run: |
           python3 -B tools/native_retirement_merge_gate_test.py -v
           python3 -B tools/native_retirement_merge_gate_workflow_test.py -v
+      - name: Qualify fixture Git housekeeping ownership
+        shell: bash
+        working-directory: validation
+        run: |
+          binary="$RUNNER_TEMP/native-retirement-fixture-housekeeping"
+          clang -std=c11 -Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char tools/native_retirement_fixture_housekeeping_test.c -o "$binary"
+          "$binary"
       - name: Enforce trusted native-retirement integration
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
