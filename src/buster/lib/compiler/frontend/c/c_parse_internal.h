@@ -82,6 +82,12 @@ struct CTestAstTypeProbe
 };
 BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
                                                       u32 start, u32 end, bool checked);
+
+// Flexible-array promoted-member count replay checks and bounded traversal control.
+BUSTER_F_DECL bool c_test_ast_type_replay_effective_member_count(void);
+BUSTER_F_DECL bool c_test_flexible_array_postorder_work(Arena* arena);
+BUSTER_F_DECL bool c_test_parse_type_replay_effective_member_count(void);
+
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
 // by the type machine and compared; the tree answer is still what the caller
 // gets. The mode and its counts are per thread. A mismatch is a tree answer the

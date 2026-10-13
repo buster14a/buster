@@ -3084,11 +3084,25 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_rows_equal(CType const* x, CType const* y)
            x->parameter_start == y->parameter_start && x->parameter_count == y->parameter_count && x->member_start == y->member_start &&
            x->member_count == y->member_count && x->enum_member_start == y->enum_member_start && x->enum_member_count == y->enum_member_count &&
            x->definition_start == y->definition_start && x->definition_token_count == y->definition_token_count &&
-           x->vector_byte_size == y->vector_byte_size && x->kind == y->kind && x->is_const == y->is_const && x->is_volatile == y->is_volatile &&
-           x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic && x->is_complete == y->is_complete &&
-           x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
+           x->vector_byte_size == y->vector_byte_size && x->effective_named_member_count == y->effective_named_member_count &&
+           x->effective_named_member_count_final == y->effective_named_member_count_final && x->kind == y->kind && x->is_const == y->is_const &&
+           x->is_volatile == y->is_volatile && x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic &&
+           x->is_complete == y->is_complete && x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
            x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
 }
+
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_ast_type_replay_effective_member_count(void)
+{
+    CType original = {.effective_named_member_count = 1, .effective_named_member_count_final = true};
+    CType changed_count = original;
+    changed_count.effective_named_member_count = 2;
+    CType changed_finality = original;
+    changed_finality.effective_named_member_count_final = false;
+    return !c_ast_types_rows_equal(&original, &changed_count) && !c_ast_types_rows_equal(&original, &changed_finality);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool c_ast_types_alignments_equal(CTypeAlignment const* x, CTypeAlignment const* y)
 {

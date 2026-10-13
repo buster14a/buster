@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/lib/time.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
@@ -55826,6 +55827,191 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     return result;
 }
 
+// C11/C17 anonymous aggregate members promote their named descendants for
+// the flexible-array-member rule; named aggregate fields contribute exactly
+// one direct name and do not promote their own children.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_flexible_array_promoted_members(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_parse_type_replay_effective_member_count() &&
+                               c_test_ast_type_replay_effective_member_count() &&
+                               c_test_flexible_array_postorder_work(arguments->arena));
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
+    String8 source = S8("struct s { struct { int i; }; int a[]; };\n"
+                       "struct packet { union { struct { int first; }; union { long second; }; }; int tail[]; };\n"
+                       "struct inner { int child; struct { int nested; }; int sibling; };\n"
+                       "struct named { struct inner item; int tail[]; };\n"
+                       "_Static_assert(sizeof(struct s) == 4, \"s size\");\n"
+                       "_Static_assert(sizeof(struct packet) == 8, \"packet size\");\n"
+                       "_Static_assert(_Alignof(struct packet) == 8, \"packet alignment\");\n"
+                       "_Static_assert(sizeof(struct named) == 12, \"named size\");\n"
+                       "int read_s(struct s* p) { return p->i + p->a[0]; }\n"
+                       "int read_packet(struct packet* p) { return p->first + (int)p->second + (int)p->tail[0]; }\n"
+                       "int read_named(struct named* p) { return p->item.nested + p->tail[0]; }\n");
+    struct
+    {
+        String8 tag;
+        u8 named_count;
+        u32 field_count;
+        u64 size;
+        u32 alignment;
+        bool has_flexible_tail;
+        u64 tail_offset;
+    } expected[] = {
+        {S8("s"), 2, 2, 4, 4, true, 4},
+        {S8("packet"), 3, 2, 8, 8, true, 8},
+        {S8("inner"), 3, 3, 12, 4, false, 0},
+        {S8("named"), 2, 2, 12, 4, true, 12},
+    };
+    for (u32 tree_mode = 0; tree_mode < 2; tree_mode += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target,
+            .data_layout = target_data_layout(target),
+            .dialect = C_PREPROCESS_DIALECT_C17,
+        });
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        CAst tree = {0};
+        CAstFacts facts = {0};
+        bool facts_ready = false;
+        bool syntax_ready = tree_mode == 0;
+        CParserResult syntax = {0};
+        if (tree_mode == 0)
+        {
+            syntax = c_parse_ast(temporary.arena, preprocess);
+        }
+        else
+        {
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+            tree = built.ast;
+            BUSTER_TEST(arguments, built.complete);
+            if (built.complete)
+            {
+                BUSTER_TEST(arguments, c_ast_validate(&tree) == C_AST_NODE_INVALID);
+                facts_ready = c_ast_facts_create(&facts, &tree);
+                BUSTER_TEST(arguments, facts_ready);
+                syntax_ready = facts_ready;
+                if (syntax_ready)
+                {
+                    syntax = c_parse_ast_from_tree(temporary.arena, preprocess, &tree, 0);
+                    syntax.ast_facts = &facts;
+                }
+            }
+            else
+            {
+                syntax_ready = false;
+            }
+        }
+        if (syntax_ready)
+        {
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+            if (analysis.analysis_complete && !analysis.diagnostic_count)
+            {
+                for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+                {
+                    CType const* record = 0;
+                    for (u32 type_index = 0; type_index < analysis.type_count && !record; type_index += 1)
+                    {
+                        CType const* type = analysis.types + type_index;
+                        if (!type->has_unqualified_type && type->kind == C_TYPE_STRUCT && string_equal(type->tag, expected[expected_index].tag))
+                        {
+                            record = type;
+                        }
+                    }
+                    BUSTER_TEST(arguments, record != 0);
+                    if (record)
+                    {
+                        BUSTER_TEST(arguments, record->is_complete &&
+                                               record->effective_named_member_count == expected[expected_index].named_count);
+                    }
+                }
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(
+                        temporary.arena, S8("promoted-flexible-array.c"), preprocess, analysis, target,
+                        (CIRLowerOptions){
+                            .disable_direct_ssa = form != 0,
+                            .syntax_tree = tree_mode ? &tree : 0,
+                            .syntax_facts = tree_mode ? &facts : 0,
+                        });
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0 && lowered.program &&
+                                               lowered.program->module_count == 1);
+                    if (lowered.program && lowered.program->module_count == 1)
+                    {
+                        IrProgram* program = lowered.program;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+                        for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+                        {
+                            IrType* record = 0;
+                            for (u32 type_index = 0; type_index < program->types.count && !record; type_index += 1)
+                            {
+                                IrType* type = program->types.types + type_index;
+                                if (!type->is_volatile && type->kind == IR_TYPE_STRUCT &&
+                                    string_equal(type->name, expected[expected_index].tag))
+                                {
+                                    record = type;
+                                }
+                            }
+                            BUSTER_TEST(arguments, record != 0);
+                            if (record)
+                            {
+                                BUSTER_TEST(arguments, record->layout.resolved &&
+                                                       record->layout.size == expected[expected_index].size &&
+                                                       record->layout.alignment == expected[expected_index].alignment &&
+                                                       record->field_count == expected[expected_index].field_count);
+                                if (expected[expected_index].has_flexible_tail && record->field_count > 1)
+                                {
+                                    IrType* tail = ir_type_from_id(&program->types, record->fields[1].type);
+                                    BUSTER_TEST(arguments, record->fields[1].offset == expected[expected_index].tail_offset &&
+                                                           tail && tail->kind == IR_TYPE_ARRAY && tail->element_count == 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (facts_ready)
+        {
+            c_ast_facts_release(&facts);
+        }
+        c_ast_release(&tree);
+        c_test_scratch_end(temporary);
+    }
+
+    String8 invalid_sources[] = {
+        S8("struct only_flexible { int tail[]; };\n"),
+        S8("struct all_unnamed { struct { unsigned int : 1; }; int tail[]; };\n"),
+        S8("struct nested_only { int visible; struct { int tail[]; }; };\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_sources[source_index], (CPreprocessOptions){
+            .target = target,
+            .data_layout = target_data_layout(target),
+            .dialect = C_PREPROCESS_DIALECT_C17,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == 1);
+        if (analysis.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER);
+            BUSTER_TEST(arguments, string_equal(analysis.diagnostics[0].message,
+                                                S8("structure with a flexible array member must have another named member")));
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Scalar fabs must lower without any math-library import on every native
 // layout; the driver fixture separately observes executed float images.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fabs_builtin_lowering(UnitTestArguments* arguments)
@@ -67657,6 +67843,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     C_TEST_FIXTURE(arguments, c_test_fabs_builtin_lowering);
+    C_TEST_FIXTURE(arguments, c_test_flexible_array_promoted_members);
     C_TEST_FIXTURE(arguments, c_test_float16_type);
     C_TEST_FIXTURE(arguments, c_test_float_classifier_widths);
     C_TEST_FIXTURE(arguments, c_test_float_integer_constants);
