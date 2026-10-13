@@ -5,12 +5,15 @@
 #include <buster/lib/os.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // Integer wire coverage: llvm_bitcode_test_integer_encoding exhausts the
 // scalar operand boundary; llvm_bitcode_test_integer reads complete serialized
 // modules and llvm_bitcode_test_consumers keeps independent Clang execution.
 // llvm_bitcode_test_weak_records checks canonical binding/visibility records;
 // llvm_bitcode_test_weak_consumers checks ELF bindings and linked behavior.
+// llvm_bitcode_test_section_index pins ordered section IDs and scaling work;
+// the weak-record fixture also checks mixed global/function section operands.
 // Scalar ABI coverage: llvm_bitcode_test_scalar_abi_wire pins target attributes;
 // llvm_bitcode_test_scalar_abi_runtime exchanges original C with independent compilers.
 // llvm_bitcode_test_lifecycle checks canonical registrations and independently
@@ -135,7 +138,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArgum
                                     target.triple, modes[mode], frontends[frontend], compiled.diagnostic);
                 }
                 BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -178,7 +181,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArgum
         {
             BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -379,7 +382,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -692,7 +695,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
                                 }
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -817,7 +820,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
             BUSTER_TEST(arguments, observer_after.length == observer.length && observer_after.pointer &&
                 !memcmp(observer_after.pointer, observer.pointer, observer_after.length));
             os_file_delete(observer_path);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #else
@@ -980,7 +983,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1006,7 +1009,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
         BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
                                !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
         file_map_unmap(preserved);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -1106,7 +1109,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_debug_trap(UnitTestArgument
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1280,7 +1283,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_aggregate_va_arg(UnitTestAr
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1322,7 +1325,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_aggregate_va_arg(UnitTestAr
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #else
     (void)arguments;
@@ -1494,7 +1497,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_wide_va_arg(UnitTestArgumen
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1536,7 +1539,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_wide_va_arg(UnitTestArgumen
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #else
     (void)arguments;
@@ -1650,7 +1653,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_clear_cache(UnitTestArgumen
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1826,7 +1829,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_inline_assembly(UnitTestArg
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1861,7 +1864,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_inline_assembly(UnitTestArg
         BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
                                !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
         file_map_unmap(preserved);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -1983,7 +1986,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_array_compound_literals(Uni
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -2063,7 +2066,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments*
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -2109,7 +2112,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
                 BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE);
                 BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(emitted.llvm_bitcode));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -2161,7 +2164,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTe
                                   !memcmp(retained.bytes.pointer, sentinel.pointer, sentinel.length));
             file_map_unmap(retained);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;
@@ -2206,7 +2209,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_win64_object(UnitT
             BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 #endif
     return result;
 }
@@ -3264,7 +3267,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
             BUSTER_TEST_RAW(arguments, boolean_seen == 255, boolean_context);
         }
         types[5].bit_width = 1;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -3651,7 +3654,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_runtime(UnitTest
                         BUSTER_TEST_RAW(arguments, passed, detail);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         for (u32 unit = 0; unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
@@ -3675,6 +3678,7 @@ struct LlvmBitcodeTestBinding
 {
     u32 linkage;
     u32 visibility;
+    u32 section[2];
     bool declaration;
 };
 
@@ -3685,6 +3689,8 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
     LlvmBitcodeTestReader reader = {.bytes = bytes, .bit = 32};
     u32 code_width = 2;
     u32 counts[2] = {0};
+    u32 section_count = 0;
+    String8 sections[] = {S8(".data.z"), S8(".data.a"), S8(".text.z"), S8(".text.f")};
     bool in_module = false;
     bool saw_module = false;
     while (!reader.failed && reader.bit < bytes.length * 8)
@@ -3730,7 +3736,23 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
                     operands[index] = operand;
                 }
             }
-            if (record == 7 || record == 8)
+            if (record == 5)
+            {
+                if (section_count >= BUSTER_ARRAY_LENGTH(sections) || counts[0] || counts[1])
+                {
+                    reader.failed = true;
+                }
+                else
+                {
+                    String8 name = sections[section_count++];
+                    reader.failed |= count != name.length;
+                    for (u64 index = 0; index < count && index < name.length && index < BUSTER_ARRAY_LENGTH(operands); index += 1)
+                    {
+                        reader.failed |= operands[index] != (u8)name.pointer[index];
+                    }
+                }
+            }
+            else if (record == 7 || record == 8)
             {
                 u32 kind = record == 7 ? 0 : 1;
                 u32 index = counts[kind]++;
@@ -3743,6 +3765,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
                     bool declaration = kind == 0 ? operands[2] == 0 : operands[2] != 0;
                     reader.failed |= operands[3] != expected[index].linkage ||
                                      operands[kind == 0 ? 6 : 7] != expected[index].visibility ||
+                                     operands[kind == 0 ? 5 : 6] != expected[index].section[kind] ||
                                      declaration != expected[index].declaration;
                 }
             }
@@ -3752,7 +3775,8 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
             reader.failed = true;
         }
     }
-    return !reader.failed && saw_module && !in_module && counts[0] == expected_count && counts[1] == expected_count;
+    return !reader.failed && saw_module && !in_module && counts[0] == expected_count && counts[1] == expected_count &&
+           section_count == BUSTER_ARRAY_LENGTH(sections);
 }
 
 #if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
@@ -3836,8 +3860,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
     // LLVM 23.1.2 getEncodedLinkage: weak=16 (legacy 1 implies COMDAT),
     // extern_weak=7, internal=3, external=0; visibility is a separate operand.
     LlvmBitcodeTestBinding expected[binding_count] = {
-        {.linkage = 16}, {.linkage = 0}, {.linkage = 3},
-        {.linkage = 16, .visibility = 1}, {.linkage = 7, .declaration = true},
+        {.linkage = 16, .section = {1, 3}}, {.linkage = 0}, {.linkage = 3, .section = {2, 4}},
+        {.linkage = 16, .visibility = 1, .section = {1, 3}}, {.linkage = 7, .declaration = true},
         {.linkage = 0, .declaration = true}, {.linkage = 7, .visibility = 1, .declaration = true},
     };
     String8 data_names[binding_count] = {S8("weak_data"), S8("strong_data"), S8("local_data"), S8("hidden_weak_data"),
@@ -3875,6 +3899,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
                            .linkage = index == 2 ? IR_LINKAGE_INTERNAL : expected[index].declaration ? IR_LINKAGE_IMPORT : IR_LINKAGE_EXTERNAL,
                            .is_definition = !expected[index].declaration, .is_weak = index != 1 && index != 5,
                            .is_hidden = index == 2 || index == 3 || index == 6};
+        String8 data_sections[] = {S8(".data.z"), {0}, S8(".data.a"), S8(".data.z"),
+                                   S8(".ignored.data"), S8(".ignored.data"), S8(".ignored.data")};
+        String8 function_sections[] = {S8(".text.z"), {0}, S8(".text.f"), S8(".text.z"),
+                                       S8(".ignored.function"), S8(".ignored.function"), S8(".ignored.function")};
+        symbol.section_name = data_sections[index];
         symbols[index] = symbol;
         if (!expected[index].declaration)
         {
@@ -3886,6 +3915,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
         symbol.link_name = function_names[index];
         symbol.type.value = 2;
         symbol.kind = IR_SYMBOL_FUNCTION;
+        symbol.section_name = function_sections[index];
         symbols[binding_count + index] = symbol;
         functions[index] = (IrFunction){.name = symbol.name, .symbol = symbol.id, .canonical_type = {.value = 2}, .id = {.value = index},
                                        .state = expected[index].declaration ? IR_FUNCTION_DECLARATION : IR_FUNCTION_LOWERED};
@@ -4002,7 +4032,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
             {
                 arguments->show(arguments, S8("LLVM weak ELF validation requires clang and llvm-readelf/readelf on PATH\n"));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
 #endif
         }
     }
@@ -4144,7 +4174,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_consumers(UnitTestArgu
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length || !inspector.length)
     {
@@ -4153,6 +4183,196 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_consumers(UnitTestArgu
 #else
     (void)arguments;
 #endif
+    return result;
+}
+
+typedef struct LlvmBitcodeTestAlias LlvmBitcodeTestAlias;
+struct LlvmBitcodeTestAlias
+{
+    u32 linkage;
+    u32 visibility;
+};
+
+// Inspect MODULE_CODE_ALIAS (14) records independently of the writer: each
+// version-1 record is [value type, address space, aliasee, linkage,
+// visibility, DLL storage, thread-local], and its aliasee must be an earlier
+// global (7) or function (8) record with the same value type. The writer
+// emits every global before every function, so a module value id is that
+// record's position.
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_aliases(ByteSlice bytes, LlvmBitcodeTestAlias* expected, u32 expected_count)
+{
+    LlvmBitcodeTestReader reader = {.bytes = bytes, .bit = 32};
+    u32 code_width = 2;
+    u64 entity_types[64];
+    u32 entity_count = 0;
+    u32 alias_count = 0;
+    bool in_module = false;
+    bool saw_module = false;
+    while (!reader.failed && reader.bit < bytes.length * 8)
+    {
+        u64 code = llvm_bitcode_test_bits(&reader, code_width);
+        if (code == 1)
+        {
+            u64 block = llvm_bitcode_test_vbr(&reader, 8);
+            u64 width = llvm_bitcode_test_vbr(&reader, 4);
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            u64 words = llvm_bitcode_test_bits(&reader, 32);
+            if (!in_module && !saw_module && block == 8 && width > 0 && width <= 32)
+            {
+                in_module = true;
+                saw_module = true;
+                code_width = (u32)width;
+            }
+            else if (reader.bit <= bytes.length * 8 && words <= (bytes.length * 8 - reader.bit) / 32)
+            {
+                reader.bit += words * 32;
+            }
+            else
+            {
+                reader.failed = true;
+            }
+        }
+        else if (code == 0 && in_module)
+        {
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            in_module = false;
+            code_width = 2;
+        }
+        else if (code == 3 && in_module)
+        {
+            u64 record = llvm_bitcode_test_vbr(&reader, 6);
+            u64 count = llvm_bitcode_test_vbr(&reader, 6);
+            u64 operands[8] = {0};
+            for (u64 index = 0; index < count && !reader.failed; index += 1)
+            {
+                u64 operand = llvm_bitcode_test_vbr(&reader, 6);
+                if (index < BUSTER_ARRAY_LENGTH(operands))
+                {
+                    operands[index] = operand;
+                }
+            }
+            if ((record == 7 || record == 8) && !reader.failed)
+            {
+                // An entity after an alias would shift the alias value ids.
+                reader.failed = alias_count != 0 || entity_count >= BUSTER_ARRAY_LENGTH(entity_types);
+                if (!reader.failed)
+                {
+                    entity_types[entity_count++] = operands[0];
+                }
+            }
+            else if (record == 14 && !reader.failed)
+            {
+                u32 index = alias_count++;
+                reader.failed = count != 7 || index >= expected_count || operands[1] != 0 || operands[2] >= entity_count ||
+                                entity_types[operands[2]] != operands[0] || operands[3] != expected[index].linkage ||
+                                operands[4] != expected[index].visibility || operands[5] != 0 || operands[6] != 0;
+            }
+        }
+        else
+        {
+            reader.failed = true;
+        }
+    }
+    return !reader.failed && saw_module && !in_module && alias_count == expected_count;
+}
+
+// __attribute__((alias)) used to leave LLVM bitcode as a declaration of the
+// alias name, so an independent link failed with an undefined reference
+// (#1338). Both frontend forms must emit one alias record per alias,
+// deterministically, and Clang must link and run the unit at -O0 and -O2.
+// The unit is embedded and written to scratch so that the record checks also
+// run on Android and iOS, whose bundles carry no source fixtures. It covers
+// function and data aliases, an alias used before its declaration with a
+// static target, weak, hidden and internal aliases, and address equality;
+// main returns 0 only when every alias is its target.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 text = S8(
+        "int target(void) { return 1; }\n"
+        "int other(void) __attribute__((alias(\"target\")));\n"
+        "\n"
+        "int used_early(void);\n"
+        "int early(void) { return used_early(); }\n"
+        "static int local_target(void) { return 30; }\n"
+        "int used_early(void) __attribute__((alias(\"local_target\")));\n"
+        "\n"
+        "int counter = 5;\n"
+        "extern int counter_alias __attribute__((alias(\"counter\")));\n"
+        "int table[3] = {1, 2, 3};\n"
+        "extern int table_alias[3] __attribute__((alias(\"table\")));\n"
+        "\n"
+        "int weak_other(void) __attribute__((weak, alias(\"target\")));\n"
+        "__attribute__((visibility(\"hidden\"))) int hidden_other(void) __attribute__((alias(\"target\")));\n"
+        "static int local_other(void) __attribute__((alias(\"target\")));\n"
+        "\n"
+        "int (*saved)(void) = other;\n"
+        "int* counter_address = &counter_alias;\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    counter_alias += 4;\n"
+        "    table_alias[1] = 7;\n"
+        "    int same_function = saved == target && &weak_other != 0;\n"
+        "    int same_data = counter_address == &counter && table_alias == table;\n"
+        "    int calls = other() + early() + weak_other() + hidden_other() + local_other();\n"
+        "    return same_function && same_data && calls == 34 && counter == 9 && table[1] == 7 ? 0 : 1;\n"
+        "}\n");
+    // Fixture order: other, used_early, counter_alias, table_alias,
+    // weak_other (weak = 16), hidden_other (hidden = 1), local_other
+    // (internal = 3).
+    LlvmBitcodeTestAlias expected[] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}, {16, 0}, {0, 1}, {3, 0}};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    BUSTER_TEST(arguments, compiler.length != 0);
+    String8 target = BUSTER_CPU_ARCH_X86_64 ? S8("x86_64-linux") : S8("aarch64-linux");
+#else
+    String8 target = S8("x86_64-linux");
+#endif
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(".c"));
+        String8 bitcode = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+        String8 command[] = {S8("-emit-llvm"), S8("-target"), target, S8("-g0"), frontends[frontend], S8("-o"), bitcode, source};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool success = emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success;
+        BUSTER_TEST_RAW(arguments, success, emitted.diagnostic);
+        command[6] = buster_test_temporary_path(arena, S8("buster-llvm-alias-repeat"), S8(".bc"));
+        CompilerDriverResult repeated = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool repeated_success = repeated.error == COMPILER_DRIVER_ERROR_NONE && repeated.has_llvm_bitcode && repeated.llvm_bitcode.success;
+        BUSTER_TEST_RAW(arguments, repeated_success, repeated.diagnostic);
+        if (success && repeated_success)
+        {
+            BUSTER_TEST(arguments, emitted.llvm_bitcode.bytes.length == repeated.llvm_bitcode.bytes.length &&
+                                  !memcmp(emitted.llvm_bitcode.bytes.pointer, repeated.llvm_bitcode.bytes.pointer, emitted.llvm_bitcode.bytes.length));
+            BUSTER_TEST(arguments, llvm_bitcode_test_aliases(emitted.llvm_bitcode.bytes, expected, BUSTER_ARRAY_LENGTH(expected)));
+        }
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+        for (u32 optimization = 0; success && compiler.length && optimization < 2; optimization += 1)
+        {
+            String8 level = optimization ? S8("-O2") : S8("-O0");
+            String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(""));
+            String8 stage = string_format(arena, S8("alias {S8} {S8}"), frontends[frontend], level);
+            ProcessWaitResult completed;
+            String8 link[] = {compiler, level, bitcode, S8("-o"), executable};
+            bool linked = llvm_bitcode_test_weak_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link), stage, (String8){0}, &completed);
+            BUSTER_TEST(arguments, linked);
+            if (linked)
+            {
+                String8 run[] = {executable};
+                BUSTER_TEST(arguments, llvm_bitcode_test_weak_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), stage, (String8){0},
+                                                                     &completed));
+            }
+        }
+#endif
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
@@ -4238,7 +4458,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
 
@@ -4261,6 +4481,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     LlvmBitcodeArtifact global_tls = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
     BUSTER_TEST(arguments, global_tls.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER && !global_tls.bytes.length);
 
+    return result;
+}
+
+// First-seen IDs depend on content, never storage or lexical order. The
+// generated common-prefix family counts real hash probes at N through 16N.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_section_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    char8 repeated[] = ".data.z";
+    IrSymbol mixed[] = {
+        {.section_name = S8(".data.z")}, {.section_name = S8(".data.a")},
+        {.section_name = {.pointer = repeated, .length = sizeof(repeated) - 1}},
+        {0}, {.section_name = S8(".ignored.declaration")},
+        {.section_name = S8(".text.f")}, {.section_name = S8(".data.a")},
+    };
+    IrSymbol* symbols[] = {mixed, mixed + 1, mixed + 2, mixed + 3, mixed + 4, 0, mixed + 5, mixed + 6};
+    bool declarations[] = {false, false, false, false, true, false, false, true};
+    u32 expected[] = {1, 2, 1, 0, 0, 0, 3, 0};
+    u32 ids[BUSTER_ARRAY_LENGTH(symbols)];
+    LlvmBitcodeTestSections indexed = llvm_bitcode_test_section_ids(arena, symbols, declarations, BUSTER_ARRAY_LENGTH(symbols), ids);
+    BUSTER_TEST(arguments, indexed.name_count == 3 && !memcmp(ids, expected, sizeof(expected)));
+    bool absent[BUSTER_ARRAY_LENGTH(symbols)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(absent); index += 1) absent[index] = true;
+    indexed = llvm_bitcode_test_section_ids(arena, symbols, absent, BUSTER_ARRAY_LENGTH(symbols), ids);
+    BUSTER_TEST(arguments, indexed.name_count == 0 && indexed.probes == 0);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ids); index += 1) BUSTER_TEST(arguments, ids[index] == 0);
+
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        u64 initial_probes = 0;
+        for (u32 count = 1000; count <= 16000; count *= 2)
+        {
+            TemporalArena temporary = scratch_begin(&arena, 1);
+            Arena* scratch = temporary.arena;
+            IrSymbol* rows = arena_allocate(scratch, IrSymbol, count);
+            IrSymbol** pointers = arena_allocate(scratch, IrSymbol*, count);
+            bool* declared = arena_allocate(scratch, bool, count);
+            u32* actual = arena_allocate(scratch, u32, count);
+            char8* names = arena_allocate(scratch, char8, (u64)count * 14);
+            memset(declared, 0, (size_t)count * sizeof(*declared));
+            for (u32 index = 0; index < count; index += 1)
+            {
+                char8* name = names + (u64)index * 14;
+                memcpy(name, ".data.s0000000", 14);
+                u32 number = shape ? index : 0;
+                for (u32 digit = 0; digit < 7; digit += 1)
+                {
+                    name[13 - digit] = (char8)('0' + number % 10);
+                    number /= 10;
+                }
+                rows[index] = (IrSymbol){.section_name = {.pointer = name, .length = 14}};
+                pointers[index] = rows + index;
+            }
+            LlvmBitcodeTestSections measured = llvm_bitcode_test_section_ids(scratch, pointers, declared, count, actual);
+            BUSTER_TEST(arguments, measured.name_count == (shape ? count : 1));
+            BUSTER_TEST(arguments, measured.probes >= count && measured.probes <= (u64)count * 4);
+            for (u32 index = 0; index < count; index += 1) BUSTER_TEST(arguments, actual[index] == (shape ? index + 1 : 1));
+            if (count == 1000) initial_probes = measured.probes;
+            if (count == 16000) BUSTER_TEST(arguments, measured.probes <= initial_probes * 24);
+            arguments->show(arguments, S8("LLVM_SECTION_INDEX shape={u32} names={u32} probes={u64}\n"), shape, count, measured.probes);
+            scratch_end(temporary);
+        }
+    }
     return result;
 }
 
@@ -4573,7 +4857,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_fixed_allocas(UnitTestArgum
                 file_map_unmap(original);
                 BUSTER_TEST(arguments, os_file_delete(input));
                 BUSTER_TEST(arguments, os_file_delete(output));
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -4634,7 +4918,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_fixed_allocas(UnitTestArgum
         BUSTER_TEST(arguments, os_file_delete(output));
         BUSTER_TEST(arguments, os_file_delete(mixed_output));
         BUSTER_TEST(arguments, os_file_delete(executable));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -4751,7 +5035,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
                         BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -4838,7 +5122,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     types[1].bit_width = 32;
     types[1].layout.size = 4;
@@ -4880,7 +5164,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_constant_handoff(UnitTestAr
         BUSTER_TEST_RAW(arguments, success, emitted.diagnostic);
         emitted_all &= success;
         stats[variant] = emitted.llvm_bitcode.stats;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (emitted_all)
     {
@@ -4899,6 +5183,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_integer_encoding);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_weak_records);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_weak_consumers);
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_alias);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_scalar_abi_wire);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_scalar_abi_runtime);
 
@@ -5123,6 +5408,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult constant_handoff = llvm_bitcode_test_constant_handoff(arguments);
     result.test_count += constant_handoff.test_count;
     result.succeeded_test_count += constant_handoff.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_section_index);
     UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
     result.test_count += indexed_lookups.test_count;
     result.succeeded_test_count += indexed_lookups.succeeded_test_count;

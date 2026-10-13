@@ -1,10 +1,11 @@
 # Windows CI critical-path attribution (#2787, #2788)
 
-The native build driver owns this bounded change. Windows AArch64 Release
-uses the existing isolated unit-process runner; Windows x86-64's checked
-sanitized Release uses a better-balanced projection of the same module table.
-Runtime configuration rows, tests, independent references, sanitizer/check/fuzz
-policy and required CI job identities stay the same.
+The native build driver owns this bounded change. Every Clang CI tree, including
+both Windows Release trees since #3912, uses the existing isolated unit-process runner.
+`compiler_driver_tests` remains primary only on Windows AArch64; the other
+partitioned trees use `c_frontend_tests`. Runtime configuration rows, tests,
+independent references, sanitizer/check/fuzz policy and required CI job
+identities stay the same.
 
 ## Recorded diagnostic baseline
 
@@ -62,12 +63,18 @@ Below four workers, or in a single-threaded build, the ordinary invocation
 remains in effect. A four-worker budget yields two workers per child, preserving
 OS multi-lane assertions.
 
-The `primary` process owns the frontend module on Windows x86-64, and the
-driver module on other platforms. Keeping the driver primary on ARM is
-supported as a hypothesis by its recorded 308/205-second payload split; moving its frontend
-to the primary process would give a less balanced 150/363-second split.
-Those payloads were recorded at the serial four-worker quota; each partition
-receives two workers, so the projections do not predict candidate latency.
+The `primary` process owns `compiler_driver_tests` only on Windows AArch64;
+`c_frontend_tests` is primary on the other partitioned trees. The Linux
+sanitized-release observations motivating [#3480](https://github.com/buster14a/buster/issues/3480)
+recorded primary(driver)/rest durations of 201.7/583.7 seconds on x86-64,
+with the frontend contributing 395.4 seconds to `rest`; Linux AArch64 recorded
+189.6/411.1 seconds, with 277.9 seconds of frontend work in `rest`. These
+measurements motivate putting the frontend in `primary`, but do not measure
+candidate latency. Windows AArch64 retains the driver split: its recorded
+308/205-second payload split was more balanced than the 150/363-second
+alternative. Those payloads were recorded at the serial four-worker quota;
+each partition receives two workers, so the projections do not predict
+candidate latency.
 `rest` owns every other enabled module. `primary_module` in the plan records
 the exact selected anchor. Inventories retain canonical module indices,
 audit ownership, and every enabled module exactly once.

@@ -287,6 +287,60 @@ class NativeObservationTest(unittest.TestCase):
         self.assertNotIn("differential_corpus", observation.PACKAGE_REQUIRED_PHASES["windows"])
         self.assertIn("differential_corpus", observation.PACKAGE_REQUIRED_PHASES["unix"])
 
+    def test_package_retains_ebpf_kernel_phases_before_packing(self):
+        # #1625: the Linux x86-64 kernel-oracle phases must stay inside the
+        # workflow's free sequence range: after differential_corpus (80) and
+        # before evidence_packing (85) and the upload_handoff default (90).
+        self.initialize()
+        phases = (
+            ("bootstrap_driver", 10),
+            ("configuration", 20),
+            ("producer_build", 30),
+            ("mode_payload", 40),
+            ("differential_driver_refresh", 50),
+            ("differential_preparation", 60),
+            ("differential_producer_check", 70),
+            ("differential_corpus", 80),
+            ("ebpf_kernel_producer_check", 82),
+            ("ebpf_kernel_oracle", 84),
+        )
+        for name, sequence in phases:
+            self.run_phase(name, sequence)
+        self.assertEqual(0, self.package("unix"))
+        document = json.loads((self.artifact / "native-observation.json").read_text(encoding="utf-8"))
+        self.assertTrue(document["complete"])
+        ordered = [(phase["phase"], phase["sequence"]) for phase in document["phases"]]
+        self.assertEqual(sorted(sequence for _, sequence in ordered),
+                         [sequence for _, sequence in ordered])
+        names = [name for name, _ in ordered]
+        self.assertLess(names.index("ebpf_kernel_producer_check"), names.index("evidence_packing"))
+        self.assertLess(names.index("ebpf_kernel_oracle"), names.index("evidence_packing"))
+        self.assertLess(names.index("ebpf_kernel_oracle"), names.index("upload_handoff"))
+
+    def test_native_workflow_phase_sequences_are_unique_and_before_packing(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        workflow_path = repository_root / ".github" / "workflows" / "ci.yml"
+        if not workflow_path.is_file():
+            self.skipTest("repository workflow is not present in the standalone test fixture")
+        native = workflow_path.read_text(encoding="utf-8")
+        native = native.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        # Each lane is exclusive, so a sequence may repeat only across the
+        # unix/windows lane boundary, never inside one lane's bash/powershell
+        # step set.
+        per_lane = {"bash": [], "powershell": []}
+        for step in re.split(r"(?m)^      - name: ", native)[1:]:
+            shell = re.search(r"(?m)^        shell: (bash|powershell)$", step)
+            if shell:
+                per_lane[shell.group(1)].extend(
+                    int(value) for value in re.findall(r"--sequence (\d+)", step))
+        sequences = per_lane["bash"] + per_lane["powershell"]
+        self.assertTrue(sequences)
+        for lane, lane_sequences in per_lane.items():
+            self.assertEqual(len(lane_sequences), len(set(lane_sequences)), lane)
+        for sequence in sequences:
+            self.assertLess(sequence, observation.PACKAGE_SEQUENCE)
+            self.assertNotEqual(90, sequence)
+
     def test_package_with_root_requires_platform_and_completion(self):
         self.initialize()
         for platform, complete in (("", "1"), ("unix", ""), ("macos", "1"), ("windows", "2")):
@@ -721,11 +775,11 @@ class NativeObservationTest(unittest.TestCase):
             self.skipTest("repository workflow is not present in the standalone test fixture")
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}",
+            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel' || 'modes differential' }}",
             workflow,
         )
         self.assertIn(
-            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}",
+            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel pack' || 'modes differential pack' }}",
             workflow,
         )
         self.assertIn("steps.msvc_reference.outcome == 'success' && '1'", workflow)
@@ -812,6 +866,31 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("retention-days: 7", upload)
         self.assertNotIn("uses: actions/upload-artifact@", upload)
         self.assertNotRegex(desktop, r"(?m)^\s*continue-on-error:")
+        # Backend capability evidence retries one transient upload failure
+        # (#3944); its report step already requires a successful checkout.
+        for platform, report_id in (
+            ("Linux, macOS", "backend_capability_report_unix"),
+            ("Windows", "backend_capability_report_windows"),
+        ):
+            with self.subTest(backend_capability=platform):
+                report = steps[f"Report backend capability evidence ({platform})"]
+                evidence = steps[f"Upload backend capability evidence report ({platform})"]
+                self.assertIn(f"id: {report_id}", report)
+                self.assertIn("steps.checkout.outcome == 'success'", report)
+                self.assertIn(f"if: ${{{{ always() && steps.{report_id}.outcome == 'success' }}}}", evidence)
+                self.assertIn("uses: ./.github/actions/native-artifact-upload", evidence)
+                self.assertIn("label: backend-capability", evidence)
+                self.assertIn("label_title: Backend capability", evidence)
+                self.assertIn(
+                    "name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-"
+                    "${{ github.run_id }}-${{ github.run_attempt }}",
+                    evidence,
+                )
+                self.assertIn("path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md", evidence)
+                self.assertIn("compression-level: 6", evidence)
+                self.assertIn("if-no-files-found: error", evidence)
+                self.assertIn("retention-days: 7", evidence)
+                self.assertNotIn("uses: actions/upload-artifact@", evidence)
         # The caller runs after failed builds, but never loads a local action
         # without checkout or retries after cancellation.
         condition = re.search(r"(?m)^        if: \$\{\{ (.+) \}\}$", upload)

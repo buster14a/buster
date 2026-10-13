@@ -144,6 +144,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShap
 
 typedef struct CTypeParseMachine CTypeParseMachine;
 typedef struct CIrDecodedString CIrDecodedString;
+typedef struct CParseInitializerLog CParseInitializerLog;
+typedef struct CParseInitializerReplays CParseInitializerReplays;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
@@ -162,6 +164,7 @@ BUSTER_C_EXTERN u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsi
 BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
+BUSTER_C_EXTERN bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // GNU `_Alignof(object)` answers the object's alignment, which its alignment
 // records raise; a record may itself spell `_Alignof(object)`, so each layout
@@ -253,6 +256,13 @@ struct CParsePrimitiveSpelling
 BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
+// A deferred _Static_assert row's semantic verdict, for lowering when
+// validation left the row unchecked; see CStaticAssertVerdict.
+BUSTER_C_EXTERN CStaticAssertVerdict c_semantic_static_assert_verdict(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 row);
+// Size and alignment of an unevaluated sizeof/_Alignof operand whose type is
+// storage-only __fp16 or built from it, which has no canonical IR type.
+BUSTER_C_EXTERN bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                           u32 start, u32 end, bool type_name, u64* size_out, u32* alignment_out);
 // Whether a call through this function type ends control flow because the
 // declarator that derived it spelled `noreturn`. The set behind it is empty
 // in almost every translation unit; see CParseResult.noreturn_function_types.
@@ -302,9 +312,14 @@ struct CDeclarationBinding
     // the declaration is a local name for a weak reference to `weakref_target`
     // rather than a definition or an alias of one.
     bool is_weakref;
-    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    // __attribute__((ifunc("resolver"))): the declaration defines the name as
+    // a GNU indirect function whose value is `ifunc_resolver`, a function this
+    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
+    // missing resolver string leaves `ifunc_resolver` empty for
+    // c_parse_validate_alias_targets to refuse.
     bool is_ifunc;
     String8 weakref_target;
+    String8 ifunc_resolver;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -371,6 +386,9 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
                                               CAnalysisResult parse, Target target);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
+// A stamp that changes whenever c_parse_lookup_entity_token's answer could;
+// false outside the validation families, where no stamp is kept.
+BUSTER_C_EXTERN bool c_parse_lookup_generation(CParseResult const* result, u64* generation_out);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 // The same answer from a nearby earlier answer under `root` (or `root` itself): O(tree distance), not O(depth).
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index);
@@ -490,6 +508,8 @@ BUSTER_C_EXTERN bool c_number_convert_at(CNumberFacts const* facts, char8 const*
 typedef struct CStringLiteralMemoSlot CStringLiteralMemoSlot;
 struct CStringLiteralMemoSlot
 {
+    // Null for a length-only slot (CStringLiteralMemo.lengths_only); a
+    // recorded decode always has a buffer, even for an empty literal.
     u8* bytes;
     // Decoded byte count, which is the element count of a narrow fragment.
     u32 length;
@@ -504,8 +524,11 @@ struct CStringLiteralMemo
     CStringLiteralMemoSlot* slots;
     u32 capacity;
     u32 count;
+    // First sights are counted and record no bytes: set when nothing will
+    // lower the unit (CParserResult.string_literal_lengths_only).
+    bool lengths_only;
 };
-BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 // Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
@@ -650,6 +673,8 @@ BUSTER_C_EXTERN CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
 // attribute on the definition -- is final.
 BUSTER_C_EXTERN u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment);
 BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
+BUSTER_C_EXTERN CTypeId c_parse_intern_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
+BUSTER_C_EXTERN CTypeId c_parse_interned_qualified_type(CParseResult const* result, CTypeId base, CType qualifiers);
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
@@ -758,12 +783,19 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
     C_SYMBOL_BUILTIN_ABSOLUTE_VALUE,
+    C_SYMBOL_BUILTIN_SOURCE_LINE,
+    C_SYMBOL_BUILTIN_SOURCE_FILE,
+    C_SYMBOL_BUILTIN_SOURCE_FUNCTION,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
+BUSTER_C_EXTERN bool c_semantic_source_location_builtin(CSymbolBuiltin builtin);
+BUSTER_C_EXTERN u32 c_semantic_source_line(CPreprocessResult const* preprocess, u32 token_index);
+BUSTER_C_EXTERN String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index);
+BUSTER_C_EXTERN CTypeId c_semantic_source_name_type(CParseResult* result, Target target);
 
 typedef enum CIntegerTransformOperation
 {
@@ -808,6 +840,23 @@ typedef struct CMathLibmShape
 
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
+
+// The constant-valued special-float math builtins: positive infinity, or the
+// default quiet NaN of a `nan*("")` call, in the floating type `kind` names.
+typedef enum CMathSpecial
+{
+    C_MATH_SPECIAL_NONE,
+    C_MATH_SPECIAL_INFINITY,
+    C_MATH_SPECIAL_QUIET_NAN,
+} CMathSpecial;
+
+typedef struct CMathSpecialValue
+{
+    CTypeKind kind;
+    CMathSpecial special;
+} CMathSpecialValue;
+
+BUSTER_C_EXTERN CMathSpecialValue c_semantic_math_special_value(String8 link_name);
 
 struct CSymbolTable
 {
@@ -1188,6 +1237,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_VENDOR_TYPE,
     C_TYPE_PARSE_STAGE_VENDOR_TYPE_SUFFIX,
     C_TYPE_PARSE_STAGE_VENDOR_OPERAND,
+    C_TYPE_PARSE_STAGE_ATOMIC_OBJECT,
     C_TYPE_PARSE_STAGE_FINISH,
     C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
@@ -1213,7 +1263,8 @@ struct CParseExpressionTypeTask
     // The false arm of a conditional whose own top-level `?` and `:` its
     // parent already found sits in `split` and `colon`; it skips the scan.
     bool conditional_hinted;
-    u8 reserved[1];
+    // The parent proved this assignment suffix has no top-level comma.
+    bool assignment_rhs;
 };
 
 struct CTypeParseFrame
@@ -1276,6 +1327,7 @@ struct CTypeParseFrame
     // own range holds it.
     u32 shared_specifier_end;
     u32 mutation_mark;
+    // SIZEOF frames also use this as the type-row count at query entry.
     u32 definition_type_start;
     // PARAMETER frames: the diagnostic count at entry, so a failed type
     // specifier that said nothing can be named.
@@ -1406,6 +1458,24 @@ typedef enum CConstantEvaluationMode
 // mismatching entries until an empty slot, so it finds the one live entry of
 // a key exactly, whatever was rolled back before. A lookup
 // (c_parse_interned_type) works whether or not the window is open.
+//
+// Qualified member copies (GitHub #3102). The machine's member step on a const
+// or volatile struct or union appends a qualified copy of the member's row
+// (c_parse_add_qualified_type), and nearly all of those copies repeat an
+// earlier one. While the window is open, c_parse_intern_qualified_type shares
+// them through a second log and slot table, `qualified_*`, whose live prefix
+// is CParseResult.interned_qualified_count. It is kept apart because
+// c_parse_interned_row_matches compares only kind, element and qualifiers and
+// would take a qualified pointer copy for a plain pointer row; a shared copy
+// matches only a row equal in every CType field. The window keeps such a copy
+// unobservable but for the table's size, as above: it is never mutated in
+// place; lowering maps every row with an unqualified link through that row
+// (const to the same IR type, volatile through c_ir_add_qualified_type, which
+// returns an existing type), so it has no IR type or `-g` entry of its own;
+// and it only ever replaces a later copy of itself. A copy that would inherit
+// an alignment record is never shared, because lowering builds an aligned IR
+// type per record, and neither is a restrict or atomic one. A lookup
+// (c_parse_interned_qualified_type) works whether or not the window is open.
 struct CTypeInterning
 {
     u32* rows;
@@ -1415,6 +1485,11 @@ struct CTypeInterning
     u32 slot_count;
     // Slots written since the table was last built, stale ones included.
     u32 slot_used;
+    u32* qualified_rows;
+    u32* qualified_slots;
+    u32 qualified_row_capacity;
+    u32 qualified_slot_count;
+    u32 qualified_slot_used;
     // Aggregate member segments in flight (c_type_parse_aggregate_range_step);
     // the machine's failure path takes back those it discards.
     u32 suspended;
@@ -1520,6 +1595,24 @@ struct CTypeParseMachine
     CAstStatementStatistics* ast_statement_statistics;
     u32* ast_statement_bodies;
     u32 ast_statement_body_count;
+    // The declaration specifier read (c_parse_declaration_specifiers_type)
+    // reads the same tree: `ast_specifier_starts` holds the first token of
+    // every DECL_SPECIFIERS node, ascending, and `ast_specifier_nodes` the
+    // node at the same position, built once before the declarations are
+    // typed (count in `ast_specifier_count`, null without a tree), with the
+    // position of the last lookup in `ast_specifier_cursor`;
+    // `ast_specifier_statistics` the optional counts.
+    CAstSpecifierStatistics* ast_specifier_statistics;
+    u32* ast_specifier_starts;
+    u32* ast_specifier_nodes;
+    u32 ast_specifier_count;
+    u32 ast_specifier_cursor;
+    // Beside it, one bit per token for the first token of every
+    // DECL_SPECIFIERS node, word-only or not, over `ast_specifier_first_limit`
+    // tokens: a type-name run whose first token has no bit begins no type
+    // name (c_parse_type_name_specifiers).
+    u64* ast_specifier_firsts;
+    u32 ast_specifier_first_limit;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
@@ -1547,7 +1640,17 @@ struct CTypeParseMachine
     // CParseResult.phase_released_bytes/phase_releases when analysis returns.
     u64 phase_released_bytes;
     u64 phase_releases;
+    // While c_parse_infer_file_array_bounds walks one list: where that walk
+    // records its element checks. Null at every other time.
+    CParseInitializerLog* initializer_log;
+    // The logs kept from those walks, for static-initializer validation to
+    // replay instead of walking the list again. Null until the first one; in
+    // the phase arena. See c_parse_initializer_replay_find.
+    CParseInitializerReplays* initializer_replays;
     CTypeLayoutCache layout_cache;
+    // Owns a grown member-search workspace; the initial buffers stay in the
+    // analysis machine arena. Released by semantic teardown, never a query rewind.
+    Arena* promoted_member_arena;
     CParsePromotedMemberWork* promoted_member_work;
     u32* promoted_member_visited;
     u32 promoted_member_capacity;
@@ -1564,6 +1667,14 @@ struct CTypeParseMachine
     // inside one is reported there, because neither path has a later fallback
     // that names it.
     u32 member_declarator_depth;
+    // Active aggregate-member frames; replaces per-core ancestor rescans.
+    u32 aggregate_segment_depth;
+    // The `(` and `)` of the identifier list of the old-style definition
+    // whose parenthesized declarator is being parsed, `(a)` in
+    // `int (k(a)) int a; {...}`, else both zero: its names are parameters,
+    // not declarations (GitHub #3368).
+    u32 identifier_list_open;
+    u32 identifier_list_close;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
@@ -1603,6 +1714,15 @@ struct CParsePromotedMemberWork
 };
 
 // ---- tree expression typer (c_ast_types.c) ----------------------------------
+
+// The typer's rarely taken answers stay out of line: inlined into
+// c_parse_expression_type_query, which every query runs, they change that
+// function's code on the default path too.
+#if BUSTER_COMPILER_MSVC
+#define C_AST_TYPES_NOINLINE __declspec(noinline)
+#else
+#define C_AST_TYPES_NOINLINE __attribute__((noinline))
+#endif
 //
 // What the typer made of one type query. ANSWER carries the type and the
 // nonplace-projection fact exactly as a valid, constraint-free machine answer
@@ -1615,8 +1735,13 @@ typedef enum CAstTypeStatus
     C_AST_TYPE_MISS,
     C_AST_TYPE_DECLINE,
     C_AST_TYPE_ANSWER,
-    // An answer that is the row a replay of the queried string literal
-    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    // An answer that is the row a replay of the queried node appends: a
+    // string literal, whose `type` is invalid until
+    // c_parse_expression_tree_query replays it, or, when `node_kind` is
+    // MEMBER or MEMBER_ARROW, a member access over a const or volatile
+    // aggregate, whose `type` is that aggregate's row until the replay
+    // appends the member's qualified copy. One status keeps the query
+    // function's code as it was.
     C_AST_TYPE_STRING,
 } CAstTypeStatus;
 
@@ -1630,7 +1755,8 @@ struct CAstTypeAnswer
     // [replay_start, replay_end), when not empty, is a string-literal token
     // whose typing the answer must replay exactly as the machine's task would
     // (c_parse_expression_tree_query): a checked cast's operand, or under
-    // C_AST_TYPE_STRING the queried literal itself.
+    // C_AST_TYPE_STRING the queried literal itself, or the queried member
+    // access's tokens, which end at the member's name.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;
@@ -1680,6 +1806,10 @@ BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKi
 // Whether [start, end) has the shape of a place, the constraint the machine's
 // `&` checks.
 BUSTER_C_EXTERN bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+// Whether [start, end) is a place `++` or `--` may modify, given its type and
+// whether it is a nonplace projection: the machine's checked update rule.
+BUSTER_C_EXTERN bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type,
+                                                       bool nonplace_projection);
 // The binding strength the machine's operator scan gives a token: 1 for the
 // comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
 BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
@@ -1691,8 +1821,25 @@ BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u3
 // enumerator list still being parsed.
 BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
 
+// The last token of the statement at `node` by the statement plan's anchor
+// rules (c_parse.c), or UINT32_MAX when no rule states it. `lasts` memoizes
+// answers per node - `begin`, zeroed by the caller; `limit` is the body's `}`.
+// Lowering's extent table (c_gen.c) reads the same rules.
+BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit);
+
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;
+
+#if BUSTER_INCLUDE_TESTS
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, c_parse.c).
+// Lowering asks whether it is on before it does any work for it, then reports
+// each `sizeof` size it settles (or its resolver's refusal) for one keyword
+// token, with the signedness of its integer type when it had one (`typed`):
+// `path` is a C_TEST_SIZEOF_HANDOFF_PATH_* value.
+BUSTER_C_EXTERN bool c_sizeof_handoff_enabled(void);
+BUSTER_C_EXTERN void c_sizeof_handoff_compare(CParseResult* result, CPreprocessResult const* preprocess, u32 keyword, bool answered, u64 size,
+                                              bool typed, bool lowering_signed, u32 path);
+#endif
 
 #if BUSTER_INCLUDE_TESTS
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
@@ -1704,6 +1851,10 @@ struct CAstTypeVerifyMark
     u32 types;
     u32 diagnostics;
     u32 array_bounds;
+    u32 type_alignments;
+    // The live shared qualified copies (CTypeInterning), which a replay may
+    // log and the hold takes back with its rows.
+    u32 interned_qualified;
     u32 members;
     u32 enum_members;
     u32 entities;
@@ -1711,6 +1862,8 @@ struct CAstTypeVerifyMark
     u32 parameters;
 };
 BUSTER_C_EXTERN bool c_ast_types_verifying(void);
+// Whether `row` is a live shared qualified member copy (CTypeInterning).
+BUSTER_C_EXTERN bool c_parse_qualified_copy_shared(CParseResult const* result, u32 row);
 BUSTER_C_EXTERN CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_verify_hold_replay(CParseResult* result, CAstTypePending* pending);
 BUSTER_C_EXTERN void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypePending const* pending, u32 start, u32 end,
@@ -1734,10 +1887,13 @@ struct CAstTypePending
     CAstTypeVerifyMark mark;
     u32 replay_types;
     u32 replay_bounds;
+    u32 replay_alignments;
     // More rows than C_AST_TYPE_REPLAY_ROWS are counted but not kept, which
     // the comparison reports as a mismatch.
     CType replay_type_rows[C_AST_TYPE_REPLAY_ROWS];
     CArrayBound replay_bound_rows[C_AST_TYPE_REPLAY_ROWS];
+    // The alignment records a replayed row inherited (c_parse_add_qualified_type).
+    CTypeAlignment replay_alignment_rows[C_AST_TYPE_REPLAY_ROWS];
 };
 #endif
 
@@ -1822,6 +1978,7 @@ BUSTER_C_EXTERN bool c_ir_constant_float_to_integer(f64 floating, IrType* target
 BUSTER_C_EXTERN f64 c_ir_float16_round(f64 value);
 BUSTER_C_EXTERN f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_EXTERN bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result);
+BUSTER_C_EXTERN CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special);
 BUSTER_C_EXTERN bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation, CIrConstantValue left, CIrConstantValue right, IrType const* type, CIrConstantValue* result);
 
@@ -1873,6 +2030,33 @@ struct CIrAtomicBuiltinSpelling
 
 BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling);
+
+// What an atomic builtin call answers: nothing, a _Bool flag, or the
+// unqualified, non-atomic type of the object its first argument points to.
+// Lowering's strict operand walk and the parser's expression typer both read
+// it, so `sizeof` and `__typeof__` agree.
+typedef enum CSemanticAtomicResult
+{
+    C_SEMANTIC_ATOMIC_RESULT_INVALID,
+    C_SEMANTIC_ATOMIC_RESULT_VOID,
+    C_SEMANTIC_ATOMIC_RESULT_FLAG,
+    C_SEMANTIC_ATOMIC_RESULT_OBJECT,
+} CSemanticAtomicResult;
+
+BUSTER_C_EXTERN CSemanticAtomicResult c_semantic_atomic_builtin_result(CIrAtomicBuiltinSpelling spelling);
+
+// The C types a library builtin's standard prototype is spelled in.
+typedef enum CIrLibraryValue
+{
+    C_IR_LIBRARY_VALUE_VOID_POINTER,
+    C_IR_LIBRARY_VALUE_CHAR_POINTER,
+    C_IR_LIBRARY_VALUE_INT,
+    C_IR_LIBRARY_VALUE_SIZE,
+} CIrLibraryValue;
+
+// The result of a `__builtin_mem*`/`__builtin_str*` library-shaped builtin,
+// or false when the name is not one.
+BUSTER_C_EXTERN bool c_semantic_memory_builtin_result(String8 name, CIrLibraryValue* value_out);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_literal_kind(Target target, u64 const* limits, String8 spelling, u64 value);
 BUSTER_C_EXTERN bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out, String8* message, u32* location);
 

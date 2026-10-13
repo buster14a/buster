@@ -19,6 +19,7 @@ typedef enum JitError
     JIT_ERROR_BINDING_KIND,
     JIT_ERROR_INVALID_BINDING,
     JIT_ERROR_INIT_FINI_UNSUPPORTED,
+    JIT_ERROR_EXECUTABLE_STACK,
     JIT_ERROR_COUNT,
 } JitError;
 
@@ -73,6 +74,17 @@ struct JitProgram
     JitError error;
 };
 
+// Imported data ABSOLUTE64 references bind directly on x86-64 and AArch64.
+// Relative data references (x86-64 PC32, AArch64 PREL32 and Mach-O PAGE21)
+// constrain the image's placement to reach the actual host addresses. Hints
+// never replace existing mappings; no representable available placement is
+// reported as JIT_ERROR_CAPACITY. Host reads, writes and pointer identity are
+// preserved; the loader does not copy imported objects into its own image.
+//
+// For admitted imported-data relocation kinds, a missing explicit binding
+// reports JIT_ERROR_UNRESOLVED_IMPORT and names the symbol, including when
+// the binding list is empty. Unsupported data kinds retain their refusal.
+//
 // Imported function PC32 references in text retain the call-thunk policy.
 // PC32 references in data/read-only sections use the explicit binding address,
 // like ABSOLUTE64 pointers, and fail with JIT_ERROR_CAPACITY when that signed
@@ -81,6 +93,8 @@ struct JitProgram
 // Nonempty initializer/finalizer arrays are refused before image allocation:
 // this API has no initialization/finalization execution protocol. Empty arrays
 // without relocations are inert placeholders and remain admitted.
+// An object that requires an executable stack is refused before image
+// allocation: the JIT cannot change the protection of the caller's stack.
 // The host process must permit JIT executable memory. Apple Silicon macOS code
 // starts in a nominal RWX MAP_JIT mapping and uses
 // pthread_jit_write_protect_np around construction; the call assumes write

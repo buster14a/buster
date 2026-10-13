@@ -123,8 +123,8 @@ The catch-up is fully automatic:
    validate nothing. Nobody needs to approve them. It dispatches the existing writer through the
    standing grant. The writer regenerates the pair for current `main` and
    publishes the usual two-parent integration head; that push starts PR CI.
-   If `main` moves during the run without newer generated state, the writer
-   still publishes for its expected base (see
+   If `main` moves during the run without newer generated state or a
+   standing-policy change, the writer still publishes for its expected base (see
    [staleness](#staleness-failure-and-cancellation)).
    The controller records its claim as a comment on the PR, so its job needs
    `pull-requests: write`; with `pull-requests: read` the issues API refuses
@@ -223,16 +223,30 @@ two-parent commit and attestation for its expected base when both of these hold
 for live `main`:
 
 - the expected base is an ancestor of live `main`;
-- `generated_changed_between(expected_base, live_main)` is false.
+- `generated_changed_between(expected_base, live_main)` is false;
+- `policy_changed_between(expected_base, live_main)` is false, so
+  `.github/native-retirement-automation.json` is unchanged.
 
-The merge gate admits exactly that head. `catch_up_main_admissible` in
+The merge gate admits that head; it judges only the first two conditions.
+The third exists because authorization reads the standing policy at live
+`main` and compares its digest with the one the controller scheduled for the
+base. A policy change since the base would otherwise fail the run with
+`standing grant changed after scheduling`. Instead the catch-up is superseded
+(exit 75), and the new policy digest gives the next controller request a new
+key. A digest mismatch without observed `main` movement still blocks, as it
+does for every other request. `catch_up_main_admissible` in
 `tools/native_retirement_integration.py` holds this rule. Authorization
 (`authorize`, with and without `--automation-publication`) applies it before it
 reads the live policy. The publication step applies it through `catch-up-main`
 at both of its `main` checks. Any other movement still exits 75. Ordinary,
 trust-transition and manually dispatched requests still need exact current
-`main` at every check. A lease failure while `main` differs from the base is
-still reported as main movement. Trusted job outputs carry those outcomes
+`main` at every check. A leased-push failure while the PR head is unchanged
+and `main` differs from the base is reported as main movement only when that
+movement is not admissible: for an automatic catch-up the failure branch calls
+`catch-up-main` with the live `main`, and an admissible movement exits 1, since
+`main` did not cause the failure and a superseded label would hide a real
+publication failure behind a fresh retry. Other requests keep exit 75 for any
+such movement. Trusted job outputs carry those outcomes
 into a separate read-only result job. Its fixed `Superseded request` marker is
 accepted only from the verified writer's exact attempt; candidate test logs or
 artifacts cannot supply that decision. The first failed stage decides the

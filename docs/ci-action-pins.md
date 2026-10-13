@@ -35,20 +35,22 @@ changing the checker together with a workflow.
 
 ## Approved local CI evidence-upload composite action
 
-`./.github/actions/native-artifact-upload` is approved only for two Buster CI
-uses: the packed native evidence step after successful packaging, and the
-mobile log-retention step after `Mobile result and reproduction`. The mobile
-caller runs it under `!cancelled()`, so build, lifecycle, test, and coverage
-failures still retain the available logs. Its inputs preserve the mobile
-artifact name and path, the upload action's default compression level (6),
-`if-no-files-found: ignore`, and seven-day retention.
+`./.github/actions/native-artifact-upload` is approved only for these Buster
+CI uses: main-CI reuse evidence, the packed native evidence step after
+successful packaging, desktop and mobile log retention, and the desktop
+backend capability evidence reports (Linux/macOS and Windows, #3944). The log
+retention callers run under `!cancelled()`, so build, lifecycle, test, and
+coverage failures still retain the available logs. Callers preserve their
+artifact name, path, compression level, `if-no-files-found` policy, and
+seven-day retention; the backend capability reports keep the upload action's
+default compression level (6) and `if-no-files-found: error`.
 
 The composite uses the existing pinned upload-artifact v7 action for the
 initial attempt and one retry, tolerates only the initial failure, waits
 15 seconds, and sets `overwrite: true` on the blocking retry. Recovery and
 evidence loss are reported explicitly. A successful retry does not change any
 earlier build or coverage failure. Regression coverage in
-`tools/ci_native_observation_test.py` checks both callers, all three mobile
+`tools/ci_native_observation_test.py` checks the callers, all three mobile
 matrix entries, the matching retry inputs, cancellation, and the two-attempt
 limit.
 
@@ -58,14 +60,13 @@ actions.
 
 ## Approved same-commit reusable workflow
 
-`./.github/workflows/throughput-real-source.yml` reuses the existing native
-workload qualification after both pinned apt profiles pass, without copying its build/admission commands into a
-second harness. GitHub resolves this literal `./` workflow from the caller's
-same commit; there is no floating external branch, tag or downloaded action.
-The called workflow retains read-only contents permission and its existing
-source identity, native oracle, admission and artifact checks. Direct PR runs
-remain opt-in; only the path-filtered apt qualification sets the new boolean
-input. See [pinned input qualification](ci-apt-inputs.md).
+The former `./.github/workflows/throughput-real-source.yml` caller was retired
+by #3501. Full external source staging/oracles/admission now belong to
+[the main-push owner](../.github/workflows/external-projects.yml), with no
+PR/manual/reusable route. The frozen action-pin allowlist retains its historical
+literal for compatibility tests; the native scheduling policy rejects any live
+workflow that attempts to use it. See [pinned input qualification](ci-apt-inputs.md)
+and [the migration map](external-project-ci.md).
 
 `./.github/workflows/compiler-throughput.yml` is also approved for the
 same-commit `Compiler throughput requests` caller. It shares the reviewed PR
@@ -77,7 +78,7 @@ retains read-only contents permission and no inherited secrets. See
 
 The checker does not accept arbitrary local actions, path traversal, local
 `@ref` suffixes, expressions or unreviewed remote references. The additional
-controls in `tests/ci_apt_test.py` exercise those rejection boundaries; the
+controls loaded by `tools/ci_apt_retry_test.py` exercise those rejection boundaries; the
 existing action-policy tests and independent actionlint remain required.
 
 The pinned actionlint predates GitHub's `concurrency.queue` syntax. Workflow

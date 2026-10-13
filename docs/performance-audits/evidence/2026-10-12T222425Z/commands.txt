@@ -1,0 +1,27 @@
+# Commands as run, in order, from the repository root at commit 64021a34ac2b.
+# $S is the session scratch directory; PATH was prefixed with the TinyCC install.
+
+# 1. TinyCC bootstrap compiler
+git clone https://github.com/TinyCC/tinycc.git && git -C tinycc checkout 0fb54300b56512754221d80adda85ddb9815bceb
+(cd tinycc && ./configure --prefix=/tmp/claude-0/tools/tcc && make -j4 && make install)
+
+# 2. The preparation recipe on a fresh tree (generate.log, build.log, ninja_log.txt)
+(time ./build.sh generate --cc clang --no-include-tests) > $S/gen.log 2>&1
+(time ./build.sh build --config Release -t ide) > $S/build.log 2>&1
+
+# 3. Time-traced rebuild of the same compile edge (ide-time-trace.json).
+#    FLAGS and DEFINES are lines 49 and 47 of build/CMakeFiles/impl-Release.ninja
+#    (impl-Release.ninja.excerpt), substituted verbatim.
+/usr/bin/clang $DEFINES -I/home/user/buster/build/generated -I/home/user/buster/src $FLAGS \
+    -ftime-trace -ftime-trace-granularity=2000 -o $S/ide_trace.o -c /home/user/buster/src/buster/apps/ide/ide.c
+python3 -I trace_summary.py ide-time-trace.json > trace-summary.txt
+
+# 4. Three concurrent variants of the same edge, each wrapped by rtime.py (variants.log)
+C="/usr/bin/clang $DEFINES -I/home/user/buster/build/generated -I/home/user/buster/src $FLAGS"
+python3 -I rtime.py $S/plain.time $C -o $S/plain.o -c src/buster/apps/ide/ide.c &
+python3 -I rtime.py $S/noat.time $C -Xclang -fexperimental-assignment-tracking=disabled -o $S/noat.o -c src/buster/apps/ide/ide.c &
+python3 -I rtime.py $S/nog.time $C -g0 -o $S/nog.o -c src/buster/apps/ide/ide.c &
+wait
+for o in plain noat nog; do echo "$o $(cat $S/$o.time)"; objcopy -O binary --only-section=.text $S/$o.o $S/$o.text; sha256sum $S/$o.text; done
+
+# 5. Output identities (identities.txt): sha256sum and stat -c %s of each listed file.

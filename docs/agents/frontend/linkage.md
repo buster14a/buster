@@ -4,6 +4,13 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **i386 relocatable objects use ELF32 REL records.** The object API emits and
+  reads `ELFCLASS32`/`EM_386` with the eight i386 relocation forms documented in
+  [object emission](../../object-emission.md#elf32-i386-relocatable-objects).
+  Inline addends, 16-bit fields, four-byte initializer priorities and lazy
+  archives preserve their 32-bit contracts. Driver code generation and Buster
+  image linking remain refused until their i386 backends are implemented.
+
 - **TLS classification consumes canonical keyword spellings.** Preprocessing
   rewrites C23/GNU23 `thread_local` to `_Thread_local`, including preprocessed
   input. A remaining raw `thread_local` is an ordinary identifier; its use as
@@ -77,7 +84,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `link_test_elf_shared_local_initial_exec_tls_addend` verifies a local
   initial-exec `TPOFF64` relocation retains the second TLS variable's offset.
 - **AArch64 ELF variant procedure-call metadata is refused explicitly.**
-  `object_read_elf64` refuses every non-null, non-FILE symbol carrying
+  `object_read_elf` refuses every non-null, non-FILE symbol carrying
   `STO_AARCH64_VARIANT_PCS` (st_other bit 0x80), naming the symbol and table
   index. The neutral object model cannot preserve this marking or the
   intermediary register/state guarantees required by
@@ -113,14 +120,64 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   keep their virtual sizes without allocating serialized storage (GitHub #303).
 - **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
   The reader normalizes the signed inline displacement B to canonical A=B-4,
-  including references named `__tls_index`. The writer restores B=A+4 for
+  including references to `_tls_index`. The writer restores B=A+4 for
   `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
   The registered object regression constructs raw COFF bytes independently,
   checks both signed boundaries and a near-name ordinary-symbol control,
-  and inspects serialized fields across repeated read/write cycles. This
-  preserves addends within the current TLS model; platform TLS symbol spelling,
-  section conventions and runtime interoperability remain separate contracts
-  tracked by GitHub #1323.
+  and inspects serialized fields across repeated read/write cycles.
+- **COFF TLS index loads name the platform's `_tls_index`.** Codegen attaches
+  every Windows TLS relocation to the variable so the in-memory PE linker can
+  resolve it; `object_coff_bind_tls_index` rebinds only the serialized index
+  load (x86-64 REL32, ARM64 ADRP/LDR pair) to an undefined global DATA
+  `_tls_index` (`OBJECT_COFF_TLS_INDEX_NAME`), the spelling the MSVC CRT
+  defines and `link.exe`/`lld-link` resolve. The reader maps an x86-64 REL32
+  against that undefined symbol back to the index kind, rejects REL32_1..5
+  against it, and keeps a defined `_tls_index` an ordinary PC32 target.
+  `link_pe_tls_index_symbol` lets the PE linker resolve that symbol to its
+  synthesized index slot on both architectures when every reference is an
+  index load. `link_test_pe_x64_tls_index_object` checks that an image linked
+  from the written object loads `AddressOfIndex`, as a direct link does
+  (GitHub #1323 W1/W3 spelling).
+- **COFF thread-local data is serialized as initialized `.tls$`.** The PE
+  loader copies one `.tls` template, which `link.exe` and `lld-link` build from
+  the `.tls$` input sections between the CRT's `.tls` and `.tls$ZZZ` bounds;
+  a `.tdata`/`.tbss` section would land outside the TLS directory.
+  `object_coff_place_tls` therefore names every TLS section
+  `OBJECT_COFF_TLS_SECTION_NAME` and materializes zero-fill TLS as zeros, as
+  MSVC and Clang do. Section and symbol indices are unchanged, so no
+  relocation is rebased; the reader maps `.tls$` back to
+  `OBJECT_SECTION_THREAD_LOCAL_DATA`, and Windows assembly output prints the
+  same section. `link_test_pe_x64_tls_index_object` checks the written
+  sections and that the TLS template linked from the object equals the direct
+  link's (GitHub #1323 W3).
+- **Mach-O thread-local variables are named by `__thread_vars` descriptors.**
+  dyld reaches a variable through a 24-byte descriptor `{thunk, key,
+  storage}` in an `S_THREAD_LOCAL_VARIABLES` (0x13) section, and ld64 accepts
+  TLV/TLVP relocations only against such a descriptor. The canonical model
+  defines the variable on its storage and the native Mach-O linker
+  synthesizes descriptors. `object_mach_o_place_thread_variables` therefore
+  moves each written thread-local symbol `v` onto a new descriptor with
+  `UNSIGNED` relocations to `__tlv_bootstrap` (+0) and a local `v$tlv$init`
+  left on the `__thread_data`/`__thread_bss` storage (+16), as Clang does;
+  indices are unchanged, so TLV/TLVP relocations keep naming `v`. The reader
+  inverts it in `object_mach_o_restore_thread_variables`: descriptor sections
+  are not copied, each descriptor's symbol moves onto its storage, and the
+  storage alias and any other label on the descriptor (Clang's `ltmp`) are
+  dropped, their references following the variable. Only the exact
+  descriptor shape is admitted. X86_64_RELOC_TLV, like SIGNED, stores the
+  displacement from the end of its field: the writer restores B = A + 4 for
+  `OBJECT_RELOCATION_X86_64_MACH_TLV_PC32`, which the reader maps to A = B - 4.
+  `compiler_driver_mach_tls_object_tests` decodes the written descriptors
+  independently, checks the canonical read-back, requires the object-linked
+  executable to equal a direct compile on AArch64 and x86-64, and links the
+  objects with `ld64.lld` against a libSystem stub that only supplies
+  `__tlv_bootstrap`, recording `status=unavailable` without it (GitHub #1323 M1).
+  These platform TLS transforms (`_tls_index` binding, `.tls$` zero-fill and
+  Mach-O descriptors) plan their exact scratch demand with
+  `object_writer_scratch_plan` before allocating, so a bounded arena refuses
+  with `OBJECT_ERROR_CAPACITY`, publishes nothing and is rewound;
+  `object_test_tls_writer_arena_limits` sweeps every limit below the first
+  accepted one.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -215,12 +272,48 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   that same module. The frontend keeps a static alias target alive -- an
   attribute names it, no identifier use does -- and diagnoses an alias whose
   target this translation unit does not define rather than emitting an
-  import. Both attributes are read inside the declaration's
+  import. Non-native outputs never drop an alias silently (#1338): LLVM
+  bitcode writes a `MODULE_CODE_ALIAS` record (`@name = alias T, ptr @target`
+  with the alias's own linkage and visibility, the target's value type and
+  thread-local mode) from `llvm_bc_add_alias_entity`, so an independent
+  Clang link resolves the name; the direct WebAssembly and eBPF emitters have
+  no second name for a definition and refuse the module with "WebAssembly
+  output does not represent symbol aliases" and "eBPF output does not
+  represent symbol aliases"; SPIR-V refuses any module with aliases. The
+  refusals live in the emitters rather than the frontend because
+  `-emit-llvm` for `wasm64-unknown-freestanding` and `bpfel-unknown-linux`
+  carries the alias. `llvm_bitcode_test_alias` and
+  `compiler_driver_test_alias_direct_emitters` cover them. Both attributes are read inside the declaration's
   `__attribute__((...))` list by `c_declaration_binding` in `c_gen.c`, never
   anywhere in its token range the way `section` and `asm` are matched: a
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **`__attribute__((ifunc("resolver")))`** (issue 1243) defines its name as a
+  GNU indirect function whose value is the resolver's address, as GCC and
+  Clang do. It is an alias whose target is the resolver, so it travels the
+  same path with one more bit: `c_declaration_binding` records
+  `ifunc_resolver`, the lowering adds an `IrSymbolAlias` with `is_indirect`
+  set, `ir_validate_canonical_module` requires that target to be a function
+  body of the same module, and the object writer gives the symbol the
+  resolver's section, offset and size with `ObjectSymbol.indirect`, which the
+  ELF writer emits as `STT_GNU_IFUNC` (`object_elf64_symbol_type`). A local
+  (`static`) ifunc is a local indirect symbol. From there the linker treats
+  it as it treats a host compiler's IFUNC
+  ([object emission](../../object-emission.md)):
+  `link_elf_indirect_functions_rebind` turns it into a thunk and a slot.
+  `c_parse_validate_alias_targets` refuses, by name and identically under
+  `-fsyntax-only` and `-c`: an output without an indirect symbol (COFF,
+  Mach-O, and any target but x86-64/AArch64 Linux, Android or freestanding
+  ELF); an ifunc on an object; a missing resolver string; an ifunc that is
+  also an alias or weakref, or that has a body; a resolver that is not
+  declared, not a function or not defined in the translation unit; and a
+  resolver that returns neither `void *` nor a pointer to a function
+  compatible with the declared one, which Clang refuses and GCC warns about.
+  LLVM bitcode has no ifunc form here and refuses the module rather than
+  drop the symbol. `compiler_driver_test_ifunc_attribute` checks the symbol
+  and every refusal; `compiler_driver_elf_ifunc_tests` runs `ide cc`-built
+  programs, static, dynamic, `-pie` and `-shared`, against the host oracle.
 - **Symbol visibility** (GitHub #1291) is one bit, `IrSymbol.is_hidden`
   (`ObjectSymbol.hidden`, ELF `STV_HIDDEN`; LLVM bitcode `hidden`). Three
   statements set it, each read where its declaration is: `__attribute__((visibility("...")))`
@@ -337,7 +430,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `.NNNNN` suffix, becomes an initializer-array section, and the ELF writer
   types it `SHT_INIT_ARRAY`, `SHT_FINI_ARRAY` or `SHT_PREINIT_ARRAY`.
   Functions moved out of `.text` leave the one-range DWARF unit.
-  `object_read_elf64` keeps every C-identifier-named input section as its
+  `object_read_elf` keeps every C-identifier-named input section as its
   own section. `link_objects` places each such set contiguously after the
   ordinary sections of its kind, and defines the `__start_NAME`/`__stop_NAME`
   references GNU `ld` would (`link_section_sets_define`). The registered
@@ -383,7 +476,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `object_split_initializer_priorities` splits it back into one section per
   priority group for the ELF and COFF writers, so an external linker orders
   two Buster objects exactly as it orders Clang's (issue #782).
-  `object_read_elf64` and `object_read_coff` recover it from those section
+  `object_read_elf` and `object_read_coff` recover it from those section
   names -- the padded `.init_array.00101` written here and the unpadded
   `.init_array.101` Clang writes are both read -- and
   `object_reader_merge_initializer_arrays` merges the sections of a kind in
@@ -628,9 +721,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   nonzero REL instruction fields and nonzero RELA addends; canonical ELF
   writing, assembly printing and the shared image patcher enforce the same
   rule. A valid pair relaxes to ADRP/ADD of the symbol, including an imported
-  data symbol's copy slot; an undefined weak zero target becomes MOVZ/ADD
-  zero. Direct ADRP/ADD and scaled memory relocations retain their distinct
-  signed-addend rules. See [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/a5e86d3fec7342719f3bd1f939ec1b8ac6438c4f/aaelf64/aaelf64.rst).
+  data symbol's copy slot. In AArch64 PIEs, an undefined weak GOT target uses
+  a zero-filled GOT slot and retains the LDR; direct PAGE21/ADR references
+  instead use MOVZ #0. Direct ADRP/ADD and scaled memory relocations retain
+  their distinct signed-addend rules. See [AAELF64 addends and relocation
+  definitions](https://github.com/ARM-software/abi-aa/blob/a5e86d3fec7342719f3bd1f939ec1b8ac6438c4f/aaelf64/aaelf64.rst).
 
 - Direct AArch64 ELF unsigned-immediate memory references use distinct
   `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`
@@ -657,20 +752,26 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   SUB, ADDS and unrelated instructions. Type 7 ordinarily accepts the scaled
   unsigned-immediate load/store and PRFM encodings, preserving the operation
   and registers while clearing or restoring the immediate. Reserved,
-  unscaled and register-offset forms fail closed. The exact `__tls_index`
+  unscaled and register-offset forms fail closed. The exact `_tls_index`
   symbol remains a distinct DATA-symbol contract restricted to a 32-bit
   unsigned-immediate LDR; the writer binds index-pair relocations to that
   loader symbol. TLS section offsets use shifted ADD type 10
   (`SECREL_HIGH12A`) followed by unshifted ADD type 9 (`SECREL_LOW12A`).
+  Clang and MSVC instead fold the low half into the access with type 11
+  (`SECREL_LOW12L`), which the reader accepts against TLS sections on the
+  scaled unsigned-immediate load/store forms `PAGEOFFSET_12L` admits, as
+  `OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L`. Its inline imm12 counts
+  access-size units; the canonical addend counts bytes, and the PE linker
+  splits offset plus addend and requires the low half to be aligned to the
+  access size. The writer restores type 11, so Buster links and rewrites
+  Clang/MSVC ARM64 TLS objects.
   Native MIR producers emit both halves, preserving offset bits 12..23
   beyond 4 KiB. COFF's inline imm12 addend is an unscaled byte count even in
   the shifted ADD; the PE linker adds it before splitting the final template
   offset. Offsets beyond 24 bits, malformed ADD forms and arithmetic overflow
   fail before executable publication. Registered codegen, original raw-COFF
   and final PE byte tests cover both frontend forms, all allocators, carries,
-  initialized/zero-fill placement and output retention. This fixes #1323 W2;
-  platform TLS-index spelling/section interoperability and Mach-O descriptors
-  remain separate work. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
+  initialized/zero-fill placement and output retention. This fixes #1323 W2. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
   CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
   checked inline addends. The PE linker applies all of these only after final
   layout and returns no executable bytes on a relocation failure.

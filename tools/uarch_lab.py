@@ -124,6 +124,7 @@ Map (searchable symbols):
     summarize, percentile, runs_since_minimum, tenth_medians   statistics
     phase_spans, interval_table, attribute_intervals      timeline alignment
     Lab, Lab.workload, Lab.run_command                    process execution
+    run_measured, child_subreaper, reap_orphans           wait4 RSS, probe orphan reaping
     Lab.instance, fresh_binary_copy, Lab.record_options   fresh binary copy per run/capture
     step_env ... step_micro, sampling_capture, derive_ibs_reports   the steps (raw files)
     render_env ... render_micro, guarded                  report sections from raw files
@@ -162,8 +163,24 @@ import threading
 import time
 
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
-DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+# The driver default is baseline since #1557; the compiler-compare workload
+# stays the host-native compile it was before that default.
+DEFAULT_COMPILE = ["cc", "-march=native", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
+# The fixed issue #3397 -fc-ast-pilot acceptance cells (compare
+# --ast-pilot-pair CELL): the same unity source at -g0 with no link, A
+# omitting AST_PILOT_FLAG and B passing it. Every run keeps the compile's
+# stdout and stderr in `<output>.diagnostics`; a syntax-only cell writes no
+# object, so that transcript is also its compared output.
+AST_PILOT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                     "-DBUSTER_INCLUDE_TESTS=0", "-g0", "src/buster/apps/ide/ide.c"]
+AST_PILOT_CELLS = {"syntax-only": "-fsyntax-only", "object": "-c"}
+AST_PILOT_FLAG = "-fc-ast-pilot"
+# The fixed issue #3011 constant-reuse acceptance cells (compare
+# --constant-reuse-pair CELL): the same -g0 unity object compile, A default
+# and B passing the cell's one opt-in flag. B's object differs from A's by
+# design; each run keeps its stdout and stderr in `<output>.diagnostics`.
+CONSTANT_REUSE_CELLS = {"intern": "-fcanonical-intern-constants", "cse": "-fcanonical-fast-cse"}
 # No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
 # list with another event; wall time is the harness span (see step_timed).
 TIMED_EVENTS = ["task-clock", "cycles:u", "instructions:u", "branch-misses:u",
@@ -933,7 +950,8 @@ def attribute_intervals(intervals, spans):
 # ---------------------------------------------------------------- execution
 
 class Lab:
-    def __init__(self, output, perf="perf", cpu=None, ide=None, repo_root=".", extra=(), sudo=False, fresh_copy=False):
+    def __init__(self, output, perf="perf", cpu=None, ide=None, repo_root=".", extra=(), sudo=False, fresh_copy=False,
+                 compile_command=None, writes_output=True, transcripts=False):
         self.output = os.path.abspath(output)
         self.perf = perf
         self.cpu = cpu
@@ -943,6 +961,11 @@ class Lab:
         self.binary = None
         self.repo_root = os.path.abspath(repo_root)
         self.extra = list(extra)
+        self.compile = list(compile_command) if compile_command is not None else list(DEFAULT_COMPILE)
+        # A cell that writes no object (-fsyntax-only) passes no -o; with
+        # transcripts, run_workload keeps each compile's stdout and stderr.
+        self.writes_output = writes_output
+        self.transcripts = transcripts
         self.sudo = sudo
         self.environment = dict(os.environ, LC_ALL="C", LANG="C")
         self.meta = load_meta(self.output)
@@ -968,7 +991,25 @@ class Lab:
         return ["taskset", "-c", str(self.cpu)] if self.cpu is not None else []
 
     def workload(self, output_path, flags=()):
-        return [self.binary or self.ide] + DEFAULT_COMPILE + self.extra + list(flags) + ["-o", output_path]
+        argv = [self.binary or self.ide] + self.compile + self.extra + list(flags)
+        return argv + ["-o", output_path] if self.writes_output else argv
+
+    def run_workload(self, prefix, output_path, flags=(), log=None):
+        """run_command(prefix + workload).  With transcripts, the compile's
+        stdout and stderr go to output_path + ".diagnostics" after the timed
+        span, and also to output_path itself when the cell writes no object."""
+        transcript = output_path + ".diagnostics"
+        if self.transcripts:
+            for stale in (transcript,) if self.writes_output else (transcript, output_path):
+                if os.path.isfile(stale):
+                    os.remove(stale)
+        status, out_text, err_text = self.run_command(list(prefix) + self.workload(output_path, flags), log=log)
+        if self.transcripts:
+            text = "--- stdout\n%s--- stderr\n%s" % (out_text, err_text)
+            write_text(transcript, text)
+            if not self.writes_output and status == 0:
+                write_text(output_path, text)
+        return status, out_text, err_text
 
     def record_options(self):
         """Extra `perf record` options: a fresh copy's unique path would add one
@@ -1000,10 +1041,12 @@ class Lab:
             with contextlib.suppress(OSError):
                 os.rmdir(parent)
 
-    def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None):
+    def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None, probe=False):
         """Run argv in the repository root; returns (exit status, stdout, stderr).
         last_elapsed is its monotonic span; last_maxrss and last_harness_rss
-        are run_measured's peak RSS and resident harness floor in bytes (or None)."""
+        are run_measured's peak RSS and resident harness floor in bytes (or None).
+        A probe (`perf stat -- true`) reaps the orphans it leaves (#3709) and
+        names each in commands.log and its log."""
         output = None
         if "-o" in argv:
             output = argv[argv.index("-o") + 1]
@@ -1016,7 +1059,9 @@ class Lab:
                 os.remove(output)
         started = time.monotonic()
         usage = {}
-        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout, usage)
+        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout, usage,
+                                                                                    reap_orphans_after=probe)
+        orphans = "".join("  orphan reaped: %s\n" % orphan for orphan in usage.get("orphans", ()))
         self.last_cpu_s = usage.get("cpu_s")
         if status == 0 and output and not os.path.isfile(output):
             status, err = 1, err + b"\ncompiler did not create the requested output\n"
@@ -1027,11 +1072,11 @@ class Lab:
             with open(stdout_path, "w") as handle:
                 handle.write(out_text)
         with open(self.path("commands.log"), "a") as handle:
-            handle.write("%s exit=%d %.3fs\n" % (shell_join(argv), status, self.last_elapsed))
+            handle.write("%s exit=%d %.3fs\n%s" % (shell_join(argv), status, self.last_elapsed, orphans))
         if log:
             with open(log, "w") as handle:
-                handle.write("$ %s\nexit=%d\n--- stdout\n%s\n--- stderr\n%s" % (
-                    shell_join(argv), status, out_text[-200000:], err_text[-200000:]))
+                handle.write("$ %s\nexit=%d\n%s--- stdout\n%s\n--- stderr\n%s" % (
+                    shell_join(argv), status, orphans, out_text[-200000:], err_text[-200000:]))
         return status, out_text, err_text
 
     def save_meta(self):
@@ -1058,7 +1103,62 @@ def harness_resident_bytes():
     return value
 
 
-def run_measured(argv, cwd, environment, timeout, usage_out=None):
+# prctl(2) options for the probe-scoped child subreaper (#3709).
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
+# How long run_measured(reap_orphans=True) waits for an orphaned probe
+# descendant, already sent SIGKILL, before leaving it unreaped.
+ORPHAN_REAP_SECONDS = 5.0
+
+
+def child_subreaper(value):
+    """Set this process's PR_SET_CHILD_SUBREAPER flag (Linux only); returns
+    the previous value, or None where prctl is unavailable or refuses."""
+    previous = None
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            state = ctypes.c_int(0)
+            if libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(state), 0, 0, 0) == 0 and \
+                    libc.prctl(PR_SET_CHILD_SUBREAPER, ctypes.c_ulong(value), 0, 0, 0) == 0:
+                previous = state.value
+        except (OSError, AttributeError):
+            previous = None
+    return previous
+
+
+def reap_orphans(group):
+    """Reap every remaining child of this subreaper after the direct child of
+    a probe was waited for (#3709): `perf stat -- true` was seen to leave its
+    exited `true` behind, which the 9700X supervisor's own subreaper then
+    adopted and charged to the trial.  Live members of the probe's process
+    group are killed first.  Returns one `pid=N stat=[...]` line per reaped
+    orphan, plus `unreaped` when one outlived ORPHAN_REAP_SECONDS; that one
+    stays a child of this process, so the supervisor still adopts it."""
+    found = []
+    with contextlib.suppress(OSError):
+        os.killpg(group, signal.SIGKILL)
+    deadline = time.monotonic() + ORPHAN_REAP_SECONDS
+    waiting = True
+    while waiting:
+        try:
+            info = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            info, waiting = None, False
+        if info is not None:
+            stat = (read_text("/proc/%d/stat" % info.si_pid) or "").strip()
+            os.waitpid(info.si_pid, 0)
+            found.append("pid=%d stat=[%s]" % (info.si_pid, stat))
+        elif waiting and time.monotonic() < deadline:
+            time.sleep(0.01)
+        elif waiting:
+            found.append("unreaped after %.0fs" % ORPHAN_REAP_SECONDS)
+            waiting = False
+    return found
+
+
+def run_measured(argv, cwd, environment, timeout, usage_out=None, reap_orphans_after=False):
     """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
     resident RSS bytes) of argv; both RSS values None where unsupported.
     A usage_out dict receives `cpu_s`, the child's user+system seconds from
@@ -1075,8 +1175,24 @@ def run_measured(argv, cwd, environment, timeout, usage_out=None):
     stat -- ide ...` the value is max(harness, perf's own RSS, the compiler's
     RSS over all its threads); rss_value keeps only values clearly above the
     first two.  Output goes to temporary files, so a chatty child cannot
-    block on a full pipe."""
+    block on a full pipe.
+
+    reap_orphans_after (the `-- true` probes only, #3709) makes this process
+    a child subreaper for the call, so an orphan the child leaves is reaped
+    here (reap_orphans) and listed in usage_out["orphans"]; workload runs
+    keep every orphan visible to an outer supervisor."""
     harness = harness_resident_bytes()
+    prior = child_subreaper(1) if reap_orphans_after else None
+    try:
+        result = run_measured_child(argv, cwd, environment, timeout, usage_out, harness, prior is not None)
+    finally:
+        if prior is not None:
+            child_subreaper(prior)
+    return result
+
+
+def run_measured_child(argv, cwd, environment, timeout, usage_out, harness, subreaper):
+    """run_measured's body; subreaper means reap the child's orphans after it."""
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
             process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err, start_new_session=os.name == "posix")
@@ -1111,6 +1227,10 @@ def run_measured(argv, cwd, environment, timeout, usage_out=None):
             raise
         finally:
             timer.cancel()
+            if subreaper:
+                orphans = reap_orphans(process.pid)
+                if usage_out is not None:
+                    usage_out["orphans"] = orphans
         out.seek(0)
         err.seek(0)
         stdout, stderr = out.read(), err.read()
@@ -1354,7 +1474,7 @@ def probe_counters(lab):
     if lab.counters is None:
         csv_path = lab.path("perf-probe.csv")
         status, _, err = lab.run_command([lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--", "true"],
-                                         timeout=60)
+                                         timeout=60, probe=True)
         task = task_seconds(parse_stat(read_text(csv_path) or "")) if status == 0 else None
         lab.counters = task is not None
         reason = "perf stat counts task-clock" if lab.counters else "perf stat unusable (%s)" % (
@@ -1381,18 +1501,18 @@ def probe_workload(lab, directory, out):
     the floor rss_value compares every run against."""
     capabilities = lab.meta["capabilities"]
     status, _, _ = lab.run_command(timed_command(lab, os.path.join(directory, "wrapper.csv")) + ["true"],
-                                   log=os.path.join(directory, "wrapper-rss.log"))
+                                   log=os.path.join(directory, "wrapper-rss.log"), probe=True)
     capabilities["wrapper_rss_bytes"] = lab.last_maxrss if status == 0 else None
     # Work denominators (and the -fsource-metrics probe) from a separate run.
     source = os.path.join(directory, "source.metrics")
-    status, _, _ = lab.run_command(lab.pin() + lab.workload(out, ["-fsource-metrics=" + source]), log=os.path.join(directory, "source-run.log"))
+    status, _, _ = lab.run_workload(lab.pin(), out, ["-fsource-metrics=" + source], log=os.path.join(directory, "source-run.log"))
     capabilities["source_metrics"] = status == 0 and os.path.exists(source)
     if status != 0:
-        status, _, err = lab.run_command(lab.pin() + lab.workload(out), log=os.path.join(directory, "plain-run.log"))
+        status, _, err = lab.run_workload(lab.pin(), out, log=os.path.join(directory, "plain-run.log"))
         if status != 0:
             raise RuntimeError("workload fails: " + err.strip()[-400:])
     probe = os.path.join(directory, "probe.ccmetrics")
-    status, _, _ = lab.run_command(lab.pin() + lab.workload(out, ["-fmetrics-out=" + probe]), log=os.path.join(directory, "metrics-probe.log"))
+    status, _, _ = lab.run_workload(lab.pin(), out, ["-fmetrics-out=" + probe], log=os.path.join(directory, "metrics-probe.log"))
     capabilities["metrics_out"] = status == 0 and os.path.exists(probe)
     capabilities["metrics_out_measured"] = bool(capabilities["metrics_out"] and measured_input(parse_cc_metrics(read_text(probe) or "")))
     lab.save_meta()
@@ -1498,7 +1618,8 @@ def step_topdown(lab, groups):
     for group in groups:
         base = lab.path("topdown", safe_name(group))
         entry = {"group": group}
-        status, out, err = lab.run_command([lab.perf, "stat", "-M", group, "--", "true"], log=base + ".dryrun.log", timeout=120)
+        status, out, err = lab.run_command([lab.perf, "stat", "-M", group, "--", "true"], log=base + ".dryrun.log", timeout=120,
+                                           probe=True)
         entry["dryrun_exit"] = status
         if status != 0:
             entry.update({"exit": status, "reason": last_reason(out + "\n" + err)})
@@ -2906,15 +3027,30 @@ def compare_labs(arguments, output, cpu, extra):
     """{variant key: Lab} with each variant's directory DIR/a, DIR/b."""
     labs = {}
     canonical_inline_pair = getattr(arguments, "canonical_inline_pair", False)
+    ast_cell = getattr(arguments, "ast_pilot_pair", None)
+    reuse_cell = getattr(arguments, "constant_reuse_pair", None)
     for key, role in VARIANTS:
         ide = os.path.abspath(getattr(arguments, role))
         if not os.path.isfile(ide):
             sys.exit("uarch_lab: no %s binary at %s" % (role, ide))
         variant_extra = (["-fcanonical-inline"] if canonical_inline_pair and key == "b" else
-                         [] if canonical_inline_pair else extra)
-        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy)
+                         [] if canonical_inline_pair else
+                         [AST_PILOT_FLAG] if ast_cell and key == "b" else [] if ast_cell else
+                         [CONSTANT_REUSE_CELLS[reuse_cell]] if reuse_cell and key == "b" else [] if reuse_cell else extra)
+        if ast_cell:
+            lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy,
+                      compile_command=AST_PILOT_COMPILE + [AST_PILOT_CELLS[ast_cell]], writes_output=ast_cell != "syntax-only", transcripts=True)
+        elif reuse_cell:
+            lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy,
+                      compile_command=AST_PILOT_COMPILE + ["-c"], writes_output=True, transcripts=True)
+        else:
+            lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy)
         lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "perf": arguments.perf, "repo_root": lab.repo_root,
                               "ide": ide, "role": role, "extra": variant_extra, "fresh_copy": arguments.fresh_copy}
+        if ast_cell:
+            lab.meta["config"]["ast_pilot_cell"] = ast_cell
+        if reuse_cell:
+            lab.meta["config"]["constant_reuse_cell"] = reuse_cell
         lab.save_meta()
         labs[key] = lab
     return labs
@@ -2926,28 +3062,34 @@ def prepare_variant(lab, warmups):
     warm-ups, compile a reference under that policy separately from probes."""
     out = os.path.join(lab.output, "out.exe")
     if warmups == 0:
-        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "reference.ccmetrics"))),
-                                         log=os.path.join(lab.output, "reference-run.log"))
+        status, _, err = lab.run_workload(lab.pin(), out, compile_flags(lab, os.path.join(lab.output, "reference.ccmetrics")),
+                                          log=os.path.join(lab.output, "reference-run.log"))
         if status != 0:
             raise RuntimeError("reference compile failed: " + err.strip()[-400:])
     for index in range(warmups):
-        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics"))),
-                                         log=os.path.join(lab.output, "warmup-%d.log" % index))
+        status, _, err = lab.run_workload(lab.pin(), out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics")),
+                                          log=os.path.join(lab.output, "warmup-%d.log" % index))
         if status != 0:
             raise RuntimeError("warm-up failed: " + err.strip()[-400:])
         print("[compare] %s warm-up %.2f s" % (lab.meta["config"]["role"], lab.last_elapsed), flush=True)
-    shutil.copyfile(out, os.path.join(lab.output, "reference.exe"))
+    reference = os.path.join(lab.output, "reference.exe")
+    shutil.copyfile(out, reference)
+    # Stage-two self-hosting executes this exact output; retain its permissions.
+    shutil.copymode(out, reference)
+    if lab.transcripts:
+        shutil.copyfile(out + ".diagnostics", os.path.join(lab.output, "reference.diagnostics"))
 
 
 def run_pair_member(lab, directory, pair, key):
     base = os.path.join(directory, "pairs", "%04d-%s" % (pair, key))
     out = os.path.join(lab.output, "out.exe")
     with lab.instance():
-        status, out_text, err = lab.run_command(timed_command(lab, base + ".csv") + lab.workload(out, compile_flags(lab, base + ".ccmetrics")))
+        status, out_text, err = lab.run_workload(timed_command(lab, base + ".csv"), out, compile_flags(lab, base + ".ccmetrics"))
     span = lab.last_elapsed
     if status != 0:
         write_text(base + ".err", out_text[-20000:] + err[-20000:])
-    identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False)
+    identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False) and \
+        (not lab.transcripts or filecmp.cmp(os.path.join(lab.output, "reference.diagnostics"), out + ".diagnostics", shallow=False))
     return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6),
             "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
             "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
@@ -3005,6 +3147,12 @@ def command_compare(arguments):
     extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
     if arguments.canonical_inline_pair and extra:
         sys.exit("uarch_lab: --canonical-inline-pair does not accept extra compile arguments")
+    ast_cell = getattr(arguments, "ast_pilot_pair", None)
+    if ast_cell and (extra or arguments.canonical_inline_pair or arguments.profile_steps or arguments.sudo):
+        sys.exit("uarch_lab: --ast-pilot-pair accepts no extra compile arguments, other fixed pair or profile steps")
+    reuse_cell = getattr(arguments, "constant_reuse_pair", None)
+    if reuse_cell and (extra or arguments.canonical_inline_pair or ast_cell or arguments.profile_steps or arguments.sudo):
+        sys.exit("uarch_lab: --constant-reuse-pair accepts no extra compile arguments, other fixed pair or profile steps")
     steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
     if arguments.sudo and "ibs" not in steps:
         steps.append("ibs")
@@ -3025,16 +3173,25 @@ def command_compare(arguments):
         if os.path.exists(os.path.join(directory, stale)):
             os.remove(os.path.join(directory, stale))
     labs = compare_labs(arguments, directory, cpu, extra)
+    command = (["IDE"] + AST_PILOT_COMPILE + [AST_PILOT_CELLS[ast_cell]] + (["-o", "OUT"] if ast_cell == "object" else []) if ast_cell else
+               ["IDE"] + AST_PILOT_COMPILE + ["-c", "-o", "OUT"] if reuse_cell else
+               ["IDE"] + DEFAULT_COMPILE + extra + ["-o", "OUT"])
     meta = {"version": 1, "mode": "compare", "steps": {}, "plan": None,
-            "config": {"command": shell_join(["IDE"] + DEFAULT_COMPILE + extra + ["-o", "OUT"]), "repo_root": os.path.abspath(arguments.repo_root),
+            "config": {"command": shell_join(command), "repo_root": os.path.abspath(arguments.repo_root),
                        "cpu": cpu, "perf": arguments.perf, "pairs": arguments.pairs, "target_minutes": arguments.target_minutes,
                        "warmups": arguments.warmups, "seed": arguments.seed, "profile_steps": steps, "sudo": arguments.sudo,
                        "require_identical_output": arguments.require_identical_output, "extra": extra,
                        "canonical_inline_pair": arguments.canonical_inline_pair,
-                       "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else {"a": extra, "b": extra},
+                       "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else
+                                           {"a": [], "b": [AST_PILOT_FLAG]} if ast_cell else
+                                           {"a": [], "b": [CONSTANT_REUSE_CELLS[reuse_cell]]} if reuse_cell else {"a": extra, "b": extra},
                        "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
             "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
                                "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
+    if ast_cell:
+        meta["config"]["ast_pilot_pair"] = ast_cell
+    if reuse_cell:
+        meta["config"]["constant_reuse_pair"] = reuse_cell
     save_compare_meta(directory, meta)
     print("uarch_lab: compare output %s; %s" % (directory, "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else
                                                 "pair count chosen after %d pilot pairs to land near %g min" % (PILOT_PAIRS, arguments.target_minutes)), flush=True)
@@ -3322,7 +3479,11 @@ def compare_summary(directory):
     verdict = compare_verdict(metrics, phases, min_effect)
     code = code_bytes_summary(references)
     counters = compare_counters(directory)
-    return {"schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
+    extension = {}
+    if config.get("ast_pilot_pair") or config.get("constant_reuse_pair"):
+        transcripts = [os.path.join(directory, key, "reference.diagnostics") for key, _ in VARIANTS]
+        extension["diagnostics_identical"] = filecmp.cmp(*transcripts, shallow=False) if all(map(os.path.isfile, transcripts)) else None
+    return {**extension, "schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
             "cpu": config.get("cpu"), "host": host_facts(os.path.join(directory, "a")),
             "baseline": variants["baseline"], "candidate": variants["candidate"], "outputs_identical": outputs_identical,
             "phase_metrics": meta.get("phase_metrics", {"enabled": None, "reason": "collection policy not recorded (older comparison)"}),
@@ -3999,6 +4160,10 @@ def main(argv=None):
                          help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
     compare.add_argument("--canonical-inline-pair", action="store_true",
                          help="fixed issue #48 acceptance pair: A omits -fcanonical-inline, B passes it")
+    compare.add_argument("--ast-pilot-pair", choices=sorted(AST_PILOT_CELLS), default=None,
+                         help="fixed issue #3397 acceptance cell: A omits -fc-ast-pilot, B passes it, on the -g0 unity source")
+    compare.add_argument("--constant-reuse-pair", choices=sorted(CONSTANT_REUSE_CELLS), default=None,
+                         help="fixed issue #3011 acceptance cell: A default, B passes the cell's opt-in flag, on the -g0 unity object compile")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
     retire = commands.add_parser("retirement", help="historical #512 native-retirement v1 gate (archived compilers required): compare per allocator mode plus generated-program "
                                  "runtime, judged against the #511 limits (retirement.md, retirement.json)")

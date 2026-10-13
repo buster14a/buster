@@ -60,9 +60,10 @@
   the same item at N and 16N copies and requires counted work to stay constant
   or linear. Use `c_type_layout_test_scales` for semantic validation passes;
   see [whole-unit pass scaling](frontend/semantic-validation.md#whole-unit-pass-scaling).
-- C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
-  object, archive, and shell-script inputs. Keep fixture paths relative to the
-  repository root because tests intentionally exercise the real file loader.
+- Root-corpus C frontend and driver fixtures live under `tests/`; selected
+  source-tree fixtures live under `src/buster/tests/.../fixtures/`. Keep fixture
+  paths relative to the repository root because tests intentionally exercise
+  the real file loader.
 - The Linux x86-64 parameter-alignment driver regression uses a separately
   host-compiled caller and observer with the Buster-compiled callee at every
   registered optimization level and allocator. Its expanded caller, callee
@@ -88,6 +89,12 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- The native GPU timeout log-retention assertion emits
+  `GPU_LOG_RETENTION_FAILURE_V1` only on failure: retained length/budget,
+  suffix/bound booleans, dropped/capture-truncation facts and at most 64 log
+  bytes in hex, with the omitted-byte count. This diagnoses #3780 without
+  changing its marker, one-second deadline or 27-byte retention budget;
+  a passing run does not explain the preserved original failure.
 - With a debugger attached, assertion failures stop through `os_fail()` after
   reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
   self-tests set `UnitTestArguments.suppress_debugger_break` only around their
@@ -116,6 +123,19 @@
   depend on run order; inline assertions follow that block. Define a new test
   function next to the tests of the feature it covers, not after the most
   recently added one. Names that sort adjacently can still conflict.
+- The `direct-ssa-census` job in `compiler-throughput.yml` builds and tests
+  the immutable event/workflow revision (`github.sha`), including the PR test
+  merge, so its diagnostic flags and compiler come from the same source.
+  Reusable calls use a same-commit local `./.github/workflows/` caller; the
+  caller workflow SHA must equal the event SHA.
+  `direct-ssa-census-evidence/source.txt` retains the event, workflow, PR head
+  and base, actual checkout/tree and workflow blob identities; mismatched source
+  fails before any proof runs. The timing comparison and native harness retain
+  their separate PR-head checkout policy. The three-arm production tiny-helper
+  proof remains mandatory when its direct/reference prerequisites succeed.
+  `python3 tools/compiler_throughput_workflow_test.py` exercises old-base Git
+  fixtures across an option-adding main change, source mismatches and proof
+  failure controls. These fixtures validate orchestration, not compiler semantics.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
@@ -191,6 +211,27 @@
   `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
   with the same dependency-only support identity. It is historical input,
   not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
+
+### Just-run executable cleanup
+
+Driver runtime fixtures use `buster_test_executable_delete` after waiting for
+their executable. On Windows it retries only `ERROR_SHARING_VIOLATION` and
+`ERROR_ACCESS_DENIED`, under a 500 ms retry deadline and a 51-attempt ceiling. Native syscall and
+scheduling time can extend elapsed time past that deadline. It does not
+retry compilation, linking or execution; a persistent denial still fails.
+Other platforms make one checked delete attempt. An initial failure logs the
+path, first and final native error codes, attempt count and elapsed time, even
+if cleanup later succeeds.
+
+`compiler_driver_test_executable_cleanup` checks unchanged bytes and one
+attempt for an unrelated error; Windows additionally exercises two injected
+transient errors, a real handle opened without delete sharing, and a real
+read-only file. A two-lane Windows control releases a real held handle while
+cleanup runs and requires eventual deletion when the test quota permits two
+lanes; serial builds and one-lane quotas retain the persistent
+lock controls. Both persistent native errors remain failures until the
+fixture releases its lock or restores the attribute. Missing paths are
+idempotent success, matching `os_file_delete_checked`.
 
 ### Native investigation source-size comparison
 
@@ -300,6 +341,35 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   budget. The hosted Linux/macOS controls run in a separate five-minute lane,
   preserving the full lifecycle lane's ten-minute cap and artifact-retention
   headroom. No test selection, acceptance marker or process owner changes.
+  The launcher forwards `BUSTER_TEST_FIXTURE_TIMING=all` into each simulator
+  payload (#3585). Completed scopes retain `TEST_FIXTURE_TIMING_V1` and the
+  existing driver operation counters in the per-label console artifact.
+  Timed iOS module scopes also emit two module-named `BUSTER_IOS_LAUNCH_V1`
+  observations: entry before the starting scope clock, exit after the ending
+  clock and before cleanup/reporting. Pair observations by module name and
+  order; missing exits leave partial intervals. Query status must be zero for
+  usable clocks. Process CPU includes every app thread; concurrent modules
+  overlap, so neither CPU nor nested fixture intervals may be summed as
+  independent costs. The existing module wall-time series remains authoritative
+  for comparisons. These diagnostic clocks do not select tests or extend the
+  launch deadline.
+  Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` for the launch-trace monitor to retain
+  each case's output, complete console file, lifecycle receipts, registered
+  child identities and case/collector timing before its private directory is
+  removed. The hosted launch-trace artifact includes this evidence on both
+  success and failure. Collector startup, stall, drain and real EOF observations
+  use that child's Bash `SECONDS` clock; parent case observations use the
+  parent's clock and must not be subtracted across processes. A failed collector
+  wait records its actual status before cleanup; expiry still fails with 124.
+  The collector keeps its twenty-second cap and one-second kill grace.
+  `/bin/bash ios/launch_trace_monitor_test.sh --backpressure-only` runs both
+  transport controls for a focused reproduction. For a receipt-overhead
+  sensitivity experiment, `BUSTER_IOS_TEST_RECEIPT_DELAY=1` adds a finite
+  20 ms delay only when the fake grep reads caller/supervisor receipt files.
+  The hosted launch-trace lane enables this sensitivity control; the production
+  builtin field checks do not enter that delayed path.
+  This models a reachable delay class, not the cause of a historical runner
+  failure; it does not change any production deadline or fixture expectation.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
@@ -387,7 +457,17 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   actual native statuses versus launch errors, binary retention, held and
   escaped writers, cancellation and keeper failure, startup clock expiry,
   ignored/blocked signals, final protocol EOF, actual shim exit, generation
-  isolation and malformed receipt refusal. The signing fixture also requires
+  isolation and malformed receipt refusal. Named lifecycle fields use
+  `ios/lifecycle_receipt.sh` Bash builtins to verify one terminated text row,
+  unique fields and exact value patterns without per-field grep/wc processes.
+  `/bin/bash ios/lifecycle_receipt_test.sh` checks missing, duplicate, invalid,
+  multiple, unterminated and NUL-corrupted rows on system Bash. Extracted phase
+  controls still refuse malformed ownership/caller proof. Cleanup records
+  INT/TERM that arrive during an already-started shutdown, waits the existing
+  bounded invocation-owned phase, and retains 130/143 alongside its actual
+  shutdown result. Deterministic controls signal that real cleanup path during
+  successful and failed shutdowns after either an initial success or failure.
+  The signing fixture also requires
   empty or malformed capture receipts to prevent install/launch, including
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
@@ -536,11 +616,35 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
   Release — plus the batch line's `status=` field; a missing per-config line or
   `status=not-run` is itself evidence of an incomplete run.
-  `android/run_tests.sh` bounds each complete suite with a 180-second monitor
-  watchdog, independently of adb command/install/boot deadlines. Debug compiler
-  fixtures exceeded the former 60-second budget while still reporting progress
-  in PR #687's run `35157195321`; this is a correctness-suite execution budget,
-  not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
+  With `BUSTER_ANDROID_RUNTIME_ORDER=1`, which the workflow's Android step
+  sets, `android/test_ci.sh` also executes a Buster-linked program on the
+  emulator (#1243). The APK payload cannot do this: Android 10+ app data is
+  W^X, so its sandbox cannot execute a freshly written file. While the
+  emulator boots, `android/runtime_order.sh build` has the native build driver
+  generate and build a host `ide` (Debug, no tests): the workflow bootstraps
+  that driver with Clang and passes it as `BUSTER_ANDROID_HOST_DRIVER`, and a
+  local run selects `build.sh`. It then links `android/runtime_order/probe.c`
+  against a shared library and an IFUNC object built by the NDK's clang. After boot, `run` pushes the
+  probe to `/data/local/tmp`, runs it through `adb shell` with the
+  `BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS` adb bounds and a 30-second
+  probe bound (`BUSTER_ANDROID_RUNTIME_ORDER_TIMEOUT_SECONDS`), and requires
+  exit status 0 and the anchored record: both preinit entries in order, then
+  the library's constructor, then the program's, with the IFUNC resolved once
+  and callable from preinit. `ANDROID_RUNTIME_ORDER_RESULT` reports each mode
+  and `ANDROID_RUNTIME_ORDER_CHECK` the batch's view (`disabled` when not
+  requested). A build or run failure fails the batch with
+  `config=runtime-order` while both payloads still run; a probe that did not
+  build is not run. `bash android/runtime_order_test.sh` (run by
+  `android/run_tests_test.sh`) covers the script with fake tools; the frozen
+  shared mobile suite keeps the check disabled.
+  Android CI selects a 240-second Debug / 60-second Release whole-suite monitor
+  watchdog; the standalone `android/run_tests.sh` default remains 180 seconds.
+  These are independent of adb command/install/boot deadlines. #3258 measured
+  a same-checkout 75-second Debug pass and a 180-second cutoff, with about
+  190 seconds estimated slow-host completion after #3265's scan fix. See
+  [payload deadline sizing](../android-payload-deadlines.md) for the matched
+  module/fixture receipts, intended coverage growth and sizing multiple.
+  This is a correctness-suite execution budget, not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
   overrides it. Terminal markers end monitoring immediately, and timeout,
   malformed or missing markers still fail; the fake monitor suite checks the
   default and override without lengthening its short timeout failure controls.
@@ -595,6 +699,48 @@ its own bounded five-second budget; missing readiness fails and still reaps the
 child. `WASM_NODE_PROCESS` retains separate startup and wait timings. Delayed
 startup and missing-readiness controls cover the handshake. Actual Node-backed
 Wasm oracle deadlines and success requirements are unchanged.
+
+## Profiling image retention
+
+For Linux Superluminal captures, the profiler can abort when a test executable
+is deleted before image metadata is read. Run tests with opt-in retention:
+
+```sh
+BUSTER_TEST_RETAIN_IMAGES=1 build/Release/ide test
+```
+
+Any `--module=...` or `--ci=1` options can be added. This mode addresses the
+capture lifetime described in [issue #3674](https://github.com/buster14a/buster/issues/3674).
+It keeps paths registered by spawned executables and recognized shared-library
+images (ELF `ET_DYN`, Mach-O `MH_DYLIB`/`MH_BUNDLE`, and PE DLL images). If the
+bounded registration table overflows, it also keeps any recognized loadable
+image. When a temporary directory contains a kept image, the entire directory
+tree is retained; ordinary text, object files and archives are not retained by
+the image classifier itself.
+
+The test temporary root remains until you remove it. The final
+`TEST_IMAGE_RETENTION_V1` line reports counter deltas:
+
+```text
+TEST_IMAGE_RETENTION_V1 status=retained root=<root-or-none> registered=<n> retained_files=<n> retained_directories=<n> overflowed=<n>
+```
+
+After the capture and symbol processing finish, remove the reported root:
+
+```sh
+rm -rf '<root>'
+```
+
+Do not run that cleanup until both operations are complete. Images outside the
+temporary root that are registered or recognized are left in place as well;
+the root cleanup does not remove them. Retaining full-run artifacts can consume
+substantial disk space, and whole-tree directory retention can preserve
+unrelated files beside an image. A crash or timeout can leave a temporary root
+even without this mode. Windows behavior has not been verified locally.
+In one measured full local run, the retained root occupied 110 MiB across 5,598
+files, and the suite passed without mode-induced assertion failures. Usage
+varies by run; record and investigate any later failures rather than skipping
+or weakening assertions.
 
 The bit-field aggregate Node oracle (#2194) logs `WASM_NODE_MODULE` with the
 exact module size and SHA-256 before each run, and the module bytes as hex
@@ -728,27 +874,39 @@ failures remain failures and must not be hidden by this fixture repair.
 
 ## External compiler-oracle qualification
 
-The registered function-parameter compatibility and type-specifier fixtures
-qualify the specific external-compiler rows they compare. A CAPABLE result
-requires the exact resolved compiler command and captured environment, a
-complete normal process wait with successful cleanup and capture, a silent
-successful known-valid probe, and the expected executable or object artifact.
-The fixture then runs the subject comparisons; any capable compiler that
-disagrees with Buster remains a failed assertion.
+Fixtures that compare Buster with a host compiler or linker qualify the
+specific reference rows they compare (#2579). A CAPABLE result requires the
+exact resolved compiler command and captured environment, a complete normal
+process wait with successful cleanup and capture, a silent successful
+known-valid probe, and the expected executable or object artifact. The fixture
+then runs the subject comparisons; any capable reference that disagrees with
+Buster remains a failed assertion.
 
-An optional local compiler refusal is reported as NOT_RUN. It is explicit
-non-participation, never a passing assertion. In required CI, the same narrowly
-authenticated refusal is INCOMPLETE and adds a failed assertion, so
-ide test --ci=1 cannot accept that required reference obligation as complete.
-Other outcomes are failures: missing tools, an unauthenticated profile, an
-unhealthy control, altered or additional diagnostics, unexpected stdout or
-artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
-qualifies only when its compiler/profile witness and known-valid control pass
-and the full normalized stderr, normal exit code, argv, and environment match
-the fixture's exact contract. The probes set LC_ALL=C in a per-child
-environment and disable diagnostic color, carets, and wrapping without changing
-the parent process environment. These dispositions do not weaken Buster's
-semantic or diagnostic assertions.
+A reference that is too old for a row is reported as NOT_RUN, under
+`ide test --ci=1` as well. NOT_RUN is explicit non-participation, never a
+passing assertion, and it skips only that reference row; Buster's own
+compilations and assertions still run. Hosted CI images carry current
+toolchains, so they still execute these rows. Each qualification names its
+reference release and evidence:
+
+| Fixture | Reference that qualifies | Witness |
+|---|---|---|
+| `c_test_function_parameter_compatibility_runtime` | GCC 11-13 for `-std=gnu23` (GCC 14 added the spelling) | exact refusal of the known-valid control |
+| `compiler_driver_test_type_specifiers` | GCC 11 on x86-64 for `_Float16` (GCC 12 added it) | exact refusal of `_Float16 v;` after a healthy integer control |
+| `compiler_driver_test_function_literal_identity` | GCC 11 on x86-64, GCC producer rows | the same `_Float16` qualification |
+| `c_test_enumerator_type_differential` | GCC 11 and 12, GCC rows (GCC 13 added C23 enumerator types) | documented release profile, never a probe of the subject |
+| `c_macro_rescan_boundary_tests` | GCC 11, two `pop_macro`-in-argument rows | the exact token output GCC 11 is recorded to print |
+| `compiler_driver_test_imported_function_addresses` | GNU ld 2.38 behind a Clang host driver (binutils 2.39 accepts it) | exact protected-symbol refusal after a healthy shared-object control |
+
+Compiler identity comes from `buster_test_reference_identity`: `--version`,
+`-dumpmachine` and a header-free `-dM -E` profile must agree on a native,
+non-Clang GCC release. Other outcomes are failures: missing tools, an
+unidentified or different release, an unhealthy control, altered or additional
+diagnostics, unexpected stdout or artifacts, abnormal exit, timeout, capture
+loss, or cleanup failure. The probes set LC_ALL=C in a per-child environment
+and disable diagnostic color, carets, and wrapping without changing the parent
+process environment. The classifier still supports a `required` reference,
+which reports INCOMPLETE and fails; no fixture currently requests it.
 
 ## Native differential matrix
 
@@ -887,6 +1045,9 @@ separate from both live arena bytes and reserved address space.
 Use `BUSTER_TEST_FIXTURE(arguments, function)` for a direct fixture function that
 returns only `UnitTestResult` counts. It preserves call order, consumes counts,
 and rewinds the primary arena after the last assertion and diagnostic consumer.
+The macro calls the fixture through a volatile function pointer so it is not
+inlined into the dispatcher (a compile-time bound for sanitized builds, #2816);
+fixture functions must have exactly the `TestFunction` signature.
 For inline fixture groups, pair `buster_test_arena_begin` and
 `buster_test_arena_end` around the complete set of consumers. Names must be
 static, whitespace-free tokens; the ordinal distinguishes repeated invocations.
@@ -1212,3 +1373,70 @@ unclassified, and instruction execution, machine edges, MC/DC and functional
 assertions each stay unmeasured. No percentages or approved tracing capability
 are inferred from a successful preflight. See
 [the exact-artifact pilot command and gaps](build.md#exact-artifact-binary-coverage-pilot).
+
+## Work-conserving sanitized unit processes (#3620)
+
+The native `test_units_partitioned <ide-path>` runner uses two process slots
+when `BUSTER_TEST_JOBS >= 4`. Each slot receives half the quota, retaining
+the multi-lane OS assertions. It first queries the complete inventory, starts
+`c_frontend_tests` and `compiler_driver_tests`, then prioritizes `c_ast_tests`
+and dynamically claims contiguous inventory slices between those modules.
+Each priority module retains its own child; other batches contain at most
+four canonical descriptors, including disabled audit rows. This
+avoids repeating compiler prewarm and process startup for every small module
+while allowing either free slot to claim the next batch. Serial bootstraps
+and smaller quotas retain
+the ordinary streaming invocation.
+
+`BUSTER_TEST_MODULE_GROUP=module:<name>` is the private CI selector;
+`module:range:<begin>:<end>` selects an inclusive-begin, exclusive-end slice
+of the canonical inventory. Bounds must be valid and select enabled work. It
+preserves table-audit flags and canonical indices, unlike explicit
+`--module=` selection, which intentionally takes ownership of named audits.
+Each child must supply the full independent inventory, exactly its selected
+timing rows and matching successful terminal counts. The parent compares all
+inventory identities and accepts only the exact enabled union, rejecting
+duplicate coverage as well as missing modules. Failed spawn,
+capture, cleanup, replay, timeout or incomplete coverage fails the invocation.
+
+The persistent parent lanes claim stable batch slots through an atomic index;
+captured output replays in canonical descriptor order after both lanes finish.
+The complete schedule shares the existing 5400-second deadline. Each process
+keeps the existing 64 MiB capture cap; retained captures share a 128 MiB cap.
+At most two in-flight captures can temporarily exceed that retained cap before
+admission stops and the run fails. No fixture deadline or test-worker quota
+increases.
+
+`CI_UNIT_SCHEDULE_PLAN_V1` binds source revision, executable SHA-256 and quota.
+`CI_UNIT_PROCESS_V1 group=module` retains each heavy child's native interval;
+`group=batch module=range:<begin>:<end>` retains a shared child's interval,
+with `index` naming its first canonical descriptor. `CI_UNIT_SCHEDULE_V1`
+reports aggregate module coverage, captured bytes and wall time, including
+inventory and replay. Batch intervals must not be attributed to every module
+inside the batch or summed with overlapping child intervals. These rows
+must not be fed to the historical two-group observer as accepted evidence.
+
+`BUSTER_TEST_UNIT_SCHEDULE=pair` retains the earlier primary/rest runner;
+the existing unit-partition experiment explicitly selects it. Empty or
+`modules` selects the new scheduler, and unknown values fail. An unset schedule
+under `BUSTER_CI_CHECKS_EVIDENCE` retains `pair` for the existing qualification
+receipt schema; an explicit schedule still takes precedence. The native
+`test_units_partitioned --self-test` covers both paths, including actual
+synthetic module processes; the selector's harness controls add no registered
+modules, fixtures or assertions. Hosted wall-time improvements still require
+same-binary, same-runner comparisons and complete lane evidence.
+
+The `codex/3620-schedule-unit-modules` qualification branch runs three paired
+sanitized Release invocations per Linux x86-64, Linux AArch64 and Windows x64
+hosted runner, using one immutable binary and four test workers in both arms.
+The three-core macOS hosted runner keeps its ordinary serial fallback and
+normal sanitized CI validation. Windows first exercises three cold isolated
+OS processes. Its capture-sink fixture calibrates the native process runtime
+before the exact handle census and verifies the calibration child's owned
+handles are closed; registered fixture and assertion counts stay unchanged. The `pair` control runs before each `modules` candidate. Raw
+logs and machine records remain in the unit-partition artifact, including failed
+attempts. `test_units_partitioned --compare <pair-log> <module-log>` requires
+identical source and binary identities, per-module indices/names/assertion
+counts, external totals and exact fixture-start records, plus successful parent
+terminals. It reports both native wall intervals without claiming acceptance.
+Historical Debug/serial-versus-pair dispatches retain their original protocol.

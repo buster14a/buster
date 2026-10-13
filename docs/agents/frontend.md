@@ -13,7 +13,7 @@ substitute for inspecting the current implementation and fixtures.
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
 | Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
-| Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
+| Relocations, weak/alias/ifunc symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
 | Atomic layout, argument classification, loads/stores, conversions | [Atomics](frontend/atomics.md) |
 | Declarators, typeof, conditional types, calls, JIT/driver boundaries | [Calls](frontend/calls.md) |
@@ -35,6 +35,21 @@ stringization and token-paste construction retain their existing rules.
 The registered argument-demand controls in `macro_conditional_test.c` cover
 this boundary in C17/GNU17, including duplicate substitution and raw/paste
 controls. The external Clang `macro_disable.c` assertion remains unchanged.
+
+## Macro filename prefix maps
+
+`CPreprocessOptions.macro_prefix_maps` supplies ordered
+`CMacroPrefixMap` entries; the last byte-prefix match is substituted once by
+`c_macro_builtin_token`. Only synthesized filename literals change.
+`CMacro` retains the immutable mapping view for the preprocess call and its
+directive-context bit; no final result retains this view. `__FILE__` reads
+the current logical filename, `__BASE_FILE__` the root, and
+`__FILE_NAME__` the original basename before substitution. GCC-style
+directive expansions bypass mapping. Escaping happens after substitution
+through the existing literal renderer. Include identity/probes, dependencies,
+diagnostics and source maps use original physical/logical names.
+See [the driver contract](driver.md#macro-filename-prefix-maps) for argv
+ordering, GCC/Clang differences and hosted oracle controls.
 
 ## Line-control filenames
 
@@ -156,6 +171,10 @@ operations, not every recognized identifier. Its complex, atomic and integer-tra
 reuse the exact `c_symbol_builtin_from_spelling` classification: adding a new
 spelling there requires checking its real lowering and its query regression.
 Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
+Ordinary library names such as `memcpy` and `strlen` are not compiler builtins:
+only explicit `__builtin_*` spellings enter builtin classification, folding or
+lowering. Consequently `-ffreestanding` only changes `__STDC_HOSTED__` and
+header forwarding; it has no ordinary-call builtinization to disable.
 
 The active target admits atomic builtins on x86-64/AArch64, and complex
 construction there and on Wasm64. Wasm64 and eBPF reject atomic IR; eBPF also
@@ -254,6 +273,26 @@ rather than given a guessed class: `nullptr_t` (Clang answers -1), `va_list`
 (its class depends on the target ABI), and `_BitInt` (Clang's 18), which the
 frontend does not model. `c_test_builtin_classify_type` covers every class,
 the static contexts, arity and unevaluated operands at run time.
+
+`__builtin_LINE()`, `__builtin_FILE()` and `__builtin_FUNCTION()` (#3897) take
+no argument and need no entity (`c_semantic_source_location_builtin`). LINE is
+an `int` integer constant: the parser records it as a type-identity answer
+(`c_parse_source_line_builtin`), like `__builtin_classify_type`, so
+`_Static_assert`, array bounds, `case` labels and static initializers fold it.
+FILE and FUNCTION are `const char *` (`c_semantic_source_name_type`) and point
+to a string literal: the presumed file name of the call, or the enclosing
+function's shared `__func__` object, which is `""` at file scope
+(`c_ir_source_name_object`). That literal is also an address constant for
+static initializers. Positions come from the token's source map
+(`c_semantic_source_line`, `c_semantic_source_file`), so a macro-produced call
+reports its invocation and `#line` renumbers and renames it. In a macro
+invocation spanning lines, the reported line is the line of `__LINE__` there,
+which matches GCC; Clang reports the closing line. The
+result types follow GCC; Clang 18 answers `unsigned int` and `char *`.
+Every use with an argument is diagnosed. `-fmacro-prefix-map` does not apply
+to the FILE spelling yet (#3917). `c_test_source_location_builtins` checks types, constant
+contexts and invalid arity on three targets in both SSA forms. It also runs the
+program in every allocator and form, with GCC and Clang as oracles.
 
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
@@ -396,6 +435,17 @@ macros are architecture-gated, while `__k8` follows the baseline CPU model.
 Apple AArch64, 16 otherwise), independently of `abi_max_alignment`.
 PIC/PIE macros reflect the driver's `-fpic`/`-fPIC` and `-fpie`/`-fPIE`
 level and executable-mode fields.
+
+I386 uses the SysV ILP32 source model for both `-m16` and `-m32`: 32-bit
+pointers and `long`, `unsigned int` `size_t`, `int` `ptrdiff_t`, GCC's
+`long int` `wchar_t`, and 12-byte/80-bit `long double`. The model predefines
+`__i386__`/`__i386`, and GNU dialects additionally define `i386`; it does not
+inherit x86-64, code-model or unselected SIMD macros. Buster's layout records
+the psABI's 4-byte ABI alignment for `long long` and `double`. GCC's
+`__alignof__(long long)`/`__alignof__(double)` reports 8-byte preferred
+alignment while `_Alignof` and struct member alignment are 4; Buster has no
+separate preferred-type-alignment query yet, so `__alignof__` retains the
+4-byte ABI alignment on I386.
 
 These values intentionally differ from Clang 18.1.8 in several places:
 default fixed-address output leaves PIC/PIE undefined even where Ubuntu GCC
@@ -596,7 +646,8 @@ and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
 Ordinary storage-half objects, members, parameters and function results receive
 a named semantic refusal; reached scalar casts, bit-casts and vector
 conversions receive a named canonical-lowering refusal. The lowering budget
-skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+skips known `sizeof`, `_Alignof` and `typeof` operands, and lowering sizes
+such an operand from the C type layout (see [calls](frontend/calls.md)); its `_Generic`
 evaluation-context handling is not complete. No scalar arithmetic, promotion,
 or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
 slice in both frontend forms.
@@ -722,6 +773,19 @@ and its signature takes no arguments in evaluated, unused and unevaluated
 contexts. Its existing float counterpart is `__builtin_inff()`; admission
 and availability use the fixed math spelling census, without vendor metadata
 changes or a runtime library import.
+
+`c_semantic_math_special_value` is the one census of the constant-valued
+special-float builtins (#1269). `c_ir_math_builtin_link_name` folds
+`__builtin_huge_valf` onto `inff` and `__builtin_huge_vall`/`__builtin_infl`
+onto `infl`, so glibc's `HUGE_VALF`/`HUGE_VALL` spellings share the infinity
+path; `__builtin_nanl("")` joins `nan`/`nanf` as the default quiet NaN. Result
+types, arity checks, `__has_builtin`, every constant folder and runtime
+lowering read that census, and `c_ir_constant_math_special` encodes the value
+in the result type's own format (binary32/64, x87 or binary128 long double).
+The signaling `__builtin_nans*` forms stay unadvertised until their
+signaling-bit preservation contract is settled.
+`c_test_builtin_special_float_spellings` covers types, queries, arity,
+static and runtime bits on three long double layouts.
 
 Nested vector lane subscripts retain the original vector storage, including
 plain parenthesized groups. Standalone vector reads still produce copied values.

@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/ebpf/ebpf.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/string.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 typedef struct VectorContractCase VectorContractCase;
 struct VectorContractCase
@@ -146,6 +147,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult vector_contract_test_emit(UnitTestArguments* 
             {
                 BUSTER_TEST(arguments, artifact.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION && artifact.error.opcode == IR_OPCODE_SIMD);
                 BUSTER_TEST(arguments, artifact.bytes.length == 0 && artifact.error.message.length != 0);
+                BUSTER_STRING_TEST(arguments, artifact.error.message,
+                                   S8("LLVM bitcode exact SIMD lowering is unavailable; select an explicit source fallback"));
             }
         }
     }
@@ -252,7 +255,7 @@ UnitTestResult vector_contract_tests(UnitTestArguments* arguments)
                 result.test_count += emitted.test_count;
                 result.succeeded_test_count += emitted.succeeded_test_count;
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;

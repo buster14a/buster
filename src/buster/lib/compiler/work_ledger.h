@@ -16,7 +16,11 @@
 // Map of the families (key prefix, then what one unit is):
 //   rederive  semantic and lowering answers re-derived from token ranges
 //             because there is no AST: root queries, their tokens, repeated
-//             initializer walks and per-element checks
+//             initializer walks and per-element checks; the call-arity
+//             check's `identifier (` candidates and the reserved words among
+//             them it skips; and the body scope map's token stores beside the
+//             summed shares of every scope it visits, which is what filling
+//             each nested share over its parent's would store (#2676)
 //   snapshot  rollback state materialized for the semantic type machine:
 //             whole-result checkpoints and by-value frame rows, in bytes
 //   population per-query work proportional to a whole table (type table,
@@ -55,6 +59,10 @@
     X(REDERIVE_INITIALIZER_LITERAL_ELEMENTS, rederive, initializer_literal_elements) \
     X(REDERIVE_LOWER_QUERY_ROOTS, rederive, lower_query_roots) \
     X(REDERIVE_LOWER_TYPE_PREDICTIONS, rederive, lower_type_predictions) \
+    X(REDERIVE_CALL_ARITY_CANDIDATES, rederive, call_arity_candidates) \
+    X(REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED, rederive, call_arity_keywords_skipped) \
+    X(REDERIVE_BODY_SCOPE_STORES, rederive, body_scope_stores) \
+    X(REDERIVE_BODY_SCOPE_SHARE_TOKENS, rederive, body_scope_share_tokens) \
     X(SNAPSHOT_QUERY_CHECKPOINTS, snapshot, query_checkpoints) \
     X(SNAPSHOT_QUERY_CHECKPOINT_BYTES, snapshot, query_checkpoint_bytes) \
     X(SNAPSHOT_FRAME_PUSHES, snapshot, frame_pushes) \
@@ -86,6 +94,7 @@
     X(TARGET_X86_GPR_TABLES_BUILT, target, x86_gpr_tables_built) \
     X(TARGET_X86_GPR_TABLE_READS, target, x86_gpr_table_reads) \
     X(TARGET_X86_VARIABLE_MEMORY_TABLES_BUILT, target, x86_variable_memory_tables_built) \
+    X(TARGET_X86_VARIABLE_MEMORY_CELLS_BUILT, target, x86_variable_memory_cells_built) \
     X(TARGET_X86_VARIABLE_MEMORY_TABLE_READS, target, x86_variable_memory_table_reads) \
     X(MACHINE_FUNCTIONS_SELECTED, machine, functions_selected) \
     X(MACHINE_ROWS, machine, rows) \

@@ -393,6 +393,28 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_signals_end(CompilerSamplingSignalSco
 #endif
 }
 
+// Evidence is data, never compiler output: the lab leaves out.exe and
+// reference.exe beside each variant's records and the corpus leaves objects.
+// Twelve pilot executables made campaign 6's packet 0 artifact 135 MB, over
+// the hosted reader's 64 MiB bound, which also refuses executable members.
+// executables_only selects the lab names; otherwise object suffixes are pruned.
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_prune_compiled(Arena* arena, String8 directory, bool executables_only)
+{
+    MuslDirectoryEntry* entries = 0;
+    u64 count = 0;
+    bool missing = generate_path_kind(arena, directory) == GENERATE_PATH_MISSING;
+    bool result = missing || musl_list_directory(arena, directory, &entries, &count);
+    for (u64 i = 0; result && !missing && i < count; i += 1)
+    {
+        String8 name = {(char8*)entries[i].name.pointer, entries[i].name.length};
+        bool compiled = executables_only ? string_equal(name, S8("out.exe")) || string_equal(name, S8("reference.exe")) :
+            string_ends_with_sequence(name, S8(".exe")) || string_ends_with_sequence(name, S8(".o")) ||
+            string_ends_with_sequence(name, S8(".obj")) || string_ends_with_sequence(name, S8(".s"));
+        if (compiled && !entries[i].is_directory) result = os_file_delete(path_join(arena, directory, name));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_supervision_receipt(Arena* arena, String8 path,
     CompilerExperimentSupervisor supervisor, bool proven, u64 wall_us)
 {
@@ -607,6 +629,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
                         BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_OUTPUT])) &&
                         file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stderr.log"), trial)),
                         BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_ERROR]));
+                    logs = compiler_sampling_prune_compiled(arena, path_join(arena, trial_path, S8("a")), true) &&
+                        compiler_sampling_prune_compiled(arena, path_join(arena, trial_path, S8("b")), true) && logs;
                     complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
                         !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && logs &&
                         closure_before && closure_after && supervision_recorded && !measured.signalled && !measured.reaped && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
@@ -723,6 +747,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
             spawn.process_group_control = &control;
             wait = os_process_wait_deadline(arena, spawn, remaining);
         }
+    }
+    if (!launch_attempted || !spawn.handle)
+    {
+        // The worker owns the ledger claim, so this refusal is always pre-claim.
+        String8 reason = !clock_valid ? S8("the physical job clock is missing or invalid") :
+            !remaining ? S8("the reservation no longer fits the remaining physical job time") :
+            !contained ? S8("the native descendant supervisor could not start") :
+            !deferred ? S8("signal deferral could not start") : S8("the owned worker could not be spawned");
+        string_print(S8("error: sampling owner refused before its ledger claim: {S8}\n"), reason);
     }
     bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor,
         (!launch_attempted || !spawn.handle || wait.result != PROCESS_RESULT_UNKNOWN) && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
@@ -987,7 +1020,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
         result = compiler_closure_utility_main(arena, arguments);
     }
     else if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-preparation")) ||
-        string_equal(arguments.pointer[0], S8("--self-test-preparation-controller"))))
+        string_equal(arguments.pointer[0], S8("--self-test-preparation-controller")) ||
+        string_equal(arguments.pointer[0], S8("--self-test-preparation-failed-phase"))))
     {
         result = compiler_preparation_qualification_main(arena, arguments);
     }
@@ -1037,12 +1071,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     else if (options.valid && options.execute)
     {
         CompilerSamplingControllerOptions resolved = {0};
-        if (compiler_sampling_controller_resolve(arena, options, &resolved))
+        String8 reason = {0};
+        if (compiler_sampling_controller_resolve(arena, options, &resolved, &reason))
         {
             result = options.owned_worker ? compiler_sampling_controller_execute(arena, resolved) :
                 compiler_sampling_run_owned(arena, resolved.packet, arguments);
         }
-        else string_print(S8("error: trusted sampling controller rejected immutable admission data or platform identity before execution\n"));
+        else string_print(S8("error: trusted sampling controller rejected immutable admission data or platform identity before execution: {S8}\n"), reason);
     }
     else if (options.valid && options.claim)
     {

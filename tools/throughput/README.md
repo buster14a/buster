@@ -28,7 +28,10 @@ use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
 all three. The macOS leg is `.github/workflows/throughput-harness-macos.yml`:
 it runs weekly, on demand, and for ready pull requests that change a harness
-input, so the Linux comparison never waits for a macOS runner. Hardware
+input, so the Linux comparison never waits for a macOS runner. Its separate
+`timing` job runs `bench_throughput_ci` unpinned on macOS, weekly and on
+dispatch only, as informative timing that is never Zen 5 evidence or a gate
+([native hosted timing](../../docs/agents/benchmarking.md#native-hosted-timing)). Hardware
 counters currently have a Linux implementation only.
 
 ### Hosted workflow requests
@@ -165,9 +168,11 @@ particular, the Lua descriptor preserves run 34727853592's missing-readline
 failure. A new qualification must run the existing build.c oracle after
 installing the declared native dependencies before Lua can be admitted.
 
-The branch-only `throughput-real-source.yml` workflow stages these exact roots,
-runs the existing cJSON/Lua/SQLite oracles, and always writes the preflight and
-outcome evidence. For each freshly passing oracle, `admit-workload` then verifies
+The [main-push external-project owner](../../.github/workflows/external-projects.yml)
+stages these exact roots, runs the existing cJSON/Lua/SQLite oracles and retains
+preflight and outcome evidence. Full external execution is bound to the event
+SHA after each automatic push to `main`; PR, manual and reusable routes were
+retired by #3501. See [the migration map](../../docs/external-project-ci.md). For each freshly passing oracle, `admit-workload` then verifies
 parsed dependency, compiler-resource, system-header, SDK, sanitized-environment
 and runtime-library manifests; compiles every declared source/generated file to
 an object; independently compile-links the declared source list; executes that
@@ -182,6 +187,44 @@ operations. The broader frontend/PIC/allocator lists remain requested descriptor
 metadata, not performed work. This is hosted functional admission only: it does
 not enlarge the default CI corpus, run timing samples, qualify a dedicated host,
 or establish A/A or A/B performance acceptance. Those remain separate work.
+
+### Timed real-source runs
+
+`run --real-source DESCRIPTOR ROOT` (repeatable, at most four) times a
+version-2 descriptor's own `compile_link_argv` on an already staged tree:
+
+```sh
+./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide --output build/real-source \
+  --no-guard --mode all --pairs 20 --warmups 2 --timeout 120 --cpu 2 \
+  --real-source tools/throughput/workloads/cjson-1.7.19.workload /absolute/cjson-staging \
+  --real-source tools/throughput/workloads/lua-5.4.8.workload /absolute/lua-5.4.8/src \
+  --real-source tools/throughput/workloads/sqlite-3.53.4.workload /absolute/sqlite-amalgamation-3530400
+```
+
+Each descriptor adds one job per selected allocator mode, named
+`<descriptor name>/<mode>`, after any synthetic jobs. A job is one process:
+the descriptor's frozen template expanded exactly as `admit-workload` expands
+it (`-I$ROOT`, target, CPU, direct-SSA, non-PIC, `$LINK_SOURCES`), except that
+the measured mode replaces `-fregister-allocator=$MODE`. The process compiles
+every link source and links an executable in the staged root. Before any
+timing, the harness parses each descriptor, refuses a version-1 or duplicate
+descriptor, a mode the descriptor does not declare, and any missing, changed
+or undeclared staged file (complete tree hash). After timing it checks the
+descriptor and tree again. Paired A/B timing, rounds, warmups, determinism
+checks and the raw files are the ordinary `run` contract below.
+
+Real sources replace the default synthetic corpus unless `--workload` also
+selects cases, so they require `--no-guard`: each cell reports
+`diagnostic (guard disabled)` and the run makes no pass or regression claim.
+The template is frozen, so `--flag`, `--artifact assembly`, `--pmu` and
+allocation probes are refused. `metadata.json` adds a `real_sources` array
+(descriptor path and SHA-256, staged root, input tree hash, requested
+translation-unit bytes, operation and template); its jobs record the
+descriptor as `source` and the input tree hash as `sha256`. Synthetic-only
+metadata keeps its bytes. The host still needs the descriptors' native
+dependencies, for Lua the readline headers and library. On the 9700X this
+runs as the fixed `throughput-real-source-v1` profile; see
+[benchmarking.md](../../docs/agents/benchmarking.md).
 
 ## Shared library boundary
 
@@ -418,13 +461,17 @@ set:
 | `skewed` | 4 × max W | One TU eight times larger than the others |
 | `tiny` | 16 × max W | One small function per TU |
 | `count-wW-nN` | W−1, W or W+1 | Equal TUs, measured at 1 and W workers |
+| `size-nN` | 2, 4, 8, 16, 32, 64 | Equal TUs, measured at 1, 2 and max W workers |
 | `diagnostic` | max(3, max W + 1) | Two TUs reference undeclared identifiers |
 
 - `equal`, `skewed` and `tiny` keep the same inputs at every W, so they are
   strong-scaling series. Their points are: the compiler default with no
   `-fcompile-jobs`, the explicit one-worker reference, then each listed W.
-- `--shape equal|skewed|tiny|count|all` selects series (repeatable; default
-  all). The diagnostic series always runs.
+- `size` brackets the population at which a multi-lane compile repays its
+  fixed entry cost (#53). Each series records its total `input_bytes`. It needs
+  a maximum W of at least 2 and always adds a two-worker point.
+- `--shape equal|skewed|tiny|count|size|all` selects series (repeatable;
+  default all). The diagnostic series always runs.
 - `--profile` and `--scale` size the functions as in `generate`.
 
 **Each sample** is a fresh process:
@@ -433,7 +480,11 @@ run in the series directory. After every sample, `scale` checks:
 - exit status 0 and a nonempty executable;
 - the `CC_METRICS` header reports every input `ok`;
 - `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
-  one-worker points;
+  one-worker points. It must be 1 when the header reports `lane_gate=serial`
+  (the compiler kept one worker for a population too small to repay the
+  multi-lane entry cost). A compiler without the gate omits the field and gets
+  the same check as before; an unknown value is invalid;
+- every sample of one point reports the same `lane_gate`;
 - the executable is byte-identical across every worker count and repeat;
 - peak RSS stays under `--max-rss-mib`, when given.
 
@@ -454,7 +505,7 @@ excess makes the run invalid: exit 2 and a `scaling.json` with
 | `scaling-metadata.json` | Compiler path and SHA-256, requested set, per-CPU package/core/sibling topology, placements, input hashes per series |
 | `scaling.csv` | One row per timed sample: wall, user and system time, peak RSS, observed workers, interval kind, artifact hash |
 | `commands.jsonl` | Exact argv, working directory and CPU set of every launch |
-| `scaling.json`, `scaling.md` | Per point: median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency, CPU-work (user+system) inflation and peak-RSS inflation |
+| `scaling.json`, `scaling.md` | Per series: inputs and input bytes. Per point: observed workers and `lane_gate` (`null`/`-` when absent), median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency over the participating workers, CPU-work (user+system) inflation and peak-RSS inflation |
 
 Peak RSS is the compiler process's own high-water mark. It is not a sum over a
 process tree.
@@ -984,9 +1035,34 @@ an old completion manifest to claim compatibility.
 
 The native regression suite checks exact zero/UINT64_MAX/unavailable replay,
 invalid counters, legacy rejection, optional probe completeness, and unchanged
-corpus hashing. On Linux it compares one allocation-and-sleep child's `wait4`
-counts with an independently obtained `getrusage(RUSAGE_CHILDREN)` delta,
-without another child between snapshots. Other platforms check unavailability.
+corpus hashing. On Linux it checks all four exported allocation-and-sleep child
+counters exactly against the raw `wait4` result for the successfully waited PID,
+including availability, exit status and cleanup. The collector's unchanged
+mapping also has distinct-value, zero, negative/unavailable and `LONG_MAX`
+controls. Other platforms check unavailability.
+
+`RUSAGE_CHILDREN` is a separate snapshot, not an atomic oracle for `wait4`.
+In [Linux v7.0 `wait_task_zombie`](https://github.com/torvalds/linux/blob/028ef9c96e96197026887c0f092424679298aae8/kernel/exit.c),
+the parent accumulates child counters before separately collecting the returned
+rusage. Exit notification precedes `do_task_dead`; the final
+[`__schedule`](https://github.com/torvalds/linux/blob/028ef9c96e96197026887c0f092424679298aae8/kernel/sched/core.c)
+can still increment the child's context-switch count. This permits different
+snapshots even without another child. It explains why strict cumulative equality
+is unsupported; it does not prove the interleaving of any historical failure or
+authenticate a hosted runner's downstream kernel patchset (#2335/#3149).
+
+If the cumulative voluntary-switch delta differs, the test emits
+`THROUGHPUT_CHILD_COUNTER_MISMATCH_V1` with the actual child and waited PID,
+the original per-child `wait4` counters, both cumulative `RUSAGE_CHILDREN`
+snapshots, and the existing group-cleanup signal's result/errno. A Linux-only
+test snapshot copies these already observed facts after the timed interval;
+it adds no wait, signal, process discovery, result field or production wire
+schema. Cumulative disagreement remains telemetry while the per-child oracle
+stays strict. The workload and deadlines are unchanged. Deterministic controls
+require silence for equal counters, preserve an injected larger cumulative
+delta, and replay the retained `wait4=2`, cumulative `87->88` recurrence without
+changing the collected value. There is no tolerance, delay or retry.
+
 The existing Linux harness job additionally runs the suite under ASan/UBSan:
 
 ```sh

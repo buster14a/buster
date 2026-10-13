@@ -274,8 +274,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_differential_tests(UnitTestArgume
                                        !memcmp(a->blocks, b->blocks, sizeof(*a->blocks) * a->block_count) &&
                                        !memcmp(a->edges, b->edges, sizeof(*a->edges) * a->edge_count));
             // Interleaved ids were permuted into dense spans the same way.
-            BUSTER_TEST(arguments, a->instruction_remap && b->instruction_remap &&
-                                       !memcmp(a->instruction_remap, b->instruction_remap, sizeof(*a->instruction_remap) * row_count));
+            for (u32 index = 0; index < row_count; index += 1)
+            {
+                IrInstruction* x = left->instructions + index;
+                IrInstruction* y = right->instructions + index;
+                BUSTER_TEST(arguments, x->result.value == y->result.value && x->opcode == y->opcode && x->operands == y->operands);
+            }
+            BUSTER_TEST(arguments, !memcmp(left->values, right->values, sizeof(IrValue) * left->value_count));
         }
     }
     scratch_end(temporary);

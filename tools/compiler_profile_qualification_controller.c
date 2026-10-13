@@ -3,6 +3,8 @@
 // subreaper at a time; *_prepared binds the durable acquisition to the freeze.
 // Acquisition claims before clone/build and never measures a compiler. Later
 // packets reuse those exact artifacts. No process exit qualifies a campaign.
+// *_resolve and the pre-claim part of *_execute name every refusal through
+// *_check; *_roots refuses an unusable or cross-device store_root (#3390).
 #ifndef BUSTER_COMPILER_SAMPLING_CONTROLLER_INCLUDED
 #define BUSTER_COMPILER_SAMPLING_CONTROLLER_INCLUDED
 #define BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT (8ull << 20)
@@ -123,16 +125,19 @@ BUSTER_GLOBAL_LOCAL String8 compiler_sampling_controller_read(Arena* arena, Stri
     struct stat before = {0}, after = {0};
     bool valid = descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
         before.st_size >= 0 && (u64)before.st_size <= limit && limit <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT;
-    char8* bytes = valid ? arena_allocate(arena, char8, limit + 1) : 0;
+    // Size the buffer from the observed file, not the limit: one packet export
+    // reads ~100 bounded files and limit-sized buffers exhaust the arena.
+    u64 capacity = valid ? (u64)before.st_size + 1 : 0;
+    char8* bytes = valid ? arena_allocate(arena, char8, capacity) : 0;
     u64 used = 0;
     bool eof = false;
     while (valid && !eof)
     {
-        ssize_t count = read(descriptor, bytes + used, limit + 1 - used);
+        ssize_t count = read(descriptor, bytes + used, capacity - used);
         if (count > 0)
         {
             used += (u64)count;
-            valid = used <= limit;
+            valid = used < capacity;
         }
         else if (!count) eof = true;
         else valid = errno == EINTR;
@@ -542,6 +547,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_binary(Arena* arena, Strin
     return result;
 }
 
+// A failed corpus phase clears success but its partial objects are still
+// uploaded, so prune unconditionally and keep the original failure.
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_prune_corpus(CompilerSamplingController* controller)
+{
+    bool result = compiler_sampling_prune_compiled(controller->arena,
+        path_join(controller->arena, controller->evidence, S8("throughput/artifacts")), false);
+    controller->success = controller->success && result;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_prepared(CompilerSamplingController* controller, CompilerSamplingFreeze freeze)
 {
     String8 prepared = compiler_sampling_controller_read(controller->arena,
@@ -590,7 +605,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
         {
             String8 bytes = compiler_sampling_controller_read(controller->arena,
                 path_join(controller->arena, controller->prepared, name), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
-            bool retained = compiler_sampling_controller_path_safe(name) && bytes.length &&
+            // Quiet children (git checkout/reset/clean) leave empty logs; the
+            // reader still requires each bounded stream, so keep empty files.
+            bool retained = compiler_sampling_controller_path_safe(name) && bytes.pointer &&
                 file_write(path_join(controller->arena, output, name), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
             result = retained && result;
         }
@@ -639,11 +656,64 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_not_run(CompilerSamplingCo
     return result;
 }
 
+// Records the first refused check so a rejection before the ledger claim
+// always names its reason in the job log.
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_check(String8* reason, bool condition, String8 label)
+{
+    if (!condition && !reason->length) *reason = label;
+    return condition;
+}
+
+// Acquisition creates the ledger under store_root and parks the baseline
+// build from source_root into store_root/<campaign>/prepared by rename. Before
+// any claim, store_root must be an existing directory owned and writable by
+// the runner user `owner`, on the device of source_root's parent (#3390).
+// Returns the refusal reason, or an empty string when the roots are usable.
+BUSTER_GLOBAL_LOCAL String8 compiler_sampling_controller_roots(Arena* arena, String8 store_root, String8 source_root, u32 owner)
+{
+    String8 result = S8("sampling store and source roots require Linux");
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    String8 store = string_duplicate_arena(arena, store_root, true);
+    String8 parent_path = path_parent(arena, source_root);
+    String8 parent = string_duplicate_arena(arena, parent_path, true);
+    struct stat store_status = {0}, parent_status = {0};
+    errno = 0;
+    bool store_present = store_root.length && lstat((char*)store.pointer, &store_status) == 0;
+    u32 store_error = (u32)errno;
+    errno = 0;
+    bool parent_present = parent_path.length && stat((char*)parent.pointer, &parent_status) == 0 && S_ISDIR(parent_status.st_mode);
+    u32 parent_error = (u32)errno;
+    u32 owner_access = S_IWUSR | S_IXUSR;
+    if (!store_present)
+        result = string_format(arena, S8("store_root {S8} is missing (errno {u32})"), store_root, store_error);
+    else if (!S_ISDIR(store_status.st_mode))
+        result = string_format(arena, S8("store_root {S8} is not a directory"), store_root);
+    else if ((u32)store_status.st_uid != owner)
+        result = string_format(arena, S8("store_root {S8} is owned by uid {u32}, not the runner user uid {u32}"),
+            store_root, (u32)store_status.st_uid, owner);
+    else if (((u32)store_status.st_mode & owner_access) != owner_access || access((char*)store.pointer, W_OK | X_OK) != 0)
+        result = string_format(arena, S8("store_root {S8} is not writable by the runner user (mode {u32:o})"),
+            store_root, (u32)(store_status.st_mode & 07777));
+    else if (!parent_present)
+        result = string_format(arena, S8("source_root parent {S8} is missing or not a directory (errno {u32})"), parent_path, parent_error);
+    else if (store_status.st_dev != parent_status.st_dev)
+        result = string_format(arena, S8("store_root {S8} (device {u64}) and source_root parent {S8} (device {u64}) are on "
+            "different filesystems; the closure snapshot rename would fail with EXDEV"),
+            store_root, (u64)store_status.st_dev, parent_path, (u64)parent_status.st_dev);
+    else
+        result = (String8){0};
+#else
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(store_root); BUSTER_UNUSED(source_root); BUSTER_UNUSED(owner);
+#endif
+    return result;
+}
+
 // Pure admission/path resolution before the outer worker starts. No file is
 // created and no child is launched. The worker repeats this against its own
 // platform environment before claiming or materializing any transported data.
+// *reason names the first refused check.
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, CompilerSamplingOptions options,
-    CompilerSamplingControllerOptions* output)
+    CompilerSamplingControllerOptions* output, String8* reason)
 {
     CompilerSamplingControllerOptions result = {.packet = options, .acquisition_plan = options.acquisition_plan};
     result.transport = compiler_sampling_controller_transport(arena);
@@ -676,33 +746,55 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, Comp
     String8 driver = os_path_absolute(arena, program_state->input.arguments.pointer[0], true);
     String8 ledger = path_join(arena, store, S8("ledger"));
     String8 admission_directory = string_format(arena, S8("{S8}.admission"), evidence);
-    bool valid = transport.valid && result.admitted.valid && result.plan.valid &&
-        compiler_experiment_job_clock_resolve(arena, S8("sampling"), compiler_sampling_controller_fact(facts, S8("trusted_revision")), &result.job_clock) &&
-        compiler_experiment_job_clock_remaining_us(result.job_clock, result.admitted.reservation_seconds * 1000000ull,
-            (result.admitted.reservation_seconds - 120ull) * 1000000ull) &&
-        string_equal(result.acquisition_sha256, expected_plan) &&
-        string_equal(result.plan.trusted_revision, result.admitted.trusted_revision) &&
-        string_equal(result.plan.protocol_sha256, result.admitted.protocol_sha256) &&
-        compiler_sampling_controller_attempt(arena, facts, result.admitted, result.plan) &&
-        cleanup.length && workspace.length && trusted.length && evidence.length && driver.length &&
-        string_equal(cleanup, os_path_absolute(arena, options.cleanup_root, true)) &&
-        string_equal(store, result.plan.store_root) &&
-        string_equal(source_parent, path_parent(arena, result.plan.source_root)) &&
-        compiler_sampling_acquisition_plan_store_outside(result.plan, cleanup) &&
-        compiler_sampling_acquisition_plan_store_outside(result.plan, workspace) &&
-        !compiler_sampling_acquisition_path_within(result.plan.source_root, cleanup) &&
-        !compiler_sampling_acquisition_path_within(result.plan.source_root, workspace) &&
-        !compiler_sampling_path_overlap(store, trusted) && !compiler_sampling_path_overlap(result.plan.source_root, trusted) &&
-        compiler_sampling_acquisition_path_within(evidence, cleanup) &&
-        generate_path_kind(arena, evidence) == GENERATE_PATH_MISSING &&
-        string_equal(os_path_absolute(arena, path_parent(arena, evidence), true), path_parent(arena, evidence)) &&
-        (generate_path_kind(arena, ledger) == GENERATE_PATH_MISSING || string_equal(os_path_absolute(arena, ledger, true), ledger)) &&
-        (acquire || (string_equal(os_path_absolute(arena, result.plan.source_root, true), result.plan.source_root) &&
+    u32 owner = 0;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    owner = (u32)geteuid();
+#endif
+    String8 roots = result.plan.valid ? compiler_sampling_controller_roots(arena, result.plan.store_root, result.plan.source_root, owner) : (String8){0};
+    String8 refused = {0};
+    bool valid = compiler_sampling_controller_check(&refused, transport.valid, S8("admission transport data is malformed or incomplete")) &&
+        compiler_sampling_controller_check(&refused, result.admitted.valid, S8("native admission refused the allowlist, request, facts, history or freeze")) &&
+        compiler_sampling_controller_check(&refused, result.plan.valid, S8("acquisition plan is missing or malformed")) &&
+        compiler_sampling_controller_check(&refused, !roots.length, roots) &&
+        compiler_sampling_controller_check(&refused,
+            compiler_experiment_job_clock_resolve(arena, S8("sampling"), compiler_sampling_controller_fact(facts, S8("trusted_revision")), &result.job_clock) &&
+            compiler_experiment_job_clock_remaining_us(result.job_clock, result.admitted.reservation_seconds * 1000000ull,
+                (result.admitted.reservation_seconds - 120ull) * 1000000ull),
+            S8("physical job clock is missing or the reservation no longer fits the job")) &&
+        compiler_sampling_controller_check(&refused, string_equal(result.acquisition_sha256, expected_plan) &&
+            string_equal(result.plan.trusted_revision, result.admitted.trusted_revision) &&
+            string_equal(result.plan.protocol_sha256, result.admitted.protocol_sha256),
+            S8("acquisition plan digest, trusted revision or protocol differs from the admitted freeze")) &&
+        compiler_sampling_controller_check(&refused, compiler_sampling_controller_attempt(arena, facts, result.admitted, result.plan),
+            S8("executor attempt facts do not match the admitted request")) &&
+        compiler_sampling_controller_check(&refused, cleanup.length && workspace.length && trusted.length && evidence.length && driver.length &&
+            string_equal(cleanup, os_path_absolute(arena, options.cleanup_root, true)),
+            S8("RUNNER_TEMP, GITHUB_WORKSPACE, trusted root, evidence or driver path is missing or not canonical")) &&
+        compiler_sampling_controller_check(&refused, string_equal(store, result.plan.store_root) &&
+            string_equal(source_parent, path_parent(arena, result.plan.source_root)),
+            S8("store_root or source_root parent is not its canonical absolute path")) &&
+        compiler_sampling_controller_check(&refused, compiler_sampling_acquisition_plan_store_outside(result.plan, cleanup) &&
+            compiler_sampling_acquisition_plan_store_outside(result.plan, workspace) &&
+            !compiler_sampling_acquisition_path_within(result.plan.source_root, cleanup) &&
+            !compiler_sampling_acquisition_path_within(result.plan.source_root, workspace) &&
+            !compiler_sampling_path_overlap(store, trusted) && !compiler_sampling_path_overlap(result.plan.source_root, trusted),
+            S8("store_root or source_root overlaps RUNNER_TEMP, the workspace or the trusted checkout")) &&
+        compiler_sampling_controller_check(&refused, compiler_sampling_acquisition_path_within(evidence, cleanup) &&
+            generate_path_kind(arena, evidence) == GENERATE_PATH_MISSING &&
+            string_equal(os_path_absolute(arena, path_parent(arena, evidence), true), path_parent(arena, evidence)),
+            S8("evidence path is outside RUNNER_TEMP, already exists or has a non-canonical parent")) &&
+        compiler_sampling_controller_check(&refused,
+            generate_path_kind(arena, ledger) == GENERATE_PATH_MISSING || string_equal(os_path_absolute(arena, ledger, true), ledger),
+            S8("store ledger is not its canonical absolute path")) &&
+        compiler_sampling_controller_check(&refused, acquire || (string_equal(os_path_absolute(arena, result.plan.source_root, true), result.plan.source_root) &&
             string_equal(os_path_absolute(arena, path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared")), true),
-                path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared"))))) &&
-        (!transport.present || generate_path_kind(arena, admission_directory) == GENERATE_PATH_MISSING) &&
-        (!options.phase.length || string_equal(options.phase, result.admitted.phase)) &&
-        (!options.packet_text.length || string_equal(options.packet_text, string_format(arena, S8("{u64}"), result.admitted.packet)));
+                path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared")))),
+            S8("packet source_root or prepared acquisition is missing or not canonical")) &&
+        compiler_sampling_controller_check(&refused, !transport.present || generate_path_kind(arena, admission_directory) == GENERATE_PATH_MISSING,
+            S8("admission materialization directory already exists")) &&
+        compiler_sampling_controller_check(&refused, (!options.phase.length || string_equal(options.phase, result.admitted.phase)) &&
+            (!options.packet_text.length || string_equal(options.packet_text, string_format(arena, S8("{u64}"), result.admitted.packet))),
+            S8("requested phase or packet differs from the admitted selector"));
     result.cleanup_root = cleanup;
     result.trusted_root = trusted;
     result.packet.phase = result.admitted.phase;
@@ -727,9 +819,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, Comp
     result.packet.prepared = path_join(arena, path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared")), S8("prepared.json"));
     result.packet.prep_us = 0;
     result.packet.prep_text = S8("0");
-    valid = valid && compiler_sampling_acquisition_path(result.packet.python);
+    valid = valid && compiler_sampling_controller_check(&refused, compiler_sampling_acquisition_path(result.packet.python),
+        S8("python3 is missing or not an acquisition-safe path"));
     result.packet.valid = valid;
     if (valid) *output = result;
+    *reason = refused;
     return valid;
 }
 
@@ -743,7 +837,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
     requested.acquisition_plan = options.acquisition_plan;
     requested.cleanup_root = options.cleanup_root;
     requested.trusted_root = options.trusted_root;
-    bool valid = compiler_sampling_controller_resolve(arena, requested, &resolved);
+    String8 reason = {0};
+    bool valid = compiler_sampling_controller_resolve(arena, requested, &resolved, &reason);
     CompilerSamplingController controller = {.arena = arena, .packet = resolved.packet, .plan = resolved.plan, .started = started};
     CompilerSamplingAdmission admitted = resolved.admitted;
     CompilerSamplingFreeze freeze = resolved.frozen;
@@ -755,27 +850,40 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
     String8 admission_directory = string_format(arena, S8("{S8}.admission"), evidence);
     SliceString8 child_keys = {0}, child_values = {0};
     CompilerSamplingControllerHost observed = compiler_sampling_controller_observed_host(arena);
-    valid = valid && compiler_sampling_owned_environment(arena, &child_keys, &child_values) && observed.valid;
+    valid = valid && compiler_sampling_controller_check(&reason, compiler_sampling_owned_environment(arena, &child_keys, &child_values),
+        S8("owned child environment could not be constructed"));
+    valid = valid && compiler_sampling_controller_check(&reason, observed.valid, S8("host /proc/cpuinfo is not the approved processor"));
     controller.evidence = evidence;
     controller.acquisition_sha256 = plan_sha;
     controller.prepared = path_join(arena, path_join(arena, store, plan_sha), S8("prepared"));
     u64 job_remaining = valid && admitted.reservation_seconds > 120 ?
         compiler_experiment_job_clock_remaining_us(resolved.job_clock, admitted.reservation_seconds * 1000000ull,
             (admitted.reservation_seconds - 120ull) * 1000000ull) : 0;
-    valid = valid && job_remaining;
+    valid = valid && compiler_sampling_controller_check(&reason, job_remaining != 0,
+        S8("the reservation no longer fits the remaining physical job time"));
     controller.deadline = os_now_microseconds() + job_remaining;
     if (valid)
     {
-        valid = compiler_sampling_ledger_claim(arena, ledger, admitted.freeze_sha256, admitted.phase, admitted.packet, &controller.claim);
+        valid = compiler_sampling_controller_check(&reason, compiler_sampling_ledger_claim(arena, ledger, admitted.freeze_sha256,
+            admitted.phase, admitted.packet, &controller.claim),
+            S8("ledger claim refused: the store ledger is not creatable, the campaign is exhausted, or this packet or its predecessors are not claimable"));
         controller.claimed = valid;
-        if (valid && transport.present) valid = compiler_sampling_controller_materialize(arena, admission_directory,
-            transport, &controller.packet, &options.acquisition_plan);
+        if (valid && transport.present) valid = compiler_sampling_controller_check(&reason, compiler_sampling_controller_materialize(arena,
+            admission_directory, transport, &controller.packet, &options.acquisition_plan), S8("admission data could not be materialized after the claim"));
         OsDirectoryCreateResult created = valid ? os_make_directory_exclusive(evidence) : (OsDirectoryCreateResult){0};
-        valid = valid && created.created && !created.error.v;
+        valid = valid && compiler_sampling_controller_check(&reason, created.created && !created.error.v,
+            S8("evidence directory could not be created after the claim"));
         String8 claim = compiler_sampling_claim_record(arena, controller.packet);
-        valid = valid && file_write(path_join(arena, evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim)) &&
+        valid = valid && compiler_sampling_controller_check(&reason,
+            file_write(path_join(arena, evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim)) &&
             file_write(path_join(arena, evidence, S8("physical-job-clock.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.job_clock.record)) &&
-            compiler_sampling_controller_host_receipt(arena, evidence, observed, resolved);
+            compiler_sampling_controller_host_receipt(arena, evidence, observed, resolved),
+            S8("claim, job clock or host receipt could not be written after the claim"));
+    }
+    if (!valid)
+    {
+        string_print(S8("error: owned sampling worker refused {S8} its ledger claim: {S8}\n"),
+            controller.claimed ? S8("after") : S8("before"), reason);
     }
     controller.success = valid;
     if (controller.claimed)
@@ -857,6 +965,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
             SliceString8 corpus_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(corpus);
             compiler_sampling_controller_phase(&controller, S8("full-default-corpus"), corpus_arguments,
                 admitted.reservation_seconds * 1000000ull);
+            compiler_sampling_controller_prune_corpus(&controller);
             CompilerSamplingVerification after = controller.success ? compiler_sampling_closure_verify(arena, controller.packet, evidence, 99, true, controller.deadline) : (CompilerSamplingVerification){0};
             controller.success = controller.success && after.valid && compiler_sampling_controller_prepared(&controller, freeze);
             controller.cleanup_failed = controller.cleanup_failed || after.cleanup_failed;
@@ -914,6 +1023,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
     result = result && owned;
     if (owned)
     {
+        // A packet export reads ~100 bounded files; reads must not reserve the
+        // 8 MiB limit each, and empty child logs must stay distinguishable from
+        // unreadable ones.
+        Arena* bounded = arena_create((ArenaCreation){0});
+        String8 small = path_join(arena, directory, S8("bounded.txt"));
+        String8 empty = path_join(arena, directory, S8("empty.stdout"));
+        bool reads = bounded && file_write(small, BUSTER_SLICE_TO_BYTE_SLICE(S8("x\n"))) &&
+            file_write(empty, (ByteSlice){0});
+        for (u64 i = 0; reads && i < 64; i += 1)
+        {
+            String8 text = compiler_sampling_controller_read(bounded, small, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+            String8 none = compiler_sampling_controller_read(bounded, empty, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+            reads = string_equal(text, S8("x\n")) && none.pointer && !none.length;
+        }
+        reads = reads && !compiler_sampling_controller_read(bounded, path_join(arena, directory, S8("missing")),
+            BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT).pointer;
+        if (bounded) arena_destroy(bounded, 1);
+        result = result && reads;
         CompilerSamplingController fixture = {.arena = arena, .evidence = directory,
             .started = os_now_microseconds(), .deadline = os_now_microseconds() + 5000000ull, .success = true};
         string8_list_push(arena, &fixture.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
@@ -933,6 +1060,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
         bool timeout = !compiler_sampling_controller_phase(&fixture, S8("real-manager-timeout"),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(timed), 20000ull);
         result = result && timeout && !fixture.cleanup_failed && !fixture.success;
+        // A failed corpus that already emitted objects must still export only
+        // its raw records, and its failure must survive the prune.
+        fixture.success = true;
+        fixture.deadline = os_now_microseconds() + 5000000ull;
+        String8 artifacts = path_join(arena, directory, S8("throughput/artifacts"));
+        String8 partial = string_format(arena,
+            S8("mkdir -p '{S8}' && printf o > '{S8}/x.o' && printf e > '{S8}/x.exe' && printf l > '{S8}/x.log' && exit 7"),
+            artifacts, artifacts, artifacts, artifacts);
+        String8 failed_corpus[] = {S8("/bin/sh"), S8("-c"), partial};
+        bool partial_failed = !compiler_sampling_controller_phase(&fixture, S8("failed-corpus-with-outputs"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(failed_corpus), 2000000ull);
+        bool pruned = compiler_sampling_controller_prune_corpus(&fixture);
+        result = result && partial_failed && pruned && !fixture.success &&
+            generate_path_kind(arena, path_join(arena, artifacts, S8("x.o"))) == GENERATE_PATH_MISSING &&
+            generate_path_kind(arena, path_join(arena, artifacts, S8("x.exe"))) == GENERATE_PATH_MISSING &&
+            generate_path_kind(arena, path_join(arena, artifacts, S8("x.log"))) != GENERATE_PATH_MISSING;
         String8 binary_directory = path_join(arena, directory, S8("bin"));
         OsDirectoryCreateResult bin = os_make_directory_exclusive(binary_directory);
         String8 names[] = {S8("ide-base"), S8("ide-cand"), S8("ide-cand2")};
@@ -960,6 +1103,39 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
         bound.ab2_candidate_bytes = saved;
         bound.prepared_sha256 = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         result = result && !compiler_sampling_controller_prepared(&fixture, bound);
+        // Store/source root preflight (#3390): each refusal is named before any
+        // claim, including a cross-filesystem plan whose snapshot rename would
+        // fail with EXDEV. /proc is always a separate device from the fixture.
+        u32 runner = (u32)geteuid();
+        String8 store = path_join(arena, directory, S8("store"));
+        String8 store_file = path_join(arena, directory, S8("store-file"));
+        String8 source = path_join(arena, directory, S8("source"));
+        OsDirectoryCreateResult store_created = os_make_directory_exclusive(store);
+        bool roots = store_created.created && !store_created.error.v &&
+            file_write(store_file, BUSTER_SLICE_TO_BYTE_SLICE(S8("x\n"))) &&
+            !compiler_sampling_controller_roots(arena, store, source, runner).length;
+        String8 refusals[] = {
+            compiler_sampling_controller_roots(arena, path_join(arena, directory, S8("absent-store")), source, runner),
+            compiler_sampling_controller_roots(arena, store_file, source, runner),
+            compiler_sampling_controller_roots(arena, store, source, runner + 1),
+            compiler_sampling_controller_roots(arena, store, S8("/proc/buster-sampling-source"), runner),
+            compiler_sampling_controller_roots(arena, store, path_join(arena, directory, S8("absent/source")), runner),
+        };
+        String8 expected[] = {S8("is missing"), S8("is not a directory"), S8("not the runner user"),
+            S8("different filesystems"), S8("source_root parent")};
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(refusals); i += 1)
+        {
+            roots = roots && string_first_sequence(refusals[i], expected[i]) != BUSTER_STRING_NO_MATCH;
+        }
+        roots = roots && chmod((char*)store.pointer, 0500) == 0;
+        String8 read_only = roots ? compiler_sampling_controller_roots(arena, store, source, runner) : (String8){0};
+        roots = chmod((char*)store.pointer, 0700) == 0 && roots &&
+            string_first_sequence(read_only, S8("is not writable")) != BUSTER_STRING_NO_MATCH;
+        String8 refused = {0};
+        roots = roots && compiler_sampling_controller_check(&refused, true, S8("unused")) && !refused.length &&
+            !compiler_sampling_controller_check(&refused, false, S8("first")) &&
+            !compiler_sampling_controller_check(&refused, false, S8("second")) && string_equal(refused, S8("first"));
+        result = result && roots;
         bool removed = os_directory_delete(directory);
         result = result && removed;
     }

@@ -256,6 +256,7 @@ typedef enum IrAbiConvention
     IR_ABI_CONVENTION_AAPCS64,
     IR_ABI_CONVENTION_DARWIN_AARCH64,
     IR_ABI_CONVENTION_WINDOWS_AARCH64,
+    IR_ABI_CONVENTION_SYSTEMV_I386,
     IR_ABI_CONVENTION_COUNT,
 } IrAbiConvention;
 
@@ -391,8 +392,8 @@ struct IrType
     // the C frontend sets and reads it.
     bool is_transparent_union;
     // A C complex type, modelled as the two-field struct the psABIs classify
-    // it as (see c_ir_complex_type). Only the C frontend sets and reads it;
-    // to the backends the type is an ordinary aggregate.
+    // it as (see c_ir_complex_type). The C frontend sets it; ABI classifiers
+    // retain the result conventions that differ from ordinary aggregates.
     bool is_complex;
     // A function type whose declarator spelled `noreturn`, so a call through
     // it ends control flow. The marker written on a function declaration is
@@ -486,6 +487,9 @@ struct IrSymbol
     // has_owner_function is set; the link name does not depend on it.
     bool has_owner_function;
     IrSymbolId owner_function;
+    // Optimizer directives merged from compatible function declarations.
+    bool always_inline;
+    bool noinline;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).
@@ -495,11 +499,18 @@ struct IrSymbol
 // two, and it is kept as a module-level list of the pairs.  A module's
 // aliases must name definitions in that same module, which is what
 // ir_validate_canonical_module checks.
+//
+// An indirect alias is __attribute__((ifunc("resolver"))): `target` is the
+// resolver, and the symbol is a GNU indirect function whose value is the
+// resolver's address, so a reference wants the function the resolver returns.
+// Its target must be a function body, and only ELF can carry it
+// (ObjectSymbol.indirect, STT_GNU_IFUNC).
 typedef struct IrSymbolAlias IrSymbolAlias;
 struct IrSymbolAlias
 {
     IrSymbolId symbol;
     IrSymbolId target;
+    bool is_indirect;
 };
 
 typedef struct IrSymbolTable IrSymbolTable;

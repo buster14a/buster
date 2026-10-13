@@ -238,6 +238,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     // reports; only take over crash reporting in non-sanitized builds.
     install_signal_handlers();
 #endif
+    // The environment parser's own arena keeps the host's ordinary policy.
+    arena_huge_pages_initialize(S8(""));
     os_state.arena = arena_create((ArenaCreation){0});
     SliceString8 environments_raw;
 #if defined(_WIN32)
@@ -248,6 +250,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     environments_raw = slice_string_from_posix_string_list(os_state.arena, envp);
 #endif
 
+    String8 huge_page_option = {0};
     SliceString8 environment_keys = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length)};
     SliceString8 environment_values = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length)};
 
@@ -262,10 +265,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
             String8 value = string_slice(environment_raw, equal_index + 1, environment_raw.length);
             environment_keys.pointer[environment_index] = key;
             environment_values.pointer[environment_index] = value;
+            if (string_equal(key, S8("BUSTER_ARENA_HUGE_PAGES")))
+            {
+                huge_page_option = value;
+            }
             environment_keys.length += 1;
             environment_values.length += 1;
         }
     }
+
+    arena_huge_pages_initialize(huge_page_option);
 
 #if defined(_WIN32)
     bool winsock_initialized = false;

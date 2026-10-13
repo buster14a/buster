@@ -1,0 +1,144 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 62d8a59e..1061b3ca 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -16612,10 +16612,139 @@ BUSTER_C_INTERNAL bool c_parse_forward_type_query_bit_field_width_diagnostics(Ar
+ BUSTER_C_INTERNAL bool c_parse_member_specifiers_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                       u32 start, u32 end);
+ 
++// THROWAWAY CENSUS (not for commit): #3842's plain-member tree test vs token predicate.
++BUSTER_GLOBAL_LOCAL u32 c_parse_specifier_node(CTypeParseMachine* machine, u32 token);
++BUSTER_GLOBAL_LOCAL bool census_decoration_spelling(String8 s)
++{
++    String8 words[] = {S8("__attribute__"), S8("__attribute"), S8("__declspec"), S8("asm"), S8("__asm"), S8("__asm__"), S8("__extension__"),
++                       S8("_Static_assert"), S8("static_assert"), S8("_Alignas"), S8("alignas"), S8("aligned"), S8("__aligned__"),
++                       S8("__aligned"), S8("vector_size"), S8("__vector_size__")};
++    bool found = false;
++    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(words); i += 1)
++    {
++        found |= string_equal(s, words[i]);
++    }
++    return found;
++}
++
++BUSTER_GLOBAL_LOCAL void census_plain_member(CTypeParseMachine* machine, CTypeParseFrame* frame, CPreprocessResult preprocess)
++{
++    CAst const* ast = machine->syntax_tree;
++    bool token_plain = true;
++    for (u32 index = frame->start; index < frame->end; index += 1)
++    {
++        CToken token = preprocess.tokens[index];
++        if (token.kind == C_TOKEN_IDENTIFIER)
++        {
++            token_plain &= !census_decoration_spelling(c_token_spelling(preprocess.spelling_base, token));
++        }
++        else if (token.kind != C_TOKEN_PREPROCESSING_NUMBER)
++        {
++            token_plain &= c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
++                           c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
++        }
++    }
++    u32 node = c_parse_specifier_node(machine, frame->start);
++    u32 why = 0; // 0 plain, 1 no list, 2 other kind, 3 decoration word
++    u32 bad_kind = 0;
++    u32 member_node = C_AST_NODE_INVALID;
++    if (node == C_AST_NODE_INVALID)
++    {
++        why = 1;
++    }
++    else
++    {
++        for (u32 child = c_ast_subtree_begin(ast, node); child <= node && !why; child += 1)
++        {
++            u32 kind = ast->kinds[child];
++            if (kind == C_AST_SPECIFIER_WORD)
++            {
++                u32 word = ast->data[child];
++                why = word == C_AST_WORD_EXTENSION || word == C_AST_WORD_ALIGNAS || word == C_AST_WORD_ATTRIBUTE || word == C_AST_WORD_DECLSPEC ||
++                              word == C_AST_WORD_ASM || word == C_AST_WORD_STATIC_ASSERT
++                          ? 3
++                          : 0;
++            }
++            if (!why && kind != C_AST_DECL_SPECIFIERS &&
++                census_decoration_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[child]])))
++            {
++                why = 3;
++            }
++        }
++        for (u32 child = node + 1; child < ast->node_count && !why && member_node == C_AST_NODE_INVALID; child += 1)
++        {
++            u32 kind = ast->kinds[child];
++            u32 data = ast->data[child];
++            switch (kind)
++            {
++            case C_AST_MEMBER_DECLARATION:
++                member_node = child;
++                break;
++            case C_AST_MEMBER_DECLARATOR:
++                why = (data & C_AST_PRESENCE_MASK) == 1 ? 0 : 2;
++                break;
++            case C_AST_DECLARATOR_POINTER:
++                why = (data & 1) ? 2 : 0;
++                break;
++            case C_AST_DECLARATOR_ARRAY:
++            case C_AST_DECLARATOR_NAME:
++            case C_AST_NUMBER:
++            case C_AST_CHARACTER:
++            case C_AST_IDENTIFIER:
++            case C_AST_MULTIPLY:
++            case C_AST_DIVIDE:
++            case C_AST_REMAINDER:
++            case C_AST_ADD:
++            case C_AST_SUBTRACT:
++            case C_AST_SHIFT_LEFT:
++            case C_AST_SHIFT_RIGHT:
++            case C_AST_PLUS:
++            case C_AST_NEGATE:
++            case C_AST_BIT_NOT:
++            case C_AST_BIT_AND:
++            case C_AST_BIT_XOR:
++            case C_AST_BIT_OR:
++                break;
++            default:
++                why = 2;
++                bad_kind = kind;
++                break;
++            }
++            if (!why && member_node == C_AST_NODE_INVALID &&
++                census_decoration_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[child]])))
++            {
++                why = 3;
++            }
++        }
++        why = !why && member_node == C_AST_NODE_INVALID ? 2 : why;
++    }
++    bool tree_plain = why == 0;
++    string_print_error(S8("PLAINCENSUS tree={u32} token={u32} why={u32} kind={S8} start={u32} end={u32}"), (u32)tree_plain, (u32)token_plain, why,
++                       why == 2 && bad_kind ? c_ast_kind_name((CAstKind)bad_kind) : S8("-"), frame->start, frame->end);
++    if (tree_plain != token_plain)
++    {
++        string_print_error(S8(" DISAGREE:"));
++        for (u32 index = frame->start; index < frame->end; index += 1)
++        {
++            string_print_error(S8(" {S8}"), c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]));
++        }
++        if (member_node != C_AST_NODE_INVALID)
++        {
++            static Arena* arena; if (!arena) { arena = arena_create((ArenaCreation){0}); }
++            string_print_error(S8(" TREE: {S8}"), c_ast_dump(arena, ast, preprocess, member_node));
++        }
++    }
++    string_print_error(S8("\n"));
++}
++
+ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+ {
+     CParseResult* result = frame->result;
+     CPreprocessResult preprocess = *frame->preprocess;
++    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN && machine->ast_specifier_starts)
++    {
++        census_plain_member(machine, frame, preprocess);
++    }
+     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+     {
+         // A member _Static_assert declares no member. It is checked with the

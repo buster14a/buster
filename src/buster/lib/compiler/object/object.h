@@ -1,6 +1,6 @@
 #pragma once
 
-// Format-neutral object model: the ObjectFile shape shared by the ELF64,
+// Format-neutral object model: the ObjectFile shape shared by the ELF32/ELF64,
 // COFF, and Mach-O readers/writers, the codegen-module converter, archive
 // reading, the disassembly printer, and in-process execution of a linked
 // object. Readers bounds-check hostile input and return an invalid file
@@ -15,6 +15,7 @@ typedef enum ObjectFormat
     OBJECT_FORMAT_ELF64,
     OBJECT_FORMAT_COFF,
     OBJECT_FORMAT_MACH_O64,
+    OBJECT_FORMAT_ELF32,
     OBJECT_FORMAT_COUNT,
 } ObjectFormat;
 
@@ -132,7 +133,7 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12,
     // Ordinary Windows ARM64 page-address pairs.  Keep these separate from
     // the loader-owned TLS sequence even though COFF gives PAGEBASE_REL21
-    // the same numeric type as the __tls_index ADRP relocation.
+    // the same numeric type as the _tls_index ADRP relocation.
     OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21,
     OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A,
     OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L,
@@ -220,6 +221,27 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
+    // ARM64_RELOC_GOT_LOAD_PAGE21 (5) and ARM64_RELOC_GOT_LOAD_PAGEOFF12 (6):
+    // `adrp Xn` of the page holding the symbol's GOT slot and the 64-bit
+    // `ldr Xt, [Xn, #lo12]` of that slot. Darwin reaches every symbol a
+    // translation unit does not define this way; a direct page pair to a
+    // dylib symbol has no meaning to a platform linker. A linker that binds
+    // the symbol in the same image relaxes the pair to ADRP/ADD of the symbol.
+    OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21,
+    OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12,
+    // IMAGE_REL_ARM64_SECREL_LOW12L: TLS offset bits 0..11 in the scaled imm12
+    // of an unsigned-immediate load or store, which Clang and MSVC emit for the
+    // access that follows SECREL_HIGH12A.
+    OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L,
+    // i386 ELF REL fields. ABSOLUTE32 is shared with R_386_32; keep the
+    // PC/GOT/PLT formulas and 16-bit fields distinct from x86-64 kinds.
+    OBJECT_RELOCATION_I386_PC32,
+    OBJECT_RELOCATION_I386_GOTPC,
+    OBJECT_RELOCATION_I386_GOTOFF,
+    OBJECT_RELOCATION_I386_PLT32,
+    OBJECT_RELOCATION_I386_GOT32X,
+    OBJECT_RELOCATION_I386_16,
+    OBJECT_RELOCATION_I386_PC16,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -229,7 +251,7 @@ typedef enum ObjectRelocationKind
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 // Shared field facts: two bytes for COFF_SECTION16, eight for the 64-bit
-// data forms, four for the remaining kinds. Invalid kinds have zero width
+// data forms, two for i386 16-bit fields, four for the remaining kinds. Invalid kinds have zero width
 // and are not TLS. These classify fields, not a consumer's supported kinds.
 BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 BUSTER_F_DECL bool object_relocation_kind_is_tls(ObjectRelocationKind kind);
@@ -263,6 +285,14 @@ BUSTER_F_DECL bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 targe
 BUSTER_F_DECL bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, u64 offset, s64 addend, u32* patched);
 
 #define OBJECT_SECTION_UNDEFINED UINT32_MAX
+
+// The Windows loader's TLS index slot. The MSVC CRT defines it and both
+// link.exe and lld-link resolve COFF index loads against this spelling, so
+// the COFF writer, reader and PE linker agree on it for x86-64 and ARM64.
+#define OBJECT_COFF_TLS_INDEX_NAME S8("_tls_index")
+// The COFF section name MSVC and Clang give thread-local data; platform
+// linkers merge it between the CRT's .tls and .tls$ZZZ bounds.
+#define OBJECT_COFF_TLS_SECTION_NAME S8(".tls$")
 
 typedef struct ObjectSection ObjectSection;
 struct ObjectSection
@@ -342,6 +372,9 @@ struct ObjectSymbol
     // function there. `kind` is unchanged and still what every other
     // consumer reads; Mach-O and COFF have no such state and ignore this.
     bool untyped;
+    // An undefined ELF STT_NOTYPE reference, independent of TLS identity.
+    // Relocations may prove a call without changing what its producer stated.
+    bool undefined_untyped;
     // The name is already the object-level symbol name.  The Mach-O writer
     // normally prepends the C-level `_`; hand-written assembly spells that
     // underscore itself, so the driver strips it, or sets this when the
@@ -386,10 +419,22 @@ struct ObjectDebugModule
     u64 types_size;
 };
 
-// `sections` holds one section per ObjectSectionKind, indexed by its kind,
-// and past OBJECT_SECTION_COUNT any sections of their own name: the ones
-// `__attribute__((section))` places and the C-identifier-named ones an ELF
-// object carries (issue 1276). Only ELF objects have those.
+// The most sections a COFF or Mach-O object can number. Regular COFF reserves
+// section numbers 0xff00 and above; a Mach-O symbol's one-byte n_sect counts
+// sections from 1 and spends 0 on NO_SECT.
+enum
+{
+    OBJECT_COFF_MAX_SECTIONS = 65279,
+    OBJECT_MACH_O_MAX_SECTIONS = 255,
+};
+
+// A codegen, reader or link object's `sections` holds one section per
+// ObjectSectionKind, indexed by its kind, and past OBJECT_SECTION_COUNT any
+// sections of their own name: the ones `__attribute__((section))` places and
+// the C-identifier-named ones an ELF object carries (issue 1276). Only ELF
+// objects of those producers have such sections. An assembled object instead
+// holds the sections its source declares, in declaration order, each with its
+// own name and kind, as many as the format can number.
 typedef struct ObjectFile ObjectFile;
 struct ObjectFile
 {
@@ -403,6 +448,8 @@ struct ObjectFile
     // unsupported input feature (for example an ELF relocation) for a
     // user-facing diagnostic.  Empty means no more-specific text exists.
     String8 diagnostic;
+    // Driver-supplied input spelling for symbol-type refusal attribution.
+    String8 source_name;
     u32 section_count;
     u32 symbol_count;
     u32 relocation_count;
@@ -418,7 +465,7 @@ struct ObjectFile
     // The GNU `constructor(N)`/`destructor(N)` priority of every entry of
     // OBJECT_SECTION_INIT_ARRAY (index 0) and OBJECT_SECTION_FINI_ARRAY
     // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
-    // section, in slot order, ascending by order key because the entries were
+    // section (four bytes on i386), in slot order, ascending by order key because the entries were
     // sorted into it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none
     // and IR_INITIALIZER_PRIORITY_PREINIT for an ELF `.preinit_array` entry,
     // which sorts first (IR_INITIALIZER_PRIORITY_ORDER_KEY) and so is not
@@ -428,7 +475,7 @@ struct ObjectFile
     // what the attribute named and the ELF and COFF writers split the array
     // back into the sections their linkers order by --
     // `.init_array.NNNNN` and `.CRT$XCA00101`, see
-    // object_split_initializer_priorities -- while object_read_elf64 and
+    // object_split_initializer_priorities -- while object_read_elf and
     // object_read_coff recover it from those same names so the linker can
     // order one program's whole array (link_initializer_arrays_order).  A
     // producer that has no priorities to state -- the Mach-O reader, whose
@@ -508,16 +555,6 @@ struct ObjectArchive
     u32 reserved;
 };
 
-typedef struct ObjectExecutable ObjectExecutable;
-struct ObjectExecutable
-{
-    void* address;
-    // The reservation may begin before the aligned text entry.
-    void* allocation_address;
-    u64 allocation_size;
-    ObjectError error;
-};
-
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
 BUSTER_F_DECL String8 object_format_name(ObjectFormat format);
 BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatistics const* unit);
@@ -531,9 +568,7 @@ BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, T
 // Unlike the eager public reader above, this borrows bytes until extraction
 // finishes and postpones indexed member payload/target validation.
 BUSTER_F_DECL ObjectArchive object_archive_read_link(Arena* arena, ByteSlice bytes, Target target);
-BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
 BUSTER_F_DECL bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched);
-BUSTER_F_DECL void object_release_executable(ObjectExecutable executable);
 
 #if BUSTER_FUZZ_AVAILABLE
 BUSTER_F_DECL s32 object_fuzz_test_input(const u8* pointer, size_t size);

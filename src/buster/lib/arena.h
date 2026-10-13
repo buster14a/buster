@@ -22,6 +22,13 @@ void __asan_unpoison_memory_region(void const volatile* address, size_t size);
 #define BUSTER_ARENA_POISON(pointer, size) ((void)(pointer), (void)(size))
 #define BUSTER_ARENA_UNPOISON(pointer, size) ((void)(pointer), (void)(size))
 #endif
+typedef enum ArenaHugePagePolicy
+{
+    ARENA_HUGE_PAGES_DEFAULT,
+    ARENA_HUGE_PAGES_DISABLED,
+    ARENA_HUGE_PAGES_ENABLED,
+} ArenaHugePagePolicy;
+
 typedef struct ArenaFlags ArenaFlags;
 struct ArenaFlags
 {
@@ -46,7 +53,12 @@ struct ArenaFlags
     // this for large transient peaks that must not accumulate in a thread's
     // small-arena reuse pool.
     u64 no_pool : 1;
-    u64 flags : 60;
+    // DEFAULT inherits the serial startup policy (off unless opted in).
+    // DISABLED suppresses our advice, not the host's existing THP policy.
+    // ENABLED requests best-effort advice; it can increase RSS and cause
+    // synchronous compaction. Pooled reuse preserves the resolved policy.
+    u64 huge_pages : 2;
+    u64 flags : 58;
 };
 
 typedef struct Arena Arena;
@@ -107,6 +119,9 @@ struct TemporalArena
 // wrap.
 #define ARENA_MAX_RESERVATION ((u64)1 << 48)
 
+// Serial startup only, before workers: exactly "1" enables the default
+// advice policy. Missing, empty, "0" and other values leave it disabled.
+BUSTER_F_DECL void arena_huge_pages_initialize(String8 value);
 BUSTER_F_DECL Arena* arena_create(ArenaCreation initialization);
 BUSTER_F_DECL bool arena_destroy(Arena* arena, u64 count);
 // Unmaps every otherwise-reusable arena parked in the calling OS thread's
@@ -130,6 +145,14 @@ BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
 // for that next phase and the dirty high-water mark covers them, exactly as
 // arena_set_position leaves them. Returns the number of bytes released.
 BUSTER_F_DECL u64 arena_release_to_position(Arena* arena, u64 position);
+// Rewinds an over-reserved tail the caller has just finished filling, like
+// arena_release_to_position, but extends the dirty mark only to written_end:
+// the caller guarantees every byte from written_end up to the cursor is zero,
+// never written since that tail was allocated or cleared again. A later
+// arena_allocate_zeroed over that remainder then skips a fill the operating
+// system already did, so trimming an estimate faults no page nothing used
+// (#1307).
+BUSTER_F_DECL u64 arena_release_unwritten_tail(Arena* arena, u64 position, u64 written_end);
 // Ends an arena's use by the thread that created it: rewinds it, returns
 // every committed page beyond `retained_size` bytes of buffer to the OS and
 // destroys it, which parks a pool-eligible mapping for the next creation of
