@@ -3036,6 +3036,196 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 ir_test_inline_required_work_source(Arena* arena, u32 call_sites, u32 statements)
+{
+    String8 callee_head = S8("static inline __attribute__((always_inline)) int required_work_leaf(int value)\n{\n");
+    String8 statement = S8("    value = value * 3 + 1;\n");
+    String8 callee_tail = S8("    return value;\n}\nint required_work_caller(int value)\n{\n");
+    String8 call = S8("    value = required_work_leaf(value);\n");
+    String8 caller_tail = S8("    return value;\n}\n");
+    u64 source_length = callee_head.length + statement.length * statements + callee_tail.length +
+                        call.length * call_sites + caller_tail.length;
+    u8* source_bytes = arena_allocate(arena, u8, source_length);
+    u64 cursor = 0;
+    memcpy(source_bytes + cursor, callee_head.pointer, callee_head.length);
+    cursor += callee_head.length;
+    for (u32 index = 0; index < statements; index += 1)
+    {
+        memcpy(source_bytes + cursor, statement.pointer, statement.length);
+        cursor += statement.length;
+    }
+    memcpy(source_bytes + cursor, callee_tail.pointer, callee_tail.length);
+    cursor += callee_tail.length;
+    for (u32 index = 0; index < call_sites; index += 1)
+    {
+        memcpy(source_bytes + cursor, call.pointer, call.length);
+        cursor += call.length;
+    }
+    memcpy(source_bytes + cursor, caller_tail.pointer, caller_tail.length);
+    cursor += caller_tail.length;
+    String8 result = {.pointer = (char8*)source_bytes, .length = cursor};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Module-relative row growth remains saturating for impossible demands.
+    BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
+
+    // The production guard prices retained callee payload, table growth, marginal
+    // reservations, clone maps and alignment against the unchanged storage cap.
+    // The actual preparation below checks the complete sum for this fixture.
+    enum { required_call_sites = 400, excessive_call_sites = 5000, required_statements = 16 };
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = ir_test_inline_required_work_source(arena, required_call_sites, required_statements);
+    CPreprocessResult tokens = c_preprocess(arena, source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult analysis = c_parse(arena, tokens);
+    CIRLowerResult lowered = {0};
+    if (!tokens.error_count && !analysis.diagnostic_count)
+    {
+        lowered = c_lower_to_ir_with_options(arena, S8("canonical-inline-required-work.c"),
+            tokens, analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
+    }
+    BUSTER_TEST(arguments, tokens.error_count == 0 && analysis.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+    {
+        IrProgram* program = lowered.program;
+        IrModule* module = program->modules;
+        program->fast_passes = 0;
+        program->inline_options = (IrInlineOptions){0};
+        IrFunction* caller = ir_test_inline_find_function(module, S8("required_work_caller"));
+        IrFunction* callee = ir_test_inline_find_function(module, S8("required_work_leaf"));
+        BUSTER_TEST(arguments, caller && callee);
+        BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("required_work_leaf")) == required_call_sites);
+        if (BUSTER_REQUIRE(arguments, caller && callee))
+        {
+            u32 argument_rows = ir_test_opcode_count(callee, IR_OPCODE_ARGUMENT);
+            u64 copied_rows_floor = callee->instruction_count >= argument_rows
+                                        ? (u64)callee->instruction_count - argument_rows : 0;
+            u64 prior_site_pairs = (u64)required_call_sites * (required_call_sites - 1u) / 2u;
+            // With constant interning disabled, each assignment contributes at least two
+            // literal rows and two integer-binary rows: 16 * 4 * 79,800 = 5,107,200.
+            u64 old_repeated_projection_floor = copied_rows_floor * prior_site_pairs;
+            // Before the fix, function_projected_units was charged again at
+            // every later call. Even the copied-row component alone exceeds
+            // the unchanged per-caller work allowance for this fixture.
+            BUSTER_TEST(arguments, old_repeated_projection_floor > IR_FAST_WORK_BUDGET);
+
+            IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+            if (prepared.error != IR_VALIDATION_NONE)
+            {
+                arguments->show(arguments,
+                    S8("required-work 400 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64} growth={u64}\n"),
+                    (u32)prepared.error, (u32)module->inlining.required_budget_reason,
+                    module->inlining.required_budget_demand, module->inlining.required_budget_limit,
+                    module->inlining.budget_skips, module->inlining.always_inlined, module->inlining.growth);
+            }
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, module->inline_complete);
+            BUSTER_TEST(arguments, module->inlining.always_inlined == required_call_sites);
+            BUSTER_TEST(arguments, module->inlining.required_budget_reason == IR_INLINE_BUDGET_NONE);
+            BUSTER_TEST(arguments, module->inlining.budget_skips == 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("required_work_leaf")) == 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        }
+    }
+
+    // Explicit required-site limits still refuse the same source with a
+    // source-mapped required-inline error.
+    CIRLowerResult limited_lowered = {0};
+    if (!tokens.error_count && !analysis.diagnostic_count)
+    {
+        limited_lowered = c_lower_to_ir_with_options(arena, S8("canonical-inline-required-work-limit.c"),
+            tokens, analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
+    }
+    BUSTER_TEST(arguments, limited_lowered.diagnostic_count == 0 && limited_lowered.program != 0);
+    if (BUSTER_REQUIRE(arguments, limited_lowered.program && limited_lowered.program->module_count == 1))
+    {
+        IrProgram* limited_program = limited_lowered.program;
+        IrModule* limited_module = limited_program->modules;
+        limited_program->fast_passes = 0;
+        limited_program->inline_options = (IrInlineOptions){.max_call_sites = required_call_sites - 1u};
+        IrValidationResult refused = ir_prepare_canonical_module(limited_program, limited_module, false);
+        if (refused.error != IR_VALIDATION_INLINE_REQUIRED ||
+            limited_module->inlining.required_budget_reason != IR_INLINE_BUDGET_CALL_SITES ||
+            limited_module->inlining.required_budget_limit != required_call_sites - 1u)
+        {
+            arguments->show(arguments,
+                S8("required-work 399 refusal: error={u32} reason={u32} demand={u64} limit={u64} skips={u64} inlined={u64}\n"),
+                (u32)refused.error, (u32)limited_module->inlining.required_budget_reason,
+                limited_module->inlining.required_budget_demand, limited_module->inlining.required_budget_limit,
+                limited_module->inlining.budget_skips, limited_module->inlining.always_inlined);
+        }
+        IrFunction* caller = ir_test_inline_find_function(limited_module, S8("required_work_caller"));
+        BUSTER_TEST(arguments, refused.error == IR_VALIDATION_INLINE_REQUIRED);
+        BUSTER_TEST(arguments, !limited_module->inline_complete);
+        BUSTER_TEST(arguments, limited_module->inlining.required_budget_reason == IR_INLINE_BUDGET_CALL_SITES);
+        BUSTER_TEST(arguments, limited_module->inlining.required_budget_limit == required_call_sites - 1u);
+        BUSTER_TEST(arguments, caller &&
+                               ir_test_direct_call_count(limited_program, caller, S8("required_work_leaf")) == required_call_sites);
+    }
+    // Large required graphs still stop at the unchanged per-caller work cap.
+    String8 excessive_source = ir_test_inline_required_work_source(arena, excessive_call_sites, 0);
+    CPreprocessResult excessive_tokens = c_preprocess(arena, excessive_source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult excessive_analysis = c_parse(arena, excessive_tokens);
+    CIRLowerResult excessive_lowered = {0};
+    if (!excessive_tokens.error_count && !excessive_analysis.diagnostic_count)
+    {
+        excessive_lowered = c_lower_to_ir_with_options(arena, S8("canonical-inline-required-work-overflow.c"),
+            excessive_tokens, excessive_analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
+    }
+    BUSTER_TEST(arguments, excessive_tokens.error_count == 0 && excessive_analysis.diagnostic_count == 0);
+    BUSTER_TEST(arguments, excessive_lowered.diagnostic_count == 0 && excessive_lowered.program != 0);
+    if (BUSTER_REQUIRE(arguments, excessive_lowered.program && excessive_lowered.program->module_count == 1))
+    {
+        IrProgram* excessive_program = excessive_lowered.program;
+        IrModule* excessive_module = excessive_program->modules;
+        excessive_program->fast_passes = 0;
+        excessive_program->inline_options = (IrInlineOptions){0};
+        IrValidationResult refused = ir_prepare_canonical_module(excessive_program, excessive_module, false);
+        IrFunction* caller = ir_test_inline_find_function(excessive_module, S8("required_work_caller"));
+        IrFunction* callee = ir_test_inline_find_function(excessive_module, S8("required_work_leaf"));
+        u64 prefix_work_floor = 0;
+        if (caller && callee)
+        {
+            for (u32 block = 0; block < caller->block_count; block += 1)
+            {
+                u64 prefix_rows = 0;
+                for (u32 row = caller->blocks[block].first_instruction.value;
+                     row != IR_ID_UNDERLYING_INVALID && row < caller->instruction_count;
+                     row = caller->instructions[row].next.value)
+                {
+                    prefix_rows += 1;
+                    IrInstruction const* instruction = caller->instructions + row;
+                    if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value == callee->symbol.value)
+                    {
+                        // The planner and splice each search this call-block prefix.
+                        prefix_work_floor += prefix_rows * 2u;
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, caller && caller->block_count == 1);
+        BUSTER_TEST(arguments, prefix_work_floor > (u64)IR_FAST_WORK_BUDGET * 2u);
+        BUSTER_TEST(arguments, refused.error == IR_VALIDATION_INLINE_REQUIRED);
+        BUSTER_TEST(arguments, !excessive_module->inline_complete);
+        BUSTER_TEST(arguments, excessive_module->inlining.required_budget_reason == IR_INLINE_BUDGET_WORK);
+        BUSTER_TEST(arguments, excessive_module->inlining.required_budget_demand >
+                               excessive_module->inlining.required_budget_limit);
+        BUSTER_TEST(arguments, excessive_module->inlining.always_inlined == 0);
+        BUSTER_TEST(arguments, caller &&
+                               ir_test_direct_call_count(excessive_program, caller, S8("required_work_leaf")) ==
+                                   excessive_call_sites);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 typedef struct IrI386AbiTestCase IrI386AbiTestCase;
 struct IrI386AbiTestCase
 {
@@ -3187,6 +3377,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult result = ir_promotion_tests(arguments);
     BUSTER_TEST_FIXTURE(arguments, ir_test_type_from_id_bounds);
     BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_inline_required_work_budget);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_paths);

@@ -7,13 +7,17 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** The default pipeline builds it only for lowering,
-whose [statement walker](#statements-from-nodes-in-lowering) reads it in every
-compile (a placeholder until the parse phase's tree is retained in every
-compile; #3102 step 1, #4076, retains it with its facts under
-`-fc-ast-pilot` only). The
-opt-in [driver hook](#driver-pilot-hook) builds it for the parse phase too,
-and five consumers read it:
+included. **Status: default since 2026-10-13.** The
+[driver hook](#driver-pilot-hook) builds it on every C compile, by the
+[owner decision](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845)
+that put the switch ahead of steps 3 and 4 of the
+[lowering direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034).
+`-fno-c-ast-pilot` keeps the tree-free path as a reference arm until
+[#4058](https://github.com/buster14a/buster/issues/4058) deletes it, except
+for the [statement walker](#statements-from-nodes-in-lowering), which has no
+tree-free path: under `-fno-c-ast-pilot`, lowering builds the tree for a unit
+with a function body itself (a marked placeholder). Five consumers read the
+tree:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
@@ -368,7 +372,8 @@ The tree accepts two attribute placements that need node slots of their own:
 ## Driver pilot hook
 
 `ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` (see the
-[driver guide](../driver.md)) is off by default. When given, the C compile path
+[driver guide](../driver.md)) is on by default with the implicit layout;
+`-fno-c-ast-pilot` turns it off. When on, the C compile path
 calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
 phase boundary, so the build's time is part of `parse_ns` and of the `parse`
 phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree's
@@ -383,12 +388,21 @@ semantic analysis in `CParserResult.ast`, where the
 With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
-given one either), so the builder creates and retires its own. A build that is
-not complete fails the unit with the parse error class; its diagnostic is
-published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
-never reach the hook.
+given one either), so the builder creates and retires its own. A builder that
+cannot reserve its storage fails the unit with the parse error class and its
+diagnostic. A build the builder rejects on syntax no longer fails the unit:
+since the default switch the unit compiles without a tree, exactly as under `-fno-c-ast-pilot`, so its
+diagnostics come from `c_parse_ast` and analysis as before, and the driver
+counts it in `CompilerDriverCAstPilotResult.rejections`. On the corpus at the
+switch, every rejected unit was invalid input that also fails without the tree
+(missing `-std=c23` or `-D` options, deliberate syntax errors); the builder
+diagnosed the syntax error before analysis could give its semantic one.
+[#4069](https://github.com/buster14a/buster/issues/4069) owns making the tree
+mandatory, which needs those diagnoses in the builder or analysis first.
+`-E` and assembly inputs never reach the hook.
 
-Under `-v` the driver prints these rows with the other verbose counters:
+Under `-v` the driver prints these rows with the other verbose counters, plus
+`C_AST_REJECTED units=<n>` when the builder refused a unit:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
@@ -1402,15 +1416,15 @@ It has no token path and no fallback: a body without a COMPOUND_STATEMENT
 node is refused with `function body has no syntax tree node`.
 
 **The tree.** The walker needs a tree in every compile that lowers a body.
-Until the parse phase's tree is retained through lowering in every compile
-(#3102 step 1, #4076, retains it under `-fc-ast-pilot` only),
-`c_lower_to_ir_with_options` builds the implicit layout itself when the
+The driver passes the parse phase's tree under `-fc-ast-pilot`, the default
+since 2026-10-13. Under `-fno-c-ast-pilot`, and for a caller that passes no
+tree, `c_lower_to_ir_with_options` builds the implicit layout itself when the
 caller passes none, the analysis completed and the unit has a function body
 (`c_lower_to_ir_tree_run`, marked as a placeholder), and releases it
 after lowering. A unit the builder rejects fails with the builder's
 diagnostics: a malformed GNU case range (`case 1 ... 2 ... 3:`) is now the
 builder's syntax error rather than lowering's. A unit without a body lowers
-as before. Under `-fc-ast-pilot` the driver's tree is used.
+as before. The placeholder goes when #4058 deletes the tree-free path.
 
 Lowering every body from the tree surfaced two builder gaps, which also
 failed `-fc-ast-pilot` and are closed with it:
@@ -1880,11 +1894,12 @@ The plan:
 
 No code from this step lands before step 1. Step 1
 ([retained facts](#retained-facts)) retains F1's types, the bindings and
-bit-field widths per node, under `-fc-ast-pilot` only. Beyond that:
-- the tree reaches every compile that lowers a function body only through
-  step 2's placeholder, `c_lower_to_ir_tree_run`
+bit-field widths per node, under `-fc-ast-pilot` (the default since
+2026-10-13). Beyond that:
+- under `-fno-c-ast-pilot` the tree reaches lowering only through step 2's
+  placeholder, `c_lower_to_ir_tree_run`
   ([statements from nodes](#statements-from-nodes-in-lowering)), and the
-  facts only under `-fc-ast-pilot`;
+  facts not at all;
 - semantic analysis's initializer and declaration answers (F2 to F6) are not
   published to lowering yet.
 
@@ -2334,6 +2349,19 @@ off is now an end-to-end comparison of the same checked frontend that includes
 the tree's build cost. Hosted measurements are diagnostic. Acceptance needs the Ryzen 7 9700X route required by
 [#2761](https://github.com/buster14a/buster/issues/2761) and described in
 [benchmarking](../benchmarking.md).
+
+**Since the default switch** (2026-10-13), the arms are renamed, not
+re-budgeted. The sections below were measured when the tree-free path was the
+default, so their "default path" and "D against A" mean the path that is now
+`-fno-c-ast-pilot`; they stay as recorded. Under the
+[owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034),
+lowering slices carry no per-slice budget. Work after the switch reports
+correctness and counters, the opt-out is the no-added-work reference arm
+while it exists, and the end-to-end measurement and the Zen 5 acceptance
+follow [#4058](https://github.com/buster14a/buster/issues/4058). The
+`ast-pilot-acceptance-v1` profile compares no flag against `-fc-ast-pilot`,
+so on a head after the switch its two arms are the same compile and it no
+longer measures the tree.
 
 For the pilot, the budgets for the self-host unity input (about 3.97 M tokens
 reach the parser) were declared before any timing was taken:

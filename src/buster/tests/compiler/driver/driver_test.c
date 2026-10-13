@@ -2256,6 +2256,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         }
         (void)os_file_delete(trigraph_path);
     }
+    // C90 dialect spellings (#1418): strict_mode ISO C90 has no __STDC_VERSION__,
+    // defines __STRICT_ANSI__, reads trigraphs and drops the GNU `linux` macro.
+    // gnu89/gnu90 keep the GNU macros and leave __STRICT_ANSI__ undefined.
+    String8 c90_path = buster_test_temporary_path(arguments->arena, S8("driver-c90"), S8(".c"));
+    String8 c90_source = S8("#ifdef __STDC_VERSION__\nint version = __STDC_VERSION__;\n#else\nint version = 0;\n#endif\n"
+                            "#ifdef __STRICT_ANSI__\nint strict_mode = 1;\n#else\nint strict_mode = 0;\n#endif\n"
+                            "#ifdef linux\nint gnu = 1;\n#endif\nx ?\?( y\n");
+    if (BUSTER_REQUIRE(arguments, file_write(c90_path, BUSTER_SLICE_TO_BYTE_SLICE(c90_source))))
+    {
+        String8 c90_spellings[] = {S8("-std=c89"), S8("-std=c90"), S8("-std=iso9899:1990"), S8("-ansi"), S8("-std=gnu89"), S8("-std=gnu90"), S8("-std=c99")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c90_spellings); index += 1)
+        {
+            bool strict_mode = index != 4 && index != 5;
+            String8 command[] = {S8("--target=x86_64-linux"), S8("-w"), c90_spellings[index], S8("-E"), S8("-P"), c90_path};
+            String8 output = {0};
+            String8 error = {0};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &output, &error));
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int version = 0;")) != BUSTER_STRING_NO_MATCH) == (index != 6));
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int version = 199901L;")) != BUSTER_STRING_NO_MATCH) == (index == 6));
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int strict_mode = 1;")) != BUSTER_STRING_NO_MATCH) == strict_mode);
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int gnu = 1;")) != BUSTER_STRING_NO_MATCH) == !strict_mode);
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("x [ y")) != BUSTER_STRING_NO_MATCH) == strict_mode);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("\n#")) == BUSTER_STRING_NO_MATCH && !string_starts_with_sequence(output, S8("#")));
+        }
+        // A later -std= replaces -ansi, and -ansi replaces an earlier -std=.
+        String8 restored[] = {S8("--target=x86_64-linux"), S8("-w"), S8("-ansi"), S8("-std=gnu99"), S8("-E"), c90_path};
+        String8 output = {0};
+        String8 error = {0};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(restored), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int version = 199901L;")) != BUSTER_STRING_NO_MATCH);
+        String8 replaced[] = {S8("--target=x86_64-linux"), S8("-w"), S8("-std=gnu99"), S8("-ansi"), S8("-E"), c90_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(replaced), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int strict_mode = 1;")) != BUSTER_STRING_NO_MATCH);
+        (void)os_file_delete(c90_path);
+    }
+    String8 c90_near[] = {S8("-std=c88"), S8("-std=c9"), S8("-std=iso9899:199409"), S8("-ansi=1")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c90_near); index += 1)
+    {
+        String8 command[] = {S8("-c"), c90_near[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    // -Wa,--noexecstack, -Qunused-arguments and -P are accepted for every
+    // action; any other assembler request stays refused with its spelling.
+    String8 inert_actions[] = {S8("-c"), S8("-S"), S8("-E"), S8("-fsyntax-only")};
+    String8 inert_options[] = {S8("-Wa,--noexecstack"), S8("-Wa,--noexecstack,--noexecstack"), S8("-Qunused-arguments"), S8("-P")};
+    for (u32 action_index = 0; action_index < BUSTER_ARRAY_LENGTH(inert_actions); action_index += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(inert_options); index += 1)
+        {
+            String8 command[] = {S8("--target=x86_64-linux"), inert_actions[action_index], inert_options[index], S8("tests/basic_c_pic.c")};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, invocation.diagnostic);
+        }
+    }
+    String8 assembler_refused[] = {S8("-Wa,--execstack"), S8("-Wa,--noexecstack,--bogus"), S8("-Wa,--noexecstack,"), S8("-Wa,,--noexecstack"), S8("-Wa,")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(assembler_refused); index += 1)
+    {
+        String8 command[] = {S8("-c"), assembler_refused[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, invocation.diagnostic, string_format(arguments->arena, S8("unsupported pass-through option: {S8}"), assembler_refused[index]));
+    }
+    String8 near_inert[] = {S8("-Qunused"), S8("-Qunused-arguments=1"), S8("-PP")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(near_inert); index += 1)
+    {
+        String8 command[] = {S8("-c"), near_inert[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    // A C object carries the non-executable stack marker with or without the
+    // request, so -Wa,--noexecstack changes nothing.
+    String8 stack_path = buster_test_temporary_path(arguments->arena, S8("driver-noexecstack"), S8(".c"));
+    String8 stack_object = buster_test_temporary_path(arguments->arena, S8("driver-noexecstack"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, file_write(stack_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int f(void)\n{\n    return 1;\n}\n")))))
+    {
+        String8 command[] = {S8("--target=x86_64-linux"), S8("-Wa,--noexecstack"), S8("-Qunused-arguments"), S8("-c"), stack_path, S8("-o"), stack_object};
+        String8 output = {0};
+        String8 error = {0};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &output, &error));
+        ByteSlice object_bytes = file_read(arguments->arena, stack_object, (FileReadOptions){0});
+        BUSTER_TEST(arguments, object_bytes.length != 0);
+        BUSTER_TEST(arguments, string_first_sequence(BYTE_SLICE_TO_STRING(8, object_bytes), S8(".note.GNU-stack")) != BUSTER_STRING_NO_MATCH);
+        (void)os_file_delete(stack_path);
+        (void)os_file_delete(stack_object);
+    }
 #endif
     return result;
 }
@@ -4788,7 +4874,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
         {S8("int g(void); unsigned long f(int *p,int a[2]){return sizeof(&g)+sizeof(&a[1])+sizeof(&*p);}"), true},
     };
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
-    String8 forms[] = {S8("-fc-ast-pilot"), S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 forms[] = {S8("-fno-c-ast-pilot"), S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 targets[] = {S8("--target=x86_64-linux-gnu"), S8("--target=aarch64-linux-gnu"), S8("--target=x86_64-windows-msvc")};
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
     {
@@ -6628,12 +6714,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
     return result;
 }
 
-// -fc-ast-pilot (GitHub #3102) is an opt-in hook: valid input compiles to the
+// -fc-ast-pilot (GitHub #3102) is the default hook: valid input compiles to the
 // same object bytes with and without it in every layout (semantic analysis
 // answers expression types from the tree), -v adds the timed diagnostic passes
 // and the counters, an unknown layout is an argument
-// error, and input the tree builder rejects fails with the parse error class
-// and a located diagnostic.
+// error, and input the tree builder rejects compiles without a tree, failing
+// exactly as under -fno-c-ast-pilot.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6647,14 +6733,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(invalid, BUSTER_SLICE_TO_BYTE_SLICE(invalid_source))))
     {
 #if !BUSTER_IOS
-        String8 pilots[] = {S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
+        // Index 0 is the tree-free opt-out and the object reference; index 1,
+        // no flag, is the default tree.
+        String8 pilots[] = {S8("-fno-c-ast-pilot"), S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"),
+                            S8("-fc-ast-pilot=explicit")};
         CompilerDriverCAstPilot modes[] = {COMPILER_DRIVER_C_AST_PILOT_OFF, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
-                                           COMPILER_DRIVER_C_AST_PILOT_HYBRID, COMPILER_DRIVER_C_AST_PILOT_EXPLICIT};
+                                           COMPILER_DRIVER_C_AST_PILOT_IMPLICIT, COMPILER_DRIVER_C_AST_PILOT_HYBRID, COMPILER_DRIVER_C_AST_PILOT_EXPLICIT};
         ByteSlice reference = {0};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
         {
             String8 command[] = {pilots[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, input};
-            u64 skipped = index == 0;
+            u64 skipped = index == 1;
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command + skipped, BUSTER_ARRAY_LENGTH(command) - skipped});
             BUSTER_TEST(arguments, invocation.c_ast_pilot == modes[index]);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
@@ -6689,6 +6778,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         BUSTER_TEST(arguments, verbose.c_ast.types.bodies == 2 && verbose.c_ast.types.nodes_accepted != 0 && verbose.c_ast.types.answers != 0);
         BUSTER_STRING_TEST(arguments, compiler_driver_c_ast_pilot_name(COMPILER_DRIVER_C_AST_PILOT_HYBRID), S8("hybrid"));
 
+        // The last of -fc-ast-pilot and -fno-c-ast-pilot wins.
+        String8 off_last[] = {S8("-fc-ast-pilot=hybrid"), S8("-fno-c-ast-pilot"), S8("-fsyntax-only"), input};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(off_last)).c_ast_pilot == COMPILER_DRIVER_C_AST_PILOT_OFF);
+        String8 on_last[] = {S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot"), S8("-fsyntax-only"), input};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(on_last)).c_ast_pilot == COMPILER_DRIVER_C_AST_PILOT_IMPLICIT);
+
         String8 unknown[] = {S8("-fc-ast-pilot=bogus"), S8("-fsyntax-only"), input};
         CompilerDriverInvocation rejected = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unknown));
         BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_ARGUMENT);
@@ -6696,21 +6791,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         String8 empty[] = {S8("-fc-ast-pilot="), S8("-fsyntax-only"), input};
         BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empty)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
 
-        // Invalid input fails with and without the flag; with it the tree
-        // builder is the one that reports, as a parse error with a location.
-        String8 flags[] = {S8(""), S8("-fc-ast-pilot")};
+        // Invalid input the tree builder rejects compiles without a tree: it
+        // fails with the same error class and diagnostic as -fno-c-ast-pilot,
+        // and the hook counts the rejection instead of a unit.
+        String8 flags[] = {S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot")};
+        CompilerDriverResult failed[2] = {0};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(flags); index += 1)
         {
             String8 command[] = {flags[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, invalid};
-            u64 skipped = index == 0;
-            CompilerDriverResult failed = compiler_driver_execute_invocation(
-                arena, compiler_driver_parse_arguments(arena, (SliceString8){command + skipped, BUSTER_ARRAY_LENGTH(command) - skipped}));
-            BUSTER_TEST(arguments, failed.error != COMPILER_DRIVER_ERROR_NONE);
-            BUSTER_TEST(arguments, index == 0 || failed.error == COMPILER_DRIVER_ERROR_PARSE);
-            BUSTER_TEST(arguments, index == 0 || failed.parser_diagnostic_count == 1);
-            BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8("expected an expression")) != BUSTER_STRING_NO_MATCH);
-            BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8(":1:")) != BUSTER_STRING_NO_MATCH);
+            failed[index] = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, failed[index].error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(failed[index].diagnostic, S8(":1:")) != BUSTER_STRING_NO_MATCH);
         }
+        BUSTER_TEST(arguments, failed[0].error == failed[1].error && failed[0].parser_diagnostic_count == failed[1].parser_diagnostic_count);
+        BUSTER_STRING_TEST(arguments, failed[1].diagnostic, failed[0].diagnostic);
+        BUSTER_TEST(arguments, failed[0].c_ast.rejections == 0 && failed[1].c_ast.rejections == 1 && failed[1].c_ast.units == 0);
     }
     BUSTER_TEST(arguments, os_file_delete(input));
     BUSTER_TEST(arguments, os_file_delete(invalid));
@@ -6722,7 +6817,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
 }
 
 // One program per case, each with a main that returns 0: it compiles to the
-// same object with and without -fc-ast-pilot, the pilot publishes the split
+// same object with -fc-ast-pilot and -fno-c-ast-pilot, the pilot publishes the split
 // from the tree exactly when `published` says so, and the linked program
 // exits with status 0.
 typedef struct CompilerDriverDeclaratorGroupCase CompilerDriverDeclaratorGroupCase;
@@ -6752,14 +6847,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTe
             for (u32 pilot = 0; pilot < 2; pilot += 1)
             {
                 String8 label = string_format(arena, S8("redundant declarator groups case {u32}, pilot {u32}"), case_index, pilot);
-                String8 syntax_command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-fsyntax-only"), input};
+                String8 syntax_command[] = {pilot ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"), S8("-nostdinc"), S8("-fsyntax-only"), input};
                 CompilerDriverResult syntax = compiler_driver_execute_invocation(
-                    arena, compiler_driver_parse_arguments(arena, (SliceString8){syntax_command + !pilot, BUSTER_ARRAY_LENGTH(syntax_command) - !pilot}));
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
                 BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, string_format(arena, S8("{S8}: {S8}"), label, syntax.diagnostic));
 #if !BUSTER_IOS
-                String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, input};
+                String8 command[] = {pilot ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, input};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(
-                    arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, string_format(arena, S8("{S8}: {S8}"), label, compiled.diagnostic));
                 BUSTER_TEST_RAW(arguments, !pilot || (compiled.c_ast.split.units == (u64)cases[case_index].published &&
                                                       compiled.c_ast.split.fallbacks == (u64)!cases[case_index].published),
@@ -35251,7 +35346,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                     }
                     for (u32 ordinal = 1; ordinal <= counts[phase]; ordinal += 1)
                     {
-                        String8 command[] = {S8("-g0"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output, input};
+                        // The ordinals are the tree-free path's; the tree
+                        // builder's own reservation is checked below.
+                        String8 command[] = {S8("-g0"), S8("-fno-c-ast-pilot"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output,
+                                             input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                         c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
                         c_test_fail_frontend_reservation(phases[phase], ordinal);
@@ -35276,6 +35374,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                 }
             }
         }
+        // With the default tree, the builder's own phase arena is the first
+        // analysis reservation. Refusing it fails the unit with the builder's
+        // diagnostic rather than falling back to the tree-free path.
+        String8 tree_command[] = {S8("-g0"), S8("-c"), S8("-o"), output, input};
+        CompilerDriverInvocation tree_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tree_command));
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 1);
+        CompilerDriverResult refused = compiler_driver_execute_invocation(arena, tree_invocation);
+        bool tree_pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 0);
+        BUSTER_TEST(arguments, !tree_pending);
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_PARSE && refused.c_ast.rejections == 0);
+        BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic, S8("syntax tree")) != BUSTER_STRING_NO_MATCH, refused.diagnostic);
+        BUSTER_TEST(arguments, !refused.has_object && refused.output.length == 0);
         BUSTER_TEST(arguments, os_file_delete(input));
     }
     c_test_scratch_end(temporary);
@@ -35790,7 +35901,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_diagnostic_contains(String8 diagno
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pmulhuw_header_contracts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fno-c-ast-pilot")};
     String8 targets[] = {S8("x86_64-windows"), S8("x86_64-linux")};
     String8 prefix = S8(
         "typedef short v8s __attribute__((vector_size(16)));\n"
@@ -35914,7 +36025,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pmulhuw_header_contracts
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_llvm23_header_contracts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fno-c-ast-pilot")};
     String8 prefix = S8(
         "typedef char c16 __attribute__((vector_size(16)));\n"
         "typedef unsigned char u16 __attribute__((vector_size(16)));\n"
@@ -40388,7 +40499,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A C23 constexpr compound literal initializing an ordinary file-scope
     // object (#3310): only the literal is constexpr, so `cy` and the later
     // declarator `cz` are plain objects. -fsyntax-only and -c accept it with
-    // and without -fc-ast-pilot, the objects match, and the program exits 0.
+    // and without the tree (-fno-c-ast-pilot), the objects match, and the program exits 0.
     // The source is a temporary file, so the native-retirement inventory
     // stays unchanged.
     {
@@ -40407,17 +40518,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (BUSTER_REQUIRE(arguments, file_write(literal_source, BUSTER_SLICE_TO_BYTE_SLICE(literal_text))))
         {
             ByteSlice reference = {0};
-            String8 pilots[] = {S8(""), S8("-fc-ast-pilot")};
+            String8 pilots[] = {S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot")};
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
             {
-                u64 skipped = index == 0;
                 String8 syntax_command[] = {pilots[index], S8("-std=c23"), S8("-fsyntax-only"), literal_source};
                 CompilerDriverResult checked = compiler_driver_execute_invocation(
-                    literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8){syntax_command + skipped, BUSTER_ARRAY_LENGTH(syntax_command) - skipped}));
+                    literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
                 BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
                 String8 object_command[] = {pilots[index], S8("-std=c23"), S8("-g0"), S8("-c"), S8("-o"), literal_object, literal_source};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(
-                    literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8){object_command + skipped, BUSTER_ARRAY_LENGTH(object_command) - skipped}));
+                    literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 ByteSlice bytes = file_read(literal_arena, literal_object, (FileReadOptions){0});
                 if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
@@ -49011,6 +49121,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("src/buster/tests/compiler/driver/fixtures/volatile_recursive_record.c"),
         S8("src/buster/tests/compiler/driver/fixtures/git_array_size.c"),
         S8("src/buster/tests/compiler/driver/fixtures/git_expression_shapes.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/noreturn_callback_scope.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
     };
@@ -49035,6 +49146,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-volatile-recursive-record"),
         S8("buster-c-git-array-size"),
         S8("buster-c-git-expression-shapes"),
+        S8("buster-c-noreturn-callback-scope"),
         S8("buster-c-qualified-compound"),
         S8("buster-c-fresh-binding-publication"),
     };

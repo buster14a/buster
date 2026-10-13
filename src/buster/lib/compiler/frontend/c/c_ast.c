@@ -184,7 +184,8 @@ BUSTER_GLOBAL_LOCAL CAstWordSpelling const c_ast_word_spellings[] = {
     C_AST_W("__int128", INT128, ALWAYS),
     C_AST_W("_Float16", FLOAT16, ALWAYS),
     C_AST_W("__bf16", BF16, ALWAYS),
-    // Arm's storage-only half, a type word wherever the parser takes it.
+    // ARM's storage-only half, distinct from _Float16 (no arithmetic, its
+    // own type identity); the parser's type-word table names it too.
     C_AST_W("__fp16", FP16, ALWAYS),
     // GNU and Clang's builtin binary128 word. `_Float128`, `_Float64x` and
     // `_Float128x` stay identifiers: glibc's <bits/floatn.h> typedefs them

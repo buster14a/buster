@@ -1498,7 +1498,8 @@ BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 firs
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_C17;
+    return dialect == C_PREPROCESS_DIALECT_C89 || dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 ||
+           dialect == C_PREPROCESS_DIALECT_C17;
 }
 
 BUSTER_C_INTERNAL char8 c_translate_trigraph_character(char8 third)
@@ -12040,6 +12041,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
     case C_PREPROCESS_DIALECT_GNU89:
+    case C_PREPROCESS_DIALECT_C89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -13345,7 +13347,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     C_DEFINE_TYPE_MACRO("__STDC_UTF_16__", S8("1"));
     C_DEFINE_TYPE_MACRO("__STDC_UTF_32__", S8("1"));
-    if (options.dialect == C_PREPROCESS_DIALECT_GNU89)
+    if (options.dialect == C_PREPROCESS_DIALECT_GNU89 || options.dialect == C_PREPROCESS_DIALECT_C89)
     {
         C_DEFINE_TYPE_MACRO("__GNUC_GNU_INLINE__", S8("1"));
     }
@@ -15030,12 +15032,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registr
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
-BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+void c_test_unit_registry_prewarm(void)
 {
     if (!c_test_unit_registry_arena)
     {
         c_test_unit_registry_arena = arena_create((ArenaCreation){.reserved_size = C_TEST_UNIT_REGISTRY_RESERVED_SIZE, .flags = {.no_pool = 1}});
     }
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+{
+    c_test_unit_registry_prewarm();
     if (c_test_unit_registry_arena)
     {
         CTestUnitEntry* entry = arena_allocate(c_test_unit_registry_arena, CTestUnitEntry, 1);

@@ -581,6 +581,8 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
     C_PREPROCESS_DIALECT_GNU89,
+    // Strict ISO C90: -std=c89, -std=c90, -std=iso9899:1990 and -ansi.
+    C_PREPROCESS_DIALECT_C89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -1798,8 +1800,8 @@ struct CParserResult
     // Share the primitive and pointer rows the file-scope initializer and
     // function-body queries mint (CTypeInterning in c_internal.h), which the
     // tree's answers for casts and `&` need. The driver asks for it with the
-    // tree (-fc-ast-pilot); without it every row is appended, as the default
-    // path always has.
+    // tree (-fc-ast-pilot); without it every row is appended, as the tree-free
+    // path (-fno-c-ast-pilot) always has.
     bool type_interning;
     // Nothing will lower this unit (the driver's -fsyntax-only), so no
     // consumer reads the bytes of a string literal: the literal memo records
