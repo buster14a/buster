@@ -520,13 +520,28 @@ What the data show:
   hosted run-to-run range. Neither is established here.
 
 Interning is therefore the cheaper way to obtain most of the constant reuse,
-with less memory and without the spill growth. Both stay opt-in. Adopting
-either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
-peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
-measures both flags on the 9700X; its method is in
-[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
-expect today's default, so enabling interning by default would also update
-those expectations.
+with less memory and without the spill growth. The fixed report-only profile
+`profile: constant-reuse-acceptance-v1` measures both flags on the 9700X; its
+method is in [benchmarking.md](agents/benchmarking.md).
+
+### Zen 5 measurement (9700X)
+
+The profile ran on main `446f742e`, check
+[115128610735](https://github.com/buster14a/buster/runs/115128610735). It used
+one binary on the `-g0` unity `-c` self-host compile, with 20 ABBA pairs per
+cell. Ratios are B (flag) over A (default):
+
+| Flag | Wall [95% CI] | Retired instructions | Peak RSS | Code bytes |
+| --- | --- | --- | --- | --- |
+| `-fcanonical-intern-constants` | 0.9932 [0.9912, 0.9954] | 0.9868 | −1.81% | −1.62% |
+| `-fcanonical-fast-cse` | 1.0024 [1.0007, 1.0034] | 0.9957 | −0.47% | −1.96% |
+
+Both flags left diagnostics identical to the default. Interning is a
+detectable compile-time win, while the late table is a detectable cost that
+buys 0.34 points more code reduction. Interning is the only adoption candidate
+under the throughput priority. Both stay opt-in until the owner decides on
+#3011. Enabling interning by default would also update the C frontend's
+row-capacity, codegen-shape and CSE-count tests, which expect today's default.
 
 ## Tests
 
@@ -583,7 +598,9 @@ embedders start with the conservative interposition policy.
 Mandatory candidates can contain
 multiple blocks, local storage, ordinary calls and aggregate returns.
 The iterative mandatory-call graph processes callees before callers and
-rejects cycles. Dynamic stack lifetime operations, computed labels,
+rejects cycles. Caller-owned computed-goto label values and destinations retain
+their IDs across a splice; computed labels inside the callee remain refused
+until their provenance has a cloning contract (#3995). Dynamic stack lifetime operations, callee-owned computed labels,
 variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
 Unsupported candidates remain calls when optional and diagnose when mandatory.
 Arguments are evaluated once before the splice. Expansion remaps canonical
@@ -648,7 +665,14 @@ work totals let the first few large callers starve every later one. Optional
 expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
-rescanning every instruction to build reverse edges. Planning storage includes
+rescanning every instruction to build reverse edges. That scan skips a
+function whose producer opcode summary records no `CALL`
+(`IR_OPCODE_SUMMARY_TRACKED`) and streams the dense rows of the rest. Planning
+classifies every call row with one byte of per-symbol callee facts
+(`ir_inline_plan_facts`: required, `noinline`, linkage-allowed, tiny leaf),
+filled once per pass, instead of re-deriving the symbol and callee predicates
+at every site. The table adds one byte per symbol to the planning scratch
+charge; work charges and statistics are unchanged. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
 chains directly, so no full caller compaction is required. Each caller has one

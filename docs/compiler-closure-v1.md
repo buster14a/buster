@@ -94,7 +94,7 @@ error, so a SNAPSHOT on another filesystem fails at `park-build` with `EXDEV`
 for compound inventory steps the errno is the last OS error seen and only the
 step name is authoritative (#3390).
 
-`harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt.
+`harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt. A sealed pull attempt also makes them, and its owned-phase population, required members of its raw bundle ([snapshot route](compiler-evidence-v1.md#snapshot-route), #2918).
 
 The staged implementation is reviewed and validated on hosted CI first. Trusted request/dispatch support is integrated separately, then the admitted physical preparation controls run on the 9700X. Only matching controls and a reduction in complete measured preparation cost permit a separate default-activation change. Until that activation is reviewed and admitted, ordinary comparisons use legacy-rebuild and this issue remains open for physical qualification.
 

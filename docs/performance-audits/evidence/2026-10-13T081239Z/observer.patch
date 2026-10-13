@@ -1,0 +1,159 @@
+diff --git a/src/buster/lib/compiler/codegen/codegen.c b/src/buster/lib/compiler/codegen/codegen.c
+index def627463..1f4b71780 100644
+--- a/src/buster/lib/compiler/codegen/codegen.c
++++ b/src/buster/lib/compiler/codegen/codegen.c
+@@ -7609,6 +7609,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
+                     result.failed_phase = CODEGEN_PHASE_MACHINE_ENCODING;
+                     MachineEncodeResult encoded = {0};
+                     WORK_LEDGER_RECORD(MACHINE_PLACEMENT_EDITS, placement.edit_count);
++                    fprintf(stderr, "R F %p\n", (void*)placement.edits);
+ 
+                     // The encoder writes where the function will live when
+                     // its worst-case budget fits what the code buffer has
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_fast.c b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+index d8c2edf86..a4a62688e 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_fast.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+@@ -142,8 +142,12 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_lane_held(u64 mask, u32 index)
+ }
+ 
+ typedef struct MachineFastState MachineFastState;
++static u32 diag_sequence;
+ struct MachineFastState
+ {
++    u32 diag_id;
++    u32 diag_destination;
++    u32 diag_loss_kind;
+     Arena* arena;
+     MachineFunction* function;
+     // The target's register file and special-opcode identities; every
+@@ -478,6 +482,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
+         };
+         state->placement->spill_count += 1;
+     }
++    fprintf(stderr, "R X %u %u %u %u\n", state->diag_id, state->current_point, owner, (machine_instruction_opcode_row(state->function, state->function->instructions + (state->current_point >> 2)).flags & MACHINE_OPCODE_ROW_CALL) ? 2u : state->diag_loss_kind);
+     state->owner[physical_register] = UINT32_MAX;
+     state->held_mask &= ~machine_fast_lane(physical_register);
+     state->dirty_mask &= ~machine_fast_lane(physical_register);
+@@ -582,6 +587,7 @@ BUSTER_GLOBAL_LOCAL u32 const machine_fast_empty_contract_owner[MACHINE_TARGET_R
+ BUSTER_GLOBAL_LOCAL void machine_fast_conform_append(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u16 kind, u32 subject,
+                                                      u32 location)
+ {
++    if (kind == MACHINE_EDIT_SPILL || kind == MACHINE_EDIT_RELOAD) fprintf(stderr, "R B %u %u %u %u %u\n", state->diag_id, point, kind == MACHINE_EDIT_SPILL ? 1u : 2u, subject, state->diag_destination);
+     MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, stream);
+     *edit = (MachineEdit){
+         .point = point,
+@@ -1616,7 +1622,9 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick_hinted(MachineFastState* state, u64 cl
+                 best = dead;
+             }
+             BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
++            state->diag_loss_kind = 3;
+             machine_fast_spill(state, best);
++            state->diag_loss_kind = 4;
+             result = best;
+         }
+     }
+@@ -1689,6 +1697,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
+     }
+     state->owner[target] = virtual_register;
+     state->held_mask |= machine_fast_lane(target);
++    fprintf(stderr, "R L %u %u %u\n", state->diag_id, state->current_point, virtual_register);
+     state->virtual_register_locations[virtual_register] = target;
+     state->age[target] = ++state->clock;
+     state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
+@@ -1708,6 +1717,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
+     state->owner[target] = virtual_register;
+     state->held_mask |= machine_fast_lane(target);
+     state->dirty_mask |= machine_fast_lane(target);
++    fprintf(stderr, "R L %u %u %u\n", state->diag_id, state->current_point, virtual_register);
+     state->virtual_register_locations[virtual_register] = target;
+     state->preferred_registers[virtual_register] =
+         state->preferred_registers[virtual_register] == 0xff ? (u8)target : state->preferred_registers[virtual_register];
+@@ -4320,6 +4330,18 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+             .live_in = prepass->live_in,
+             .live_words = prepass->live_words,
+         };
++        state.diag_id = ++diag_sequence;
++        state.diag_loss_kind = 4;
++        fprintf(stderr, "R A %u %u %u\n", state.diag_id, function->block_count, function->virtual_register_count);
++        for (u32 b = 0; b < function->block_count; ++b)
++        {
++            fprintf(stderr, "R P %u %u %u %u\n", state.diag_id, b, function->blocks[b].first_instruction, function->blocks[b].instruction_count);
++            for (u32 e = prepass->predecessor_offsets[b]; e < prepass->predecessor_offsets[b+1]; ++e)
++                fprintf(stderr, "R E %u %u %u\n", state.diag_id, prepass->predecessor_list[e], b);
++        }
++        for (u32 v = 0; v < function->virtual_register_count; ++v)
++            if (prepass->escapes[v] && prepass->rematerialize_immediates[v] == UINT32_MAX)
++                fprintf(stderr, "R V %u %u %u\n", state.diag_id, v, prepass->definition_blocks[v]);
+         u32 const* predecessor_offsets = prepass->predecessor_offsets;
+         u32 const* predecessor_list = prepass->predecessor_list;
+         u8 const* cold_blocks = prepass->cold_blocks;
+@@ -4533,6 +4555,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                 entry_held |= machine_fast_lane(split_register);
+                 entry_dirty |= machine_fast_lane(split_register);
+             }
++            for (u64 remaining = entry_held; remaining; remaining &= remaining - 1u)
++                fprintf(stderr, "R I %u %u %u\n", state.diag_id, block_index, entry_owner[machine_fast_first_set(remaining)]);
+             contract_held[block_index] = entry_held;
+             contract_dirty[block_index] = entry_dirty;
+             // Conform every scanned predecessor edge to the contract just
+@@ -4563,6 +4587,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                     state.loop_floor = loop_floors[predecessor];
+                     state.live_out_row = state.live_out ? state.live_out + (u64)predecessor * state.live_words : 0;
+                     state.live_in_row = state.live_in ? state.live_in + (u64)block_index * state.live_words : 0;
++                    state.diag_destination = block_index;
+                     machine_fast_conform_edge_parameters(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE), predecessor_edge,
+                                                          out_owner + (u64)predecessor * register_count, out_held + predecessor, out_dirty + predecessor, 0,
+                                                          entry_owner, entry_held, entry_dirty,
+@@ -5048,6 +5073,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                 }
+                 if (is_terminator)
+                 {
++                    state.diag_destination = UINT32_MAX;
+                     // Successors whose contract is already fixed — every
+                     // backward edge, the self loop, and any statically cold
+                     // target — get the state rewritten to their contract here.
+@@ -5085,6 +5111,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                                 state.back_edge_header = block_slots == machine_fast_lane(slot) ? successor : UINT32_MAX;
+                                 state.back_edge_bypass = entry_bypass[successor];
+                                 state.live_in_row = state.live_in ? state.live_in + (u64)successor * state.live_words : 0;
++                                state.diag_destination = successor;
+                                 machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, &state.held_mask,
+                                                                      &state.dirty_mask, state.virtual_register_locations,
+                                                                      contract_owner + (u64)successor * register_count, contract_held[successor],
+@@ -5094,6 +5121,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                             }
+                             else if (cold_blocks[successor])
+                             {
++                                state.diag_destination = successor;
+                                 state.live_in_row = state.live_in ? state.live_in + (u64)successor * state.live_words : 0;
+                                 machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, &state.held_mask, &state.dirty_mask,
+                                                           state.virtual_register_locations, machine_fast_empty_contract_owner, 0, 0, true);
+@@ -5109,6 +5137,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                     {
+                         u32 physical_register = machine_fast_first_set(remaining);
+                         recorded_owner[physical_register] = state.owner[physical_register];
++                        fprintf(stderr, "R O %u %u %u\n", state.diag_id, block_index, state.owner[physical_register]);
+                     }
+                     out_held[block_index] = recorded;
+                     // Clamped to the recorded lanes, which is what the
+@@ -5544,6 +5573,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         }
+     }
+ 
++    fprintf(stderr, "R Z %u %p %u %u\n", diag_sequence, (void*)placement.edits, placement.boundary_spill_count, placement.boundary_reload_count);
+     return placement;
+ }
+ 
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_predicate.c b/src/buster/lib/compiler/codegen/register_allocator_predicate.c
+index 4fb0df668..babe8c6e1 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_predicate.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_predicate.c
+@@ -407,6 +407,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
+             bool generic = generic_cursor < placement.edit_count && (predicate_cursor == state.edits.total_count || placement.edits[generic_cursor].point <= predicates[predicate_cursor].point);
+             merged[count++] = generic ? placement.edits[generic_cursor++] : predicates[predicate_cursor++];
+         }
++        fprintf(stderr, "R T %p %p\n", (void*)placement.edits, (void*)merged);
+         placement.edits = merged;
+         placement.edit_count = count;
+     }

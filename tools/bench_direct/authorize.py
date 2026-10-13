@@ -518,7 +518,7 @@ def closed_request_pulls(repository: str, request: dict, sha: str, number: int |
     if not isinstance(listed, list) or len(listed) >= 100:
         raise ValueError("sampling closed request pull lookup is unavailable or capped")
     candidates = [pull for pull in listed if isinstance(pull, dict) and pull.get("state") == "closed" and
-                  pull.get("merged_at") is None and type(pull.get("number")) is int and pull["number"] > 0 and
+                  "merged_at" in pull and pull["merged_at"] is None and type(pull.get("number")) is int and pull["number"] > 0 and
                   (number is None or pull["number"] == number) and isinstance(pull.get("head"), dict) and
                   pull["head"].get("ref") == branch]
     owned = []
@@ -651,7 +651,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             raise ValueError("sampling history request has no canonical pull number")
         matches = [pull for pull in associated if isinstance(pull, dict) and
                    (number is None or pull.get("number") == number)] if isinstance(associated, list) else []
-        if not matches:
+        if not matches and isinstance(associated, list):
             # GitHub drops a closed-unmerged pull from commits/{sha}/pulls and
             # from the run snapshot (#3955); recover it by head ref and prove
             # membership through the pull's own commit list.

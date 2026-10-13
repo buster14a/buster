@@ -1,0 +1,158 @@
+Grouping: before = runs whose tested tree excludes 90690088 (sides B0, B1); after = includes 90690088, excludes 56aa69a7 (A0, A1).
+Medians are of per-job values; no pooling across CPU models. Source: observations.csv.
+
+Linux x86-64 release | EPYC 7763 | before 8 jobs, after 4 jobs
+  job wall (API, s)                                          before n=8 median=838.5 min=824.0 max=860.0     after n=4 median=831.5 min=823.0 max=836.0  delta=-7.0 (-0.8%) ranges overlapping
+  combination-matrix / differential step (API, s)            before n=8 median=709.5 min=703.0 max=727.0     after n=4 median=695.0 min=689.0 max=700.0  delta=-14.5 (-2.0%) ranges disjoint
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=8 median=127.4 min=127.0 max=130.5     after n=4 median=116.9 min=116.6 max=117.1  delta=-10.5 (-8.2%) ranges disjoint
+  sum of all TEST_MODULE_TIMING (s)                          before n=8 median=358.7 min=355.9 max=364.4     after n=4 median=343.6 min=341.9 max=345.5  delta=-15.1 (-4.2%) ranges disjoint
+  control modules, no compilation (s)                        before n=8 median=9.4 min=9.0 max=9.7           after n=4 median=9.5 min=9.1 max=9.6  delta=+0.1 (+0.6%) ranges overlapping
+  compiler_driver_tests (s)                                  before n=8 median=107.7 min=105.9 max=113.3     after n=4 median=105.5 min=103.8 max=106.9  delta=-2.3 (-2.1%) ranges overlapping
+  c_ast_tests (s)                                            before n=8 median=21.7 min=21.5 max=22.1        after n=4 median=20.7 min=20.6 max=20.8  delta=-1.0 (-4.5%) ranges disjoint
+
+Linux x86-64 release | EPYC 9V45 | before 2 jobs, after 0 jobs
+  job wall (API, s)                                          before n=2 median=518.0 min=489.0 max=547.0     after n=0
+  combination-matrix / differential step (API, s)            before n=2 median=421.5 min=400.0 max=443.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=2 median=60.7 min=59.0 max=62.4        after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=2 median=200.9 min=192.0 max=209.8     after n=0
+  control modules, no compilation (s)                        before n=2 median=7.6 min=7.4 max=7.8           after n=0
+  compiler_driver_tests (s)                                  before n=2 median=71.4 min=66.8 max=76.0        after n=0
+  c_ast_tests (s)                                            before n=2 median=10.1 min=9.7 max=10.6         after n=0
+
+Linux x86-64 release | EPYC 9V74 | before 3 jobs, after 0 jobs
+  job wall (API, s)                                          before n=3 median=698.0 min=659.0 max=823.0     after n=0
+  combination-matrix / differential step (API, s)            before n=3 median=553.0 min=545.0 max=673.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=3 median=82.0 min=80.7 max=110.2       after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=3 median=272.2 min=256.8 max=330.9     after n=0
+  control modules, no compilation (s)                        before n=3 median=8.2 min=8.2 max=9.0           after n=0
+  compiler_driver_tests (s)                                  before n=3 median=101.9 min=87.3 max=108.3      after n=0
+  c_ast_tests (s)                                            before n=3 median=13.6 min=13.6 max=18.9        after n=0
+
+Linux x86-64 release | Xeon 8370C | before 1 jobs, after 0 jobs
+  job wall (API, s)                                          before n=1 median=787.0 min=787.0 max=787.0     after n=0
+  combination-matrix / differential step (API, s)            before n=1 median=664.0 min=664.0 max=664.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=1 median=104.4 min=104.4 max=104.4     after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=1 median=330.8 min=330.8 max=330.8     after n=0
+  control modules, no compilation (s)                        before n=1 median=8.7 min=8.7 max=8.7           after n=0
+  compiler_driver_tests (s)                                  before n=1 median=109.3 min=109.3 max=109.3     after n=0
+  c_ast_tests (s)                                            before n=1 median=17.0 min=17.0 max=17.0        after n=0
+
+Windows x86-64 release | EPYC 7763 | before 8 jobs, after 3 jobs
+  job wall (API, s)                                          before n=8 median=1079.5 min=1032.0 max=1151.0  after n=3 median=1084.0 min=1062.0 max=1085.0  delta=+4.5 (+0.4%) ranges overlapping
+  combination-matrix / differential step (API, s)            before n=8 median=729.0 min=700.0 max=750.0     after n=3 median=713.0 min=704.0 max=722.0  delta=-16.0 (-2.2%) ranges overlapping
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=8 median=119.2 min=114.8 max=122.4     after n=3 median=103.5 min=103.5 max=103.7  delta=-15.6 (-13.1%) ranges disjoint
+  sum of all TEST_MODULE_TIMING (s)                          before n=8 median=311.1 min=301.8 max=323.2     after n=3 median=291.0 min=291.0 max=293.1  delta=-20.1 (-6.5%) ranges disjoint
+  control modules, no compilation (s)                        before n=8 median=10.6 min=10.4 max=11.7        after n=3 median=10.5 min=10.2 max=10.6  delta=-0.1 (-1.1%) ranges overlapping
+  compiler_driver_tests (s)                                  before n=8 median=94.6 min=87.6 max=99.0        after n=3 median=90.8 min=88.6 max=91.3  delta=-3.8 (-4.0%) ranges overlapping
+  c_ast_tests (s)                                            before n=8 median=14.0 min=13.7 max=14.4        after n=3 median=13.1 min=12.8 max=13.6  delta=-0.9 (-6.5%) ranges disjoint
+
+Windows x86-64 release | EPYC 9V45 | before 3 jobs, after 0 jobs
+  job wall (API, s)                                          before n=3 median=727.0 min=706.0 max=733.0     after n=0
+  combination-matrix / differential step (API, s)            before n=3 median=445.0 min=425.0 max=448.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=3 median=50.6 min=48.4 max=54.5        after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=3 median=171.1 min=167.1 max=172.5     after n=0
+  control modules, no compilation (s)                        before n=3 median=7.9 min=7.9 max=8.1           after n=0
+  compiler_driver_tests (s)                                  before n=3 median=63.0 min=60.5 max=71.7        after n=0
+  c_ast_tests (s)                                            before n=3 median=6.6 min=6.6 max=6.7           after n=0
+
+Windows x86-64 release | EPYC 9V74 | before 1 jobs, after 1 jobs
+  job wall (API, s)                                          before n=1 median=920.0 min=920.0 max=920.0     after n=1 median=1150.0 min=1150.0 max=1150.0  delta=+230.0 (+25.0%) ranges disjoint
+  combination-matrix / differential step (API, s)            before n=1 median=547.0 min=547.0 max=547.0     after n=1 median=764.0 min=764.0 max=764.0  delta=+217.0 (+39.7%) ranges disjoint
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=1 median=71.6 min=71.6 max=71.6        after n=1 median=101.3 min=101.3 max=101.3  delta=+29.6 (+41.3%) ranges disjoint
+  sum of all TEST_MODULE_TIMING (s)                          before n=1 median=216.4 min=216.4 max=216.4     after n=1 median=292.1 min=292.1 max=292.1  delta=+75.7 (+35.0%) ranges disjoint
+  control modules, no compilation (s)                        before n=1 median=9.0 min=9.0 max=9.0           after n=1 median=10.5 min=10.5 max=10.5  delta=+1.5 (+16.8%) ranges disjoint
+  compiler_driver_tests (s)                                  before n=1 median=69.8 min=69.8 max=69.8        after n=1 median=94.2 min=94.2 max=94.2  delta=+24.3 (+34.8%) ranges disjoint
+  c_ast_tests (s)                                            before n=1 median=9.1 min=9.1 max=9.1           after n=1 median=13.3 min=13.3 max=13.3  delta=+4.2 (+46.0%) ranges disjoint
+
+Windows x86-64 release | Xeon 8370C | before 1 jobs, after 0 jobs
+  job wall (API, s)                                          before n=1 median=1032.0 min=1032.0 max=1032.0  after n=0
+  combination-matrix / differential step (API, s)            before n=1 median=683.0 min=683.0 max=683.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=1 median=96.8 min=96.8 max=96.8        after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=1 median=294.4 min=294.4 max=294.4     after n=0
+  control modules, no compilation (s)                        before n=1 median=12.4 min=12.4 max=12.4        after n=0
+  compiler_driver_tests (s)                                  before n=1 median=98.0 min=98.0 max=98.0        after n=0
+  c_ast_tests (s)                                            before n=1 median=12.5 min=12.5 max=12.5        after n=0
+
+Windows x86-64 release | Xeon 8573C | before 1 jobs, after 0 jobs
+  job wall (API, s)                                          before n=1 median=984.0 min=984.0 max=984.0     after n=0
+  combination-matrix / differential step (API, s)            before n=1 median=635.0 min=635.0 max=635.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=1 median=88.3 min=88.3 max=88.3        after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=1 median=269.4 min=269.4 max=269.4     after n=0
+  control modules, no compilation (s)                        before n=1 median=10.0 min=10.0 max=10.0        after n=0
+  compiler_driver_tests (s)                                  before n=1 median=89.8 min=89.8 max=89.8        after n=0
+  c_ast_tests (s)                                            before n=1 median=12.1 min=12.1 max=12.1        after n=0
+
+Linux x86-64 sanitized-release | EPYC 7763 | before 5 jobs, after 4 jobs
+  job wall (API, s)                                          before n=5 median=705.0 min=685.0 max=716.0     after n=4 median=689.0 min=677.0 max=715.0  delta=-16.0 (-2.3%) ranges overlapping
+  combination-matrix / differential step (API, s)            before n=5 median=620.0 min=606.0 max=623.0     after n=4 median=606.5 min=595.0 max=617.0  delta=-13.5 (-2.2%) ranges overlapping
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=5 median=387.6 min=385.9 max=393.2     after n=4 median=369.9 min=364.9 max=372.9  delta=-17.7 (-4.6%) ranges disjoint
+  c_frontend_tests CI_UNIT_PROCESS_V1 child elapsed (s)      before n=5 median=387.8 min=386.1 max=393.4     after n=4 median=370.1 min=365.1 max=373.1  delta=-17.8 (-4.6%) ranges disjoint
+  sum of all TEST_MODULE_TIMING (s)                          before n=5 median=826.6 min=811.9 max=835.1     after n=4 median=798.4 min=782.9 max=818.0  delta=-28.2 (-3.4%) ranges overlapping
+  control modules, no compilation (s)                        before n=5 median=19.8 min=19.6 max=20.4        after n=4 median=19.9 min=19.5 max=21.0  delta=+0.2 (+0.8%) ranges overlapping
+  compiler_driver_tests (s)                                  before n=5 median=216.7 min=209.7 max=225.0     after n=4 median=208.6 min=206.5 max=219.9  delta=-8.1 (-3.8%) ranges overlapping
+  c_ast_tests (s)                                            before n=5 median=58.3 min=57.5 max=59.3        after n=4 median=56.9 min=55.7 max=59.8  delta=-1.4 (-2.4%) ranges overlapping
+
+Linux x86-64 sanitized-release | EPYC 9V45 | before 3 jobs, after 0 jobs
+  job wall (API, s)                                          before n=3 median=419.0 min=408.0 max=426.0     after n=0
+  combination-matrix / differential step (API, s)            before n=3 median=350.0 min=344.0 max=361.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=3 median=187.8 min=181.2 max=197.3     after n=0
+  c_frontend_tests CI_UNIT_PROCESS_V1 child elapsed (s)      before n=3 median=188.0 min=181.4 max=197.5     after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=3 median=426.8 min=424.2 max=444.9     after n=0
+  control modules, no compilation (s)                        before n=3 median=13.9 min=13.5 max=14.2        after n=0
+  compiler_driver_tests (s)                                  before n=3 median=129.2 min=125.7 max=130.5     after n=0
+  c_ast_tests (s)                                            before n=3 median=29.5 min=28.8 max=30.1        after n=0
+
+Linux x86-64 sanitized-release | EPYC 9V74 | before 3 jobs, after 0 jobs
+  job wall (API, s)                                          before n=3 median=630.0 min=532.0 max=632.0     after n=0
+  combination-matrix / differential step (API, s)            before n=3 median=552.0 min=449.0 max=552.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=3 median=333.9 min=256.8 max=335.2     after n=0
+  c_frontend_tests CI_UNIT_PROCESS_V1 child elapsed (s)      before n=3 median=334.1 min=257.0 max=335.4     after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=3 median=720.3 min=575.3 max=722.3     after n=0
+  control modules, no compilation (s)                        before n=3 median=18.8 min=16.2 max=19.4        after n=0
+  compiler_driver_tests (s)                                  before n=3 median=193.9 min=167.9 max=194.4     after n=0
+  c_ast_tests (s)                                            before n=3 median=51.6 min=38.4 max=52.0        after n=0
+
+Linux x86-64 sanitized-release | Xeon 8370C | before 2 jobs, after 0 jobs
+  job wall (API, s)                                          before n=2 median=660.5 min=646.0 max=675.0     after n=0
+  combination-matrix / differential step (API, s)            before n=2 median=578.0 min=564.0 max=592.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=2 median=343.8 min=335.9 max=351.7     after n=0
+  c_frontend_tests CI_UNIT_PROCESS_V1 child elapsed (s)      before n=2 median=344.0 min=336.1 max=351.9     after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=2 median=774.0 min=741.3 max=806.8     after n=0
+  control modules, no compilation (s)                        before n=2 median=18.0 min=18.0 max=18.1        after n=0
+  compiler_driver_tests (s)                                  before n=2 median=228.0 min=217.3 max=238.7     after n=0
+  c_ast_tests (s)                                            before n=2 median=50.5 min=50.1 max=51.0        after n=0
+
+Linux x86-64 sanitized-release | Xeon 8573C | before 1 jobs, after 0 jobs
+  job wall (API, s)                                          before n=1 median=631.0 min=631.0 max=631.0     after n=0
+  combination-matrix / differential step (API, s)            before n=1 median=537.0 min=537.0 max=537.0     after n=0
+  c_frontend_tests TEST_MODULE_TIMING (s)                    before n=1 median=310.7 min=310.7 max=310.7     after n=0
+  c_frontend_tests CI_UNIT_PROCESS_V1 child elapsed (s)      before n=1 median=310.8 min=310.8 max=310.8     after n=0
+  sum of all TEST_MODULE_TIMING (s)                          before n=1 median=697.9 min=697.9 max=697.9     after n=0
+  control modules, no compilation (s)                        before n=1 median=17.1 min=17.1 max=17.1        after n=0
+  compiler_driver_tests (s)                                  before n=1 median=217.2 min=217.2 max=217.2     after n=0
+  c_ast_tests (s)                                            before n=1 median=44.0 min=44.0 max=44.0        after n=0
+
+Linux x86-64 native | EPYC 7763 | before 5 jobs, after 2 jobs
+  job wall (API, s)                                          before n=5 median=260.0 min=252.0 max=263.0     after n=2 median=258.5 min=256.0 max=261.0  delta=-1.5 (-0.6%) ranges overlapping
+  combination-matrix / differential step (API, s)            before n=5 median=55.0 min=53.0 max=55.0        after n=2 median=53.0 min=53.0 max=53.0  delta=-2.0 (-3.6%) ranges overlapping
+  differential_corpus NATIVE_PHASE_RECORD (s)                before n=5 median=48.7 min=47.5 max=49.0        after n=2 median=47.0 min=46.9 max=47.0  delta=-1.7 (-3.5%) ranges disjoint
+  producer_build NATIVE_PHASE_RECORD, Clang build (s)        before n=5 median=143.9 min=141.9 max=149.3     after n=2 median=140.7 min=139.5 max=141.9  delta=-3.2 (-2.2%) ranges disjoint
+
+Linux x86-64 native | EPYC 9V45 | before 3 jobs, after 1 jobs
+  job wall (API, s)                                          before n=3 median=204.0 min=193.0 max=205.0     after n=1 median=200.0 min=200.0 max=200.0  delta=-4.0 (-2.0%) ranges overlapping
+  combination-matrix / differential step (API, s)            before n=3 median=43.0 min=41.0 max=46.0        after n=1 median=41.0 min=41.0 max=41.0  delta=-2.0 (-4.7%) ranges overlapping
+  differential_corpus NATIVE_PHASE_RECORD (s)                before n=3 median=37.8 min=35.9 max=40.5        after n=1 median=36.4 min=36.4 max=36.4  delta=-1.4 (-3.7%) ranges overlapping
+  producer_build NATIVE_PHASE_RECORD, Clang build (s)        before n=3 median=108.7 min=101.5 max=110.7     after n=1 median=108.9 min=108.9 max=108.9  delta=+0.1 (+0.1%) ranges overlapping
+
+Linux x86-64 native | EPYC 9V74 | before 5 jobs, after 1 jobs
+  job wall (API, s)                                          before n=5 median=225.0 min=221.0 max=267.0     after n=1 median=222.0 min=222.0 max=222.0  delta=-3.0 (-1.3%) ranges overlapping
+  combination-matrix / differential step (API, s)            before n=5 median=47.0 min=45.0 max=55.0        after n=1 median=45.0 min=45.0 max=45.0  delta=-2.0 (-4.3%) ranges overlapping
+  differential_corpus NATIVE_PHASE_RECORD (s)                before n=5 median=40.9 min=39.7 max=49.6        after n=1 median=39.6 min=39.6 max=39.6  delta=-1.3 (-3.2%) ranges disjoint
+  producer_build NATIVE_PHASE_RECORD, Clang build (s)        before n=5 median=120.5 min=118.7 max=148.8     after n=1 median=120.8 min=120.8 max=120.8  delta=+0.3 (+0.3%) ranges overlapping
+
+Linux x86-64 native | Xeon 8370C | before 1 jobs, after 0 jobs
+  job wall (API, s)                                          before n=1 median=254.0 min=254.0 max=254.0     after n=0
+  combination-matrix / differential step (API, s)            before n=1 median=50.0 min=50.0 max=50.0        after n=0
+  differential_corpus NATIVE_PHASE_RECORD (s)                before n=1 median=43.6 min=43.6 max=43.6        after n=0
+  producer_build NATIVE_PHASE_RECORD, Clang build (s)        before n=1 median=148.5 min=148.5 max=148.5     after n=0
+
