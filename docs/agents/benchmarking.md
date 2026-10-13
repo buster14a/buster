@@ -997,8 +997,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
    fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
    same every-parent freshness rule. It cannot be combined with an analyzer
-   profile, inline acceptance, the ast-pilot profile, or the other opt-in legs
-   it excludes in `compiler_compare.py`. `constant_reuse_acceptance.py` runs
+   profile, the ast-pilot profile, or the other opt-in legs it excludes in
+   `compiler_compare.py`. It runs beside issue #48's inline profile, whose
+   exact line in the request history selects it in every pull compare.
+   `constant_reuse_acceptance.py` runs
    it after the tests-off candidate build, on the same frozen candidate-HEAD
    tree. It times the one candidate binary as both A (default) and B with
    `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity

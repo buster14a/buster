@@ -672,11 +672,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
                         reasons.append("issue #3011 constant-reuse comparison is valid only in pull mode")
-                    others = [key for key in ("inline_acceptance", "ast_pilot_acceptance", "throughput_real_source",
-                                              "production_profile", "compiler_probes", "frontend_selector", "wild_linker",
-                                              "link_tls", "selfhost_inline")
-                              if receipt.get(key) is not None and
-                              (key != "inline_acceptance" or (receipt.get(key) or {}).get("requested") is True)]
+                    # The inline profile rides every pull compare (main's request history holds its line), so it
+                    # is not a competing opt-in leg here.
+                    others = [key for key in ("ast_pilot_acceptance", "throughput_real_source", "production_profile",
+                                              "compiler_probes", "frontend_selector", "wild_linker", "link_tls",
+                                              "selfhost_inline")
+                              if receipt.get(key) is not None]
                     if others:
                         reasons.append("issue #3011 constant-reuse acceptance cannot be combined with another opt-in leg")
                     candidate = (receipt.get("binaries") or {}).get("candidate") or {}

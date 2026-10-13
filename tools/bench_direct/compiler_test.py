@@ -4458,6 +4458,12 @@ class ConstantReuseAcceptanceTest(unittest.TestCase):
             with self.subTest(case=name):
                 conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
                 self.assertEqual(conclusion, "failure", reasons)
+        # main's request history holds the inline selector, so every pull compare carries an inline record.
+        with_inline = copy.deepcopy(pull)
+        with_inline["inline_acceptance"] = {"requested": True, "request_line": compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE,
+                                            "profile": compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "status": "complete"}
+        unused_conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, receipt=with_inline))
+        self.assertFalse([reason for reason in reasons if "cannot be combined" in reason], reasons)
         report = compiler_receipt.render(pull, summary(), "success", [])
         self.assertIn("Issue #3011 constant-reuse arms: complete", report)
         self.assertIn("| intern (-fcanonical-intern-constants) | 0.9900", report)
