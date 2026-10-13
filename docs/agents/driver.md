@@ -715,8 +715,11 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
-`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
+`C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
+Except under `-fsyntax-only`, the flag also retains semantic analysis's
+per-node facts for lowering
+([retained facts](frontend/ast.md#retained-facts)).
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`

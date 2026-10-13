@@ -2400,6 +2400,13 @@ struct CAstCorpusTally
     // tree, and those of them compared with the machine in verify mode.
     u64 member_answers;
     u64 member_compared;
+    // The retained facts (CAstFacts, GitHub #4062) of the analysis with the
+    // tree: fact candidates, those left without a type, and published rows
+    // found past the type table.
+    u64 fact_candidates;
+    u64 fact_missing;
+    u64 fact_stale;
+    u64 fact_unaccounted;
 };
 
 // c_parse_ast_from_tree on one input whose tree is complete, held to
@@ -2495,7 +2502,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         typed_syntax.ast_statement_statistics = &statements;
         typed_syntax.ast_specifier_statistics = &specifiers;
         typed_syntax.type_interning = true;
+        // The analysis with the tree also publishes the retained facts, which
+        // must leave the model as the machine alone builds it (below).
+        CAstFacts facts = {0};
+        typed_syntax.ast_facts = c_ast_facts_create(&facts, ast) ? &facts : 0;
         CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
+        CAstFactStatistics fact_counts = facts.statistics;
+        c_ast_facts_release(&facts);
+        u64 fact_gaps = 0;
+        for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+        {
+            fact_gaps += fact_counts.gaps[gap];
+        }
+        tally->fact_candidates += fact_counts.candidates;
+        tally->fact_missing += fact_gaps;
+        tally->fact_stale += fact_counts.stale;
+        tally->fact_unaccounted += fact_counts.tree + fact_counts.machine + fact_counts.completed + fact_gaps != fact_counts.candidates;
         String8 difference = c_ast_corpus_analyses_differ(arguments->arena, &plain, &typed);
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
         // The body binder followed the tree's statement plans in the second
@@ -3044,6 +3066,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
 #endif
     // Every body of the corpus follows its plan; none is left to the token walk.
     BUSTER_TEST(arguments, tally.statement_fallbacks == 0 && tally.statement_bodies);
+    // Every fact candidate is published or counted as a gap once, and no
+    // published row outlives the type table (GitHub #4062).
+    BUSTER_TEST(arguments, tally.fact_candidates && tally.fact_stale == 0 && tally.fact_unaccounted == 0 && tally.fact_missing < tally.fact_candidates);
     // No corpus body's extent table is refused.
     BUSTER_TEST(arguments, tally.extent_refused == 0 && tally.extent_walked[C_AST_EXTENT_FALLBACK_INPUT] == 0 &&
                                tally.extent_walked[C_AST_EXTENT_FALLBACK_ANCHOR] == 0);
@@ -5767,6 +5792,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_members(UnitTestArguments* argumen
     return result;
 }
 
+// The facts semantic analysis retains for lowering (CAstFacts, GitHub #4062).
+// One function body and two file-scope initializers are analyzed with the
+// tree and a facts record, and once with the tree alone; the model must be
+// the same, since publication keeps nothing the machine appended. The
+// columns then hold, among others: a bit-field member's width, an
+// identifier's entity, a string literal in structural form (its element row
+// and its length with the terminator), the type of a `[]` over a string
+// literal whose own run appended the literal's row, and the literals of an
+// initializer no query typed. `__func__` and a builtin's callee name are
+// gaps: the machine types them to nothing. Every candidate is accounted for
+// once, and no published row is past the type table.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8("struct S { int a : 3; int b; };\n"
+                        "char const* names[] = { \"one\", \"three\" };\n"
+                        "int table[] = { 1, 2, 3 };\n"
+                        "int f(struct S* s, int i)\n"
+                        "{\n"
+                        "    int x = s->a + s->b;\n"
+                        "    x += (int)sizeof(\"text\");\n"
+                        "    x += \"abc\"[i];\n"
+                        "    x += __builtin_expect(i, 0);\n"
+                        "    char const* name = __func__;\n"
+                        "    return x + table[i] + (name != 0);\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    bool ready = BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete) &&
+                 BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast));
+    if (ready)
+    {
+        CAst const* ast = &built.ast;
+        BUSTER_TEST(arguments, facts.node_count == ast->node_count && facts.statistics.retained_bytes >= (u64)ast->node_count * 9);
+        CParserResult plain_syntax = c_parse_ast(arena, preprocess);
+        plain_syntax.ast = ast;
+        plain_syntax.type_interning = true;
+        CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, plain_syntax);
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        syntax.ast = ast;
+        syntax.type_interning = true;
+        syntax.ast_facts = &facts;
+        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+        String8 difference = c_ast_corpus_analyses_differ(arena, &plain, &analysis);
+        difference = difference.length ? difference : c_ast_corpus_model_differ(arena, &plain, &analysis);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+        CAstFactStatistics statistics = facts.statistics;
+        u64 gaps = 0;
+        for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+        {
+            gaps += statistics.gaps[gap];
+        }
+        BUSTER_TEST(arguments, statistics.regions == 3 && statistics.candidates);
+        BUSTER_TEST(arguments, statistics.tree + statistics.machine + statistics.completed + gaps == statistics.candidates);
+        BUSTER_TEST(arguments, statistics.stale == 0 && statistics.bit_fields == 1 && statistics.strings == 4 && statistics.bound);
+        BUSTER_TEST(arguments, statistics.gaps[C_AST_FACT_GAP_INVALID] >= 2 && statistics.gaps[C_AST_FACT_GAP_APPENDS] == 0);
+        u32 checked = 0;
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            u32 flags = facts.flags[node];
+            u32 type = facts.types[node];
+            u32 kind = ast->kinds[node];
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[node]]);
+            BUSTER_TEST(arguments, !(flags & C_AST_FACT_TYPED) || type < analysis.type_count);
+            CTypeKind type_kind = (flags & C_AST_FACT_TYPED) && type < analysis.type_count ? analysis.types[type].kind : C_TYPE_COUNT;
+            if (kind == C_AST_STRING && string_equal(spelling, S8("\"abc\"")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_STRING) && type_kind == C_TYPE_CHAR && facts.payloads[node] == 4);
+                checked += 1;
+            }
+            if (kind == C_AST_INDEX && (flags & C_AST_FACT_EXPRESSION) && c_ast_subtree_begin(ast, node) + 1 < node &&
+                ast->kinds[c_ast_subtree_begin(ast, node)] == C_AST_STRING)
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_TYPED) && type_kind == C_TYPE_CHAR);
+                checked += 1;
+            }
+            if (kind == C_AST_MEMBER_ARROW && (flags & C_AST_FACT_BIT_FIELD))
+            {
+                BUSTER_TEST(arguments, facts.payloads[node] == 3 && type_kind == C_TYPE_INT);
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("s")) && (flags & C_AST_FACT_EXPRESSION))
+            {
+                u32 entity = facts.payloads[node];
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_BOUND) && entity < analysis.entity_count &&
+                                           analysis.entities[entity].kind == C_ENTITY_PARAMETER && type_kind == C_TYPE_POINTER);
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("__func__")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && !(flags & C_AST_FACT_TYPED));
+                checked += 1;
+            }
+            if (kind == C_AST_NUMBER && string_equal(spelling, S8("2")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && type_kind == C_TYPE_INT && !(flags & C_AST_FACT_MACHINE));
+                checked += 1;
+            }
+        }
+        // "abc", its `[]`, s->a, the two uses of `s`, __func__ and the 2 of `table`.
+        BUSTER_TEST(arguments, checked == 7);
+        c_ast_facts_release(&facts);
+        c_ast_facts_release(&facts);
+        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.statistics.stale == 0);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5797,6 +5937,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_AST_TEST_FIXTURE(arguments, c_ast_test_specifiers);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_type_names);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_members);
+    C_AST_TEST_FIXTURE(arguments, c_ast_test_retained_facts);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_AST_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_corpus);
