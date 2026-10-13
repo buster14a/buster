@@ -618,6 +618,9 @@ struct CompilerDriverCAstPilotResult
     // What lowering read from the tree (CAstLowerStatistics). Zero for
     // -fsyntax-only and when lowering had no tree.
     CAstLowerStatistics lower;
+    // The facts analysis retained for lowering (CAstFactStatistics, GitHub
+    // #4062). Zero for -fsyntax-only, which does not lower.
+    CAstFactStatistics facts;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

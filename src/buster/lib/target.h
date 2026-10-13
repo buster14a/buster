@@ -510,6 +510,8 @@ struct Target
     u8 x86_register_parameter_count;
     u8 x86_preferred_stack_boundary;
     u16 os_version_major;
+    // -fshort-wchar: wchar_t is 16-bit unsigned whatever the ABI default.
+    bool short_wchar;
     TargetCpuFeatures cpu_features;
     // Command-line plain-char overrides; target default keeps the ABI's
     // implementation-defined signedness.
