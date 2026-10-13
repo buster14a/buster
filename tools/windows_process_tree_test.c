@@ -99,7 +99,10 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
         TREE_TEST(count > 0 && count < TREE_COMMAND_CAPACITY);
         u64 now = 0;
         TREE_TEST(tree_test_now(tick_clock, &now));
-        u64 deadline = expired ? now - 1 : now + UINT64_C(1500000000);
+        // Cancel-during-startup's 3 s startup delay outlasts the usual 1.5 s deadline;
+        // its later deadline keeps cleanup starting first, with the whole budget left
+        // for publication.
+        u64 deadline = expired ? now - 1 : now + (cancel_startup ? UINT64_C(5000000000) : UINT64_C(1500000000));
         PROCESS_INFORMATION writer = {0};
         if (cancel_before)
         {
@@ -116,7 +119,9 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
             STARTUPINFOW startup_info = {.cb = sizeof(startup_info)};
             TREE_TEST(CreateProcessW(0, writer_command, 0, 0, FALSE, 0, 0, 0, &startup_info, &writer));
         }
-        tree_test_startup_delay_ms = startup ? 2000 : (cancel_startup ? 1000 : 0);
+        // The cancel writer must start and wait 250 ms inside this delay; loaded
+        // hosted Windows runners have taken longer than 1 s to do so.
+        tree_test_startup_delay_ms = startup ? 2000 : (cancel_startup ? 3000 : 0);
         tree_test_cleanup_delay_ms = cleanup ? 2000 : (late_cleanup ? 3500 : 0);
         tree_test_status_delay_ms = late_status ? 3500 : 0;
         // Publication shares the cleanup budget. The separate-allowance case
