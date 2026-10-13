@@ -56,6 +56,9 @@
 // block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
 // reuses a constant built earlier in the current block (CIrConstantIntern),
 // re-proving the cached row against retraction and truncation on every hit.
+// Under the opt-in -fcanonical-construction-fold (#3010), c_ir_emit_cast and
+// c_ir_truth_value build the constant FAST's rule gives a constant operand
+// (c_ir_construction_fold) instead of its CAST or BINARY row.
 // In BUSTER_BENCH_ALLOCATIONS builds c_ir_fold_census_body takes the #3010
 // end-of-body fold census between body lowering and SSA finish.
 // c_ir_string_object shares typed static storage between literal operands and
@@ -3671,6 +3674,8 @@ struct CIntegerIrBuilder
     // lowering, and this function's generation in it; null when off.
     CIrConstantIntern* constant_intern;
     u32 constant_intern_generation;
+    // -fcanonical-construction-fold counters of one lowering; null when off.
+    CIRConstructionFoldStatistics* construction_folds;
     // The interned symbol of every IrField name a member access has compared
     // (c_ir_field_symbols); shared like slot_cache, null in the test hooks.
     CIrFieldSymbolCache* field_symbols;
@@ -10814,6 +10819,32 @@ BUSTER_C_INTERNAL bool c_ir_type_is_binary128_aggregate(CIntegerIrBuilder* build
            c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, type_id);
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
+                                                       IrTypeId type);
+
+// -fcanonical-construction-fold (#3010): the constant FAST would fold
+// `candidate` to, built instead of the row, or invalid when the experiment is
+// off or FAST's rule (ir_fast_fold_candidate) leaves the row. The candidate's
+// result would be a fresh value whose only inherited metadata is the operand's
+// points_to_read_only and label provenance; an operand carrying either keeps
+// the row, so the constant's value matches the one the late fold keeps.
+BUSTER_C_INTERNAL IrValueId c_ir_construction_fold(CIntegerIrBuilder* builder, IrInstruction const* candidate, u64 const* right_bits,
+                                                   IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId operand = candidate->operands[0];
+    u64 bits = 0;
+    if (builder->construction_folds && operand.value < builder->function->value_count &&
+        !builder->function->values[operand.value].points_to_read_only && !c_ir_value_contains_label_provenance(builder, operand) &&
+        ir_fast_fold_candidate(builder->program, builder->function, candidate, right_bits, &bits))
+    {
+        result = c_ir_emit_integer_value_at(builder, bits, false, source, candidate->canonical_type);
+        builder->construction_folds->casts += result.value != IR_ID_UNDERLYING_INVALID && candidate->opcode == IR_OPCODE_CAST;
+        builder->construction_folds->truths += result.value != IR_ID_UNDERLYING_INVALID && candidate->opcode == IR_OPCODE_BINARY;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
 {
     if (value.value >= builder->function->value_count)
@@ -11169,7 +11200,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
                           c_ir_diagnostic_type_name(builder->arena, target_value));
         return IR_VALUE_ID_INVALID;
     }
-    return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
+    IrValueId folded = IR_VALUE_ID_INVALID;
+    if (operation == IR_CONVERSION_INTEGER_SIGN_EXTEND || operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+        operation == IR_CONVERSION_INTEGER_TRUNCATE || operation == IR_CONVERSION_INTEGER_REINTERPRET)
+    {
+        IrInstruction candidate = c_ir_instruction_initialize(IR_OPCODE_CAST, target_type);
+        candidate.operands = &value;
+        candidate.operand_count = 1;
+        candidate.conversion_operation = (u8)operation;
+        folded = c_ir_construction_fold(builder, &candidate, 0, source);
+    }
+    return folded.value != IR_ID_UNDERLYING_INVALID ? folded : c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
 }
 
 // The initializer lowering below is intentionally defined much earlier than
@@ -38740,7 +38781,7 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
 #include "c_vendor_x86_query.c"
 #include "c_vendor_generic.c"
 
-BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+BUSTER_C_INTERNAL IrValueId c_ir_truth_value_rows(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
 {
     IrTypeId type_id = builder->function->values[value.value].canonical_type;
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
@@ -38866,6 +38907,29 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     comparison.result = result;
     c_ir_append_instruction(builder, comparison, comparison_source);
     return result;
+}
+
+// An integer constant's truth is `value != (type)0`, which FAST folds once
+// c_ir_truth_value_rows has built the zero, its conversion and the comparison.
+// -fcanonical-construction-fold asks the same rule with that zero supplied
+// as bits, which share the operand's type as the converted zero would.
+BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    IrValueId folded = IR_VALUE_ID_INVALID;
+    IrType* type = builder->construction_folds && value.value < builder->function->value_count
+                       ? ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type)
+                       : 0;
+    if (type && type->kind == IR_TYPE_INTEGER)
+    {
+        u64 zero_bits = 0;
+        IrValueId operands[] = {value, value};
+        IrInstruction candidate = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->bool_type);
+        candidate.operands = operands;
+        candidate.operand_count = 2;
+        candidate.binary_operation = (u8)IR_BINARY_INTEGER_NOT_EQUAL;
+        folded = c_ir_construction_fold(builder, &candidate, &zero_bits, source);
+    }
+    return folded.value != IR_ID_UNDERLYING_INVALID ? folded : c_ir_truth_value_rows(builder, value, source);
 }
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
@@ -66247,6 +66311,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .slot_cache = &slot_cache,
             .constant_intern = options.intern_block_constants ? &constant_intern : 0,
             .constant_intern_generation = options.intern_block_constants ? ++constant_intern.generation : 0,
+            .construction_folds = options.construction_fold ? &result.construction_folds : 0,
             .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,

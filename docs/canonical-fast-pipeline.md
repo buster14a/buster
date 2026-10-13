@@ -543,6 +543,48 @@ under the throughput priority. Both stay opt-in until the owner decides on
 #3011. Enabling interning by default would also update the C frontend's
 row-capacity, codegen-shape and CSE-count tests, which expect today's default.
 
+## Opt-in construction-time folding (#3010)
+
+`-fcanonical-construction-fold` (cleared by
+`-fno-canonical-construction-fold`, the last one given winning) is the bounded
+experiment that the [fold census](#construction-time-fold-census-3010) pointed
+to. It is off by default and independent of every `-O` level and FAST control.
+It touches only the two C-lowering helpers where the census found birth folds:
+
+- `c_ir_emit_cast`, for an integer sign-extend, zero-extend, truncate or
+  reinterpret;
+- `c_ir_truth_value`, for the `_Bool` conversion of an integer.
+
+When the operand is a committed single-limb `CONSTANT_INTEGER`, the helper
+describes the row it would build and asks `ir_fast_fold_candidate`, which
+calls `ir_fast_fold_rule` exactly as `ir_fast_fold` does. If that is a
+constant rule, the helper builds that constant through
+`c_ir_emit_integer_value_at` instead of the `CAST` or `BINARY` row. A truth
+test is the candidate `value != 0`: the zero is supplied as bits, and the
+operand supplies its type, as the converted zero would. So a folded truth
+also builds no zero literal and no conversion of it. Anything else builds
+the rows as before:
+
+- an identity rule;
+- an unfoldable row;
+- a type wider than 64 bits;
+- a volatile or atomic type;
+- floating or pointer operands;
+- an operand whose `points_to_read_only` or label provenance the row's result
+  would have inherited.
+
+The constant's value then has the metadata the late fold keeps, and
+`ir_fast_fold` still folds every row this leaves.
+
+The operand's own literal row is still built and stays for FAST DCE when it
+has no other reader. Operands are evaluated as before, since only an
+already-built constant is read. `-fno-canonical-fast` keeps its meaning:
+FAST's admission, validation and late folding are unchanged, and the
+construction fold runs whether or not FAST does. `-v` prints
+`C_CONSTRUCTION_FOLD casts truths`. In `BUSTER_BENCH_ALLOCATIONS` builds, a
+row this experiment never builds is never seen by the commit census. So the
+`fold_birth_*` and `fold_match_direct_*` counters drop for the rows it folds.
+
 ## Tests
 
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
@@ -550,8 +592,14 @@ retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
 `ir_fast_intern_tests` checks that interning shares a repeated constant
 within a block, never across blocks, types or signs, and that each hit is
-one row and one value never built. The driver test runs the shared fixture
-with interning and CSE on every backend.
+one row and one value never built. `ir_fast_construction_fold_tests` checks, with
+construction folding on and off, the widths, signedness, wrapping and `_Bool`
+cases, an effectful comma operand, and unchanged non-constant, 128-bit and
+floating operands. Each folded case returns the constant FAST folds to
+without its row; diagnostic builds also check that no birth fold remains. A
+direct check rejects a volatile result type through `ir_fast_fold_candidate`. The driver test runs the shared fixture
+with interning and CSE, and with construction folding and no FAST pass, on
+every backend.
 `ir_fast_cse_tests` runs each case under both strategies and checks the
 window boundary for distinct rows and for repeated hits. The cases cover
 commuted and ordered pairs, duplicate operands, block boundaries, excluded
