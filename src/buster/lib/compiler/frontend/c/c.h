@@ -288,6 +288,11 @@ typedef enum CDiagnosticKind
     // GNU's obsolete `member: value` field designator in a strict ISO dialect;
     // it is accepted as `.member = value` with this warning.
     C_DIAGNOSTIC_OBSOLETE_DESIGNATOR,
+    // An implicit pointer conversion whose pointees are integer types of one
+    // rank that differ only in signedness (plain char counting as either):
+    // GCC/Clang -Wpointer-sign. Semantic analysis publishes it as a warning
+    // in CParseResult.warnings; every other pointee mismatch stays an error.
+    C_DIAGNOSTIC_POINTER_SIGN,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -2083,6 +2088,12 @@ struct CParseResult
     u32* declarations_by_entity_offsets;
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
+    // Warning-severity findings of semantic analysis (C_DIAGNOSTIC_POINTER_SIGN
+    // today). They never fail analysis: the driver applies the -W policy to
+    // them. warning_tokens holds each warning's source token, so a conversion
+    // checked more than once is reported once.
+    CDiagnostic* warnings;
+    u32* warning_tokens;
     CDeferredStaticAssert* deferred_static_asserts;
     // One CStaticAssertVerdict per deferred row, written after parsing by
     // c_parse_validate_deferred_assertions; null when validation did not run
@@ -2114,6 +2125,8 @@ struct CParseResult
     u32 scope_count;
     u32 identifier_use_count;
     u32 diagnostic_count;
+    u32 warning_count;
+    u32 warning_capacity;
     u32 deferred_static_assert_count;
     u32 deferred_bit_field_width_diagnostic_count;
     u32 declaration_capacity;
@@ -2272,6 +2285,10 @@ struct CIRLowerResult
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
+    // Semantic analysis's warnings (CParseResult.warnings), published whether
+    // or not lowering ran.
+    u32 warning_count;
+    CDiagnostic* warnings;
     // Published only after the C lowerer finishes every function and global
     // through its typed builders without a rejected row. Every row passed the
     // block-row commit protocol and every function its finalization

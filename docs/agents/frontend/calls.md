@@ -629,6 +629,51 @@ for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
 
+## Signedness-only pointer conversions (-Wpointer-sign)
+
+C17 6.5.16.1p1 makes every implicit conversion between pointers to
+incompatible types a constraint violation, and since #1094 the frontend
+refuses them. GCC and Clang file one subset under a separate warning,
+`-Wpointer-sign`, which pristine FFmpeg silences with `-Wno-pointer-sign`.
+Buster honors it (#4051): an assignment, initializer (local or static),
+call argument or return whose source and destination pointers have immediate
+pointees that are integer types of one rank class differing only in
+signedness — plain, `signed` and `unsigned char` count as one class, then each
+signed/unsigned pair of `short`, `int`, `long`, `long long` and `__int128` —
+compiles with a `C_DIAGNOSTIC_POINTER_SIGN` warning ("pointer targets in
+conversion from 'char *' to 'unsigned char *' differ in signedness") instead
+of an error. The driver applies the [`pointer-sign` warning
+group](../driver.md#warning-options): on by default, dropped by
+`-Wno-pointer-sign`, re-enabled by `-Wpointer-sign`, and an error under
+`-Werror` or `-Werror=pointer-sign`.
+
+The class stays bounded to what both reference compilers (Clang 18, GCC 13
+with `-Wall`) report as `-Wpointer-sign`; each of these remains the
+incompatible-pointer error it was:
+
+- deeper levels (`char **` to `unsigned char **`, `char (*)[3]` to
+  `unsigned char (*)[3]`, `char *const *` to `const unsigned char *const *`);
+- a rank change (`long *` to `unsigned long long *`, even where both are 64
+  bits), `_Bool`, enumerations, and non-integer pointees;
+- a lost qualifier (`const char *` to `unsigned char *`) and `_Atomic`
+  pointees;
+- pointer/integer conversions and every other #1039 refusal.
+
+`c_parse_assignment_conversion_classify` decides admission and reports the
+signedness-only case to its caller; `c_parse_assignment_conversion_message`,
+which every value-conversion check calls, turns it into the warning through
+`c_parse_pointer_sign_warning`. That records one row per source start token in
+`CParseResult.warnings`, so the repeated checks of one conversion (reference
+rechecks, retyped initializers) report it once, and a body that exhausts its
+validation scratch drops its warnings with its errors. The transparent-union
+member trial uses the classifier directly and does not select a member through
+a signedness-only match. Lowering needs nothing new: the admitted conversion is
+the existing canonical pointer copy, so canonical IR is unchanged.
+`compiler_driver_test_pointer_sign` compiles, links and runs a program that
+reads through each converted pointer under every option ordering, and checks
+the incompatible controls in each context; the syntax-diagnostic corpus checks
+`-fsyntax-only` and object actions agree on the warnings and the errors.
+
 ## C99 inline function identity
 
 A body whose file-scope declarations all specify inline without extern is an

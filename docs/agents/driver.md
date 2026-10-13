@@ -2283,8 +2283,9 @@ depfile reports failure even if the artifact has already been published.
 ## Warning options
 
 The warnings the driver publishes today are the preprocessor's (`#warning`,
-extra tokens after a directive such as `#endif junk`) and the GNU obsolete
-`member: value` designator in a strict ISO dialect. Each belongs to a group
+extra tokens after a directive such as `#endif junk`), the GNU obsolete
+`member: value` designator in a strict ISO dialect, and semantic analysis's
+signedness-only pointer conversions (`-Wpointer-sign`, #4051). Each belongs to a group
 (`CompilerDriverWarningGroup`, mapped from the diagnostic kind by
 `compiler_driver_warning_group_of_kind`), and `compiler_driver_publish_c_diagnostics`
 applies one `CompilerDriverWarningPolicy` to them for every input, serial or
@@ -2295,6 +2296,7 @@ batched, including those whose source was replayed from the source cache.
 | `cpp` | `-Wcpp` (GCC), `-W#warnings` (Clang) | `#warning` |
 | `extra-tokens` | `-Wextra-tokens` (Clang), `-Wendif-labels` (GCC, which names only `#else`/`#endif` there) | tokens after a directive |
 | `gnu-designator` | `-Wgnu-designator` (Clang; GCC files it under `-Wpedantic`) | `member:` designator |
+| `pointer-sign` | `-Wpointer-sign` (GCC and Clang) | implicit pointer conversion whose pointees differ only in integer signedness |
 
 Options apply left to right, as in GCC and Clang, and the last one that names
 a group or the global flag wins:
@@ -2317,9 +2319,10 @@ a group or the global flag wins:
   either order (`-Wno-error=cpp -Werror` leaves `#warning` a warning).
 
 A promoted warning is published with error severity and the option that
-promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]` or
-`[-Werror=gnu-designator]`; a warning without a group gets `[-Werror]`). The unit
-fails with the tokenizer error, so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]`,
+`[-Werror=gnu-designator]` or `[-Werror=pointer-sign]`; a warning without a
+group gets `[-Werror]`). The unit fails with the tokenizer error (the analysis
+error for `pointer-sign`), so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
 and a batch of several inputs all return failure and write no output; the
 failed-unit rules above decide which later results are discarded. Its record
 in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
@@ -2330,9 +2333,21 @@ before this policy existed; only the promoted ones are subtracted.
 Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
 and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
 `-Werror=` and `-Wno-` neither enable nor promote anything). Diagnosing unknown or unimplemented names is a
-separate decision (#1574). The parser and lowering still have no warning
-channel, so signed-overflow in constant expressions is not yet a warning that
-`-Werror` can promote.
+separate decision (#1574). Semantic analysis has one warning channel,
+`CParseResult.warnings` (carried to `CIRLowerResult.warnings`), which only
+`-Wpointer-sign` uses: the driver publishes it ahead of the unit's errors for
+`-fsyntax-only` and for every lowering action, counts it in
+`CompilerDriverResult.analysis_warning_count` (less promoted ones, as for
+`tokenizer_warning_count`), and fails the unit with
+`COMPILER_DRIVER_ERROR_ANALYSIS` when `-Werror` promotes one. Other parser and
+lowering findings remain errors, so signed-overflow in constant expressions is
+not yet a warning that `-Werror` can promote.
+
+`-Wpointer-sign` is on by default, as in Clang (GCC enables it only with
+`-Wall` or `-Wpedantic`); `-Wall` is accepted and changes nothing. The driver
+has no `-pedantic-errors` mode, so only `-Werror` and `-Werror=pointer-sign`
+make it an error. The frontend contract (which conversions belong to the class)
+is in [Calls](frontend/calls.md#signedness-only-pointer-conversions--wpointer-sign).
 
 Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
 in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same

@@ -2764,6 +2764,171 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
     return result;
 }
 
+// #4051: an implicit pointer conversion whose pointees differ only in integer
+// signedness is the -Wpointer-sign warning class, on by default as in Clang.
+// The source covers a static initializer, a local initializer, an
+// assignment, a call argument and a return; the program reads through every
+// converted pointer, so a wrong conversion fails its exit status. Each
+// policy row compiles it, and the rows that link run it on native hosts. A
+// genuinely incompatible pointee (int * to float *) stays an error that no
+// -W option changes.
+typedef struct CompilerDriverPointerSignCase CompilerDriverPointerSignCase;
+struct CompilerDriverPointerSignCase
+{
+    String8 options[3];
+    bool promoted;
+    bool shown;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pointer_sign(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8(
+        "static const char text[] = \"\\x80\";\n"
+        "static const signed char *signed_text = text;\n"
+        "static unsigned first(unsigned char *p) { return p[0]; }\n"
+        "static unsigned char *back(char *p) { return p; }\n"
+        "int main(void) {\n"
+        "    char buffer[2] = { (char)0x80, 1 };\n"
+        "    unsigned char *u = buffer;\n"
+        "    int value = -1;\n"
+        "    unsigned *uv = &value;\n"
+        "    char *c = buffer;\n"
+        "    u = c;\n"
+        "    unsigned total = first(c);\n"
+        "    total += back(c)[0];\n"
+        "    return !(total == 0x100u && *uv == 0xffffffffu && signed_text[0] == -128 && u[1] == 1);\n"
+        "}\n");
+    // Seven conversions: signed_text, back's return, u = buffer, uv, u = c, first(c) and back(c).
+    u32 conversions = 7;
+    String8 marker = S8("differ in signedness");
+    String8 tag = S8("[-Werror=pointer-sign]");
+    String8 input = buster_test_temporary_path(arena, S8("buster-pointer-sign"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-pointer-sign"), S8(".exe"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 none = {0};
+    CompilerDriverPointerSignCase cases[] = {
+        {{none, none, none}, false, true},
+        {{S8("-Wall"), S8("-Wextra"), none}, false, true},
+        {{S8("-Wno-pointer-sign"), none, none}, false, false},
+        {{S8("-Wno-pointer-sign"), S8("-Wpointer-sign"), none}, false, true},
+        {{S8("-Werror"), none, none}, true, false},
+        {{S8("-Werror=pointer-sign"), none, none}, true, false},
+        {{S8("-Wno-pointer-sign"), S8("-Werror"), none}, false, false},
+        {{S8("-Werror"), S8("-Wno-pointer-sign"), none}, false, false},
+        {{S8("-Wno-pointer-sign"), S8("-Wpointer-sign"), S8("-Werror")}, true, false},
+        {{S8("-Werror"), S8("-Wno-error=pointer-sign"), none}, false, true},
+        {{S8("-Wno-pointer-sign"), S8("-Werror=pointer-sign"), none}, true, false},
+        {{S8("-w"), S8("-Werror"), none}, false, false},
+        {{S8("-Wno-everything"), S8("-Werror"), none}, false, false},
+        {{S8("-Werror=cpp"), none, none}, false, true},
+    };
+    // A link, a syntax-only check and an object.
+    String8 actions[] = {none, S8("-fsyntax-only"), S8("-c")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+        {
+            CompilerDriverPointerSignCase const* row = &cases[index];
+            TemporalArena attempt = arena_begin_temporal(arena);
+            String8 command[10];
+            u32 count = 0;
+            command[count++] = S8("-std=c17");
+            command[count++] = S8("-nostdinc");
+            if (actions[action].length) command[count++] = actions[action];
+            for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(row->options); option += 1)
+            {
+                if (row->options[option].length) command[count++] = row->options[option];
+            }
+            bool writes = action != 1;
+            if (writes)
+            {
+                command[count++] = S8("-o");
+                command[count++] = output;
+            }
+            command[count++] = input;
+            (void)os_file_delete(output);
+            CompilerDriverResult run = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                (SliceString8){.pointer = command, .length = count}));
+            ByteSlice written = file_read(arena, output, (FileReadOptions){0});
+            String8 label = string_format(arena, S8("pointer-sign case {u32} action {u32}: diagnostic='{S8}' warning='{S8}' error={u32}"),
+                                          index, action, run.diagnostic, run.warning, (u32)run.error);
+            bool shown = string_first_sequence(run.warning, marker) != BUSTER_STRING_NO_MATCH;
+            if (row->promoted)
+            {
+                BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_ANALYSIS, label);
+                BUSTER_TEST_RAW(arguments, written.length == 0 && run.analysis_warning_count == 0 && !shown, label);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(run.diagnostic, tag) != BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(run.diagnostic, marker) != BUSTER_STRING_NO_MATCH, label);
+                BUSTER_TEST_RAW(arguments, run.diagnostic_count == conversions && run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_ERROR, label);
+            }
+            else
+            {
+                BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_NONE, label);
+                BUSTER_TEST_RAW(arguments, writes == (written.length != 0), label);
+                BUSTER_TEST_RAW(arguments, shown == row->shown, label);
+                BUSTER_TEST_RAW(arguments, run.analysis_warning_count == conversions, label);
+                BUSTER_TEST_RAW(arguments, row->shown ? run.diagnostic_count == conversions &&
+                                                        run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_WARNING
+                                                      : run.warning.length == 0 && run.diagnostic_count == 0, label);
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS)
+                if (action == 0 && run.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(executable),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, label);
+                    }
+                }
+#endif
+            }
+            c_test_scratch_end(attempt);
+        }
+    }
+    // Genuinely incompatible pointees stay errors in every context, whatever
+    // the -W options, and publish no pointer-sign warning.
+    String8 controls[] = {
+        S8("void f(float *p); void g(int *p) { f(p); }\n"),
+        S8("float *g(int *p) { return p; }\n"),
+        S8("void g(int *p) { float *q; q = p; (void)q; }\n"),
+        S8("static int i; static float *q = &i;\n"),
+        S8("void g(char **p) { unsigned char **q = p; (void)q; }\n"),
+        S8("void g(const char *p) { unsigned char *q = p; (void)q; }\n"),
+    };
+    String8 control_input = buster_test_temporary_path(arena, S8("buster-pointer-sign-control"), S8(".c"));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(controls); index += 1)
+    {
+        for (u32 quiet = 0; quiet < 2; quiet += 1)
+        {
+            TemporalArena attempt = arena_begin_temporal(arena);
+            BUSTER_TEST(arguments, file_write(control_input, BUSTER_SLICE_TO_BYTE_SLICE(controls[index])));
+            String8 command[] = {S8("-std=c17"), S8("-nostdinc"), quiet ? S8("-Wno-pointer-sign") : S8("-Wpointer-sign"),
+                                 S8("-c"), S8("-o"), output, control_input};
+            (void)os_file_delete(output);
+            CompilerDriverResult run = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 label = string_format(arena, S8("pointer-sign control {u32}: diagnostic='{S8}' warning='{S8}'"), index, run.diagnostic, run.warning);
+            BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_ANALYSIS && run.analysis_warning_count == 0 && run.warning.length == 0, label);
+            BUSTER_TEST_RAW(arguments, string_first_sequence(run.diagnostic, S8("incompatible pointer types")) != BUSTER_STRING_NO_MATCH, label);
+            c_test_scratch_end(attempt);
+        }
+    }
+    (void)os_file_delete(input);
+    (void)os_file_delete(output);
+    (void)os_file_delete(control_input);
+    c_test_scratch_end(temporary);
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
 // -E output must keep the effective #pragma pack state, so compiling the .i
 // lays records out as compiling the source does (#1342). The header pops back
 // to natural alignment and then leaves pack(2) open into the main file.
@@ -5923,6 +6088,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { long l = g; return (int)l; }\n"), false, false, S8("cannot convert from 'function pointer' to 'long'")},
         {S8("int x = \"s\";\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("char *p = 5;\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        // #4051: a signedness-only pointee mismatch is a -Wpointer-sign warning in
+        // every conversion context; every other pointee mismatch stays an error.
+        {S8("void f(unsigned char *p); void g(char *p) { f(p); }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int h(int *q) { unsigned *u = q; return (int)*u; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("static const char s[] = \"x\"; static const signed char *t = s; const signed char *k(void) { return t; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("unsigned char *r(char *p) { return p; }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("long *a(unsigned long *p) { long *q = 0; q = p; return q; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("void g(char **pp) { unsigned char **qq = pp; (void)qq; }\n"), false, false, S8("cannot convert from 'char **' to 'unsigned char **': incompatible pointer types"), S8("-std=c17")},
+        {S8("void g(long *p) { unsigned long long *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("void g(const char *p) { unsigned char *q = p; (void)q; }\n"), false, false, S8("cannot convert from 'const char *' to 'unsigned char *'"), S8("-std=c17")},
+        {S8("void g(_Bool *p) { unsigned char *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("enum E { X }; void g(enum E *p) { unsigned *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("void g(char (*p)[3]) { unsigned char (*q)[3] = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("void g(int *p) { float *q = p; (void)q; }\n"), false, false, S8("cannot convert from 'int *' to 'float *': incompatible pointer types"), S8("-std=c17")},
         {S8("struct S { char name[8]; int x; }; struct S s = { { \"abc\" }, 1 };\n"), true, false, {0}, S8("-std=c17")},
         {S8("struct T { const unsigned char msg[4]; int n; }; static const struct T t[] = { { { \"ab\" }, 2 } };\n"), true, false, {0}, S8("-std=c17")},
         {S8("int g(void) { struct { unsigned char msg[8]; int n; } local = { { \"hello\" }, 5 }; return local.msg[4]; }\n"), true, false, {0}, S8("-std=c17")},
@@ -36134,6 +36313,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_early_exit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pointer_sign);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_default_cpu_model);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE && BUSTER_LINK_LIBC
