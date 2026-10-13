@@ -15,14 +15,14 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Show the queued compiler benchmark check / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | push / main | 1 | 1 | [series](series-cae1070a29eec6c4.md) |
 | Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 3 | 3 | [series](series-33e938f1f4be6999.md) |
 | Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 8 | 8 | [series](series-949519260b5e186d.md) |
-| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 15 | [series](series-310307db3edca5aa.md) |
+| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 16 | [series](series-310307db3edca5aa.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/3718-linear-assignment-chains | 0 | 1 | [series](series-b6ab01d48adccc95.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | pull&#95;request / codex/3718-linear-assignment-chains | 1 | 1 | [series](series-14737ec93a7921d1.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 13 | [series](series-11db6938aa621425.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 14 | [series](series-11db6938aa621425.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-f4bbd04e90bff00b.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 33 | 33 | [series](series-20369cc20c6b6e85.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 5 | 5 | [series](series-cf913efc1e8c2ba3.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 8 | 8 | [series](series-0571bc9f9540bac0.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 9 | 9 | [series](series-0571bc9f9540bac0.md) |
 | embedding / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-41a200aefd15954a.md) |
 | Linux x86-64 investigation evidence / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-c81ba1e5dd82bceb.md) |
 | Pinned baseline self-host fixed point / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/adoring-cori-qcgdvt | 1 | 1 | [series](series-a373342dfc7e3efe.md) |
