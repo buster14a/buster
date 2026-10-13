@@ -1,0 +1,1812 @@
+{
+  "schema": "buster-function-lanes-evidence-v1",
+  "baseline_revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+  "measured_source_revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+  "host": "AMD Ryzen 9 7940HS, Linux 7.2.9-2-cachyos, 16 logical CPUs",
+  "scope": "native-host elapsed time and resource evidence; no Zen 5 claim",
+  "cells": [
+    {
+      "name": "major-confirm-fast8",
+      "complete": true,
+      "runs": 20,
+      "warmup": 2,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -10.257%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=8",
+        "-fregister-allocator=fast",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.341496119999647,
+          "candidate_median": 2.1013386715021625,
+          "relative_change": -0.102565811,
+          "verdict": "improvement",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.249287,
+          "candidate_median": 2.4369734999999997,
+          "relative_change": 0.083442664,
+          "verdict": "regression",
+          "sign_test_p": 4.00543e-05
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.068633,
+          "candidate_median": 0.08202,
+          "relative_change": 0.195051943,
+          "verdict": "regression",
+          "sign_test_p": 0.00257683
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1075324.0,
+          "candidate_median": 1104390.0,
+          "relative_change": 0.027029993,
+          "verdict": "within-effect",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5236.0,
+          "candidate_median": 5466.0,
+          "relative_change": 0.043926662,
+          "verdict": "regression",
+          "sign_test_p": 4.00543e-05
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 129.0,
+          "candidate_median": 3763.0,
+          "relative_change": 28.170542636,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 112.5,
+          "candidate_median": 470.5,
+          "relative_change": 3.182222222,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        }
+      ]
+    },
+    {
+      "name": "major-confirm-quality8",
+      "complete": true,
+      "runs": 20,
+      "warmup": 2,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -14.861%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=8",
+        "-fregister-allocator=quality",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.358083944996906,
+          "candidate_median": 2.0076502730007633,
+          "relative_change": -0.148609498,
+          "verdict": "improvement",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.2654889999999996,
+          "candidate_median": 2.4001465,
+          "relative_change": 0.059438602,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.06479099999999999,
+          "candidate_median": 0.083205,
+          "relative_change": 0.28420614,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1067454.0,
+          "candidate_median": 1105158.0,
+          "relative_change": 0.035321428,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5227.5,
+          "candidate_median": 5499.0,
+          "relative_change": 0.051936872,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 156.0,
+          "candidate_median": 3840.0,
+          "relative_change": 23.615384615,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 102.5,
+          "candidate_median": 676.0,
+          "relative_change": 5.595121951,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        }
+      ]
+    },
+    {
+      "name": "major-few-large8",
+      "complete": true,
+      "runs": 20,
+      "warmup": 2,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -6.450%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=8",
+        "-nostdinc",
+        "-g",
+        "-c",
+        "few-large-functions.c",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 0.03179954299776,
+          "candidate_median": 0.029748558001301717,
+          "relative_change": -0.06449731,
+          "verdict": "improvement",
+          "sign_test_p": 0.0413895
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 0.025061,
+          "candidate_median": 0.0277415,
+          "relative_change": 0.10695902,
+          "verdict": "regression",
+          "sign_test_p": 0.0118179
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.004873,
+          "candidate_median": 0.009281,
+          "relative_change": 0.904576236,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 97782.0,
+          "candidate_median": 154832.0,
+          "relative_change": 0.583440715,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 531.0,
+          "candidate_median": 727.0,
+          "relative_change": 0.369114878,
+          "verdict": "regression",
+          "sign_test_p": 4.00543e-05
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 5.0,
+          "candidate_median": 72.0,
+          "relative_change": 13.4,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 4.5,
+          "candidate_median": 10.0,
+          "relative_change": 1.222222222,
+          "verdict": "regression",
+          "sign_test_p": 0.000518799
+        }
+      ]
+    },
+    {
+      "name": "major-population-fast8",
+      "complete": true,
+      "runs": 20,
+      "warmup": 2,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -13.386%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=8",
+        "-fregister-allocator=fast",
+        "-nostdinc",
+        "-g",
+        "-c",
+        "test-function-lanes160.c",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 0.0868940680011292,
+          "candidate_median": 0.07526200400025118,
+          "relative_change": -0.13386488,
+          "verdict": "improvement",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 0.07912899999999999,
+          "candidate_median": 0.0935185,
+          "relative_change": 0.181848627,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.005937,
+          "candidate_median": 0.0132795,
+          "relative_change": 1.236735725,
+          "verdict": "regression",
+          "sign_test_p": 4.00543e-05
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 145160.0,
+          "candidate_median": 185912.0,
+          "relative_change": 0.280738495,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 569.5,
+          "candidate_median": 846.5,
+          "relative_change": 0.486391572,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 18.0,
+          "candidate_median": 2133.5,
+          "relative_change": 117.527777778,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 6.5,
+          "candidate_median": 175.0,
+          "relative_change": 25.923076923,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        }
+      ]
+    },
+    {
+      "name": "major-population-quality8",
+      "complete": true,
+      "runs": 20,
+      "warmup": 2,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -13.983%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=8",
+        "-fregister-allocator=quality",
+        "-nostdinc",
+        "-g",
+        "-c",
+        "test-function-lanes160.c",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 0.08764771499772905,
+          "candidate_median": 0.0753920620009012,
+          "relative_change": -0.139828551,
+          "verdict": "improvement",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 0.0793885,
+          "candidate_median": 0.0970165,
+          "relative_change": 0.222047274,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.005958,
+          "candidate_median": 0.0134845,
+          "relative_change": 1.263259483,
+          "verdict": "regression",
+          "sign_test_p": 4.00543e-05
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 144182.0,
+          "candidate_median": 186082.0,
+          "relative_change": 0.29060493,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 706.0,
+          "candidate_median": 830.0,
+          "relative_change": 0.175637394,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 17.5,
+          "candidate_median": 2142.5,
+          "relative_change": 121.428571429,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 7.0,
+          "candidate_median": 161.5,
+          "relative_change": 22.071428571,
+          "verdict": "regression",
+          "sign_test_p": 1.90735e-06
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-fast1",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "inconclusive on wall_seconds (-1.578%): no native-runtime claim established",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=1",
+        "-fregister-allocator=fast",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.191350578501442,
+          "candidate_median": 2.1567705999987083,
+          "relative_change": -0.015780213,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.099154,
+          "candidate_median": 2.0650215000000003,
+          "relative_change": -0.016260122,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.07163749999999999,
+          "candidate_median": 0.0716515,
+          "relative_change": 0.000195428,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1075900.0,
+          "candidate_median": 1075182.0,
+          "relative_change": -0.000667348,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.34375
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5226.0,
+          "candidate_median": 5247.5,
+          "relative_change": 0.004114045,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 151.0,
+          "candidate_median": 158.0,
+          "relative_change": 0.046357616,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.179688
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 122.0,
+          "candidate_median": 86.0,
+          "relative_change": -0.295081967,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-fast16",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -12.423%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=16",
+        "-fregister-allocator=fast",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.195714264998969,
+          "candidate_median": 1.9229367045008985,
+          "relative_change": -0.124231811,
+          "verdict": "improvement",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.1027415,
+          "candidate_median": 2.3420005,
+          "relative_change": 0.113784314,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.06918949999999999,
+          "candidate_median": 0.1016975,
+          "relative_change": 0.469840077,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1075726.0,
+          "candidate_median": 1155662.0,
+          "relative_change": 0.074308885,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5229.5,
+          "candidate_median": 5583.5,
+          "relative_change": 0.067692896,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 157.5,
+          "candidate_median": 5734.0,
+          "relative_change": 35.406349206,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 27.0,
+          "candidate_median": 744.0,
+          "relative_change": 26.555555556,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-fast2",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -5.865%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=2",
+        "-fregister-allocator=fast",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.176455372500641,
+          "candidate_median": 2.0488095290020283,
+          "relative_change": -0.0586485,
+          "verdict": "improvement",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.0883545000000003,
+          "candidate_median": 2.110233,
+          "relative_change": 0.01047643,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.0661755,
+          "candidate_median": 0.0744845,
+          "relative_change": 0.125560064,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1075772.0,
+          "candidate_median": 1079670.0,
+          "relative_change": 0.003623444,
+          "verdict": "within-effect",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5198.5,
+          "candidate_median": 5389.0,
+          "relative_change": 0.036645186,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 157.5,
+          "candidate_median": 2063.0,
+          "relative_change": 12.098412698,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 120.0,
+          "candidate_median": 178.5,
+          "relative_change": 0.4875,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-fast4",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -7.141%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=4",
+        "-fregister-allocator=fast",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.2046978594989923,
+          "candidate_median": 2.0472569360026682,
+          "relative_change": -0.071411565,
+          "verdict": "improvement",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.1068179999999996,
+          "candidate_median": 2.209254,
+          "relative_change": 0.048621191,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.06909299999999999,
+          "candidate_median": 0.0797235,
+          "relative_change": 0.153857844,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1074754.0,
+          "candidate_median": 1087674.0,
+          "relative_change": 0.012021356,
+          "verdict": "within-effect",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5343.0,
+          "candidate_median": 5465.0,
+          "relative_change": 0.022833614,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 155.5,
+          "candidate_median": 3065.0,
+          "relative_change": 18.710610932,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 105.5,
+          "candidate_median": 262.0,
+          "relative_change": 1.483412322,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-quality1",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "inconclusive on wall_seconds (+0.315%): no native-runtime claim established",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=1",
+        "-fregister-allocator=quality",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.402004773502995,
+          "candidate_median": 2.409570868498122,
+          "relative_change": 0.003149908,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.34375
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.313973,
+          "candidate_median": 2.3208585,
+          "relative_change": 0.002975618,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.34375
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.0661345,
+          "candidate_median": 0.0651645,
+          "relative_change": -0.01466708,
+          "verdict": "inconclusive",
+          "sign_test_p": 1
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1067544.0,
+          "candidate_median": 1066718.0,
+          "relative_change": -0.000773739,
+          "verdict": "within-effect",
+          "sign_test_p": 0.0214844
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5269.5,
+          "candidate_median": 5314.0,
+          "relative_change": 0.008444824,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 145.0,
+          "candidate_median": 153.0,
+          "relative_change": 0.055172414,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.34375
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 62.0,
+          "candidate_median": 83.5,
+          "relative_change": 0.346774194,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.109375
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-quality16",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -14.849%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=16",
+        "-fregister-allocator=quality",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.290713792997849,
+          "candidate_median": 1.9505692710008589,
+          "relative_change": -0.148488442,
+          "verdict": "improvement",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.19088,
+          "candidate_median": 2.5704775,
+          "relative_change": 0.17326257,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.067856,
+          "candidate_median": 0.09865,
+          "relative_change": 0.453813959,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1067500.0,
+          "candidate_median": 1194588.0,
+          "relative_change": 0.119051991,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5192.0,
+          "candidate_median": 5692.5,
+          "relative_change": 0.096398305,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 151.5,
+          "candidate_median": 5745.5,
+          "relative_change": 36.924092409,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 91.5,
+          "candidate_median": 756.5,
+          "relative_change": 7.267759563,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-quality2",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -5.387%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=2",
+        "-fregister-allocator=quality",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.391997396003717,
+          "candidate_median": 2.2631319944994175,
+          "relative_change": -0.053873554,
+          "verdict": "improvement",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.2951284999999997,
+          "candidate_median": 2.3955815,
+          "relative_change": 0.04376792,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.068202,
+          "candidate_median": 0.070363,
+          "relative_change": 0.031685288,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1066528.0,
+          "candidate_median": 1073760.0,
+          "relative_change": 0.006780882,
+          "verdict": "within-effect",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5378.0,
+          "candidate_median": 5358.0,
+          "relative_change": -0.003718855,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 154.5,
+          "candidate_median": 2052.0,
+          "relative_change": 12.281553398,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 83.0,
+          "candidate_median": 124.0,
+          "relative_change": 0.493975904,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.34375
+        }
+      ]
+    },
+    {
+      "name": "major-scaling-quality4",
+      "complete": true,
+      "runs": 10,
+      "warmup": 1,
+      "result": "native runtime improvement validated on this host and workload (wall_seconds -12.061%); not transferable to Zen 5",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=4",
+        "-fregister-allocator=quality",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g",
+        "src/buster/apps/ide/ide.c",
+        "-lm",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 2.325330193998525,
+          "candidate_median": 2.044875396997668,
+          "relative_change": -0.12060859,
+          "verdict": "improvement",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 2.2420774999999997,
+          "candidate_median": 2.2943404999999997,
+          "relative_change": 0.023310077,
+          "verdict": "within-effect",
+          "sign_test_p": 0.0214844
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.0591065,
+          "candidate_median": 0.074519,
+          "relative_change": 0.260758123,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 1067526.0,
+          "candidate_median": 1085098.0,
+          "relative_change": 0.016460489,
+          "verdict": "within-effect",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 5235.0,
+          "candidate_median": 5535.0,
+          "relative_change": 0.05730659,
+          "verdict": "regression",
+          "sign_test_p": 0.0214844
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 152.5,
+          "candidate_median": 3053.0,
+          "relative_change": 19.019672131,
+          "verdict": "regression",
+          "sign_test_p": 0.00195312
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 129.5,
+          "candidate_median": 279.0,
+          "relative_change": 1.154440154,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.753906
+        }
+      ]
+    },
+    {
+      "name": "major-small8",
+      "complete": true,
+      "runs": 20,
+      "warmup": 2,
+      "result": "inconclusive on wall_seconds (+0.305%): no native-runtime claim established",
+      "baseline": {
+        "path": "../bin/ide-major-base",
+        "sha256": "a03b88537b7ba2ebe11003e4c3593df30abd990dd4f7f8eacc34af7472b2b553",
+        "revision": "de6eea9f7f0c97b221a9171fe159a85ec8c4b682",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate": {
+        "path": "../bin/ide-major-final",
+        "sha256": "e8e15ce53095af20c3c51aafb772d084ae844cd721f81885b54dcebe92e50e8d",
+        "revision": "14eae53800ad41b42a72c1c86ce33619679242b8",
+        "processes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "arguments": [
+        "cc",
+        "-fcompile-jobs=8",
+        "-g",
+        "tests/basic_c_call_abi.c",
+        "-o",
+        "../evidence/major-timing-output"
+      ],
+      "metrics": [
+        {
+          "name": "wall_seconds",
+          "baseline_median": 0.0064642645011190325,
+          "candidate_median": 0.006483956996817142,
+          "relative_change": 0.003046363,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.823803
+        },
+        {
+          "name": "user_seconds",
+          "baseline_median": 0.0019715,
+          "candidate_median": 0.001856,
+          "relative_change": -0.058584834,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.823803
+        },
+        {
+          "name": "system_seconds",
+          "baseline_median": 0.0036765,
+          "candidate_median": 0.0039995,
+          "relative_change": 0.087855297,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.115318
+        },
+        {
+          "name": "max_rss_kib",
+          "baseline_median": 55078.0,
+          "candidate_median": 53764.0,
+          "relative_change": -0.023857075,
+          "verdict": "within-effect",
+          "sign_test_p": 0.00257683
+        },
+        {
+          "name": "minor_faults",
+          "baseline_median": 504.0,
+          "candidate_median": 640.0,
+          "relative_change": 0.26984127,
+          "verdict": "regression",
+          "sign_test_p": 0.0192108
+        },
+        {
+          "name": "major_faults",
+          "baseline_median": 0.0,
+          "candidate_median": 0.0,
+          "relative_change": 0.0,
+          "verdict": "within-effect",
+          "sign_test_p": 1
+        },
+        {
+          "name": "voluntary_switches",
+          "baseline_median": 2.0,
+          "candidate_median": 2.0,
+          "relative_change": 0.0,
+          "verdict": "inconclusive",
+          "sign_test_p": 1
+        },
+        {
+          "name": "involuntary_switches",
+          "baseline_median": 0.0,
+          "candidate_median": 0.5,
+          "relative_change": 1.0,
+          "verdict": "inconclusive",
+          "sign_test_p": 0.774414
+        }
+      ]
+    }
+  ],
+  "production_source_sha256": "2b2f67529bdba1dd0b64808e5ff3d28f899007f6bf5276a916e78fda8765ba51",
+  "retained_local_subjects": [
+    "/home/david/Documents/Codex/2026-10-13/opti/work/bin/ide-major-base",
+    "/home/david/Documents/Codex/2026-10-13/opti/work/bin/ide-major-final"
+  ]
+}

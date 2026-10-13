@@ -186,6 +186,10 @@ estimate. The verbose `CODEGEN_LANES function_workers=N` line reports the
 largest actual function gang, separately from `compilation_workers`, which
 continues to describe translation-unit cohorts.
 
+The driver prewarms the native family before starting function lanes. An
+embedding pipeline that invokes frontend APIs after its own gang must use
+`compiler_parallel_prewarm()` before that gang, as described below.
+
 Each worker shares immutable canonical rows and the machine type projection,
 with private ABI classification pages, call-signature plans and source cursor.
 A bounded cohort has at most four pending functions per requested lane and
