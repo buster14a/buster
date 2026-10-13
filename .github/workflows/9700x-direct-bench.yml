@@ -24,7 +24,10 @@ run-name: '9700X request ${{ github.event.workflow_run.id }}.${{ github.event.wo
 # (checks: read finds the nearest measured ancestor); main is trusted code, so
 # no author gate applies. compare builds and times both compilers; the hosted
 # publish-compiler job validates the evidence as data and completes the check.
-# Merging never waits for it, and the verdict is report-only.
+# Merging never waits for it, and the verdict is report-only. When the
+# range since an actual measurement is proven unchanged (#3923,
+# docs/compiler-main-unchanged-skip.md), compare is not allocated and
+# publish-compiler completes the check as neutral "Not measured".
 #
 # Visibility (#2803, #2804): 9700x-compiler-request.yml creates the queued
 # "9700X compiler benchmark" check before this run exists; the hosted
@@ -1466,6 +1469,15 @@ jobs:
       main_route_data: ${{ steps.verify.outputs.main_route_data }}
       main_facts_data: ${{ steps.verify.outputs.main_facts_data }}
       main_identity_data: ${{ steps.verify.outputs.main_identity_data }}
+      # #3923: 'true' only when the native classifier itself succeeded and
+      # proved the range since an actual measurement unchanged; anything
+      # else, including an error or a rollback, measures.
+      unchanged: ${{ steps.unchanged.outcome == 'success' && steps.unchanged.outputs.unchanged == 'true' && 'true' || 'false' }}
+      unchanged_receipt: ${{ steps.unchanged.outputs.receipt }}
+      classification_ms: ${{ steps.unchanged.outputs.classification_ms }}
+      base_measured: ${{ steps.verify.outputs.base_measured }}
+      reference_check_url: ${{ steps.verify.outputs.reference_check_url }}
+      reference_measured_at: ${{ steps.verify.outputs.reference_measured_at }}
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1515,6 +1527,69 @@ jobs:
           BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/authorize_compiler.py
+      # #3923 (docs/compiler-main-unchanged-skip.md): a bounded hosted
+      # decision before any 9700X allocation. Only an actual measured baseline
+      # on the non-owned route is classified, by this trusted revision's
+      # native classifier over commits and trees fetched as data. A failure
+      # or timeout here leaves `unchanged` false, which measures as before;
+      # BENCH_COMPILER_UNCHANGED_SKIP=false is the trusted rollback.
+      - name: Fetch the measured range as data
+        id: range
+        if: ${{ vars.BENCH_COMPILER_UNCHANGED_SKIP != 'false' && steps.verify.outputs.base_measured == 'true' && steps.verify.outputs.main_owned != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        env:
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          SOURCE_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ steps.verify.outputs.base }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          POLICY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
+          git init --quiet --bare "$RUNNER_TEMP/unchanged-candidate"
+          authorization=$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 -w0)
+          echo "::add-mask::$authorization"
+          # The classifier searches 128 first-parent commits; a reference
+          # beyond this shallow boundary is never found, which measures.
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$SOURCE_URL/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization" \
+            git -C "$RUNNER_TEMP/unchanged-candidate" fetch --quiet --no-tags --no-write-fetch-head \
+            --depth=130 --filter=blob:none "$SOURCE_URL" "$HEAD_SHA" "$BASE_SHA" "$POLICY_SHA"
+      - name: Classify the measured range
+        id: unchanged
+        if: ${{ steps.range.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.verify.outputs.base }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          POLICY_SHA: ${{ github.sha }}
+          STARTED_NS: ${{ steps.range.outputs.started_ns }}
+          # A missing commit or tree fails the bounded Git capture and measures.
+          GIT_NO_LAZY_FETCH: '1'
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$POLICY_SHA" ]]
+          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/unchanged-driver"
+          env -u GITHUB_OUTPUT "$RUNNER_TEMP/unchanged-driver" ci_no_code --repo "$RUNNER_TEMP/unchanged-candidate" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --tested "$HEAD_SHA" --policy "$POLICY_SHA" --event main_push \
+            > "$RUNNER_TEMP/unchanged-plan.json"
+          receipt=$(cat "$RUNNER_TEMP/unchanged-plan.json")
+          [[ "$receipt" == '{"schema":"buster-ci-main-unchanged-v1",'*'}' && "$receipt" != *$'\n'* ]]
+          unchanged=false
+          if [[ "$receipt" == *'"unchanged":true,'* ]]; then unchanged=true; fi
+          elapsed_ms=$(( ($(date +%s%N) - STARTED_NS) / 1000000 ))
+          {
+            echo '### Unchanged-input classification (#3923)'
+            echo
+            echo "$receipt"
+            echo
+            echo "Observed hosted classification time: ${elapsed_ms} ms."
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf 'receipt=%s\nclassification_ms=%s\nunchanged=%s\n' "$receipt" "$elapsed_ms" "$unchanged" >> "$GITHUB_OUTPUT"
 
   # Display only (#2803, #3209): reconciles earlier open checks and adopts
   # the queued request check in one pass. Native Actions job state shows
@@ -1564,12 +1639,14 @@ jobs:
           BQ_RUN_ID: ${{ github.run_id }}
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
           BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_UNCHANGED: ${{ needs.authorize-compiler.outputs.unchanged }}
         run: python3 -B tools/bench_direct/compiler_github.py start
 
+  # A proven unchanged-input request (#3923) never allocates this job.
   compare:
     name: Compare the main commit compiler
     needs: authorize-compiler
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize-compiler.outputs.attempt == format('{0}', github.run_attempt) }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize-compiler.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize-compiler.outputs.unchanged != 'true' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -1765,9 +1842,11 @@ jobs:
           retention-days: 90
 
   # Hosted and credentialed: independently validates the exact original attempt.
+  # Also after start-compiler, so its late adoption never follows a terminal
+  # result; the check writer never reopens a completed check either way.
   publish-compiler:
     name: Publish the compiler benchmark check
-    needs: [authorize-compiler, compare]
+    needs: [authorize-compiler, start-compiler, compare]
     if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
     runs-on: ubuntu-24.04
     permissions:
@@ -1845,6 +1924,12 @@ jobs:
           BQ_HEAD_TREE: ${{ needs.authorize-compiler.outputs.head_tree }}
           BQ_FIRST_PARENT: ${{ needs.authorize-compiler.outputs.first_parent }}
           BQ_RANGE: ${{ needs.authorize-compiler.outputs.range }}
+          BQ_UNCHANGED: ${{ needs.authorize-compiler.outputs.unchanged }}
+          BQ_UNCHANGED_RECEIPT: ${{ needs.authorize-compiler.outputs.unchanged_receipt }}
+          BQ_CLASSIFICATION_MS: ${{ needs.authorize-compiler.outputs.classification_ms }}
+          BQ_BASE_MEASURED: ${{ needs.authorize-compiler.outputs.base_measured }}
+          BQ_REFERENCE_CHECK_URL: ${{ needs.authorize-compiler.outputs.reference_check_url }}
+          BQ_REFERENCE_MEASURED_AT: ${{ needs.authorize-compiler.outputs.reference_measured_at }}
           BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}
           BQ_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/compiler_publish.py

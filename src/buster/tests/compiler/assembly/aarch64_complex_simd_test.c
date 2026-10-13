@@ -5,156 +5,11 @@
 
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 
-static Target a64_complex_simd_test_target(void)
-{
-    return (Target){.cpu_arch = CPU_ARCH_AARCH64,
-                    .cpu_model = CPU_MODEL_A64_APPLE_M1,
-                    .os = OPERATING_SYSTEM_MACOS,
-                    .cpu_features_explicit = true,
-                    .cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1)};
-}
-
-static u32 a64_complex_simd_audit_mix(u32 value)
-{
-    value ^= value >> 16;
-    value *= UINT32_C(0x7feb352d);
-    value ^= value >> 15;
-    value *= UINT32_C(0x846ca68b);
-    return value ^ (value >> 16);
-}
-
-static bool a64_complex_simd_audit_word(Target target, u32 row_index, u64 digest, u32 canonical_index, u32 word, u32* first_word)
-{
-    BusterAarch64CanonicalDecodeResult canonical = {0};
-    if (buster_aarch64_canonical_decode(target, word, &canonical) != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS || canonical.form_index != canonical_index ||
-        canonical.arm_row_digest != digest)
-    {
-        return false;
-    }
-    BusterA64ComplexSIMDResult typed = {0};
-    if (buster_a64_complex_simd_decode_row(target, row_index, word, &typed) != BUSTER_A64_SIMD_STATUS_OK)
-    {
-        return false;
-    }
-    BusterA64ComplexSIMDInstruction instruction = {.row_index = row_index, .operand_count = (u8)typed.operand_count};
-    instruction.raw_fields_valid = typed.raw_fields_valid;
-    instruction.raw_fields = typed.raw_fields;
-    for (u32 index = 0; index < typed.operand_count; index += 1)
-    {
-        instruction.operands[index] = typed.operands[index];
-    }
-    u32 reencoded = 0;
-    if (buster_a64_complex_simd_encode(target, &instruction, &reencoded) != BUSTER_A64_SIMD_STATUS_OK || reencoded != word)
-    {
-        return false;
-    }
-    if (first_word && *first_word == UINT32_MAX)
-    {
-        *first_word = word;
-    }
-    return true;
-}
-
-static bool a64_complex_simd_audit_try_word(Target target, u32 row_index, u64 digest, u32 canonical_index, u32 word, u32* tried, u32* tried_count,
-                                           u32* legal_count, u32* first_word)
-{
-    if (!tried || !tried_count || !legal_count || *tried_count >= 1024u)
-    {
-        return false;
-    }
-    for (u32 index = 0; index < *tried_count; index += 1)
-    {
-        if (tried[index] == word)
-        {
-            return true;
-        }
-    }
-    tried[*tried_count] = word;
-    *tried_count += 1;
-    if (a64_complex_simd_audit_word(target, row_index, digest, canonical_index, word, first_word))
-    {
-        *legal_count += 1;
-    }
-    return true;
-}
-
-static bool a64_complex_simd_audit_row(Target target, u32 row_index, BusterA64SIMDRowInfo row, u32 canonical_index, BusterAarch64CanonicalFormInfo canonical,
-                                       u32* legal_count, u32* first_word)
-{
-    if (!legal_count || !first_word || canonical.field_count > 32)
-    {
-        return false;
-    }
-    *legal_count = 0;
-    *first_word = UINT32_MAX;
-    u32 base_fields[32] = {0};
-    if (!buster_aarch64_canonical_raw_decode(canonical_index, canonical.representative_word, base_fields, canonical.field_count))
-    {
-        return false;
-    }
-    u32 tried[1024] = {0};
-    u32 tried_count = 0;
-    a64_complex_simd_audit_try_word(target, row_index, row.source_digest, canonical_index, canonical.representative_word, tried, &tried_count, legal_count,
-                                   first_word);
-    for (u32 field_index = 0; field_index < canonical.field_count; field_index += 1)
-    {
-        BusterAarch64CanonicalFieldInfo field = {0};
-        if (!buster_aarch64_canonical_field(canonical_index, field_index, &field) || field.width == 0)
-        {
-            return false;
-        }
-        u32 maximum = field.source_mask;
-        u32 samples[16] = {0};
-        u32 sample_count = 0;
-        if (field.width <= 4)
-        {
-            maximum = field.width == 32 ? UINT32_MAX : ((UINT32_C(1) << field.width) - 1u);
-            for (u32 value = 0; value <= maximum; value += 1)
-            {
-                samples[sample_count++] = value;
-            }
-        }
-        else
-        {
-            samples[sample_count++] = base_fields[field_index];
-            samples[sample_count++] = 0;
-            samples[sample_count++] = maximum;
-            if (base_fields[field_index] != 0)
-            {
-                samples[sample_count++] = base_fields[field_index] - 1;
-            }
-            if (base_fields[field_index] != maximum)
-            {
-                samples[sample_count++] = base_fields[field_index] + 1;
-            }
-            for (u32 random_index = 0; random_index < 4; random_index += 1)
-            {
-                samples[sample_count++] = a64_complex_simd_audit_mix(row_index * 131u + field_index * 17u + random_index) & maximum;
-            }
-        }
-        for (u32 sample_index = 0; sample_index < sample_count; sample_index += 1)
-        {
-            u32 candidate_fields[32] = {0};
-            for (u32 index = 0; index < canonical.field_count; index += 1)
-            {
-                candidate_fields[index] = base_fields[index];
-            }
-            candidate_fields[field_index] = samples[sample_index];
-            u32 word = 0;
-            if (buster_aarch64_canonical_raw_encode(canonical_index, candidate_fields, canonical.field_count, &word))
-            {
-                a64_complex_simd_audit_try_word(target, row_index, row.source_digest, canonical_index, word, tried, &tried_count, legal_count, first_word);
-            }
-        }
-    }
-    return true;
-}
-
 UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
-    Target target = a64_complex_simd_test_target();
+    Target target = aarch64_simd_test_target();
     BUSTER_TEST(arguments, buster_a64_complex_simd_schema_version() == 1);
     BUSTER_TEST(arguments, buster_a64_complex_simd_row_count() == 345);
     BUSTER_TEST(arguments, buster_a64_complex_simd_transform_row_count() == 206);
@@ -208,8 +63,8 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
         {
             u32 legal_count = 0;
             binding_word = UINT32_MAX;
-            if (!a64_complex_simd_audit_row(target, row_index, binding_row, canonical_index, binding_form, &legal_count, &binding_word) || legal_count == 0 ||
-                binding_word == UINT32_MAX ||
+            if (!aarch64_simd_test_audit_row(target, true, row_index, binding_row, canonical_index, binding_form, &legal_count, &binding_word) ||
+                legal_count == 0 || binding_word == UINT32_MAX ||
                 buster_a64_complex_simd_decode_row(target, row_index, binding_word, &binding_decoded) != BUSTER_A64_SIMD_STATUS_OK)
             {
                 arrangement_bindings_ok = false;
@@ -273,7 +128,8 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
                      audit_semantic_form.source_digest == audit_row.source_digest;
         u32 legal_count = 0;
         u32 first_legal_word = UINT32_MAX;
-        bool row_audited = row_found && a64_complex_simd_audit_row(target, audit_index, audit_row, canonical_index, audit_form, &legal_count, &first_legal_word);
+        bool row_audited =
+            row_found && aarch64_simd_test_audit_row(target, true, audit_index, audit_row, canonical_index, audit_form, &legal_count, &first_legal_word);
         audit_join = audit_join && row_audited;
         if (legal_count != 0)
         {
@@ -426,9 +282,9 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
                              buster_aarch64_canonical_form_by_digest(fixed_h_row.source_digest, &fixed_h_canonical_index, &fixed_h_canonical);
     u32 fixed_h_word = UINT32_MAX;
     u32 fixed_h_legal_count = 0;
-    bool fixed_h_word_found = fixed_h_row_found &&
-        a64_complex_simd_audit_row(target, 112, fixed_h_row, fixed_h_canonical_index, fixed_h_canonical,
-                                   &fixed_h_legal_count, &fixed_h_word) &&
+    bool fixed_h_word_found =
+        fixed_h_row_found &&
+        aarch64_simd_test_audit_row(target, true, 112, fixed_h_row, fixed_h_canonical_index, fixed_h_canonical, &fixed_h_legal_count, &fixed_h_word) &&
         fixed_h_legal_count != 0 && fixed_h_word != UINT32_MAX;
     BusterA64ComplexSIMDResult fixed_h_decoded = {0};
     bool fixed_h_decoded_ok = fixed_h_word_found &&

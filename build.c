@@ -19297,6 +19297,9 @@ BUSTER_GLOBAL_LOCAL QuickjsCommonFlags quickjs_common_flags(Arena* arena, String
 
 BUSTER_GLOBAL_LOCAL void quickjs_append_common_flags(OsArgumentBuilder* builder, QuickjsCommonFlags flags)
 {
+    // Upstream uses the host compiler GNU dialect, including bare asm in
+    // cpu_pause. Select it for both compilers instead of inheriting ISO mode.
+    os_argument_builder_append(builder, S8("-std=gnu17"));
     os_argument_builder_append(builder, flags.include);
     os_argument_builder_append(builder, S8("-D_GNU_SOURCE"));
     os_argument_builder_append(builder, flags.version);

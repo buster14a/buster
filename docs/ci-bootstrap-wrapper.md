@@ -191,13 +191,21 @@ for the invoking test process's lifetime. This retains the existing helper's
 `launch`, `drain`, `fixture` and `selftest` protocols.
 `bootstrap_process_owner_test` also builds and runs the standalone native
 deadline controls, under the same flags and a single 60-second deadline.
-When a native deadline control returns an unexpected code, it prints one
-`WINDOWS_PROCESS_TREE_TEST_CONTEXT` line before the original assertion. The
-test-only snapshot retains the runtime and cleanup deadlines, cleanup and
-publication timestamps, clock validity, and the first failed publication
-operation with its immediate Win32 error when available. Diagnostic clock
-sampling uses a copy of the owner's state; the status record, return-code
-rules, assertions and cleanup allowance are unchanged.
+The startup-cancellation control creates its cancel file synchronously after
+job establishment and before the pre-root cancellation check. This test-only
+hook covers both QPC and tick clocks without racing a writer process against a
+startup delay. The production owner checks cancellation at startup boundaries;
+the artificial startup delay is only a deadline-test hook, not a production
+wait requiring polling.
+When any native deadline-control assertion fails or the control returns an
+unexpected code, it prints `WINDOWS_PROCESS_TREE_TEST_CONTEXT` and
+`WINDOWS_PROCESS_TREE_TEST_STATUS` after the case assertions. The test-only
+snapshot retains the root PID, cancel-observed time, runtime and cleanup
+deadlines, cleanup and publication timestamps, clock validity, and the first
+failed publication operation with its immediate Win32 error when available.
+The status line includes the recorded JSON, or an explicit missing marker.
+Diagnostic clock sampling uses a copy of the owner's state; the production
+status schema, return-code rules and cleanup allowance are unchanged.
 
 CI bootstraps `build.c` with hosted image Clang under the documented exception,
 runs the native control command in the workflow-tools and bootstrap-wrapper

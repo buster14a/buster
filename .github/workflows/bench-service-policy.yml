@@ -86,6 +86,7 @@ jobs:
           python3 -B tools/bench_direct/authorize_test.py
           python3 -B tools/bench_direct/compiler_github_clock_test.py
           python3 -B tools/bench_direct/authorize_compiler_test.py
+          python3 -B tools/bench_direct/compiler_unchanged_test.py
           python3 -B tools/bench_direct/sampling_qualification_test.py
           python3 -B tools/bench_direct/sampling_publish_test.py
           PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py -v

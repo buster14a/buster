@@ -34586,7 +34586,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         }
         if (arrow)
         {
-            if (value->kind != IR_TYPE_POINTER)
+            // The left operand undergoes array-to-pointer conversion before
+            // -> selects a member, including an array reached in this chain.
+            if (value->kind != IR_TYPE_POINTER && value->kind != IR_TYPE_ARRAY)
             {
                 return false;
             }

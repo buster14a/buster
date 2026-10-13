@@ -647,11 +647,17 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
         module->inline_proven = 0;
         IrInlineOptions options = program->inline_options;
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
-        if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
-        if (!options.max_call_sites) options.max_call_sites = IR_INLINE_CALL_SITES;
         if (!options.caller_growth_shift) options.caller_growth_shift = IR_INLINE_CALLER_GROWTH_SHIFT;
         if (options.caller_growth_shift > 32u) options.caller_growth_shift = 32u;
         program->inline_options = options;
+        // Zero row/site limits keep required expansion under the independent work
+        // and storage guards, rather than the optional profitability caps.
+        // Preserve zero in the program so later modules use the same policy.
+        u32 required_function_growth = options.max_function_growth ? options.max_function_growth : UINT32_MAX;
+        u32 required_module_growth = options.max_module_growth ? options.max_module_growth : UINT32_MAX;
+        u32 required_call_sites = options.max_call_sites ? options.max_call_sites : UINT32_MAX;
+        if (!options.max_call_sites) options.max_call_sites = IR_INLINE_CALL_SITES;
+        if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
         bool has_required = false;
         for (u32 symbol = 0; symbol < program->symbols.count; symbol += 1)
         {
@@ -762,7 +768,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                 }
                 u64 module_growth = 0;
-                u64 module_storage = 0;
                 u64 total_work = module->inlining.visits;
                 u64 total_copies = 0;
                 u32* function_growth_used = arena_allocate(arena, u32, count ? count : 1u);
@@ -789,6 +794,37 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         module->inlining.budget_skips += 1;
                         continue;
                     }
+                    u64 caller_work_limit = IR_FAST_WORK_BUDGET;
+                    u64 caller_storage_limit = IR_FAST_SCRATCH_BUDGET;
+                    if (phase == 0)
+                    {
+                        // Required expansion must relocate the caller's existing
+                        // tables/snapshots. Allow that input-proportional cost
+                        // once, plus the fixed allowance for expansion itself.
+                        u64 relocation_work = ir_inline_reserve_work(caller, 1u, 1u, 1u, 1u, 0);
+                        u64 relocation_bytes = ir_inline_reserve_bytes(caller, 1u, 1u, 1u, 1u, 0);
+                        relocation_work = ir_inline_storage_add(relocation_work,
+                            ir_inline_cfg_table_growth_work(caller,
+                                caller->block_count, (u64)caller->block_count + 1u,
+                                caller->instruction_count, (u64)caller->instruction_count + 1u,
+                                caller->value_count, (u64)caller->value_count + 1u,
+                                caller->extra_count, (u64)caller->extra_count + 1u));
+                        relocation_bytes = ir_inline_storage_add(relocation_bytes,
+                            ir_inline_cfg_table_growth_bytes(caller,
+                                caller->block_count, (u64)caller->block_count + 1u,
+                                caller->instruction_count, (u64)caller->instruction_count + 1u,
+                                caller->value_count, (u64)caller->value_count + 1u,
+                                caller->extra_count, (u64)caller->extra_count + 1u));
+                        caller_work_limit = ir_inline_storage_add(caller_work_limit, relocation_work);
+                        caller_storage_limit = ir_inline_storage_add(caller_storage_limit, relocation_bytes);
+                    }
+                    if (phase == 0)
+                    {
+                        // Graph planning stays module-wide. Expansion bounds
+                        // each caller, as FAST does, so an earlier intrinsic
+                        // consumer cannot exhaust a later caller's allowance.
+                        total_work = 0;
+                    }
                     if (phase == 1)
                     {
                         // Optional selection bounds work per caller, as FAST
@@ -797,10 +833,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, caller->block_count);
                         bool possible_tiny_call = false;
                         u64 recursive_sites = 0;
-                        bool caller_scan_exhausted = total_work > IR_FAST_WORK_BUDGET;
+                        bool caller_scan_exhausted = total_work > caller_work_limit;
                         // Rows and callee scans share one running count, added
                         // to total_work and visits once after the scan.
-                        u64 scan_budget = IR_FAST_WORK_BUDGET - BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET);
+                        u64 scan_budget = caller_work_limit - BUSTER_MIN(total_work, (u64)caller_work_limit);
                         u64 scan_used = 0;
                         for (u32 block = 0; block < caller->block_count && !possible_tiny_call && !caller_scan_exhausted; block += 1)
                         {
@@ -866,13 +902,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         }
                     }
                     u64 caller_plan_work = (u64)caller->instruction_count + caller->block_count;
-                    if (caller_plan_work > IR_FAST_WORK_BUDGET - BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET))
+                    if (caller_plan_work > caller_work_limit - BUSTER_MIN(total_work, (u64)caller_work_limit))
                     {
                         module->inlining.budget_skips += 1;
                         if (phase == 0)
                         {
                             ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                ir_inline_storage_add(total_work, caller_plan_work), IR_FAST_WORK_BUDGET);
+                                ir_inline_storage_add(total_work, caller_plan_work), caller_work_limit);
                         }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
@@ -933,7 +969,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         }
                         total_work = ir_inline_storage_add(total_work, block_work);
                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, block_work);
-                        if (total_work > IR_FAST_WORK_BUDGET)
+                        if (total_work > caller_work_limit)
                         {
                             caller_preflight_exhausted = true;
                             break;
@@ -945,7 +981,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             caller_phi_units = ir_inline_storage_add(caller_phi_units, parameter_work);
                             total_work = ir_inline_storage_add(total_work, parameter_work);
                             module->inlining.visits = ir_inline_storage_add(module->inlining.visits, parameter_work);
-                            if (total_work > IR_FAST_WORK_BUDGET) caller_preflight_exhausted = true;
+                            if (total_work > caller_work_limit) caller_preflight_exhausted = true;
                         }
                     }
                     if (caller_preflight_exhausted)
@@ -954,7 +990,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         if (phase == 0)
                         {
                             ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                total_work, IR_FAST_WORK_BUDGET);
+                                total_work, caller_work_limit);
                         }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
@@ -967,7 +1003,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     u32 function_growth = function_growth_used[caller_index];
                     u64 function_storage = function_storage_used[caller_index];
                     u64 module_growth_before = module_growth;
-                    u64 module_storage_before = module_storage;
                     u64 total_copies_before = total_copies;
                     u64 function_projected_units = 0;
                     u64 function_projected_blocks = 0;
@@ -980,14 +1015,14 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     u64 function_projected_scopes = 0;
                     u32 function_sites = function_sites_used[caller_index];
                     u64 caller_main_scan = ir_inline_storage_add(original_instructions, original_blocks);
-                    if (caller_main_scan > IR_FAST_WORK_BUDGET -
-                                               BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET))
+                    if (caller_main_scan > caller_work_limit -
+                                               BUSTER_MIN(total_work, (u64)caller_work_limit))
                     {
                         module->inlining.budget_skips += 1;
                         if (phase == 0)
                         {
                             ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                ir_inline_storage_add(total_work, caller_main_scan), IR_FAST_WORK_BUDGET);
+                                ir_inline_storage_add(total_work, caller_main_scan), caller_work_limit);
                         }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
@@ -1053,8 +1088,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 u64 tiny_work_with_caller_rows =
                                     ir_inline_storage_add(total_work, caller_rows_remaining);
                                 if (tiny_scan_work >
-                                    IR_FAST_WORK_BUDGET -
-                                        BUSTER_MIN(tiny_work_with_caller_rows, (u64)IR_FAST_WORK_BUDGET))
+                                    caller_work_limit -
+                                        BUSTER_MIN(tiny_work_with_caller_rows, (u64)caller_work_limit))
                                 {
                                     module->inlining.budget_skips += 1;
                                     continue;
@@ -1088,7 +1123,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             for (u32 row_id = 0; row_id < callee->instruction_count && !callee_scan_exhausted; row_id += 1)
                             {
                                 u64 reserved_work = ir_inline_storage_add(total_work, caller_rows_remaining);
-                                if (reserved_work >= IR_FAST_WORK_BUDGET)
+                                if (reserved_work >= caller_work_limit)
                                 {
                                     callee_scan_demand = ir_inline_storage_add(reserved_work, 1u);
                                     callee_scan_exhausted = true;
@@ -1099,8 +1134,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 payload = ir_inline_storage_add(payload, source->target_count);
                                 payload = ir_inline_storage_add(payload, source->immediate_count);
                                 u64 scan_work = ir_inline_storage_add(payload, 1u);
-                                if (scan_work > IR_FAST_WORK_BUDGET -
-                                                    BUSTER_MIN(reserved_work, (u64)IR_FAST_WORK_BUDGET))
+                                if (scan_work > caller_work_limit -
+                                                    BUSTER_MIN(reserved_work, (u64)caller_work_limit))
                                 {
                                     callee_scan_demand = ir_inline_storage_add(reserved_work, scan_work);
                                     callee_scan_exhausted = true;
@@ -1112,7 +1147,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 callee_target_units = ir_inline_storage_add(callee_target_units, source->target_count);
                                 callee_return_units =
                                     ir_inline_storage_add(callee_return_units, source->opcode == IR_OPCODE_RETURN ? 1u : 0u);
-                                if (total_work > IR_FAST_WORK_BUDGET)
+                                if (total_work > caller_work_limit)
                                 {
                                     callee_scan_demand = total_work;
                                     callee_scan_exhausted = true;
@@ -1121,7 +1156,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             for (u32 block_id = 0; block_id < callee->block_count && !callee_scan_exhausted; block_id += 1)
                             {
                                 u64 reserved_work = ir_inline_storage_add(total_work, caller_rows_remaining);
-                                if (reserved_work >= IR_FAST_WORK_BUDGET - 1u)
+                                if (reserved_work >= caller_work_limit - 1u)
                                 {
                                     callee_scan_demand = ir_inline_storage_add(reserved_work, 2u);
                                     callee_scan_exhausted = true;
@@ -1134,16 +1169,16 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 {
                                     u64 reserved_parameter_work =
                                         ir_inline_storage_add(total_work, caller_rows_remaining);
-                                    if (reserved_parameter_work >= IR_FAST_WORK_BUDGET)
+                                    if (reserved_parameter_work >= caller_work_limit)
                                     {
                                         callee_scan_demand = ir_inline_storage_add(reserved_parameter_work, 1u);
                                         callee_scan_exhausted = true;
                                         break;
                                     }
                                     u64 parameter_work = ir_inline_storage_add(1u, parameter->incoming_count);
-                                    if (parameter_work > IR_FAST_WORK_BUDGET -
+                                    if (parameter_work > caller_work_limit -
                                                              BUSTER_MIN(reserved_parameter_work,
-                                                                        (u64)IR_FAST_WORK_BUDGET))
+                                                                        (u64)caller_work_limit))
                                     {
                                         callee_scan_demand = ir_inline_storage_add(reserved_parameter_work, parameter_work);
                                         callee_scan_exhausted = true;
@@ -1153,7 +1188,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                     module->inlining.visits =
                                         ir_inline_storage_add(module->inlining.visits, parameter_work);
                                     callee_payload_units = ir_inline_storage_add(callee_payload_units, parameter_work);
-                                    if (total_work > IR_FAST_WORK_BUDGET)
+                                    if (total_work > caller_work_limit)
                                     {
                                         callee_scan_demand = total_work;
                                         callee_scan_exhausted = true;
@@ -1166,7 +1201,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 if (required)
                                 {
                                     ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                        callee_scan_demand ? callee_scan_demand : total_work, IR_FAST_WORK_BUDGET);
+                                        callee_scan_demand ? callee_scan_demand : total_work, caller_work_limit);
                                     result = ir_inline_callsite_error(caller, block, row);
                                 }
                                 continue;
@@ -1246,13 +1281,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             candidate_work = ir_inline_storage_add(candidate_work, call->operand_count);
                             u64 work_with_caller_rows = ir_inline_storage_add(total_work, caller_rows_remaining);
                             if (candidate_work >
-                                IR_FAST_WORK_BUDGET - BUSTER_MIN(work_with_caller_rows, (u64)IR_FAST_WORK_BUDGET))
+                                caller_work_limit - BUSTER_MIN(work_with_caller_rows, (u64)caller_work_limit))
                             {
                                 module->inlining.budget_skips += 1;
                                 if (required)
                                 {
                                     ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                        ir_inline_storage_add(work_with_caller_rows, candidate_work), IR_FAST_WORK_BUDGET);
+                                        ir_inline_storage_add(work_with_caller_rows, candidate_work), caller_work_limit);
                                     result = ir_inline_callsite_error(caller, block, row);
                                 }
                                 continue;
@@ -1287,14 +1322,14 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                  table_values_before, table_values_after,
                                                                                  table_extras_before, table_extras_after);
                             u64 table_work_with_caller_rows = ir_inline_storage_add(total_work, caller_rows_remaining);
-                            if (table_work > IR_FAST_WORK_BUDGET -
-                                                 BUSTER_MIN(table_work_with_caller_rows, (u64)IR_FAST_WORK_BUDGET))
+                            if (table_work > caller_work_limit -
+                                                 BUSTER_MIN(table_work_with_caller_rows, (u64)caller_work_limit))
                             {
                                 module->inlining.budget_skips += 1;
                                 if (required)
                                 {
                                     ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                        ir_inline_storage_add(table_work_with_caller_rows, table_work), IR_FAST_WORK_BUDGET);
+                                        ir_inline_storage_add(table_work_with_caller_rows, table_work), caller_work_limit);
                                     result = ir_inline_callsite_error(caller, block, row);
                                 }
                                 continue;
@@ -1373,15 +1408,16 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             // would let a few large callers starve the rest.
                             bool scratch_within = projected_scratch <= IR_FAST_SCRATCH_BUDGET -
                                                                         BUSTER_MIN(active_scratch, (u64)IR_FAST_SCRATCH_BUDGET);
-                            bool within = scratch_within && total_work <= IR_FAST_WORK_BUDGET &&
-                                          function_sites < options.max_call_sites && storage != UINT64_MAX &&
-                                          storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(function_storage, (u64)IR_FAST_SCRATCH_BUDGET) &&
-                                          (!required ||
-                                           storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(module_storage, (u64)IR_FAST_SCRATCH_BUDGET)) &&
-                                          growth <= options.max_function_growth -
-                                                        BUSTER_MIN(function_growth, options.max_function_growth) &&
-                                          growth <= options.max_module_growth -
-                                                        BUSTER_MIN(module_growth, options.max_module_growth) &&
+                            u32 function_growth_limit = required ? required_function_growth : options.max_function_growth;
+                            u32 module_growth_limit = required ? required_module_growth : options.max_module_growth;
+                            u32 call_sites_limit = required ? required_call_sites : options.max_call_sites;
+                            bool within = scratch_within && total_work <= caller_work_limit &&
+                                          function_sites < call_sites_limit && storage != UINT64_MAX &&
+                                          storage <= caller_storage_limit - BUSTER_MIN(function_storage, caller_storage_limit) &&
+                                          growth <= function_growth_limit -
+                                                        BUSTER_MIN(function_growth, function_growth_limit) &&
+                                          growth <= module_growth_limit -
+                                                        BUSTER_MIN(module_growth, module_growth_limit) &&
                                           copied <= IR_FAST_WORK_BUDGET - BUSTER_MIN(total_copies, (u64)IR_FAST_WORK_BUDGET);
                             if (!within)
                             {
@@ -1394,41 +1430,39 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                             ir_inline_storage_add(active_scratch, projected_scratch),
                                             IR_FAST_SCRATCH_BUDGET);
                                     }
-                                    else if (total_work > IR_FAST_WORK_BUDGET)
+                                    else if (total_work > caller_work_limit)
                                     {
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
-                                            total_work, IR_FAST_WORK_BUDGET);
+                                            total_work, caller_work_limit);
                                     }
-                                    else if (function_sites >= options.max_call_sites)
+                                    else if (function_sites >= call_sites_limit)
                                     {
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_CALL_SITES,
-                                            (u64)function_sites + 1u, options.max_call_sites);
+                                            (u64)function_sites + 1u, call_sites_limit);
                                     }
                                     else if (storage == UINT64_MAX ||
-                                             storage > IR_FAST_SCRATCH_BUDGET -
-                                                           BUSTER_MIN(function_storage, (u64)IR_FAST_SCRATCH_BUDGET) ||
-                                             storage > IR_FAST_SCRATCH_BUDGET -
-                                                           BUSTER_MIN(module_storage, (u64)IR_FAST_SCRATCH_BUDGET))
+                                             storage > caller_storage_limit -
+                                                           BUSTER_MIN(function_storage, caller_storage_limit))
                                     {
-                                        u64 storage_base = BUSTER_MAX(function_storage, module_storage);
+                                        u64 storage_base = function_storage;
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_STORAGE,
                                             storage == UINT64_MAX ? UINT64_MAX :
                                                 ir_inline_storage_add(storage_base, storage),
-                                            IR_FAST_SCRATCH_BUDGET);
+                                            caller_storage_limit);
                                     }
-                                    else if (growth > options.max_function_growth -
-                                                          BUSTER_MIN(function_growth, options.max_function_growth))
+                                    else if (growth > function_growth_limit -
+                                                          BUSTER_MIN(function_growth, function_growth_limit))
                                     {
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_FUNCTION_GROWTH,
                                             ir_inline_storage_add(function_growth, growth),
-                                            options.max_function_growth);
+                                            function_growth_limit);
                                     }
-                                    else if (growth > options.max_module_growth -
-                                                          BUSTER_MIN(module_growth, options.max_module_growth))
+                                    else if (growth > module_growth_limit -
+                                                          BUSTER_MIN(module_growth, module_growth_limit))
                                     {
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_MODULE_GROWTH,
                                             ir_inline_storage_add(module_growth, growth),
-                                            options.max_module_growth);
+                                            module_growth_limit);
                                     }
                                     else
                                     {
@@ -1462,7 +1496,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             function_projected_edges =
                                 ir_inline_storage_add(function_projected_edges, cloned_edge_delta);
                             module_growth += growth;
-                            module_storage += storage;
                             total_copies += copied;
                         }
                     }
@@ -1488,7 +1521,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         function_growth = function_growth_used[caller_index];
                         function_storage = function_storage_used[caller_index];
                         module_growth = module_growth_before;
-                        module_storage = module_storage_before;
                         total_copies = total_copies_before;
                     }
                     bool changed = false;

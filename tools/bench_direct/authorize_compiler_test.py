@@ -122,6 +122,7 @@ class AuthorizeCompilerTest(unittest.TestCase):
                    {"sha": BASE, "parents": [{"sha": OLDER}]}, {"sha": OLDER, "parents": [{"sha": "2" * 40}]}]
         measured = {"id": 1, "name": "9700X compiler benchmark", "head_sha": OLDER, "status": "completed",
                     "conclusion": "success", "app": {"id": 15368},
+                    "html_url": "https://github.com/x/y/runs/77", "completed_at": "2026-10-01T02:03:04Z",
                     "external_id": f"buster-9700x-compiler-main-v1:{OLDER}:90.1:1"}
         reads: list[str] = []
 
@@ -133,14 +134,58 @@ class AuthorizeCompilerTest(unittest.TestCase):
         commit = records()["commit"]
         with mock.patch.object(authorize_compiler, "fetch", side_effect=fetch):
             self.assertEqual(authorize_compiler.main_chain("/repos/x/y", "t", HEAD, commit),
-                             ([BASE, OLDER, "2" * 40], OLDER))
+                             ([BASE, OLDER, "2" * 40], OLDER,
+                              {"check_url": "https://github.com/x/y/runs/77", "measured_at": "2026-10-01T02:03:04Z"}))
         self.assertEqual(len([path for path in reads if "/check-runs?" in path]), 2)
 
         def broken(path: str, token: str) -> object:
             raise urllib.error.URLError("unreachable")
         with mock.patch.object(authorize_compiler, "fetch", side_effect=broken), mock.patch("sys.stderr"):
-            self.assertEqual(authorize_compiler.main_chain("/repos/x/y", "t", HEAD, commit), ([BASE], BASE))
-        self.assertEqual(authorize_compiler.main_chain("/repos/x/y", "t", HEAD, {"parents": []}), ([], ""))
+            self.assertEqual(authorize_compiler.main_chain("/repos/x/y", "t", HEAD, commit), ([BASE], BASE, {}))
+        self.assertEqual(authorize_compiler.main_chain("/repos/x/y", "t", HEAD, {"parents": []}), ([], "", {}))
+
+    def test_unmeasured_fallback_baseline_has_no_reference(self) -> None:
+        # #3923 A -> B -> C: B pending, failed or cancelled leaves C's range at A, and
+        # a chain with no measurement in reach is the first-parent fallback with no
+        # reference, so it can never anchor an unchanged-input skip.
+        a, b = OLDER, BASE
+        listing = [{"sha": HEAD, "parents": [{"sha": b}]}, {"sha": b, "parents": [{"sha": a}]},
+                   {"sha": a, "parents": [{"sha": "2" * 40}]}]
+        def row(sha: str, conclusion: str, row_id: int = 1, status: str = "completed") -> dict:
+            return {"id": row_id, "name": "9700X compiler benchmark", "head_sha": sha, "status": status,
+                    "conclusion": conclusion, "app": {"id": 15368},
+                    "html_url": f"https://github.com/x/y/runs/{row_id}", "completed_at": "2026-10-01T02:03:04Z",
+                    "external_id": f"buster-9700x-compiler-main-v1:{sha}:90.1:{row_id}"}
+        for pending in ([], [row(b, "failure")], [row(b, "cancelled")], [row(b, "neutral")],
+                        [row(b, None, status="queued")]):
+            with self.subTest(pending=pending):
+                def fetch(path: str, token: str) -> object:
+                    if path.startswith("/repos/x/y/commits?"):
+                        return listing
+                    return {"check_runs": pending if f"/commits/{b}/" in path else
+                            [row(a, "success", 5)] if f"/commits/{a}/" in path else []}
+                with mock.patch.object(authorize_compiler, "fetch", side_effect=fetch):
+                    chain, base, reference = authorize_compiler.main_chain("/repos/x/y", "t", HEAD, listing[0])
+                self.assertEqual((chain[:2], base, reference["check_url"]), ([b, a], a, "https://github.com/x/y/runs/5"))
+        def nothing(path: str, token: str) -> object:
+            return listing if path.startswith("/repos/x/y/commits?") else {"check_runs": [row(b, "neutral")]}
+        with mock.patch.object(authorize_compiler, "fetch", side_effect=nothing):
+            self.assertEqual(authorize_compiler.main_chain("/repos/x/y", "t", HEAD, listing[0])[1:], (b, {}))
+
+    def test_measured_reference_is_the_newest_shaped_success(self) -> None:
+        def row(row_id: int, conclusion: str = "success", **changes: object) -> dict:
+            return dict({"id": row_id, "name": "9700X compiler benchmark", "head_sha": BASE, "status": "completed",
+                         "conclusion": conclusion, "app": {"id": 15368},
+                         "html_url": f"https://github.com/{REPOSITORY}/runs/{row_id}",
+                         "completed_at": "2026-10-01T02:03:04Z",
+                         "external_id": f"buster-9700x-compiler-main-v1:{BASE}:90.1:{row_id}"}, **changes)
+        reference = authorize_compiler.measured_reference(REPOSITORY, BASE, [row(9), row(3), row(12, "neutral")])
+        self.assertEqual(reference["check_url"], f"https://github.com/{REPOSITORY}/runs/9")
+        for bad in ({"html_url": "https://github.com/fork/buster/runs/9"}, {"html_url": "https://x/runs/9\nbase=1"},
+                    {"completed_at": "yesterday"}, {"completed_at": None}, {"head_sha": HEAD}):
+            with self.subTest(bad=bad):
+                self.assertEqual(authorize_compiler.measured_reference(REPOSITORY, BASE, [row(9, **bad)]), {})
+        self.assertEqual(authorize_compiler.measured_reference(REPOSITORY, BASE, None), {})
 
 
 

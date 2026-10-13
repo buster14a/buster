@@ -2,9 +2,10 @@
 
 #if BUSTER_INCLUDE_TESTS
 
+#include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 
-static Target a64_direct_simd_test_target(void)
+Target aarch64_simd_test_target(void)
 {
     return (Target){.cpu_arch = CPU_ARCH_AARCH64,
                     .cpu_model = CPU_MODEL_A64_APPLE_M1,
@@ -28,7 +29,7 @@ BusterA64SIMDArrangement aarch64_simd_test_alternate_arrangement(BusterA64Semant
     return result;
 }
 
-static u32 a64_direct_simd_audit_mix(u32 value)
+static u32 aarch64_simd_test_audit_mix(u32 value)
 {
     value ^= value >> 16;
     value *= UINT32_C(0x7feb352d);
@@ -37,88 +38,99 @@ static u32 a64_direct_simd_audit_mix(u32 value)
     return value ^ (value >> 16);
 }
 
-static bool a64_direct_simd_audit_word(Target target, u32 row_index, u64 digest, u32 canonical_index, u32 word, u32* first_word)
+/* A word is legal for the row when the canonical decoder maps it to the row's
+ * form and the module's typed decode re-encodes to the same word. `complex`
+ * selects the complex-SIMD binding instead of the direct one. */
+static bool aarch64_simd_test_audit_word(Target target, bool complex, u32 row_index, u64 digest, u32 canonical_index, u32 word, u32* first_word)
 {
     BusterAarch64CanonicalDecodeResult canonical = {0};
-    if (buster_aarch64_canonical_decode(target, word, &canonical) != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS || canonical.form_index != canonical_index ||
-        canonical.arm_row_digest != digest)
-    {
-        return false;
-    }
-    BusterA64DirectSIMDResult typed = {0};
-    if (buster_a64_direct_simd_decode_row(target, row_index, word, &typed) != BUSTER_A64_SIMD_STATUS_OK)
-    {
-        return false;
-    }
-    BusterA64DirectSIMDInstruction instruction = {.row_index = row_index, .operand_count = (u8)typed.operand_count};
-    for (u32 index = 0; index < typed.operand_count; index += 1)
-    {
-        instruction.operands[index] = typed.operands[index];
-    }
+    bool valid = buster_aarch64_canonical_decode(target, word, &canonical) == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
+                 canonical.form_index == canonical_index && canonical.arm_row_digest == digest;
     u32 reencoded = 0;
-    if (buster_a64_direct_simd_encode(target, &instruction, &reencoded) != BUSTER_A64_SIMD_STATUS_OK || reencoded != word)
+    if (valid && complex)
     {
-        return false;
+        BusterA64ComplexSIMDResult typed = {0};
+        valid = buster_a64_complex_simd_decode_row(target, row_index, word, &typed) == BUSTER_A64_SIMD_STATUS_OK;
+        if (valid)
+        {
+            BusterA64ComplexSIMDInstruction instruction = {.row_index = row_index, .operand_count = (u8)typed.operand_count};
+            instruction.raw_fields_valid = typed.raw_fields_valid;
+            instruction.raw_fields = typed.raw_fields;
+            for (u32 index = 0; index < typed.operand_count; index += 1)
+            {
+                instruction.operands[index] = typed.operands[index];
+            }
+            valid = buster_a64_complex_simd_encode(target, &instruction, &reencoded) == BUSTER_A64_SIMD_STATUS_OK;
+        }
     }
-    if (first_word && *first_word == UINT32_MAX)
+    else if (valid)
+    {
+        BusterA64DirectSIMDResult typed = {0};
+        valid = buster_a64_direct_simd_decode_row(target, row_index, word, &typed) == BUSTER_A64_SIMD_STATUS_OK;
+        if (valid)
+        {
+            BusterA64DirectSIMDInstruction instruction = {.row_index = row_index, .operand_count = (u8)typed.operand_count};
+            for (u32 index = 0; index < typed.operand_count; index += 1)
+            {
+                instruction.operands[index] = typed.operands[index];
+            }
+            valid = buster_a64_direct_simd_encode(target, &instruction, &reencoded) == BUSTER_A64_SIMD_STATUS_OK;
+        }
+    }
+    valid = valid && reencoded == word;
+    if (valid && first_word && *first_word == UINT32_MAX)
     {
         *first_word = word;
     }
-    return true;
+    return valid;
 }
 
-static bool a64_direct_simd_audit_try_word(Target target, u32 row_index, u64 digest, u32 canonical_index, u32 word, u32* tried, u32* tried_count,
-                                           u32* legal_count, u32* first_word)
+/* Audits each distinct word once; at most 1024 words are tried per row. */
+static void aarch64_simd_test_audit_try_word(Target target, bool complex, u32 row_index, u64 digest, u32 canonical_index, u32 word, u32* tried,
+                                             u32* tried_count, u32* legal_count, u32* first_word)
 {
-    if (!tried || !tried_count || !legal_count || *tried_count >= 1024u)
+    bool fresh = tried && tried_count && legal_count && *tried_count < 1024u;
+    for (u32 index = 0; fresh && index < *tried_count; index += 1)
     {
-        return false;
+        fresh = tried[index] != word;
     }
-    for (u32 index = 0; index < *tried_count; index += 1)
+    if (fresh)
     {
-        if (tried[index] == word)
+        tried[*tried_count] = word;
+        *tried_count += 1;
+        if (aarch64_simd_test_audit_word(target, complex, row_index, digest, canonical_index, word, first_word))
         {
-            return true;
+            *legal_count += 1;
         }
     }
-    tried[*tried_count] = word;
-    *tried_count += 1;
-    if (a64_direct_simd_audit_word(target, row_index, digest, canonical_index, word, first_word))
-    {
-        *legal_count += 1;
-    }
-    return true;
 }
 
-static bool a64_direct_simd_audit_row(Target target, u32 row_index, BusterA64SIMDRowInfo row, u32 canonical_index, BusterAarch64CanonicalFormInfo canonical,
-                                      u32* legal_count, u32* first_word)
+bool aarch64_simd_test_audit_row(Target target, bool complex, u32 row_index, BusterA64SIMDRowInfo row, u32 canonical_index,
+                                 BusterAarch64CanonicalFormInfo canonical, u32* legal_count, u32* first_word)
 {
-    if (!legal_count || !first_word || canonical.field_count > 32)
-    {
-        return false;
-    }
-    *legal_count = 0;
-    *first_word = UINT32_MAX;
+    bool valid = legal_count && first_word && canonical.field_count <= 32;
     u32 base_fields[32] = {0};
-    if (!buster_aarch64_canonical_raw_decode(canonical_index, canonical.representative_word, base_fields, canonical.field_count))
-    {
-        return false;
-    }
     u32 tried[1024] = {0};
     u32 tried_count = 0;
-    a64_direct_simd_audit_try_word(target, row_index, row.source_digest, canonical_index, canonical.representative_word, tried, &tried_count, legal_count,
-                                   first_word);
-    for (u32 field_index = 0; field_index < canonical.field_count; field_index += 1)
+    if (valid)
+    {
+        *legal_count = 0;
+        *first_word = UINT32_MAX;
+        valid = buster_aarch64_canonical_raw_decode(canonical_index, canonical.representative_word, base_fields, canonical.field_count);
+    }
+    if (valid)
+    {
+        aarch64_simd_test_audit_try_word(target, complex, row_index, row.source_digest, canonical_index, canonical.representative_word, tried, &tried_count,
+                                         legal_count, first_word);
+    }
+    for (u32 field_index = 0; valid && field_index < canonical.field_count; field_index += 1)
     {
         BusterAarch64CanonicalFieldInfo field = {0};
-        if (!buster_aarch64_canonical_field(canonical_index, field_index, &field) || field.width == 0)
-        {
-            return false;
-        }
+        valid = buster_aarch64_canonical_field(canonical_index, field_index, &field) && field.width != 0;
         u32 maximum = field.source_mask;
         u32 samples[16] = {0};
         u32 sample_count = 0;
-        if (field.width <= 4)
+        if (valid && field.width <= 4)
         {
             maximum = field.width == 32 ? UINT32_MAX : ((UINT32_C(1) << field.width) - 1u);
             for (u32 value = 0; value <= maximum; value += 1)
@@ -126,7 +138,7 @@ static bool a64_direct_simd_audit_row(Target target, u32 row_index, BusterA64SIM
                 samples[sample_count++] = value;
             }
         }
-        else
+        else if (valid)
         {
             samples[sample_count++] = base_fields[field_index];
             samples[sample_count++] = 0;
@@ -141,7 +153,7 @@ static bool a64_direct_simd_audit_row(Target target, u32 row_index, BusterA64SIM
             }
             for (u32 random_index = 0; random_index < 4; random_index += 1)
             {
-                samples[sample_count++] = a64_direct_simd_audit_mix(row_index * 131u + field_index * 17u + random_index) & maximum;
+                samples[sample_count++] = aarch64_simd_test_audit_mix(row_index * 131u + field_index * 17u + random_index) & maximum;
             }
         }
         for (u32 sample_index = 0; sample_index < sample_count; sample_index += 1)
@@ -155,18 +167,19 @@ static bool a64_direct_simd_audit_row(Target target, u32 row_index, BusterA64SIM
             u32 word = 0;
             if (buster_aarch64_canonical_raw_encode(canonical_index, candidate_fields, canonical.field_count, &word))
             {
-                a64_direct_simd_audit_try_word(target, row_index, row.source_digest, canonical_index, word, tried, &tried_count, legal_count, first_word);
+                aarch64_simd_test_audit_try_word(target, complex, row_index, row.source_digest, canonical_index, word, tried, &tried_count, legal_count,
+                                                 first_word);
             }
         }
     }
-    return true;
+    return valid;
 }
 
 UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
-    Target target = a64_direct_simd_test_target();
+    Target target = aarch64_simd_test_target();
     BUSTER_TEST(arguments, buster_a64_direct_simd_schema_version() == 1);
     BUSTER_TEST(arguments, buster_a64_direct_simd_row_count() == 390);
     BUSTER_TEST(arguments, buster_a64_direct_simd_transform_row_count() == 263);
@@ -259,8 +272,9 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
         {
             u32 legal_count = 0;
             binding_word = UINT32_MAX;
-            if (!a64_direct_simd_audit_row(target, row_index, binding_row, canonical_index, binding_form, &legal_count, &binding_word) || legal_count == 0 ||
-                binding_word == UINT32_MAX || buster_a64_direct_simd_decode_row(target, row_index, binding_word, &binding_decoded) != BUSTER_A64_SIMD_STATUS_OK)
+            if (!aarch64_simd_test_audit_row(target, false, row_index, binding_row, canonical_index, binding_form, &legal_count, &binding_word) ||
+                legal_count == 0 || binding_word == UINT32_MAX ||
+                buster_a64_direct_simd_decode_row(target, row_index, binding_word, &binding_decoded) != BUSTER_A64_SIMD_STATUS_OK)
             {
                 arrangement_bindings_ok = false;
                 continue;
@@ -321,7 +335,8 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
                      audit_semantic_form.source_digest == audit_row.source_digest;
         u32 legal_count = 0;
         u32 first_legal_word = UINT32_MAX;
-        bool row_audited = row_found && a64_direct_simd_audit_row(target, audit_index, audit_row, canonical_index, audit_form, &legal_count, &first_legal_word);
+        bool row_audited =
+            row_found && aarch64_simd_test_audit_row(target, false, audit_index, audit_row, canonical_index, audit_form, &legal_count, &first_legal_word);
         audit_join = audit_join && row_audited;
         if (legal_count != 0)
         {
