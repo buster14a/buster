@@ -63775,6 +63775,260 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_array_type_name_runti
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 attribute_text = S8(
+        "void trailing_noreturn(void (*routine)(void) __attribute__((noreturn))) { (void)routine; }\n"
+        "void prefix_noreturn(__attribute__((noreturn)) void (*routine)(void)) { (void)routine; }\n");
+    TemporalArena inspection = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult attributes = c_preprocess(inspection.arena, attribute_text, (CPreprocessOptions){
+        .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+    });
+    CParserResult attribute_syntax = c_parse_ast(inspection.arena, attributes);
+    CParseResult attribute_model = c_parse(inspection.arena, attributes);
+    BUSTER_TEST(arguments, !attributes.diagnostic_count && !attribute_syntax.diagnostic_count &&
+        !attribute_model.diagnostic_count && attribute_model.analysis_complete);
+    String8 attributed_functions[] = {S8("trailing_noreturn"), S8("prefix_noreturn")};
+    u32 attributed_parameter_counts[BUSTER_ARRAY_LENGTH(attributed_functions)] = {0};
+    for (u32 entity_index = 0; entity_index < attribute_model.entity_count; entity_index += 1)
+    {
+        CEntity entity = attribute_model.entities[entity_index];
+        if (entity.kind != C_ENTITY_PARAMETER || !string_equal(entity.name, S8("routine")))
+        {
+            continue;
+        }
+        u32 owner = BUSTER_ARRAY_LENGTH(attributed_functions);
+        if (entity.declaration_index < attribute_model.declaration_count)
+        {
+            CDeclaration declaration = attribute_model.declarations[entity.declaration_index];
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(attributed_functions); function_index += 1)
+            {
+                if (string_equal(declaration.name, attributed_functions[function_index]))
+                {
+                    owner = function_index;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, owner < BUSTER_ARRAY_LENGTH(attributed_functions));
+        if (owner < BUSTER_ARRAY_LENGTH(attributed_functions))
+        {
+            attributed_parameter_counts[owner] += 1;
+            CTypeId callback_type = entity.type;
+            for (u32 depth = 0; depth < attribute_model.type_count && callback_type.value < attribute_model.type_count; depth += 1)
+            {
+                CType type = attribute_model.types[callback_type.value];
+                CTypeId next = type.has_unqualified_type ? type.unqualified_type :
+                    type.kind == C_TYPE_POINTER ? type.element_type : C_TYPE_ID_INVALID;
+                if (next.value >= callback_type.value)
+                {
+                    break;
+                }
+                callback_type = next;
+            }
+            bool is_function_type = callback_type.value < attribute_model.type_count &&
+                attribute_model.types[callback_type.value].kind == C_TYPE_FUNCTION;
+            BUSTER_TEST(arguments, is_function_type);
+            BUSTER_TEST(arguments, is_function_type && c_parse_type_is_noreturn(&attribute_model, callback_type));
+        }
+    }
+    for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(attributed_functions); function_index += 1)
+    {
+        BUSTER_TEST(arguments, attributed_parameter_counts[function_index] == 1);
+    }
+    BUSTER_TEST(arguments, attribute_model.noreturn_function_type_count == 2);
+    c_test_scratch_end(inspection);
+    String8 source_text = S8(
+        "static int hits;\n"
+        "void trailing_runtime(void (*routine)(void) __attribute__((unused))) { (void)routine; hits += 1; }\n"
+        "void prefix_runtime(__attribute__((unused)) void (*routine)(void)) { (void)routine; hits += 2; }\n"
+        "int main(void) { trailing_runtime(0); prefix_runtime(0); return hits != 3; }\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("function-pointer-parameter-attribute"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        FileReadResult readback = file_read_checked(arguments->arena, source, (FileReadOptions){0});
+        bool source_matches = readback.status == OS_FILE_READ_OK && readback.error.v == 0 &&
+            string_equal(BYTE_SLICE_TO_STRING(8, readback.bytes), source_text);
+        BUSTER_TEST(arguments, source_matches);
+        if (source_matches)
+        {
+#if BUSTER_LINUX
+            u32 buster_statuses[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+#endif
+            String8 function_names[] = {S8("trailing_runtime"), S8("prefix_runtime")};
+            String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){
+                    .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CParseResult model = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count &&
+                    !model.diagnostic_count && model.analysis_complete);
+                u32 parameter_counts[BUSTER_ARRAY_LENGTH(function_names)] = {0};
+                for (u32 entity_index = 0; entity_index < model.entity_count; entity_index += 1)
+                {
+                    CEntity entity = model.entities[entity_index];
+                    if (entity.kind != C_ENTITY_PARAMETER || !string_equal(entity.name, S8("routine")))
+                    {
+                        continue;
+                    }
+                    u32 owner = BUSTER_ARRAY_LENGTH(function_names);
+                    if (entity.declaration_index < model.declaration_count)
+                    {
+                        CDeclaration declaration = model.declarations[entity.declaration_index];
+                        for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(function_names); function_index += 1)
+                        {
+                            if (string_equal(declaration.name, function_names[function_index]))
+                            {
+                                owner = function_index;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, owner < BUSTER_ARRAY_LENGTH(function_names));
+                    if (owner < BUSTER_ARRAY_LENGTH(function_names))
+                    {
+                        parameter_counts[owner] += 1;
+                        CTypeId callback_type = entity.type;
+                        for (u32 depth = 0; depth < model.type_count && callback_type.value < model.type_count; depth += 1)
+                        {
+                            CType type = model.types[callback_type.value];
+                            CTypeId next = type.has_unqualified_type ? type.unqualified_type :
+                                type.kind == C_TYPE_POINTER ? type.element_type : C_TYPE_ID_INVALID;
+                            if (next.value >= callback_type.value)
+                            {
+                                break;
+                            }
+                            callback_type = next;
+                        }
+                        bool is_function_type = callback_type.value < model.type_count &&
+                            model.types[callback_type.value].kind == C_TYPE_FUNCTION;
+                        bool is_noreturn = is_function_type && c_parse_type_is_noreturn(&model, callback_type);
+                        BUSTER_TEST(arguments, is_function_type);
+                        BUSTER_TEST(arguments, !is_noreturn);
+                    }
+                }
+                for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(function_names); function_index += 1)
+                {
+                    BUSTER_TEST(arguments, parameter_counts[function_index] == 1);
+                }
+                BUSTER_TEST(arguments, model.noreturn_function_type_count == 0);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("function-pointer-parameter-attribute.c"),
+                    tokens, syntax, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                bool canonical = !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                    lowered.program->module_count == 1;
+                BUSTER_TEST(arguments, canonical);
+                if (canonical)
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(lowered.program, module, false).error == IR_VALIDATION_NONE);
+                }
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    String8 output = buster_test_temporary_unique_path(temporary.arena,
+                        S8("function-pointer-parameter-attribute-run"), S8(".exe"));
+                    String8 command[] = {
+                        S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form],
+                        S8("-fverify-codegen"), S8("-o"), output, source,
+                    };
+                    CompilerDriverInvocation invocation =
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("function pointer parameter attribute {S8} {S8}: {S8}"),
+                            modes[mode], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                            (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            bool ran = !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                !execution.process_group_ownership_lost;
+                            BUSTER_TEST_RAW(arguments, ran,
+                                string_format(temporary.arena, S8("function pointer parameter attribute runtime {S8} {S8}: status={u32} timeout={u32}"),
+                                    modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+#if BUSTER_LINUX
+                            buster_statuses[form * BUSTER_ARRAY_LENGTH(modes) + mode] = execution.platform_status;
+#endif
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+#if BUSTER_LINUX
+            String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+            BUSTER_TEST(arguments, clang.length != 0);
+            if (clang.length)
+            {
+                String8 reference_output = buster_test_temporary_unique_path(arguments->arena,
+                    S8("function-pointer-parameter-attribute-clang"), S8(".exe"));
+                String8 command[] = {clang, S8("-std=gnu17"), S8("-nostdinc"), S8("-o"), reference_output, source};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                    (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                BUSTER_TEST(arguments, child.handle != 0);
+                bool clang_ran = false;
+                u32 clang_status = UINT32_MAX;
+                if (child.handle)
+                {
+                    ProcessWaitResult compilation = os_process_wait_deadline(arguments->arena, child, 30000000);
+                    bool compiled = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
+                        !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
+                        !compilation.process_group_ownership_lost;
+                    BUSTER_TEST_RAW(arguments, compiled,
+                        string_format(arguments->arena, S8("Clang function pointer parameter attribute compile: status={u32} timeout={u32}"),
+                            compilation.platform_status, (u32)compilation.timed_out));
+                    if (compiled)
+                    {
+                        String8 run[] = {reference_output};
+                        ProcessSpawnResult reference_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                            (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                        BUSTER_TEST(arguments, reference_child.handle != 0);
+                        if (reference_child.handle)
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(arguments->arena, reference_child, 30000000);
+                            clang_ran = !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                !execution.process_group_ownership_lost;
+                            clang_status = execution.platform_status;
+                            BUSTER_TEST_RAW(arguments, clang_ran,
+                                string_format(arguments->arena, S8("Clang function pointer parameter attribute runtime: status={u32} timeout={u32}"),
+                                    execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                }
+                if (clang_ran)
+                {
+                    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(buster_statuses); row += 1)
+                    {
+                        BUSTER_TEST(arguments, buster_statuses[row] == clang_status);
+                    }
+                }
+                BUSTER_TEST(arguments, os_file_delete(reference_output));
+            }
+#endif
+        }
+        BUSTER_TEST(arguments, os_file_delete(source));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(Arena* arena, SliceString8 command)
 {
@@ -66960,6 +67214,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility);
     C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility_runtime);
     C_TEST_FIXTURE(arguments, c_test_function_pointer_array_type_name_runtime);
+    C_TEST_FIXTURE(arguments, c_test_function_pointer_parameter_attribute_runtime);
     C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     C_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
     C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);

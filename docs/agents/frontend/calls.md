@@ -580,6 +580,16 @@ groups such as `int ((T))` carry that classification down the explicit type
 machine. Pointer-led named groups, `int T`, `const T T`, member names and
 ordinary block-scope shadowing keep their existing rules.
 
+GNU attributes may also follow a complete function-pointer parameter
+declarator, after its callback function suffix. The trailing form
+`void f(void (*routine)(void) __attribute__((noreturn)))` keeps `routine`
+visible in the body and retains the marker on the callback function type. The
+prefix spelling remains supported. `c_test_function_pointer_parameter_attribute_runtime`
+parses both placements, checks parameter visibility and the callback
+function-type marker, then separately compiles and runs returning `unused`
+controls through Buster and Clang. It leaves the separate outer-function
+callback-effect rule to #4087.
+
 A typedef remains a type in the function body. Checked expression leaf queries
 reject its use as a value, including within parentheses or operator operands;
 casts and type operands keep their type-name binding. The statement-expression
