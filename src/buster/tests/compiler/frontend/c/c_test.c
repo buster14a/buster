@@ -53922,6 +53922,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_callback_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("src/buster/tests/compiler/driver/fixtures/noreturn_callback_scope.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("noreturn-callback-scope.c"), tokens, syntax, target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !lowered.diagnostic_count);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                String8 names[] = {S8("setter"), S8("pointer_setter"), S8("grouped_setter"), S8("through_true_prefix"), S8("through_true_suffix"), S8("through_true_mixed")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, names[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        bool returns = false;
+                        bool unreachable = false;
+                        for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                        {
+                            returns |= function->instructions[instruction].opcode == IR_OPCODE_RETURN;
+                            unreachable |= function->instructions[instruction].opcode == IR_OPCODE_UNREACHABLE;
+                        }
+                        BUSTER_TEST(arguments, index >= 3 ? unreachable && !returns : returns && !unreachable);
+                    }
+                }
+                IrFunction* caller = c_test_find_ir_function(module, S8("main"));
+                u32 calls = 0;
+                bool returns = false;
+                bool unreachable = false;
+                if (BUSTER_REQUIRE(arguments, caller != 0))
+                {
+                    for (u32 index = 0; index < caller->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = caller->instructions + index;
+                        calls += instruction->opcode == IR_OPCODE_CALL;
+                        returns |= instruction->opcode == IR_OPCODE_RETURN;
+                        unreachable |= instruction->opcode == IR_OPCODE_UNREACHABLE;
+                    }
+                }
+                BUSTER_TEST(arguments, calls == 3 && returns && !unreachable);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_git_expression_shapes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -67217,6 +67283,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_volatile_recursive_records);
     C_TEST_FIXTURE(arguments, c_test_array_size_identity_layout);
     C_TEST_FIXTURE(arguments, c_test_git_expression_shapes);
+    C_TEST_FIXTURE(arguments, c_test_noreturn_callback_scope);
     C_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
     C_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
     C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_ir);

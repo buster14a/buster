@@ -49032,6 +49032,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("src/buster/tests/compiler/driver/fixtures/volatile_recursive_record.c"),
         S8("src/buster/tests/compiler/driver/fixtures/git_array_size.c"),
         S8("src/buster/tests/compiler/driver/fixtures/git_expression_shapes.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/noreturn_callback_scope.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
     };
@@ -49056,6 +49057,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-volatile-recursive-record"),
         S8("buster-c-git-array-size"),
         S8("buster-c-git-expression-shapes"),
+        S8("buster-c-noreturn-callback-scope"),
         S8("buster-c-qualified-compound"),
         S8("buster-c-fresh-binding-publication"),
     };
