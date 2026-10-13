@@ -7288,7 +7288,6 @@ class SelfHostInlineCompareTest(unittest.TestCase):
             "with the link-tls leg": {"receipt": dict(pull, link_tls=link_tls_evidence()[0]),
                                       "throughput": dict(corpus(), selfhost_inline_bundle=bundle,
                                                          link_tls_bundle=link_tls_evidence()[1])},
-            "with the #48 inline profile": {"receipt": dict(pull, inline_acceptance={"requested": True})},
             "with the scaling leg": {"receipt": dict(pull, scaling_profile=copy.deepcopy(compiler_receipt.SCALING_PROFILE)),
                                      "throughput": dict(corpus(), selfhost_inline_bundle=bundle, scaling=scaling())},
             "with constant-reuse acceptance": {
@@ -7445,6 +7444,34 @@ class SelfHostInlineCompareTest(unittest.TestCase):
                                      "lab/compare.json", "lab/a/lab.json", "lab/b/lab.json"]))
             self.assertFalse((root / "evidence/selfhost_inline/compare/lab/a/report.md").exists())
             self.assertEqual(record["digest"], record_value["digest"])
+
+    def test_the_presence_selected_48_inline_leg_does_not_block_this_leg(self) -> None:
+        """inline_acceptance_requested reads presence, and main has carried its line since #48 (#3969 refusal)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate, work, evidence, bins = root / "candidate", root / "work", root / "evidence", root / "bins"
+            for directory in (work, evidence, bins):
+                directory.mkdir()
+            request = candidate / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text(compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE + "\n" +
+                               compiler_receipt.SELFHOST_INLINE_REQUEST_LINE + "\n", encoding="utf-8")
+            current = {"state": "pending", "reasons": [], "timings": {"build_seconds": {}}, "binaries": {}, "lab": {}}
+            args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40, selfhost_inline_requested=True,
+                                      lab=root / "uarch_lab.py")
+            with mock.patch.object(compiler_compare, "scaling_requested", return_value=False), \
+                    mock.patch.object(compiler_compare, "build", return_value=("stopped by the test", 0.0)) as build:
+                compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+            self.assertIs(current["inline_acceptance"]["requested"], True)
+            self.assertFalse(any("cannot be combined" in reason for reason in current["reasons"]), current["reasons"])
+            build.assert_called_once()
+        record, bundle = selfhost_inline_evidence()
+        pull = selfhost_pull_receipt(record)
+        pull["inline_acceptance"] = {"requested": True, "status": "failed"}
+        unused, unused_title, reasons = compiler_publish.decide(
+            dict(EXPECTED, mode="pull"), True, "success", pull, summary(), "",
+            dict(corpus(), selfhost_inline_bundle=bundle))
+        self.assertFalse(any("self-host inline leg cannot be combined" in reason for reason in reasons), reasons)
 
     def test_leg_runs_the_trusted_helper_and_refuses_missing_stage1(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

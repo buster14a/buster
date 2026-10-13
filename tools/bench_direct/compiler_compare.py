@@ -2550,9 +2550,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["selfhost_inline"] = {"requested": True, "request_line": SELFHOST_INLINE_REQUEST_LINE,
                                       "profile": SELFHOST_INLINE_PROFILE, "status": "pending"}
         # One opt-in leg per attempt keeps a report from being shared between two profiles; the
-        # scaling leg also runs before this one and would share its budget.
+        # scaling leg also runs before this one and would share its budget. The #48 inline leg is
+        # not an opt-in here: inline_acceptance_requested selects it whenever its line is anywhere in
+        # the request file, which it has been on main since #48, so it runs beside this leg.
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
-                linker_requested or link_tls_requested or inline_requested or reuse_requested or \
+                linker_requested or link_tls_requested or reuse_requested or \
                 scaling_requested(candidate, arguments.base, arguments.head):
             reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg, the scaling "
                            "leg included")

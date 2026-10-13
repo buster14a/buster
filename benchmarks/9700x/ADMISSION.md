@@ -373,6 +373,20 @@ request's verified head, never the trusted harness revision `github.sha`.
   a terminal result. The same request/time/writer bounds apply. Native Actions
   identifies `Compiler preparation qualification` as physical and its queue
   and publisher as hosted control; recovery starts no work.
+- **Failed preparation diagnostics.** A failed preparation worker prints one
+  `COMPILER_PREPARATION_FAILED_PHASE` job-log line per failed
+  `controller.tsv` row (stage, phase, wall, exit status, timeout, cleanup and
+  cancellation flags, stderr size and a printable 512-byte stderr tail),
+  then one `COMPILER_PREPARATION_FAILED_CHECKS` line with each non-phase
+  check as `pass`, `fail` or `not_run`. A failed owner prints
+  `COMPILER_PREPARATION_OWNER_FAILED`. When the physical job did not succeed,
+  `preparation-publish` adds the same failed rows and the worker's
+  non-complete `preparation.tsv` state from the retained artifact to the
+  check's `problems`. These are diagnostics only: the attempt stays
+  incomplete and unqualified, and publication is still refused. The TCC
+  bootstrap check runs `--self-test-preparation-failed-phase`, which fails a
+  named fixture phase through the production emission, and replays that
+  evidence and log into the check with `--preparation-failed-phase`.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads
