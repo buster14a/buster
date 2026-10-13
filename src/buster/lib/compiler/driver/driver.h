@@ -618,8 +618,9 @@ struct CompilerDriverCAstPilotResult
     // answered, and runs left to the type machine and why. Zero when the
     // analysis had no tree to use.
     CAstSpecifierStatistics specifiers;
-    // What lowering read from the tree (CAstLowerStatistics). Zero for
-    // -fsyntax-only and when lowering had no tree.
+    // What lowering read from the tree (CAstLowerStatistics), on every
+    // compile that lowers: lowering builds the unit's tree itself when the
+    // pilot did not (GitHub #3102 step 1). Zero for -fsyntax-only.
     CAstLowerStatistics lower;
     // The facts analysis retained for lowering (CAstFactStatistics, GitHub
     // #4062). Zero for -fsyntax-only, which does not lower.

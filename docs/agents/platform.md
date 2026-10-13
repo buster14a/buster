@@ -149,6 +149,17 @@ the same lane path as a one-lane gang, as described in [parallelism](parallelism
 
 ## Linux process-group census reads
 
+When `self/status` proves that procfs and the caller use the same PID namespace
+coordinate, the census queries `getpgid` before opening each task's stat file.
+A successful different group (including kernel tasks in group zero) needs no
+stat read. Matching groups and failed queries retain the complete stat/status
+path; ancestor-mounted procfs retains that path for every task. The filter does
+not cache membership across snapshots. Two matching complete censuses, zombie
+state, namespace identity and the final exact-child reservation check remain
+required. `os_linux_process_group_filter_self_test` uses a valid non-directory
+descriptor to prove which cases must still read stat, alongside the existing
+live-child, zombie, ownership-loss, descendant and churn controls.
+
 A procfs task can disappear after its stat/status descriptor opens. Both the
 ordinary read and the capacity probe classify native ESRCH as disappearance;
 the caller retries its unchanged bounded, complete two-snapshot census.
@@ -248,6 +259,17 @@ regular spill controls cover partial writes, real read-only-descriptor write
 failure, caller reuse, platform deadline cleanup and POSIX flag cancellation.
 Mobile retains production compilation and existing collector coverage; these
 desktop process fixtures do not claim mobile process execution.
+
+On Windows, each ordinary captured-pipe pass reads at most one available
+16 KiB block per stream, polls the leader, and checks a finite deadline even
+when bytes keep arriving. On the first signaled poll, the waiter freezes the
+remaining available byte count for each open stream. It drains only those
+snapshotted bytes, at most 16 KiB per stream per pass, decrementing by successful
+read counts and closing each reader as soon as its count reaches zero. Later
+descendant writes cannot replenish the snapshot or prolong capture. Since the
+leader has exited, successful draining of this finite snapshot completes before
+deadline expiry is considered. Zero timeout still means wait forever. The
+storage-I/O and scheduling caveat above remains in force.
 
 For retained stream lengths `R_s`, the collector allocates exactly
 `N = sum(ceil(R_s / 16384))` chunk headers and payload blocks. With `R` total

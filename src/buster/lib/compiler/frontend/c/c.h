@@ -449,6 +449,7 @@ struct CPreprocessDependency
     bool system;
 };
 
+typedef struct CMacroPrefixMap CMacroPrefixMap;
 typedef struct CPreprocessDetail CPreprocessDetail;
 enum
 {
@@ -496,6 +497,10 @@ struct CPreprocessDetail
     u64 macro_expansion_peak_bytes;
 #endif
     u32 lexed_file_count;
+    // Caller-arena-owned copy that survives option-array expiry through
+    // parser/lowering source-name expansion.
+    CMacroPrefixMap* macro_prefix_maps;
+    u32 macro_prefix_map_count;
 };
 
 typedef struct CLexResult CLexResult;
@@ -563,7 +568,6 @@ struct CPreprocessorOperation
 
 // Literal, case-sensitive filename prefix substitutions in command-line order.
 // The last matching entry wins once; replacements are not remapped.
-typedef struct CMacroPrefixMap CMacroPrefixMap;
 struct CMacroPrefixMap
 {
     String8 old_prefix;
@@ -1026,6 +1030,13 @@ struct CType
     // For enums, element_type is the resolved compatible integer type. This
     // flag distinguishes a written fixed base from ordinary range selection.
     bool has_fixed_underlying_type;
+    // Saturated count of names this complete aggregate contributes to the
+    // C flexible-array rule. Anonymous aggregates promote their names;
+    // named aggregate members contribute one without promoting their fields.
+    u8 effective_named_member_count;
+    // Set after every nested definition in this aggregate's source range has
+    // settled, so a zero count distinguishes a finalized empty shape.
+    bool effective_named_member_count_final;
 };
 
 typedef struct CMember CMember;
@@ -1120,6 +1131,8 @@ typedef struct CTypeAlignment CTypeAlignment;
 struct CTypeAlignment
 {
     u32 type_index;
+    // The type row whose written request this row inherits; self for its owner.
+    u32 source_type_index;
     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
     u32 alignment_start;
     u32 alignment_count;
@@ -1385,8 +1398,8 @@ struct CDeclaration
     bool is_variadic;
     bool is_constexpr;
     bool is_identifier_list_definition;
-    // A GNU `extern inline` function definition: its body is only for
-    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    // An externally linked GNU `extern inline` definition: its body is only
+    // for inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
@@ -1648,6 +1661,13 @@ struct CAstSpecifierStatistics
 // fallback went to the token scan. Steps are the nodes and parentheses the
 // index build's walks and widening visited, a work count that must stay linear
 // in the input; it leaves out the memo's binary-search comparisons.
+// The retained facts (GitHub #3102 step 1): trees_built counts the units whose
+// tree lowering built itself because the caller passed none, with that tree's
+// nodes and retained bytes (CAstStatistics.retained_bytes); tree_rejections
+// the units whose syntax that build rejected, which lowered without a tree
+// (c_lower_to_ir_tree_run); span_nodes and
+// span_bytes are the nodes c_ast_spans_build gave a span and the bytes of its
+// columns, for every lowered unit with a tree.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
@@ -1664,6 +1684,12 @@ struct CAstLowerStatistics
     u64 statement_bodies;
     u64 statements;
     u64 range_adapters;
+    u64 trees_built;
+    u64 tree_rejections;
+    u64 tree_nodes;
+    u64 tree_bytes;
+    u64 span_nodes;
+    u64 span_bytes;
 };
 
 // The semantic facts semantic analysis retains for lowering (GitHub #4062,
@@ -2301,10 +2327,11 @@ struct CIRLowerOptions
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
     // The unit's syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
-    // from its nodes and runs the token scans for everything else. Null
-    // lowers exactly as before. Read only during the call; the tree and the
-    // preprocessing result must outlive it.
+    // -fc-ast-pilot, GitHub #3102). Lowering always reads a tree: when this is
+    // null it builds one from `preprocess` itself (c_lower_to_ir_tree_run) and
+    // releases it before returning, and a unit whose tree cannot be built
+    // fails with the builder's diagnostic. Read only during the call; a
+    // caller's tree and the preprocessing result must outlive it.
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;

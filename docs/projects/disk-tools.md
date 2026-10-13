@@ -6,12 +6,17 @@
 
 [src/buster/apps/disk_builder.c](../../src/buster/apps/disk_builder.c) is the
 standalone disk-image tool source. It has its own catalogue home rather than being
-classified as a C frontend or compiler-backend feature.
+classified as a C frontend or compiler-backend feature. The protective MBR layout
+and verification helpers live in
+[src/buster/apps/disk_builder_verification.c](../../src/buster/apps/disk_builder_verification.c)
+and its private header.
 
-`disk-tools.images` identifies this source-level capability area. The file contains
-protective-MBR/GPT structures and disk-image verification helpers, including
-`verify_disk` and `verify_disk_reserved_partitions_zeroed`. That observation is not
-a complete format-conformance or bootability claim.
+`disk-tools.images` identifies this source-level capability area. The verifier
+helpers include `verify_disk` and `verify_disk_reserved_partitions_zeroed`. The
+registered `disk_builder_tests` module checks MBR lengths against disk extent,
+including the builder's 64 MiB geometry and 32-bit saturation. This remains a
+helper-level MBR check: the tests do not validate GPT headers or arrays, CRCs,
+filesystems, or bootability, and `entry_point` still does not call `verify_disk`.
 
 ## Integration and validation boundary
 
@@ -23,8 +28,10 @@ Fuzz-enabled trees (the Linux Release and sanitized Release CI shards) skip it,
 because `entry_point.c` then needs the libFuzzer driver that only Buster programs
 link; the Linux portability shard still compiles it. Windows and Apple
 configurations do not build it yet; their compile has never been checked. That only
-establishes that the source compiles: the tool is not run by CI and has no
-focused test. When run from the repository root it reads
+establishes that the standalone tool compiles: the tool itself is not run by CI.
+The registered test can be selected with `ide test --module=disk_builder_tests`;
+it exercises the verifier helper without running the image-writing entry point.
+When run from the repository root the standalone tool reads
 `build/minimal_fat32.img` as the reference image, writes `build/mine.img` and
 reports whether the two match; reproduce that with your own reference image
 before treating the output as usable.

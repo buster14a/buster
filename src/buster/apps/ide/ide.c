@@ -84,10 +84,11 @@
 // region. The `#pragma clang attribute` form it replaces marked every
 // function a test source merely *declared* there too, so the production
 // functions that test headers redeclare ran at -O0 in the trusted Release
-// `ide` (#1376). A production header that defines functions must still be
-// included before the region, as simd.h's fallbacks are here;
+// `ide` (#1376). A production header or source that defines functions must
+// still be included before the region, as simd.h's fallbacks are here;
 // `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
+#include <buster/apps/disk_builder_verification.c>
 #if BUSTER_COMPILER_CLANG
 #pragma clang optimize off
 #endif
@@ -2167,6 +2168,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (compile.c_ast.rejections)
         {
             string_print(S8("C_AST_REJECTED units={u64}\n"), compile.c_ast.rejections);
+        }
+        // Counts and sizes: the facts lowering retained for the unit (GitHub #3102 step 1), with or without the pilot.
+        {
+            CAstLowerStatistics retained = compile.c_ast.lower;
+            string_print(S8("C_AST_RETAINED trees_built={u64} tree_rejections={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64}\n"),
+                         retained.trees_built, retained.tree_rejections, retained.tree_nodes, retained.tree_bytes, retained.span_nodes,
+                         retained.span_bytes);
         }
         if (compile.c_ast.units)
         {

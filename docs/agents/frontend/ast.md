@@ -13,10 +13,9 @@ included. **Status: default since 2026-10-13.** The
 that put the switch ahead of steps 3 and 4 of the
 [lowering direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034).
 `-fno-c-ast-pilot` keeps the tree-free path as a reference arm until
-[#4058](https://github.com/buster14a/buster/issues/4058) deletes it, except
-for the [statement walker](#statements-from-nodes-in-lowering), which has no
-tree-free path: under `-fno-c-ast-pilot`, lowering builds the tree for a unit
-with a function body itself (a marked placeholder). Five consumers read the
+[#4058](https://github.com/buster14a/buster/issues/4058) deletes it. Lowering
+has the tree on that path as well: it builds one itself when the caller passes
+none ([retained facts](#retained-facts-for-lowering)). Five consumers read the
 tree:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
@@ -309,6 +308,62 @@ has their numbers and the open decision.
 
 **Never in IR.** No node id, column index or `CAst` pointer reaches canonical
 IR. Lowering reads the columns by node and emits only what it emits today.
+
+## Retained facts for lowering
+
+Step 1 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
+on #3102: each phase keeps its finished output for the next, and `c_gen.c`
+lowers from nodes and facts.
+
+- **The tree.** `CIRLowerOptions.syntax_tree` is never missing for lowering.
+  When the caller passes none, `c_lower_to_ir_tree_run` (`c_gen.c`) builds
+  the implicit tree from the final token stream with `c_ast_build`, keeps it
+  for the whole lowering call and releases it on the same thread before
+  returning. `-fsyntax-only` does not lower, so it builds no tree.
+  - A tree that cannot be reserved (`C_DIAGNOSTIC_SOURCE_TOO_LARGE`) fails the
+    unit with the builder's diagnostic. So does a span table that cannot be
+    reserved.
+  - A unit with a function body whose syntax the builder rejects fails with
+    the builder's diagnostics: the
+    [statement walker](#statements-from-nodes-in-lowering) has no token path.
+    A unit without a body lowers without a tree, keeping lowering's own
+    diagnostics, and is counted in `tree_rejections`. These are inputs
+    semantic analysis accepts and lowering diagnoses, such as file-scope
+    `[1 ... 2 ... 3]` designators and stray initializer separators. Step 3
+    makes the tree mandatory for lowering, so it must first have the builder
+    or analysis diagnose them.
+  - A hand-built stream with no symbol table no longer refuses the build: the
+    builder interns into a table of its own (`c_symbol_table_standalone`), in
+    its phase arena, whose ids no consumer compares with another table's.
+  - The builder reads `__fp16`, ARM's storage-only half, as a type word
+    (`C_AST_WORD_FP16`), as the parser does. The tree's specifier readers do
+    not treat it as a primitive, so they hand it to the type machine.
+- **Token spans.** `c_ast_spans_build` gives every node the span
+  [first, end) defined by `c_ast_span_rule`, which is also the
+  [typer](#tree-expression-typer)'s rule; there is one statement of it. It
+  is computed once per unit in index order, so each operand's span is known
+  before its parent. A per-start-token chain maps a token range back to its
+  node (`c_ast_spans_locate`, which strips balanced outer parentheses as the
+  typer's lookup does). This is the
+  [token-to-node map](#token-to-node-map-for-lowering)'s design A, built once
+  per unit instead of per body: 12 bytes per node and 4 per token, in a
+  private arena (`c_ir_syntax_spans_create`). Lowering keeps it in
+  `CIntegerIrBuilder.syntax_spans`. Token and node indices stay in that
+  arena; no node id reaches the IR.
+- **Types.** The tree typer's per-node C types are still body scratch in
+  analysis and run only under the pilot. They are not retained yet. Lowering's
+  expression IR types come from the values it emits; the C types its type
+  queries need (`sizeof` operands, `typeof`, type names) belong to the query
+  machine, which step 4 moves to nodes. Retaining typer facts is that step's
+  dependency, not this one's.
+- **Counts.** `CAstLowerStatistics` records the trees lowering built
+  (`trees_built`, `tree_nodes`, `tree_bytes`) and the span facts
+  (`span_nodes`, `span_bytes`), and the rejections above (`tree_rejections`).
+  `-v` prints them on every compile as `C_AST_RETAINED trees_built=<>
+  tree_rejections=<> tree_nodes=<> tree_bytes=<> span_nodes=<> span_bytes=<>`.
+
+Retained bytes are measured and reported, not budgeted per slice. The
+end-to-end measurement waits until lowering is complete (step 5).
 
 ## Layouts
 
@@ -1417,14 +1472,13 @@ node is refused with `function body has no syntax tree node`.
 
 **The tree.** The walker needs a tree in every compile that lowers a body.
 The driver passes the parse phase's tree under `-fc-ast-pilot`, the default
-since 2026-10-13. Under `-fno-c-ast-pilot`, and for a caller that passes no
-tree, `c_lower_to_ir_with_options` builds the implicit layout itself when the
-caller passes none, the analysis completed and the unit has a function body
-(`c_lower_to_ir_tree_run`, marked as a placeholder), and releases it
-after lowering. A unit the builder rejects fails with the builder's
-diagnostics: a malformed GNU case range (`case 1 ... 2 ... 3:`) is now the
-builder's syntax error rather than lowering's. A unit without a body lowers
-as before. The placeholder goes when #4058 deletes the tree-free path.
+since 2026-10-13; otherwise `c_lower_to_ir_tree_run` builds it
+([retained facts for lowering](#retained-facts-for-lowering), #3102 step 1).
+Because the walker has no token path, a unit with a function body whose
+syntax the builder rejects fails with the builder's diagnostics: a malformed
+GNU case range (`case 1 ... 2 ... 3:`) is the builder's syntax error rather
+than lowering's. Only a unit without a body lowers without a tree
+(`tree_rejections`).
 
 Lowering every body from the tree surfaced two builder gaps, which also
 failed `-fc-ast-pilot` and are closed with it:
@@ -1602,11 +1656,12 @@ typedef.
 
 ## Lowering from the tree
 
-Under `-fc-ast-pilot` the driver also hands the tree to lowering, in
-`CIRLowerOptions.syntax_tree`. Without it, lowering reads tokens as before. The tree
-outlives lowering: the driver releases it at the end of the unit, after the
-backend. Lowering reads nodes only while `c_lower_to_ir_with_options` runs,
-and no IR record, type or source range refers to a node.
+Under `-fc-ast-pilot` the driver hands its tree to lowering, in
+`CIRLowerOptions.syntax_tree`, and releases it at the end of the unit, after
+the backend. Without the pilot, lowering builds and releases the unit's tree
+itself ([retained facts](#retained-facts-for-lowering)). Either way lowering
+reads nodes only while `c_lower_to_ir_with_options` runs, and no IR record,
+type or source range refers to a node.
 
 **First slice: root conditionals.** `c_ir_root_conditional` decides whether a
 token range, after its outer parentheses are stripped, is a `?:` at the root.
@@ -1896,10 +1951,8 @@ No code from this step lands before step 1. Step 1
 ([retained facts](#retained-facts)) retains F1's types, the bindings and
 bit-field widths per node, under `-fc-ast-pilot` (the default since
 2026-10-13). Beyond that:
-- under `-fno-c-ast-pilot` the tree reaches lowering only through step 2's
-  placeholder, `c_lower_to_ir_tree_run`
-  ([statements from nodes](#statements-from-nodes-in-lowering)), and the
-  facts not at all;
+- under `-fno-c-ast-pilot` lowering builds its own tree
+  (`c_lower_to_ir_tree_run`), but the facts are not retained;
 - semantic analysis's initializer and declaration answers (F2 to F6) are not
   published to lowering yet.
 
