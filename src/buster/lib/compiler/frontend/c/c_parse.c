@@ -3574,6 +3574,7 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
         operand_parse.deferred_bit_field_width_diagnostic_capacity = operand_parse.deferred_bit_field_width_diagnostic_count;
         CScopeId scope = c_parse_scope_for_token(result, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, start);
         u32 type_end = start;
+        u32 alignment_count_before = operand_parse.type_alignment_count;
         // The machineless reader takes exactly the typedef names, tags and
         // primitives the fold measures, and never reenters the caller's
         // declaration machine.
@@ -3591,13 +3592,20 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
             type_end += named;
         }
         CType named_type = named ? operand_parse.types[type.value] : (CType){0};
-        // A qualified copy the name parse appended past this solve's table
-        // (`const struct S`) has its base's layout, though `_Atomic` may
-        // promote it. A qualified copy of an aligned alias names the alias's
-        // own base, and the solve's row for such a copy does not carry the
-        // alias's alignment either, so in a unit with any aligned alias every
-        // qualified copy is left to the typed query.
-        bool aliased_copy = named_type.has_unqualified_type && operand_parse.type_alignment_count;
+        CTypeAlignment const* qualified_alignment = 0;
+        if (named && operand_parse.type_alignment_count > alignment_count_before)
+        {
+            CTypeAlignment const* appended_alignment = operand_parse.type_alignments + operand_parse.type_alignment_count - 1;
+            if (appended_alignment->type_index == type.value)
+            {
+                qualified_alignment = appended_alignment;
+            }
+        }
+        // The layout columns are a snapshot taken before this operand's
+        // qualified copy was appended. Its inherited CTypeAlignment row
+        // identifies the matching in-column alias fact, whose size and
+        // replacement alignment this copy shares.
+        bool qualified_copy = !pointer && type.value >= context->type_count && qualified_alignment;
         u32 layout_type = type.value;
         if (named && !pointer && type.value >= context->type_count && named_type.has_unqualified_type && !named_type.is_atomic &&
             named_type.unqualified_type.value < context->type_count)
@@ -3606,7 +3614,7 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
         }
         u64 builtin_size = 0;
         u32 builtin_alignment = 0;
-        if (!named || (!pointer && (aliased_copy || named_type.kind == C_TYPE_VOID || named_type.kind == C_TYPE_FUNCTION)))
+        if (!named || (!pointer && (named_type.kind == C_TYPE_VOID || named_type.kind == C_TYPE_FUNCTION)))
         {
             fold = C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
         }
@@ -3615,6 +3623,29 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
             *size_out = c_preprocess_detail(preprocess)->data_layout.pointer.size;
             *alignment_out = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
             fold = C_LAYOUT_ALIGNMENT_FOLD_VALUE;
+        }
+        else if (qualified_copy)
+        {
+            // The sparse row points directly at the alias that owns this
+            // request; reuse its exact solver fact, including any wait state.
+            u32 source_type = qualified_alignment->source_type_index;
+            if (source_type >= context->type_count)
+            {
+                fold = C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+            }
+            else if (!c_parse_layout_resolved(context, agenda, source_type))
+            {
+                fold = C_LAYOUT_ALIGNMENT_FOLD_WAIT;
+            }
+            else
+            {
+                // The original alias row already applied its inherited
+                // request (including atomic padding); reuse that solve fact.
+                *size_out = c_parse_layout_size(context, agenda, source_type);
+                *alignment_out = c_parse_layout_alignment(context, agenda, source_type);
+                *provisional_out |= c_parse_layout_provisional(context, agenda, source_type);
+                fold = C_LAYOUT_ALIGNMENT_FOLD_VALUE;
+            }
         }
         else if (layout_type < context->type_count)
         {
@@ -3851,6 +3882,7 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
             {
                 u32 type_start = specifier.token_start + 2;
                 u32 type_end = specifier_end - 1;
+                u32 alignment_count_before = context->result->type_alignment_count;
                 u32 aligned_type_index = type_start;
                 CTypeId aligned_type = c_parse_type_name_specifiers(context->machine, context->result, context->preprocess,
                                                                        context->result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, type_start,
@@ -3863,7 +3895,39 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                 // 0 answers, 1 waits for a type of the table, 2 needs the typed query.
                 u32 spelled = 2;
                 u32 spelled_index = aligned_type.value;
-                while (aligned_type_index == type_end && spelled == 2 && spelled_index < context->result->type_count)
+                // A qualified copy of an aligned typedef is outside this
+                // solve's layout columns but carries the inherited sparse
+                // record. It was appended while parsing this type name, so the
+                // last alignment row is a constant-time lookup.
+                CTypeAlignment const* inherited_alignment = 0;
+                if (context->result->type_alignment_count > alignment_count_before)
+                {
+                    CTypeAlignment const* appended_alignment =
+                        context->result->type_alignments + context->result->type_alignment_count - 1;
+                    if (appended_alignment->type_index == aligned_type.value)
+                    {
+                        inherited_alignment = appended_alignment;
+                    }
+                }
+                bool inherited_copy = aligned_type_index == type_end && aligned_type.value >= context->type_count &&
+                                      aligned_type.value < context->result->type_count && inherited_alignment;
+                if (inherited_copy)
+                {
+                    u64 ignored_size = 0;
+                    u32 folded_alignment = 0;
+                    CLayoutAlignmentFold inherited_fold = c_parse_layout_alignment_fold_operand(
+                        context, agenda, type_start, type_end, &ignored_size, &folded_alignment, provisional_out);
+                    if (inherited_fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE)
+                    {
+                        requested_alignment = folded_alignment;
+                        spelled = 0;
+                    }
+                    else if (inherited_fold == C_LAYOUT_ALIGNMENT_FOLD_WAIT)
+                    {
+                        spelled = 1;
+                    }
+                }
+                while (!inherited_copy && aligned_type_index == type_end && spelled == 2 && spelled_index < context->result->type_count)
                 {
                     u64 builtin_size = 0;
                     u32 builtin_alignment = 0;
@@ -11533,6 +11597,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CType
     }
     result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
         .type_index = aligned.value,
+        .source_type_index = aligned.value,
         .alignment_start = alignment_start,
         .alignment_count = alignment_count,
     };
@@ -13803,6 +13868,7 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
         CTypeAlignment const* base_alignment = result->type_alignment_count && !atomic_applied ? c_parse_type_alignment(result, base) : 0;
         u32 alignment_start = base_alignment ? base_alignment->alignment_start : 0;
         u32 alignment_count = base_alignment ? base_alignment->alignment_count : 0;
+        u32 source_type_index = base_alignment ? base_alignment->source_type_index : UINT32_MAX;
         // Room is taken and the range read out before the copy is added: the
         // growth reallocates the table the record points into.
         bool inherit = alignment_count && c_parse_reserve_type_alignment(result);
@@ -13811,6 +13877,7 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
         {
             result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
                 .type_index = qualified_id.value,
+                .source_type_index = source_type_index,
                 .alignment_start = alignment_start,
                 .alignment_count = alignment_count,
             };
