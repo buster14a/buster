@@ -18,7 +18,7 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 17 | [series](series-310307db3edca5aa.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/3718-linear-assignment-chains | 0 | 1 | [series](series-b6ab01d48adccc95.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | pull&#95;request / codex/3718-linear-assignment-chains | 1 | 1 | [series](series-14737ec93a7921d1.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 15 | [series](series-11db6938aa621425.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 18 | [series](series-11db6938aa621425.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-f4bbd04e90bff00b.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 33 | 33 | [series](series-20369cc20c6b6e85.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 5 | 5 | [series](series-cf913efc1e8c2ba3.md) |
