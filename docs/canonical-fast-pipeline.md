@@ -597,7 +597,7 @@ Positive decimal limits are configurable through
 `-fcanonical-inline-function-growth=N` (optional default 2048 copied rows per caller),
 `-fcanonical-inline-module-growth=N` (optional default: the larger of 4096 copied rows
 and 1/32 of the module's lowered canonical instruction rows), and
-`-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+`-fcanonical-inline-call-sites=N` (optional default 64 sites per caller).
 The fixed 4096-row module default stopped optional expansion of the unity
 self-host source after 243 sites, because callers are visited in module
 order; per-caller limits refused only 54 further sites once the module limit
@@ -627,15 +627,21 @@ dropped. `-fcanonical-inline-caller-growth-shift=N` and
 selects the default, 32 or more keeps every planned site).
 The optional caller default is twice the 64-site times 16-row tiny-body budget.
 Required intrinsic wrappers can exceed both optional row caps (the RAD AVX-512
-probe copies 6318 rows), so zero function/module row limits leave required
-expansion to the independent work, storage and call-site guards. Explicit
-function/module row limits cap both phases and still produce a source-mapped
-refusal. Zero row limits remain zero in embedding options across modules;
+probe copies 6318 rows), so zero function/module row and call-site limits leave
+required expansion to the independent work and storage guards. Explicit
+row/site limits cap both phases and still produce a source-mapped refusal.
+Zero row/site limits remain zero in embedding options across modules;
 other zero numeric fields normalize to their named defaults.
 Mandatory calls are processed before optional tiny candidates across the module.
-Their growth counts against any subsequent optional row allowance, and both
-phases share the call-site limit. Mandatory planning and splicing share one
-module-wide work and retained-storage budget.
+Their growth and sites count against any subsequent optional allowance.
+Mandatory graph planning retains its module-wide work and scratch bounds.
+Required splicing bounds work and retained storage per caller: independent
+consumers cannot exhaust one shared allowance. Its fixed expansion allowances
+are 4 Mi work units and 16 MiB, plus one input-proportional relocation of the
+caller's existing tables and local/debug snapshots, computed before planning
+sites. This permits large existing callers without granting unbounded repeated
+expansion. Planning scratch remains bounded at 16 MiB, and copied rows retain
+the independent 4 Mi module-wide ceiling.
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
 work totals let the first few large callers starve every later one. Optional

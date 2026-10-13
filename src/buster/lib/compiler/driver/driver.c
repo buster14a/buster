@@ -2118,7 +2118,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             // Zero: optional row caps; required calls use work/storage guards.
             .max_function_growth = 0,
             .max_module_growth = 0,
-            .max_call_sites = IR_INLINE_CALL_SITES,
+            .max_call_sites = 0,
         },
     };
     if (!arena)

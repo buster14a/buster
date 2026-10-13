@@ -1978,7 +1978,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 2000000u) == 2000000u / 32u);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(100u, 2000000u) == 100u);
-            BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == 0);
             BUSTER_TEST(arguments, defaults_program->inline_options.caller_growth_shift == IR_INLINE_CALLER_GROWTH_SHIFT);
             BUSTER_TEST(arguments, defaults_module->inline_complete);
             BUSTER_TEST(arguments, defaults_module->inlining.inlined >= 1);
@@ -2394,6 +2394,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         }
         memcpy(large_source_bytes + large_cursor, large_tail.pointer, large_tail.length);
         String8 large_source = {.pointer = large_source_bytes, .length = large_source_size};
+        if (limit_case == 0)
+        {
+            // Independent callers collectively exceed the old shared work
+            // allowance; each expansion remains below its own fixed bound.
+            String8 callers[49];
+            callers[0] = large_source;
+            for (u32 caller_index = 1; caller_index < BUSTER_ARRAY_LENGTH(callers); caller_index += 1)
+            {
+                callers[caller_index] = string_format(large_arena,
+                    S8("int large_caller_{u32}(int value) {{ return large_required(value); }}\n"), caller_index);
+            }
+            large_source = string_join_arena(large_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(callers), false);
+        }
         CPreprocessResult large_preprocessed = c_preprocess(large_arena, large_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
         CAnalysisResult large_analysis = c_parse(large_arena, large_preprocessed);
@@ -2419,8 +2432,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             if (limit_case == 0)
             {
                 BUSTER_TEST(arguments, large_prepared.error == IR_VALIDATION_NONE);
-                BUSTER_TEST(arguments, large_module->inlining.always_inlined == 1);
+                BUSTER_TEST(arguments, large_module->inlining.always_inlined == 49);
                 BUSTER_TEST(arguments, large_module->inlining.growth > IR_INLINE_MODULE_GROWTH);
+                BUSTER_TEST(arguments, large_module->inlining.visits > IR_FAST_WORK_BUDGET);
                 BUSTER_TEST(arguments, ir_validate_canonical_module(large_program, large_module).error == IR_VALIDATION_NONE);
             }
             else
@@ -2435,6 +2449,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
         }
         scratch_end(large_temporary);
+    }
+
+    // A required consumer may have more than the optional 64-site allowance.
+    // An explicit site cap remains a source-mapped refusal.
+    for (u32 site_case = 0; site_case < 2; site_case += 1)
+    {
+        TemporalArena sites_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* sites_arena = sites_temporary.arena;
+        String8 sites_head = S8(
+            "static inline __attribute__((always_inline)) int site_leaf(int value) { return value + 1; }\n"
+            "int site_caller(int value) {\n");
+        String8 sites_statement = S8("value = site_leaf(value);\n");
+        String8 sites_tail = S8("return value; }\n");
+        u64 sites_size = sites_head.length + (IR_INLINE_CALL_SITES + 1u) * sites_statement.length + sites_tail.length;
+        char8* sites_bytes = arena_allocate(sites_arena, char8, sites_size);
+        u64 sites_cursor = sites_head.length;
+        memcpy(sites_bytes, sites_head.pointer, sites_head.length);
+        for (u32 site = 0; site <= IR_INLINE_CALL_SITES; site += 1)
+        {
+            memcpy(sites_bytes + sites_cursor, sites_statement.pointer, sites_statement.length);
+            sites_cursor += sites_statement.length;
+        }
+        memcpy(sites_bytes + sites_cursor, sites_tail.pointer, sites_tail.length);
+        String8 sites_source = {.pointer = sites_bytes, .length = sites_size};
+        CPreprocessResult sites_preprocess = c_preprocess(sites_arena, sites_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult sites_analysis = c_parse(sites_arena, sites_preprocess);
+        CIRLowerResult sites_lowered = c_lower_to_ir(sites_arena, S8("canonical-inline-required-sites.c"),
+            sites_preprocess, sites_analysis, target_native);
+        BUSTER_TEST(arguments, !sites_preprocess.error_count && !sites_analysis.diagnostic_count && !sites_lowered.diagnostic_count);
+        if (BUSTER_REQUIRE(arguments, sites_lowered.program && sites_lowered.program->module_count == 1))
+        {
+            IrProgram* sites_program = sites_lowered.program;
+            IrModule* sites_module = sites_program->modules;
+            sites_program->fast_passes = 0;
+            sites_program->inline_options = (IrInlineOptions){.max_call_sites = site_case ? IR_INLINE_CALL_SITES : 0};
+            IrValidationResult sites_prepared = ir_prepare_canonical_module(sites_program, sites_module, false);
+            if (site_case == 0)
+            {
+                BUSTER_TEST(arguments, sites_prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, sites_module->inlining.always_inlined == IR_INLINE_CALL_SITES + 1);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(sites_program, sites_module).error == IR_VALIDATION_NONE);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, sites_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                BUSTER_TEST(arguments, sites_module->inlining.required_budget_reason == IR_INLINE_BUDGET_CALL_SITES);
+                BUSTER_TEST(arguments, sites_module->inlining.required_budget_demand == IR_INLINE_CALL_SITES + 1);
+                BUSTER_TEST(arguments, sites_module->inlining.required_budget_limit == IR_INLINE_CALL_SITES);
+            }
+        }
+        scratch_end(sites_temporary);
     }
 
     // An explicit function-growth limit on a required call reports the

@@ -623,9 +623,9 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `-fcanonical-inline-module-growth=N`,
 `-fcanonical-inline-call-sites=N`, and
 `-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
-tiny inlining; zero is rejected on the command line. Zero-valued API row limits
-select the optional defaults while required expansion uses the independent
-work/storage guards; other zero API fields normalize to the named defaults.
+tiny inlining; zero is rejected on the command line. Zero-valued API row/site limits
+select the optional defaults while required expansion uses independent per-caller
+work/storage guards (including one relocation of existing caller data); other zero API fields normalize to the named defaults.
 Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
 the shift sets the caller relocation bound described below.
