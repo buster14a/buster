@@ -1843,6 +1843,74 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisRes
     return difference;
 }
 
+// The matching-delimiter index c_ast_spans_build reads (closer + 1 at each
+// opener, 0 elsewhere), built with a stack as CPositionIndex builds it. A
+// stream whose delimiters do not match has none.
+BUSTER_GLOBAL_LOCAL u32* c_ast_test_matches(Arena* arena, CPreprocessResult preprocess)
+{
+    u32 count = (u32)preprocess.token_count;
+    u32* matches = arena_allocate_zeroed(arena, u32, (u64)count + 1);
+    u32* stack = arena_allocate(arena, u32, (u64)count + 1);
+    u32 depth = 0;
+    bool matched = true;
+    for (u32 index = 0; index < count && matched; index += 1)
+    {
+        CToken const* token = &preprocess.tokens[index];
+        bool open = token->punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+                    token->punctuator == C_PUNCTUATOR_LEFT_BRACE;
+        bool close = token->punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                     token->punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+        if (open)
+        {
+            stack[depth] = index;
+            depth += 1;
+        }
+        else if (close)
+        {
+            matched = depth > 0;
+            if (matched)
+            {
+                depth -= 1;
+                matches[stack[depth]] = index + 1;
+            }
+        }
+    }
+    return matched && !depth ? matches : 0;
+}
+
+// The spellings of [first, end), one space apart.
+BUSTER_GLOBAL_LOCAL String8 c_ast_test_span_text(Arena* arena, CPreprocessResult preprocess, u32 first, u32 end)
+{
+    String8 text = {0};
+    for (u32 token = first; token < end; token += 1)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]);
+        text = text.length ? string_format(arena, S8("{S8} {S8}"), text, spelling) : spelling;
+    }
+    return text;
+}
+
+// Every spanned node of a built tree holds its anchor token, and the span
+// maps back to a node with the same span.
+BUSTER_GLOBAL_LOCAL bool c_ast_test_spans_consistent(CAst const* ast, CAstSpans const* spans, CPreprocessResult preprocess, u32 const* matches)
+{
+    bool consistent = spans->node_count == ast->node_count;
+    for (u32 node = 0; node < ast->node_count && consistent; node += 1)
+    {
+        u32 first = spans->first[node];
+        u32 end = spans->end[node];
+        if (first != C_AST_SPAN_NONE)
+        {
+            u32 token = ast->tokens[node];
+            // A label address is anchored at its label, after the `&&`.
+            consistent = token >= first && token < end;
+            u32 found = c_ast_spans_locate(spans, preprocess.tokens, matches, first, end);
+            consistent = consistent && found != C_AST_NODE_INVALID && spans->first[found] == first && spans->end[found] == end;
+        }
+    }
+    return consistent;
+}
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Mobile test runs carry no repository tree, so the fixture-reading suites
 // below run only where the tests/ directory exists, as c_test.c's do.
@@ -2866,74 +2934,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
 // hold the tree to the claims above. `label` names the input in failures (a
 // path, or the source text of a construct); `required` makes a preprocessing
 // error a failure instead of a skip.
-// The matching-delimiter index c_ast_spans_build reads (closer + 1 at each
-// opener, 0 elsewhere), built with a stack as CPositionIndex builds it. A
-// stream whose delimiters do not match has none.
-BUSTER_GLOBAL_LOCAL u32* c_ast_test_matches(Arena* arena, CPreprocessResult preprocess)
-{
-    u32 count = (u32)preprocess.token_count;
-    u32* matches = arena_allocate_zeroed(arena, u32, (u64)count + 1);
-    u32* stack = arena_allocate(arena, u32, (u64)count + 1);
-    u32 depth = 0;
-    bool matched = true;
-    for (u32 index = 0; index < count && matched; index += 1)
-    {
-        CToken const* token = &preprocess.tokens[index];
-        bool open = token->punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
-                    token->punctuator == C_PUNCTUATOR_LEFT_BRACE;
-        bool close = token->punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
-                     token->punctuator == C_PUNCTUATOR_RIGHT_BRACE;
-        if (open)
-        {
-            stack[depth] = index;
-            depth += 1;
-        }
-        else if (close)
-        {
-            matched = depth > 0;
-            if (matched)
-            {
-                depth -= 1;
-                matches[stack[depth]] = index + 1;
-            }
-        }
-    }
-    return matched && !depth ? matches : 0;
-}
-
-// The spellings of [first, end), one space apart.
-BUSTER_GLOBAL_LOCAL String8 c_ast_test_span_text(Arena* arena, CPreprocessResult preprocess, u32 first, u32 end)
-{
-    String8 text = {0};
-    for (u32 token = first; token < end; token += 1)
-    {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]);
-        text = text.length ? string_format(arena, S8("{S8} {S8}"), text, spelling) : spelling;
-    }
-    return text;
-}
-
-// Every spanned node of a built tree holds its anchor token, and the span
-// maps back to a node with the same span.
-BUSTER_GLOBAL_LOCAL bool c_ast_test_spans_consistent(CAst const* ast, CAstSpans const* spans, CPreprocessResult preprocess, u32 const* matches)
-{
-    bool consistent = spans->node_count == ast->node_count;
-    for (u32 node = 0; node < ast->node_count && consistent; node += 1)
-    {
-        u32 first = spans->first[node];
-        u32 end = spans->end[node];
-        if (first != C_AST_SPAN_NONE)
-        {
-            u32 token = ast->tokens[node];
-            // A label address is anchored at its label, after the `&&`.
-            consistent = token >= first && token < end;
-            u32 found = c_ast_spans_locate(spans, preprocess.tokens, matches, first, end);
-            consistent = consistent && found != C_AST_NODE_INVALID && spans->first[found] == first && spans->end[found] == end;
-        }
-    }
-    return consistent;
-}
-
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* arguments, String8 label, String8 source, CPreprocessOptions options, bool required,
                                                      CAstCorpusTally* tally)
 {
