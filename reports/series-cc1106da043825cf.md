@@ -2,7 +2,7 @@
 
 [Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)
 
-Policy hosted-ci-cohort-v1; refresh 2026-10-13T16:16:51Z. Cohort fields and missing values:
+Policy hosted-ci-cohort-v1; refresh 2026-10-13T17:09:19Z. Cohort fields and missing values:
 
 | Field | Value |
 |---|---|
@@ -37,15 +37,15 @@ Context qualification: incomplete-producer-context. Unknown critical context pre
 
 ### Trailing comparison
 
-**insufficient data**. Baseline: n=0; median/dispersion unavailable; p95 unavailable (requires 20). Candidate: n=0; median/dispersion unavailable; p95 unavailable (requires 20). Change unavailable (percent unavailable below two-second baseline). Observed practical floor 2.0 s; candidate variability allowance 2.0 s.
+**insufficient data**. Baseline: n=0; median/dispersion unavailable; p95 unavailable (requires 20). Candidate: n=1; median 28.0 s; MAD 0.0 s; 1 UTC date buckets; p95 unavailable (requires 20). Change unavailable (percent unavailable below two-second baseline). Observed practical floor 2.0 s; candidate variability allowance 2.0 s.
 
 **Trailing baseline observations:** unavailable.
 
-**Candidate observations:** unavailable.
+**Candidate observations:** [job 115407737326](https://github.com/buster14a/buster/actions/runs/38429525930/job/115407737326) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38429525930/attempts/1) / [tested 2d610db56206](https://github.com/buster14a/buster/commit/2d610db56206ed811439e0c01962950cdd82f227) at 2026-10-13T16:19:29Z.
 
 ### Cumulative change from the fixed initial anchor
 
-**insufficient data**. Baseline: n=4; median 22.5 s; MAD 1.5 s; 2 UTC date buckets; p95 unavailable (requires 20). Candidate: n=0; median/dispersion unavailable; p95 unavailable (requires 20). Change unavailable (percent unavailable below two-second baseline). Observed practical floor 4.5 s; candidate variability allowance 2.0 s.
+**noncomparable/workload-or-environment changed**. Baseline: n=4; median 22.5 s; MAD 1.5 s; 2 UTC date buckets; p95 unavailable (requires 20). Candidate: n=1; median 28.0 s; MAD 0.0 s; 1 UTC date buckets; p95 unavailable (requires 20). Change: +5.5 s (+24.4%). Observed practical floor 4.5 s; candidate variability allowance 2.0 s.
 
 Anchor reason: initial observations of this exact policy/cohort. It fills at most twenty points and never slides. Candidate overlap is excluded. Changing an anchor requires a new explicit report/policy and recorded reason; old rows remain.
 
@@ -57,3 +57,4 @@ These are descriptive CI signals, not independent significance tests or paired e
 
 | Started | Outcome / population | Elapsed s | Source evidence |
 |---|---|---:|---|
+| 2026-10-13T16:19:29Z | success / executed / physical-execution | 28 | [job 115407737326](https://github.com/buster14a/buster/actions/runs/38429525930/job/115407737326) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38429525930/attempts/1) / [tested 2d610db56206](https://github.com/buster14a/buster/commit/2d610db56206ed811439e0c01962950cdd82f227) |
