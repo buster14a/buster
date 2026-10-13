@@ -95,8 +95,8 @@ Children use existing bounded captures,
 deadlines and fail-closed cleanup; a timeout or truncated log cannot pass.
 All children retain the original ten-minute bound. The unmeasured 600-to-1800
 second test-limit increase was reverted; the portable reference still timed out
-at the larger limit and its cause remains unresolved on #3184. Final bounded
-TAP progress/summary is also printed to the job log. The
+at the larger limit. The measured cause is serial execution (see below), not
+the bound. Final bounded TAP progress/summary is also printed to the job log. The
 [initial census](https://github.com/buster14a/buster/actions/runs/38131412845/job/114446340801)
 built both Clang references and passed optimized reference tests. Both Buster
 cells stopped on `-m64`, owned by [#3458](https://github.com/buster14a/buster/issues/3458)
@@ -114,6 +114,42 @@ was uploaded successfully. The native log records inner archive SHA-256
 this is retained producer evidence, not independent archive certification or a
 complete inspected TAP denominator.
 
+### Local diagnostic runs (2026-10-13)
+
+These ran in a shared 4-vCPU Linux x86-64 cloud container with load 5-15 from
+other sessions. The compiler was Clang 18 and a Clang-built Release `ide`
+(SHA-256 `b2f156e26add2fa12a86d2f0c89bf351cea63f30ac717f514c438c9800105f50`).
+Wall times are diagnostic only; CPU seconds are given beside them. These runs
+do not show that hosted cells fit the 600-second bound.
+
+At `dcb1469b613acaa60b206988c8a204691982d28f` (before the fixes), every cell
+failed:
+
+- Portable reference tests timed out after 131 of 347 recipes. With `V=1`,
+  upstream printed `Warning: HARNESS_JOBS > 1 ignored with HARNESS_VERBOSE`.
+- An unbounded rerun of that suite needed 1621 CPU seconds, so two jobs
+  cannot finish it in under about 810 seconds.
+- The Buster portable build hit its bound after 232 C actions, all of
+  which passed, with only 55 seconds of total compile time. Each proxy
+  action spent about 2 seconds (4 to 6 under load) hashing the 69 MB `ide`;
+  the compile itself took about 0.02 seconds.
+
+At the fixed revision, each proxy action takes 0.02 to 0.03 seconds, and its
+provenance keeps the digest. All four cells were rerun:
+
+| Cell | Build | Tests |
+| --- | --- | --- |
+| Reference portable | 257 s | all 347 recipes, 4518 tests, in 582 s wall / 1618 CPU s |
+| Reference optimized | 259 s | all 347 recipes in 211 s wall / 554 CPU s |
+| Buster portable | 974 actions in 58 s, then `ssl3_cbc.c` fails (#3324) | not run |
+| Buster optimized | `-Wa,--noexecstack`, then `-Qunused-arguments` (#1418) | not run |
+
+Both reference suites fail only `04-test_bio_dgram.t`, in its two `AF_INET6`
+iterations. The container has no IPv6 (`/proc/net/if_inet6` is absent).
+Treating that as the cause is unverified, and upstream tests are not changed.
+The `#3324` failure is a cast to a function-pointer type name with a named
+parameter, `(void (*)(void *ctx, ...))`.
+
 Whole-project execution follows the [main-only shared OS owner](../../external-project-ci.md).
 The obsolete branch-push/manual project workflow is removed. OpenSSL has no
 qualified shared input recipe yet; this PR does not schedule upstream builds or
@@ -121,9 +157,8 @@ tests in PR/merge-group CI. The existing hosted TCC proof job runs only the
 isolated native `test_openssl_controls` source/routing/archive fixtures, with no upstream
 checkout or project compilation. This separate zero-argument command cannot
 route to an upstream cell; extra arguments fail before any controls run.
-Keep this intake draft until the driver owner
-lands, the portable reference timeout is diagnosed and the applicable acceptance
-evidence is complete. Correctness development stays hosted; diagnostic elapsed
+Keep this intake draft until hosted cells reproduce the local results above
+and the applicable acceptance evidence is complete. Correctness development stays hosted; diagnostic elapsed
 times cannot satisfy the approved exact-candidate 9700X performance requirement.
 
 Before issue completion, retain complete input/dependency/generated-file
