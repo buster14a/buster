@@ -48189,7 +48189,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
 BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     CAst const* ast = builder->ast;
-    state->list = state->compound != C_AST_NODE_INVALID ? c_ir_node_block_list(builder, state->compound) : 0;
+    state->list = ast && state->compound < ast->node_count ? c_ir_node_block_list(builder, state->compound) : 0;
     bool initialized = state->list != 0;
     u32 begin = 0;
     u32 end = 0;
@@ -66081,22 +66081,33 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
 }
 
 // STEP 1 PLACEHOLDER (#3102 step 1, "retain the syntax tree and semantic facts
-// through lowering"): the statement walker reads the syntax tree, so a caller
-// that passes none gets one built here and released after lowering. Step 1
-// retains the parse phase's tree through lowering and replaces this; it is
-// not part of the step-2 change (#4060).
+// through lowering"): the statement walker reads function bodies from the
+// syntax tree, so when the caller passes none and the unit has a body, one is
+// built here and released after lowering. A unit the builder rejects fails
+// with the builder's diagnostics; there is no token walk to fall back to. A
+// unit without a body, or whose analysis did not complete, lowers as before:
+// nothing it lowers reads the tree, and lowering reports an incomplete
+// analysis itself. Step 1 retains the parse phase's tree through lowering and
+// replaces this; it is not part of the step-2 change (#4060).
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse,
                                                         Target target, CIRLowerOptions options, u64 query_reservation_limit,
                                                         u64 function_reservation_limit)
 {
+    bool has_body = false;
+    for (u32 index = 0; index < parse.declaration_count && !has_body; index += 1)
+    {
+        // body_start is the token after a body's `{`, set even for `{}`.
+        has_body = parse.declarations[index].body_start != 0;
+    }
     CAstResult built = {0};
-    if (!options.syntax_tree && arena)
+    bool build = !options.syntax_tree && arena && parse.analysis_complete && has_body;
+    if (build)
     {
         built = c_ast_build(arena, preprocess, (CAstOptions){0});
         options.syntax_tree = built.complete ? &built.ast : 0;
     }
     CIRLowerResult result = {0};
-    if (options.syntax_tree || !arena)
+    if (!build || built.complete)
     {
         result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
     }
@@ -66216,8 +66227,27 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclarat
                 break;
             case C_TEST_IR_SCRATCH_BODY_TASKS:
             {
-                CIrLowerBodyState state = {.declaration = declaration};
-                refused = !c_ir_lower_body_initialize(&builder, &state);
+                // The walker reads the body from its node (#4060); the scratch
+                // left is one label row, too little for the body's tables.
+                Arena* tree_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = true}});
+                CAstResult tree = tree_arena ? c_ast_build(tree_arena, preprocess, (CAstOptions){0}) : (CAstResult){0};
+                u32 compound = C_AST_NODE_INVALID;
+                for (u32 node = 1; tree.complete && node < tree.ast.node_count; node += 1)
+                {
+                    if (tree.ast.kinds[node] == C_AST_FUNCTION_DEFINITION && tree.ast.kinds[node - 1] == C_AST_COMPOUND_STATEMENT &&
+                        tree.ast.tokens[node - 1] + 1 == declaration.body_start)
+                    {
+                        compound = node - 1;
+                    }
+                }
+                builder.ast = tree.complete ? &tree.ast : 0;
+                CIrLowerBodyState state = {.declaration = declaration, .compound = compound};
+                refused = compound != C_AST_NODE_INVALID && !c_ir_lower_body_initialize(&builder, &state);
+                c_ast_release(&tree.ast);
+                if (tree_arena)
+                {
+                    arena_destroy(tree_arena, 1);
+                }
                 break;
             }
             case C_TEST_IR_SCRATCH_SSA_SLOTS:

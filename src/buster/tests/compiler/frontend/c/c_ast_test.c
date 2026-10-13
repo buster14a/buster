@@ -957,6 +957,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_check_slots(UnitTestArguments* arg
 // The attribute slots of INIT_DECLARATOR (bit 3 leading, bit 1 trailing),
 // MEMBER_DECLARATOR (bit 3 leading, bit 2 trailing) and the FIXED
 // DECLARATOR_ATTRIBUTED, as c_ast.h states them.
+// A vendor attribute's argument clause is a balanced token sequence (C23
+// 6.7.13.2): `vendor::tag({gnu::error("m")})` is stepped over to its closing
+// parenthesis and appends no argument node, while a `gnu::` attribute's
+// arguments are still expressions. An unbalanced clause fails the build.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_attribute_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(
+        temporary.arena, S8("[[gnu::unused, vendor::tag({gnu::error(\"m\")}), gnu::aligned(8)]] void f(void);\nvoid t(void) { f(); }\n"),
+        C_PREPROCESS_DIALECT_GNU23);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    if (BUSTER_REQUIRE(arguments, built.complete))
+    {
+        u32 vendor = C_AST_NODE_INVALID;
+        u32 aligned = C_AST_NODE_INVALID;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_ATTRIBUTE_SCOPED)
+            {
+                String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[node]]);
+                vendor = string_equal(name, S8("tag")) ? node : vendor;
+                aligned = string_equal(name, S8("aligned")) ? node : aligned;
+            }
+        }
+        // The namespace alone; `aligned` keeps its argument expression.
+        BUSTER_TEST(arguments, vendor != C_AST_NODE_INVALID && c_ast_child_count(&built.ast, vendor) == 1);
+        BUSTER_TEST(arguments, aligned != C_AST_NODE_INVALID && c_ast_child_count(&built.ast, aligned) == 2);
+        BUSTER_TEST(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID);
+    }
+    c_ast_release(&built.ast);
+    CPreprocessResult unbalanced = c_ast_test_preprocess(temporary.arena, S8("[[vendor::tag({)]] void f(void);\n"), C_PREPROCESS_DIALECT_GNU23);
+    CAstResult refused = c_ast_build(temporary.arena, unbalanced, (CAstOptions){0});
+    BUSTER_TEST(arguments, !refused.complete && refused.diagnostic_count != 0);
+    c_ast_release(&refused.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_attribute_slots(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6014,6 +6053,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_navigation);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_validator);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_attribute_slots);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_attribute_arguments);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_options_and_statistics);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_columns);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_oracle);

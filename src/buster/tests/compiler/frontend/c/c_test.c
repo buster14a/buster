@@ -7617,7 +7617,12 @@ BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* a
     if (parse.diagnostic_count + lowered.diagnostic_count == 1)
     {
         CDiagnostic diagnostic = parse.diagnostic_count ? parse.diagnostics[0] : lowered.diagnostics[0];
-        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        // Lowering reports what it refuses inside a function; a range the
+        // grammar refuses is the syntax tree builder's error, since lowering
+        // reads the body from the tree (#4060).
+        CDiagnosticKind kind = string_starts_with_sequence(message, S8("in function")) ? C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS
+                                                                                     : C_DIAGNOSTIC_EXPECTED_DECLARATION;
+        BUSTER_TEST(arguments, diagnostic.kind == kind);
         BUSTER_STRING_TEST(arguments, diagnostic.message, message);
     }
     outer_result->test_count += result.test_count;
@@ -36920,7 +36925,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                         }
                         BUSTER_TEST(arguments, found == 1);
                     }
-                    if (cases[case_index].semantic_only)
+                    // Lowering reads function bodies from the syntax tree
+                    // (#4060), whose builder needs the symbol table the
+                    // symbol-less rows leave out.
+                    if (cases[case_index].semantic_only || !symbols)
                     {
                         c_test_scratch_end(temporary);
                         continue;
@@ -39518,7 +39526,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     }
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int malformed(int value) { switch (value) { case 1 ... 2 ... 3: return 0; } return 1; }\n"),
-                                       S8("in function 'malformed': malformed GNU case range"));
+                                       S8("expected ':' after the case value, found '...'"));
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int nonconstant_low(int value) { switch (value) { case value ... 2: return 0; } return 1; }\n"),
                                        S8("in function 'nonconstant_low': case range lower bound is not an integer constant expression"));
