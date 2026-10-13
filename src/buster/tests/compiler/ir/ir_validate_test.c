@@ -132,7 +132,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_validate_test_random(u64* state)
 BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_builder(Arena* arena)
 {
     IrValidateTestBuilder builder = {.arena = arena};
-    builder.program = ir_program_initialize(arena, 1, 8, 0, 0);
+    builder.program = ir_program_initialize(arena, 1, 8, 8, 0);
     builder.void_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}});
     builder.i32_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
         .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
