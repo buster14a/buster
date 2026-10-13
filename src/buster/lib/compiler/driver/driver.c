@@ -7512,6 +7512,30 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
     return layout;
 }
 
+// Adds one unit's fact counts (GitHub #4062) to the invocation's, as the
+// other -v rows sum theirs over the inputs.
+BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* total, CAstFactStatistics unit)
+{
+    total->nodes += unit.nodes;
+    total->regions += unit.regions;
+    total->candidates += unit.candidates;
+    total->tree += unit.tree;
+    total->machine += unit.machine;
+    total->completed += unit.completed;
+    total->bound += unit.bound;
+    total->bit_fields += unit.bit_fields;
+    total->strings += unit.strings;
+    for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+    {
+        total->gaps[gap] += unit.gaps[gap];
+    }
+    total->uncovered += unit.uncovered;
+    total->outside += unit.outside;
+    total->stale += unit.stale;
+    total->completion_queries += unit.completion_queries;
+    total->retained_bytes += unit.retained_bytes;
+}
+
 // The -fc-ast-pilot hook (GitHub #3102): builds the syntax tree of one
 // preprocessed unit. Its columns live in private arenas that the unit's end
 // label releases (c_ast_release); its storage record lives in the unit's
@@ -8633,6 +8657,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // preprocessing result by index, so the end label releases its column
     // arenas first.
     CAst pilot_tree = {0};
+    // The semantic facts the pilot retains for lowering (GitHub #4062), over
+    // the same tree; released right after lowering, and again, idempotently,
+    // at the end label.
+    CAstFacts pilot_facts = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -8793,6 +8821,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_statement_statistics = &result.c_ast.statements;
         syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
+        // Nothing lowers a -fsyntax-only unit, so it retains no facts.
+        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY && c_ast_facts_create(&pilot_facts, &pilot_tree))
+        {
+            syntax.ast_facts = &pilot_facts;
+        }
     }
     // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
     // not decoded (CParserResult.string_literal_lengths_only).
@@ -8850,7 +8883,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     // from the pilot's tree; it is released at `end:`, after lowering.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0,
-                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0,
+                                                                    .syntax_facts = syntax.ast_facts});
+    // Lowering was the facts' last reader.
+    if (syntax.ast_facts)
+    {
+        compiler_driver_c_ast_facts_add(&result.c_ast.facts, pilot_facts.statistics);
+        c_ast_facts_release(&pilot_facts);
+    }
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     // Semantic warnings (-Wpointer-sign) publish ahead of any error; one that
     // -Werror promotes fails the unit as an analysis error.
@@ -9243,6 +9283,7 @@ end:
     {
         compiler_driver_detach_object(arena, &preprocess, &result.object);
     }
+    c_ast_facts_release(&pilot_facts);
     c_ast_release(&pilot_tree);
     c_preprocess_release(&preprocess);
     file_map_unmap(source_file);
@@ -11159,6 +11200,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
         result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
+        compiler_driver_c_ast_facts_add(&result.c_ast.facts, unit.c_ast.facts);
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;
         for (u32 reason = 0; reason < C_AST_STATEMENT_FALLBACK_COUNT; reason += 1)

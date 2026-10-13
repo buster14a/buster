@@ -30,7 +30,9 @@
 // implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
 // c_ir_root_conditional answers from its conditional nodes through
 // c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
-// question still reads tokens. No node id reaches the IR. The prepared control
+// question still reads tokens. The caller may also pass the facts semantic
+// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062);
+// no lowering consumer reads them yet. No node id reaches the IR. The prepared control
 // expressions of a function are answered by token-indexed tables, not scans of
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof

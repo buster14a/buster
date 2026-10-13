@@ -42574,7 +42574,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
 // label addresses; `:` before a parenthesized or cast else operand; chains in
 // either arm; GNU `?:`; and conditionals in calls, returns, initializers,
 // subscripts, statement expressions and `if` conditions. A conditional after a
-// root assignment or comma goes to the scan.
+// root assignment or comma goes to the scan. The pilot's retained facts
+// (GitHub #4062) reach the driver's counts and change neither object.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42635,6 +42636,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         BUSTER_TEST(arguments, lower.answers >= 20);
         BUSTER_TEST(arguments, lower.negatives > 0);
         BUSTER_TEST(arguments, lower.fallbacks > 0);
+        // The pilot also retains analysis's facts through lowering (GitHub
+        // #4062), which leaves the object as it was (above).
+        CAstFactStatistics facts = compiled[1].c_ast.facts;
+        BUSTER_TEST(arguments, compiled[0].c_ast.facts.nodes == 0 && compiled[0].c_ast.facts.retained_bytes == 0);
+        BUSTER_TEST(arguments, facts.nodes && facts.retained_bytes && facts.regions == 3 && facts.candidates && facts.stale == 0);
+    }
+    // Nothing lowers a -fsyntax-only unit, so it retains no facts.
+    {
+        String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), input};
+        CompilerDriverResult checked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){command, BUSTER_ARRAY_LENGTH(command)}));
+        BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+        BUSTER_TEST(arguments, checked.c_ast.units && checked.c_ast.facts.nodes == 0 && checked.c_ast.facts.candidates == 0);
     }
     scratch_end(temporary);
     return result;
