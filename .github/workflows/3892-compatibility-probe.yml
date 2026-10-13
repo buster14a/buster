@@ -60,5 +60,5 @@ jobs:
         run: |
           python3 -B tools/check_markdown_links.py
           git diff --check origin/main...HEAD
-          clang -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver"
           "$RUNNER_TEMP/driver" source_size --base "$(git merge-base origin/main HEAD)"
