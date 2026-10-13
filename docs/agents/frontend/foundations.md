@@ -128,7 +128,13 @@ walk past N nested `do` loops for each of their N variables needed N^2 slots
 read whose only predecessor lies in such a closed loop it leaves, a loop that
 neither writes nor reads the local, passes to the loop's entry in one step when
 the predecessor's forward links climb to that loop's header (preorder intervals
-of the forward-link forest answer this). Otherwise each of N nested `do`
+of the forward-link forest answer this). The read index and forest are built
+once, lazily, after the ordinary walk spends more steps than the function's
+blocks plus SSA events. Activation is checked between reads; one read visits
+at most every block, so work before activation is bounded by events plus twice
+the blocks. Cheap functions retain only the loop-header facts and write index;
+a refused optional carve leaves the general walk and is not retried (#4029).
+Otherwise each of N nested `do`
 conditions climbed through every inner condition and exit block: N^2 steps
 (#3894). Trivial
 parameters and unused parameter cycles are removed; a replaced parameter hands

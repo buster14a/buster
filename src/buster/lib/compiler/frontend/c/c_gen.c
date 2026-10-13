@@ -19,7 +19,9 @@
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
 // records the refusal); c_ir_ssa_finish_loops, which lets reads pass loop
 // headers from the loops c_ir_ssa_loop_record noted, drops its shortcut
-// rather than refusing. The remaining phase/state graph is in
+// rather than refusing. c_ir_ssa_finish_loop_exits lazily builds the read
+// index and forward-link forest once the general walk overspends its linear
+// budget. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // By default lowering has no syntax tree: it re-walks token ranges directly,
 // resolving identifiers through the parse result's scopes and answering
@@ -6815,9 +6817,9 @@ struct CIrDirectSsa
     u32* loop_headers;
     u32* local_definition_offsets;
     u32* local_definition_blocks;
-    // Also from c_ir_ssa_finish_loops: per local, the blocks that read it,
-    // ascending, like the writes; per block, its innermost recorded loop or
-    // UINT32_MAX; and the preorder interval [forward_enter, forward_leave) of
+    // The loop pass retains each block's innermost recorded loop or UINT32_MAX.
+    // c_ir_ssa_finish_loop_exits lazily adds per-local read blocks, ascending
+    // like the writes, and the preorder interval [forward_enter, forward_leave) of
     // each block in the forest of forward links, UINT32_MAX when no root
     // reaches it (c_ir_ssa_forward_block).
     u32* local_read_offsets;
@@ -6825,6 +6827,9 @@ struct CIrDirectSsa
     u32* loop_innermost;
     u32* forward_enter;
     u32* forward_leave;
+    // General read-walk steps already spent before optional exit preparation.
+    u64 forward_steps;
+    bool loop_exits_attempted;
     // Set by c_ir_ssa_refuse once a scratch carve was refused. Finish stops
     // its walks on it and keeps the refusal's own diagnostic.
     bool scratch_exhausted;
@@ -7245,7 +7250,7 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_forward_block(CIrDirectSsa* ssa, u32 block, u32 l
     if (ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1)
     {
         result = ssa->predecessors[ssa->predecessor_offsets[block]];
-        u32 loop_index = ssa->loop_innermost ? ssa->loop_innermost[result] : UINT32_MAX;
+        u32 loop_index = ssa->forward_enter ? ssa->loop_innermost[result] : UINT32_MAX;
         CIrSsaLoop* loop = loop_index != UINT32_MAX ? ssa->loops + loop_index : 0;
         if (loop && ssa->loop_headers[loop->header] == loop_index + 1 && !c_ir_ssa_loop_contains(loop, block))
         {
@@ -7281,10 +7286,20 @@ u64 c_test_ir_ssa_forward_steps(void)
 {
     return c_ir_ssa_forward_step_total;
 }
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_ssa_loop_exit_block_total;
+
+u64 c_test_ir_ssa_loop_exit_blocks(void)
+{
+    return c_ir_ssa_loop_exit_block_total;
+}
+#define C_IR_SSA_LOOP_EXIT_BLOCKS(count) (c_ir_ssa_loop_exit_block_total += (count))
 #define C_IR_SSA_FORWARD_STEP() (c_ir_ssa_forward_step_total += 1)
 #else
+#define C_IR_SSA_LOOP_EXIT_BLOCKS(count) ((void)0)
 #define C_IR_SSA_FORWARD_STEP() ((void)0)
 #endif
+
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loop_exits(CIntegerIrBuilder* builder);
 
 // Once predecessor discovery is complete, forward through single-predecessor
 // blocks instead of allocating a parameter at every intervening block. The walk
@@ -7302,6 +7317,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
     IrValueId value = slot ? slot->value : IR_VALUE_ID_INVALID;
     if (walk && value.value == IR_ID_UNDERLYING_INVALID)
     {
+        // Check between reads: one walk visits at most block_count blocks,
+        // so work before activation is bounded by events + 2 * blocks.
+        if (ssa->loop_headers && !ssa->loop_exits_attempted &&
+            ssa->forward_steps > (u64)ssa->event_count + builder->function->block_count)
+        {
+            c_ir_ssa_finish_loop_exits(builder);
+        }
         ssa->read_stamp += 1;
         if (!ssa->read_stamp)
         {
@@ -7321,6 +7343,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             forward = value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
         }
     }
+    ssa->forward_steps += path_count;
     bool refused = false;
     if (value.value == IR_ID_UNDERLYING_INVALID)
     {
@@ -7982,49 +8005,29 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
     {
         definition_count += ssa->events[index].opcode != IR_OPCODE_LOAD;
     }
-    u32 read_count = ssa->event_count - definition_count;
-    u32 event_rows = BUSTER_MAX(BUSTER_MAX(definition_count, read_count), 1);
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
     bool fits = loop_count != 0 &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), read_count ? read_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), event_rows, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32));
     if (fits)
     {
         u32* headers = arena_allocate(builder->scratch_arena, u32, block_count);
         u32* definition_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
         u32* definition_blocks = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
-        u32* read_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
-        u32* read_blocks = arena_allocate(builder->scratch_arena, u32, read_count ? read_count : 1);
         u32* innermost = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* enter = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* leave = arena_allocate(builder->scratch_arena, u32, block_count);
         TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
         u32* stack = arena_allocate(builder->scratch_arena, u32, loop_count);
         u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
-        u32* by_block = arena_allocate(builder->scratch_arena, u32, event_rows);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
         u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
-        u32* parents = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* child_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
-        u32* children = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* child_cursor = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* path = arena_allocate(builder->scratch_arena, u32, block_count);
         u32* skip = arena_allocate(builder->scratch_arena, u32, loop_count);
         memset(headers, 0, sizeof(*headers) * block_count);
         // A usable record has both window ends and its blocks; windows open in
@@ -8130,52 +8133,141 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
                 headers[loop->header] = index + 1;
             }
         }
-        // Writes, then reads, per local in block order: bucket by block, then
-        // deal the buckets out to the locals in ascending block order.
-        for (u32 pass = 0; pass < 2 && consistent; pass += 1)
+        // Writes per local in block order: bucket by block, then deal the
+        // buckets out to the locals in ascending block order.
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(definition_offsets, 0, sizeof(*definition_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
         {
-            bool reads = pass == 1;
-            u32* offsets = reads ? read_offsets : definition_offsets;
-            u32* blocks = reads ? read_blocks : definition_blocks;
-            memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
-            memset(offsets, 0, sizeof(*offsets) * ((u64)local_count + 1));
-            for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode != IR_OPCODE_LOAD)
             {
-                CIrSsaEvent* event = ssa->events + index;
-                consistent = event->block.value < block_count && event->local < local_count;
-                if (consistent && (event->opcode == IR_OPCODE_LOAD) == reads)
-                {
-                    block_offsets[event->block.value + 1] += 1;
-                    offsets[event->local + 1] += 1;
-                }
+                block_offsets[event->block.value + 1] += 1;
+                definition_offsets[event->local + 1] += 1;
             }
-            for (u32 block = 0; block < block_count; block += 1)
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            definition_offsets[local + 1] += definition_offsets[local];
+            cursor[local] = definition_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode != IR_OPCODE_LOAD)
             {
-                block_offsets[block + 1] += block_offsets[block];
+                by_block[block_offsets[event->block.value]++] = index;
             }
-            for (u32 local = 0; local < local_count; local += 1)
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
             {
-                offsets[local + 1] += offsets[local];
-                cursor[local] = offsets[local];
+                definition_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
             }
-            for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+            begin = block_offsets[block];
+        }
+        scratch_end(temporary);
+        if (consistent)
+        {
+            ssa->loop_headers = headers;
+            ssa->loop_innermost = innermost;
+            ssa->local_definition_offsets = definition_offsets;
+            ssa->local_definition_blocks = definition_blocks;
+        }
+    }
+}
+
+// The loop-exit shortcut needs per-local read blocks and a forward-link
+// forest. Build them only after the ordinary read walk spends a linear
+// budget; the loop-header shortcut remains available from the first read.
+// A refused optional carve is attempted once and leaves the general walk.
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loop_exits(CIntegerIrBuilder* builder)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 block_count = builder->function->block_count;
+    u32 local_count = ssa->local_count;
+    u32 read_count = 0;
+    for (u32 index = 0; index < ssa->event_count; index += 1)
+    {
+        read_count += ssa->events[index].opcode == IR_OPCODE_LOAD;
+    }
+    ssa->loop_exits_attempted = true;
+    u64 position = builder->scratch_arena->position;
+    u64 reserved_size = builder->scratch_arena->reserved_size;
+    bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), read_count ? read_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), read_count ? read_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32));
+    if (fits)
+    {
+        u32* read_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
+        u32* read_blocks = arena_allocate(builder->scratch_arena, u32, read_count ? read_count : 1);
+        u32* enter = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* leave = arena_allocate(builder->scratch_arena, u32, block_count);
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, read_count ? read_count : 1);
+        u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
+        u32* parents = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* child_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* children = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* child_cursor = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* path = arena_allocate(builder->scratch_arena, u32, block_count);
+        bool consistent = true;
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(read_offsets, 0, sizeof(*read_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode == IR_OPCODE_LOAD)
             {
-                CIrSsaEvent* event = ssa->events + index;
-                if ((event->opcode == IR_OPCODE_LOAD) == reads)
-                {
-                    by_block[block_offsets[event->block.value]++] = index;
-                }
+                block_offsets[event->block.value + 1] += 1;
+                read_offsets[event->local + 1] += 1;
             }
-            // The fill advanced each bucket's start to the next bucket's.
-            u32 begin = 0;
-            for (u32 block = 0; block < block_count && consistent; block += 1)
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            read_offsets[local + 1] += read_offsets[local];
+            cursor[local] = read_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode == IR_OPCODE_LOAD)
             {
-                for (u32 row = begin; row < block_offsets[block]; row += 1)
-                {
-                    blocks[cursor[ssa->events[by_block[row]].local]++] = block;
-                }
-                begin = block_offsets[block];
+                by_block[block_offsets[event->block.value]++] = index;
             }
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
+            {
+                read_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
+            }
+            begin = block_offsets[block];
         }
         // The forest of variable-independent forward links: the only
         // predecessor, or the entry of a closed loop at its header. A read
@@ -8191,9 +8283,9 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
             {
                 parent = ssa->predecessors[ssa->predecessor_offsets[block]];
             }
-            else if (headers[block])
+            else if (ssa->loop_headers[block])
             {
-                parent = ssa->loops[headers[block] - 1].entry;
+                parent = ssa->loops[ssa->loop_headers[block] - 1].entry;
             }
             parents[block] = parent;
             if (parent != UINT32_MAX)
@@ -8247,14 +8339,11 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
         scratch_end(temporary);
         if (consistent)
         {
-            ssa->loop_headers = headers;
-            ssa->local_definition_offsets = definition_offsets;
-            ssa->local_definition_blocks = definition_blocks;
             ssa->local_read_offsets = read_offsets;
             ssa->local_read_blocks = read_blocks;
-            ssa->loop_innermost = innermost;
             ssa->forward_enter = enter;
             ssa->forward_leave = leave;
+            C_IR_SSA_LOOP_EXIT_BLOCKS(block_count);
         }
     }
 }
@@ -67029,6 +67118,26 @@ CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 sour
                                                      CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
 {
     return c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+}
+
+bool c_test_ir_ssa_loop_exits_refusal(void)
+{
+    bool result = false;
+    Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64),
+                                                 .granularity = BUSTER_KB(64), .flags = {.no_pool = true}});
+    if (scratch)
+    {
+        arena_allocate_bytes(scratch, scratch->reserved_size - scratch->position, 1);
+        u64 position = scratch->position;
+        CIrDirectSsa ssa = {0};
+        IrFunction function = {.block_count = 1};
+        CIntegerIrBuilder builder = {.scratch_arena = scratch, .function = &function, .direct_ssa = &ssa};
+        c_ir_ssa_finish_loop_exits(&builder);
+        result = ssa.loop_exits_attempted && !ssa.forward_enter && !ssa.local_read_offsets &&
+                 !ssa.scratch_exhausted && !builder.lower_machine.failed && scratch->position == position;
+        arena_destroy(scratch, 1);
+    }
+    return result;
 }
 
 bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out)
