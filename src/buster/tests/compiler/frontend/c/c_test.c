@@ -48082,9 +48082,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         }
     }
     {
-        // The scalar form is the complete no-cx16 regression: every
-        // sixteen-byte C atomic operation lowers to its libatomic ABI helper,
-        // while a cx16 target keeps the native canonical atomic operations.
+        // Sixteen-byte scalar atomics use libatomic without cx16 and native
+        // canonical operations with it. Keep call-result and local-value
+        // stores in this same target and lowering-form matrix.
         Target targets[] = {
             {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
             {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = OPERATING_SYSTEM_LINUX},
@@ -48100,17 +48100,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             S8("__atomic_exchange_16"),
             S8("__atomic_compare_exchange_16"),
         };
-        u32 runtime_call_counts[] = {2, 2, 1, 1, 1, 1, 1, 2, 1};
+        u32 runtime_call_counts[] = {2, 4, 1, 1, 1, 1, 1, 2, 1};
         BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(runtime_names) == BUSTER_ARRAY_LENGTH(runtime_call_counts));
         String8 source = S8("typedef unsigned __int128 wide;"
                             " typedef signed __int128 signed_wide;"
                             " static _Atomic(wide) object;"
                             " static volatile _Atomic(signed_wide) signed_object;"
+                            " wide bits(wide value) { return value; }"
                             " signed_wide atomic_wide_signed_load(void) { return signed_object; }"
                             " void atomic_wide_signed_store(signed_wide value) { signed_object = value; }"
                             " signed_wide atomic_wide_signed_exchange(signed_wide value) {"
                             " return __c11_atomic_exchange(&signed_object, value, __ATOMIC_SEQ_CST); }"
                             " void atomic_wide_store(wide value) { __c11_atomic_store(&object, value, __ATOMIC_SEQ_CST); }"
+                            " int atomic_wide_store_call(wide v) { _Atomic(wide) call_object;"
+                            " __c11_atomic_store(&call_object, bits(v), __ATOMIC_RELAXED); return 0; }"
+                            " int atomic_wide_store_via_temp(wide v) { _Atomic(wide) call_object; wide temp = bits(v);"
+                            " __c11_atomic_store(&call_object, temp, __ATOMIC_RELAXED); return 0; }"
                             " wide atomic_wide_load(void) { return __c11_atomic_load(&object, __ATOMIC_ACQUIRE); }"
                             " wide atomic_wide_add(wide value) { return __c11_atomic_fetch_add(&object, value, __ATOMIC_ACQ_REL); }"
                             " wide atomic_wide_sub(wide value) { return __c11_atomic_fetch_sub(&object, value, __ATOMIC_RELAXED); }"
@@ -48123,60 +48128,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                             " __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); }\n");
         for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
         {
-            TemporalArena temporary = scratch_begin(0, 0);
-            Target target = targets[target_index];
-            TargetDataLayout data_layout = target_data_layout(target);
-            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
-                                                     (CPreprocessOptions){.target = target, .data_layout = data_layout});
-            CParseResult parse = c_parse(temporary.arena, tokens);
-            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("atomic-wide-runtime.c"), tokens, parse, target);
-            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
-            if (lowered.program)
+            for (u32 form_index = 0; form_index < 2; form_index += 1)
             {
-                IrModule* module = lowered.program->modules;
-                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
-                u32 runtime_calls[BUSTER_ARRAY_LENGTH(runtime_names)] = {0};
-                u32 atomic_load_count = 0;
-                u32 atomic_store_count = 0;
-                u32 atomic_rmw_count = 0;
-                u32 atomic_compare_count = 0;
-                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                TemporalArena temporary = scratch_begin(0, 0);
+                Target target = targets[target_index];
+                TargetDataLayout data_layout = target_data_layout(target);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                                         (CPreprocessOptions){.target = target, .data_layout = data_layout});
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("atomic-wide-runtime.c"), tokens, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form_index != 0});
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0,
+                    string_format(temporary.arena, S8("atomic wide call preprocessing target={u32} form={u32}: {S8}"),
+                        target_index, form_index, tokens.diagnostic_count ? tokens.diagnostics[0].message : S8("none")));
+                BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0,
+                    string_format(temporary.arena, S8("atomic wide call parsing target={u32} form={u32}: {S8}"),
+                        target_index, form_index, parse.diagnostic_count ? parse.diagnostics[0].message : S8("none")));
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0 && lowered.program,
+                    string_format(temporary.arena, S8("atomic wide call IR target={u32} form={u32}: {S8}"),
+                        target_index, form_index,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : lowered.program ? S8("lowering succeeded") : S8("no program")));
+                if (lowered.program)
                 {
-                    IrFunction* function = module->functions + function_index;
-                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                    u32 validation_error = (u32)ir_validate_canonical_module(lowered.program, module).error;
+                    BUSTER_TEST_RAW(arguments, validation_error == IR_VALIDATION_NONE,
+                        string_format(temporary.arena, S8("atomic wide call canonical IR target={u32} form={u32}: error {u32}"),
+                            target_index, form_index, validation_error));
+                    u32 runtime_calls[BUSTER_ARRAY_LENGTH(runtime_names)] = {0};
+                    u32 bits_call_count = 0;
+                    u32 atomic_load_count = 0;
+                    u32 atomic_store_count = 0;
+                    u32 atomic_rmw_count = 0;
+                    u32 atomic_compare_count = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
                     {
-                        IrInstruction* instruction = function->instructions + instruction_index;
-                        atomic_load_count += instruction->opcode == IR_OPCODE_ATOMIC_LOAD;
-                        atomic_store_count += instruction->opcode == IR_OPCODE_ATOMIC_STORE;
-                        atomic_rmw_count += instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE;
-                        atomic_compare_count += instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE;
-                        if (instruction->opcode == IR_OPCODE_CALL)
+                        IrFunction* function = module->functions + function_index;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
                         {
-                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, instruction->symbol);
-                            for (u32 runtime_index = 0; symbol && runtime_index < BUSTER_ARRAY_LENGTH(runtime_names); runtime_index += 1)
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            atomic_load_count += instruction->opcode == IR_OPCODE_ATOMIC_LOAD;
+                            atomic_store_count += instruction->opcode == IR_OPCODE_ATOMIC_STORE;
+                            atomic_rmw_count += instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE;
+                            atomic_compare_count += instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE;
+                            if (instruction->opcode == IR_OPCODE_CALL)
                             {
-                                runtime_calls[runtime_index] += string_equal(symbol->link_name, runtime_names[runtime_index]);
+                                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, instruction->symbol);
+                                bits_call_count += symbol && string_equal(symbol->link_name, S8("bits"));
+                                for (u32 runtime_index = 0; symbol && runtime_index < BUSTER_ARRAY_LENGTH(runtime_names); runtime_index += 1)
+                                {
+                                    runtime_calls[runtime_index] += string_equal(symbol->link_name, runtime_names[runtime_index]);
+                                }
                             }
                         }
                     }
+                    BUSTER_TEST_RAW(arguments, bits_call_count == 2,
+                        string_format(temporary.arena, S8("atomic wide bits calls target={u32} form={u32}: got {u32}, expected 2"),
+                            target_index, form_index, bits_call_count));
+                    for (u32 runtime_index = 0; runtime_index < BUSTER_ARRAY_LENGTH(runtime_names); runtime_index += 1)
+                    {
+                        u32 expected_count = target_index == 0 ? runtime_call_counts[runtime_index] : 0u;
+                        BUSTER_TEST_RAW(arguments, runtime_calls[runtime_index] == expected_count,
+                            string_format(temporary.arena, S8("atomic wide runtime {S8} target={u32} form={u32}: got {u32}, expected {u32}"),
+                                runtime_names[runtime_index], target_index, form_index, runtime_calls[runtime_index], expected_count));
+                    }
+                    if (target_index == 0)
+                    {
+                        BUSTER_TEST_RAW(arguments,
+                            atomic_load_count == 0 && atomic_store_count == 0 && atomic_rmw_count == 0 && atomic_compare_count == 0,
+                            string_format(temporary.arena,
+                                S8("atomic wide baseline operations target={u32} form={u32}: load {u32}, store {u32}, RMW {u32}, compare {u32}"),
+                                target_index, form_index, atomic_load_count, atomic_store_count, atomic_rmw_count, atomic_compare_count));
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments,
+                            atomic_load_count == 2 && atomic_store_count == 4 && atomic_rmw_count == 7 && atomic_compare_count == 1,
+                            string_format(temporary.arena,
+                                S8("atomic wide cx16 operations target={u32} form={u32}: load {u32}, store {u32}, RMW {u32}, compare {u32}"),
+                                target_index, form_index, atomic_load_count, atomic_store_count, atomic_rmw_count, atomic_compare_count));
+                    }
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
+                                                                                 (CodegenModuleOptions){0});
+                    BUSTER_TEST_RAW(arguments, generated.error == CODEGEN_ERROR_NONE,
+                        string_format(temporary.arena, S8("atomic wide call codegen target={u32} form={u32}: error {u32}"),
+                            target_index, form_index, (u32)generated.error));
                 }
-                for (u32 runtime_index = 0; runtime_index < BUSTER_ARRAY_LENGTH(runtime_names); runtime_index += 1)
-                {
-                    BUSTER_TEST(arguments, runtime_calls[runtime_index] == (target_index == 0 ? runtime_call_counts[runtime_index] : 0u));
-                }
-                if (target_index == 0)
-                {
-                    BUSTER_TEST(arguments, atomic_load_count == 0 && atomic_store_count == 0 && atomic_rmw_count == 0 && atomic_compare_count == 0);
-                }
-                else
-                {
-                    BUSTER_TEST(arguments, atomic_load_count == 2 && atomic_store_count == 2 && atomic_rmw_count == 7 && atomic_compare_count == 1);
-                }
-                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
-                                                                             (CodegenModuleOptions){0});
-                BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                c_test_scratch_end(temporary);
             }
-            c_test_scratch_end(temporary);
         }
     }
     {
