@@ -25,6 +25,17 @@ def write(root, name, data):
     (root / name).write_text(json.dumps(data) + "\n", encoding="utf-8")
 
 
+def record(root, name, pid, start, end, argv, dep="ready"):
+    common = dict(id=name, epoch_us=1, pid=pid, start_us=start, argv=argv)
+    if "-evidence-" in name:
+        common["authority"] = "driver_callback"
+    write(root, f"{name}.{common['pid']}.start.json", dict(common, state="running"))
+    write(root, f"{name}.{common['pid']}.end.json", dict(common, state="success", child_start_us=start, end_us=end, publication_start_us=end,
+          result=0, platform_status=0, spawned=1, timed_out=0, termination_requested=0, forcibly_terminated=0, cpu_time="unknown", peak_rss="unknown", test_jobs="1", ctest_jobs="not-applicable"))
+    if dep == "ready":
+        write(root, f"{name}.ready.json", dict(epoch_us=1, ready_us=start))
+
+
 def fixture(root, direct=False):
     identity = dict(lane_id="fixture", source_revision="a" * 40, source_tree="b" * 40, source_hash="c" * 64,
                     driver_hash="d" * 64, repository="buster14a/buster", run_id="123", run_attempt="1", workflow="CI", job="test",
@@ -49,14 +60,9 @@ def fixture(root, direct=False):
             argv = ["fixture-cmake", "--build", f"build/{tree}", "--parallel", "1"]
         elif phase == "test":
             argv = [f"build/{tree}/{config}/ide" + ("" if direct else ".exe"), "test"]
-        common = dict(id=name, epoch_us=1, pid=10 + len(plan["tasks"]), start_us=start, argv=argv)
-        if phase == "evidence":
-            common["authority"] = "driver_callback"
-        write(root, f"{name}.{common['pid']}.start.json", dict(common, state="running"))
-        write(root, f"{name}.{common['pid']}.end.json", dict(common, state="success", child_start_us=start, end_us=end, publication_start_us=end,
-              result=0, platform_status=0, spawned=1, timed_out=0, termination_requested=0, forcibly_terminated=0, cpu_time="unknown", peak_rss="unknown", test_jobs="1", ctest_jobs="not-applicable"))
-        if dep == "ready":
-            write(root, f"{name}.ready.json", dict(epoch_us=1, ready_us=start))
+        elif phase == "scheduler":
+            argv = ["fixture-cmake", "--build", "build/superbuild", "--parallel", str(plan["outer_jobs"])]
+        record(root, name, 10 + len(plan["tasks"]), start, end, argv, dep)
     for i in range(5):
         task(f"tree{i}", "configure", "", 2 if i < 4 else 10, 10 if i < 4 else 15)
     if not direct:
@@ -72,6 +78,61 @@ def fixture(root, direct=False):
             task(name, "validation", config, start, end, "ready" if direct else phases.task_id(name, "build"), "" if direct else f"validation-{name}")
             task(name, "test", config, start + 5, end - 5, "nested")
     task("matrix", "evidence", "coverage", 390, 395)
+    write(root, "plan.json", plan)
+    write(root, "terminal.json", dict(epoch_us=1, terminal_us=400, result=0))
+    return coverage
+
+
+GIB = 1024 ** 3
+
+
+def release_fixture(root, memory=16 * GIB, budget=4, overlap=None):
+    """A single-tree pooled release shard, as the native policy admits it.
+
+    With the post-test edge the analyzers take their own outer slot after the
+    tests and the self-host worker runs beside them; without it the analyzers
+    stay in the test edge and the worker follows them through the one slot.
+    """
+    identity = dict(lane_id="fixture", source_revision="a" * 40, source_tree="b" * 40, source_hash="c" * 64,
+                    driver_hash="d" * 64, repository="buster14a/buster", run_id="123", run_attempt="1", workflow="CI", job="test",
+                    platform="windows", architecture="x86_64", shard="release")
+    scheduled = dict(state="scheduled", reason="fixture")
+    coverage = dict(identity=identity.copy(), phase="complete", obligations=dict(self_host=scheduled, unity_analysis=scheduled),
+                    expected=[dict(id="row0", compiler="clang", configuration="Release", state="required", owner_shard="release",
+                                   sanitize=False, fuzz=False, unity=True, execution="runtime")],
+                    detected=[dict(id="row0", compiler="clang", path="clang", path_hash="e" * 64, identity="clang", version="1", target="fixture")])
+    if overlap is None:
+        overlap = budget >= phases.POST_TEST_OVERLAP_THREADS and memory >= phases.ANALYZE_OVERLAP_MEMORY
+    analyze_jobs = 2 if budget >= 3 and memory >= phases.ANALYZE_OVERLAP_MEMORY else 1
+    plan = dict(schema=phases.SCHEMA, epoch_us=1, identity=identity, scheduler="pooled", outer_jobs=1 + int(overlap),
+                logical_cpus=budget, cpu_budget=budget, memory_bytes=memory, cpu_time="unknown", peak_rss="unknown",
+                trees=[dict(id="tree0", rows=["row0"], build_directory="build/tree0", compiler="clang", compiler_path="clang",
+                            compiler_sha256="e" * 64, compiler_identity="clang", compiler_version="1", target="fixture",
+                            configurations="Release", sanitize=0, fuzz=0, lto=False, generator="Ninja Multi-Config", linker="DEFAULT")],
+                tasks=[])
+
+    def task(phase, config, start, end, dep="ready", pool="", inner=1, argv=None, tree="tree0"):
+        name = phases.task_id(tree, phase, config)
+        plan["tasks"].append(dict(id=name, tree=tree, phase=phase, configuration=config, dependency=dep, pool_edge=pool, inner_jobs=inner, argv=[]))
+        record(root, name, 10 + len(plan["tasks"]), start, end, argv or ["fixture-cmake", "--build", "build/tree0", "--parallel", str(inner)], dep)
+
+    validation = phases.task_id("tree0", "validation", "Release")
+    task("configure", "", 2, 10)
+    task("evidence", "capture", 11, 12)
+    task("clean", "Release", 12, 15)
+    task("evidence", "clean", 15, 16)
+    task("scheduler", "", 20, 400, argv=["fixture-cmake", "--build", "build/superbuild", "--parallel", str(plan["outer_jobs"])], tree="matrix")
+    task("build", "", 30, 130, "scheduler", "build-tree0")
+    task("validation", "Release", 130, 230, phases.task_id("tree0", "build"), "validation-tree0")
+    task("test", "Release", 135, 225, "nested", argv=["build/tree0/Release/ide.exe", "test"])
+    self_host_argv = ["fixture-driver", "self_host_from_existing", "--build-directory", "build/tree0"]
+    if overlap:
+        task("post_test", "Release", 230, 290, validation, "post-test-tree0", analyze_jobs)
+        task("self_host", "Release", 230, 330, validation, "self-host", argv=self_host_argv)
+    else:
+        task("post_test", "Release", 230, 290, validation, "validation-tree0", analyze_jobs)
+        task("self_host", "Release", 290, 390, phases.task_id("tree0", "build"), "self-host", argv=self_host_argv)
+    task("evidence", "coverage", 395, 398, tree="matrix")
     write(root, "plan.json", plan)
     write(root, "terminal.json", dict(epoch_us=1, terminal_us=400, result=0))
     return coverage
@@ -534,6 +595,160 @@ class PhaseValidationTests(unittest.TestCase):
         self.assertIn("matrix_phases", result["unsatisfied_steps"])
 
 
+class ReleasePostTestTests(unittest.TestCase):
+    """The analyzers' own outer slot beside the self-host worker (#3912)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def build(self, **options):
+        shutil.rmtree(self.root)
+        self.root.mkdir()
+        self.coverage = release_fixture(self.root, **options)
+
+    def mutate(self, pattern, change):
+        path = next(self.root.glob(pattern))
+        value = phases.read(path)
+        change(value)
+        write(self.root, path.name, value)
+
+    def check(self):
+        return phases.analyze(self.root, self.coverage)
+
+    def task(self, plan, name):
+        return next(task for task in plan["tasks"] if task["id"] == name)
+
+    def test_self_host_runs_beside_the_analyzers(self):
+        self.build()
+        report = self.check()
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["outer_jobs"], 2)
+        self.assertEqual(report["max_observed_pool_overlap"], 2)
+        events = {event["id"]: event for event in report["events"]}
+        self.assertLess(events["tree0-self_host-Release"]["start_us"], events["tree0-post_test-Release"]["end_us"])
+        # build 100 + tests 100 + max(analyzers 60, self-host 100).
+        self.assertEqual(report["predictions"]["current_model_us"], 300)
+        self.assertEqual(report, self.check())
+
+    def test_small_memory_and_three_cpu_hosts_keep_the_serial_tail(self):
+        for memory, budget in ((7 * GIB, 4), (12 * GIB - 1, 16), (64 * GIB, 3)):
+            with self.subTest(memory=memory, budget=budget):
+                self.build(memory=memory, budget=budget)
+                report = self.check()
+                self.assertEqual((report["outer_jobs"], report["max_observed_pool_overlap"]), (1, 1))
+                self.assertEqual(report["predictions"]["current_model_us"], 360)
+                self.build(memory=memory, budget=budget, overlap=True)
+                with self.assertRaisesRegex(ValueError, "outer quota differs from native policy"):
+                    self.check()
+                # The same edges under the serial outer quota still fail.
+                self.mutate("plan.json", lambda plan: plan.update(outer_jobs=1))
+                with self.assertRaisesRegex(ValueError, "admission/dependency identity mismatch"):
+                    self.check()
+
+    def test_admitted_host_cannot_keep_or_widen_the_serial_tail(self):
+        self.build(overlap=False)
+        with self.assertRaisesRegex(ValueError, "outer quota differs from native policy"):
+            self.check()
+        self.mutate("plan.json", lambda plan: plan.update(outer_jobs=2))
+        with self.assertRaisesRegex(ValueError, "admission/dependency identity mismatch"):
+            self.check()
+        self.build()
+        self.mutate("plan.json", lambda plan: plan.update(outer_jobs=3))
+        with self.assertRaisesRegex(ValueError, "outer quota differs from native policy"):
+            self.check()
+
+    def test_historical_journal_without_memory_never_admits_the_slot(self):
+        self.build(memory=7 * GIB)
+        self.mutate("plan.json", lambda plan: plan.pop("memory_bytes"))
+        self.assertTrue(self.check()["complete"])
+        self.build()
+        self.mutate("plan.json", lambda plan: plan.pop("memory_bytes"))
+        with self.assertRaisesRegex(ValueError, "outer quota differs from native policy"):
+            self.check()
+        for value in (0, -1, "16", None, True):
+            with self.subTest(value=value):
+                self.build()
+                self.mutate("plan.json", lambda plan: plan.update(memory_bytes=value))
+                with self.assertRaisesRegex(ValueError, "invalid quota: memory_bytes"):
+                    self.check()
+
+    def test_post_test_slot_requires_self_host_to_wait_for_tests(self):
+        self.build()
+        def wait_for_build_only(plan):
+            self.task(plan, "tree0-self_host-Release").update(dependency=phases.task_id("tree0", "build"))
+        self.mutate("plan.json", wait_for_build_only)
+        with self.assertRaisesRegex(ValueError, "admission/dependency identity mismatch: tree0-self_host-Release"):
+            self.check()
+        self.build()
+        self.mutate("plan.json", lambda plan: self.task(plan, "tree0-post_test-Release").update(pool_edge="validation-tree0"))
+        with self.assertRaisesRegex(ValueError, "admission/dependency identity mismatch: tree0-post_test-Release"):
+            self.check()
+
+    def test_self_host_cannot_compete_with_the_tests(self):
+        self.build()
+        for kind in ("start", "end"):
+            self.mutate(f"tree0-self_host-Release.*.{kind}.json", lambda value: value.update(start_us=200))
+        self.mutate("tree0-self_host-Release.*.end.json", lambda value: value.update(child_start_us=200))
+        with self.assertRaisesRegex(ValueError, "dependency overlap: tree0-self_host-Release"):
+            self.check()
+
+    def test_analyzer_quota_binds_the_plan_and_the_command(self):
+        self.build()
+        self.mutate("plan.json", lambda plan: self.task(plan, "tree0-post_test-Release").update(inner_jobs=1))
+        with self.assertRaisesRegex(ValueError, "analyzer quota differs from native policy"):
+            self.check()
+        self.build()
+        for kind in ("start", "end"):
+            self.mutate(f"tree0-post_test-Release.*.{kind}.json", lambda value: value["argv"].__setitem__(-1, "1"))
+        with self.assertRaisesRegex(ValueError, "Ninja quota mismatch: tree0-post_test-Release"):
+            self.check()
+
+    def test_outer_ninja_quota_binds_the_plan(self):
+        for outer in ("1", "3", None):
+            with self.subTest(outer=outer):
+                self.build()
+                def change(value):
+                    value["argv"] = value["argv"][:-2] if outer is None else value["argv"][:-1] + [outer]
+                for kind in ("start", "end"):
+                    self.mutate(f"matrix-scheduler-all.*.{kind}.json", change)
+                with self.assertRaisesRegex(ValueError, "outer Ninja quota mismatch"):
+                    self.check()
+
+    def test_multi_tree_release_never_admits_the_slot(self):
+        self.build()
+        plan = phases.read(self.root / "plan.json")
+        coverage = copy.deepcopy(self.coverage)
+        coverage["expected"].append(dict(id="row1", compiler="gcc", configuration="Debug", state="required", owner_shard="release",
+                                         sanitize=False, fuzz=False, unity=False, execution="compile-link"))
+        coverage["detected"].append(dict(id="row1", compiler="gcc", path="gcc", path_hash="e" * 64, identity="gcc", version="1", target="fixture"))
+        plan["trees"].append(dict(plan["trees"][0], id="tree1", rows=["row1"], build_directory="build/tree1", compiler="gcc",
+                                  compiler_path="gcc", compiler_identity="gcc", configurations="Debug", unity=False))
+        plan["tasks"] += [dict(id=phases.task_id("tree1", phase), tree="tree1", phase=phase, configuration="", dependency=dep,
+                               pool_edge=pool, inner_jobs=1, argv=[])
+                          for phase, dep, pool in (("configure", "ready", ""), ("build", "scheduler", "build-tree1"))]
+        for outer, message in ((3, "outer quota differs from native policy"), (2, "admission/dependency identity mismatch")):
+            with self.subTest(outer=outer):
+                plan["outer_jobs"] = outer
+                with self.assertRaisesRegex(ValueError, message):
+                    phases.validate_plan(plan, coverage, {})
+
+    def test_pool_occupancy_keeps_the_cpu_pool_depth(self):
+        def edge(name, start, end):
+            return dict(id=name, tree="tree0", phase="fixture", start_us=start, end_us=end)
+        maximum, idle = phases.pool_occupancy([edge("validation-tree0", 0, 10), edge("post-test-tree0", 10, 20),
+                                               edge("self-host", 10, 30)], 2)
+        self.assertEqual((maximum, idle), (2, []))
+        for edges, outer in (([edge("validation-tree0", 0, 10), edge("self-host", 5, 30), edge("post-test-tree0", 10, 20)], 2),
+                             ([edge("post-test-tree0", 0, 10), edge("post-test-tree1", 5, 20)], 3),
+                             ([edge("post-test-tree0", 0, 10)], 1),
+                             ([edge("build-tree0", 0, 10), edge("self-host", 5, 30)], 1)):
+            with self.subTest(edges=[e["id"] for e in edges], outer=outer):
+                with self.assertRaisesRegex(ValueError, "impossible pool overlap/quota"):
+                    phases.pool_occupancy(edges, outer)
+
+
 PLAN_FIXTURE = r'''
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
 {
@@ -563,6 +778,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
             .identity = build_compilers[i], .target = S8("fixture"), .version = S8("fixture"), .available = 1};
     }
     ok = matrix_phase_begin(arena, &coverage, direct) && ok;
+    // A stated host memory makes the analyzer and post-test quotas independent of the test host.
+    u64 fixture_memory_mib = environment_positive_u64_or(S8("BUSTER_PHASE_FIXTURE_MEMORY_MIB"), 0);
+    if (fixture_memory_mib) { matrix_phase.memory_bytes = fixture_memory_mib << 20; }
     MatrixTestCombination combinations[16] = {0};
     MatrixTestTree trees[8] = {0};
     u32 count = 0, combo_count = 0;
@@ -659,16 +877,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
             }
         }
         u32 fixture_threads = (u32)environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count());
-        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(fixture_threads, count);
-        // The production quotas, including serialized checks test phases.
-        matrix_superbuild_allocate_jobs(trees, count, fixture_threads, checks ? 0 : 1);
-        MatrixSuperbuildSelfHostPlan self_host = {.enabled = !checks, .tree_index = 0, .pool_jobs = 1, .build_directory = trees[0].build_directory};
+        // The production quotas, including serialized checks test phases and
+        // the release shard's post-test slot beside the self-host worker.
+        u32 self_host_jobs = checks ? 0 : 1;
+        matrix_superbuild_allocate_jobs(trees, count, fixture_threads, self_host_jobs);
+        u32 analyze_jobs = matrix_superbuild_analyze_jobs(fixture_threads, matrix_phase.memory_bytes);
+        for (u32 i = 0; i < count; i += 1) { trees[i].analyze_jobs = trees[i].unity_analysis_scheduled ? analyze_jobs : 0; }
+        u32 post_test_jobs = matrix_superbuild_post_test_assign(trees, count, fixture_threads, 0, self_host_jobs);
+        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(fixture_threads, count) + post_test_jobs;
+        MatrixSuperbuildSelfHostPlan self_host = {.enabled = !checks, .tree_index = 0, .pool_jobs = 1, .build_directory = trees[0].build_directory,
+            .config = S8("Release"), .build_driver = matrix_phase.driver, .provenance_record_path = path_join(arena, matrix_phase.root, S8("fixture.provenance")),
+            .depends_on_compile = 1, .depends_on_validation = post_test_jobs, .producer_clean_required = 1};
+        ok = (checks || matrix_superbuild_self_host_plan_valid(self_host, trees, count, fixture_threads)) && ok;
         ok = matrix_superbuild_manifest_write(arena, path_join(arena, matrix_phase.root, S8("matrix.cmake")), S8("/fixture"),
-                   matrix_phase.driver, trees, count, matrix_phase.outer_jobs, combinations, self_host, false, false) && ok;
+                   matrix_phase.driver, trees, count, matrix_superbuild_outer_jobs(fixture_threads, count), combinations, self_host, false, false) && ok;
         ProcessRun* run = run_add(arena, step_add(arena));
-        String8* args = arena_allocate(arena, String8, 3);
-        args[0] = S8("fixture-cmake"); args[1] = S8("--build"); args[2] = S8("superbuild");
-        run->arguments = (SliceString8){.pointer = args, .length = 3};
+        String8* args = arena_allocate(arena, String8, 5);
+        args[0] = S8("fixture-cmake"); args[1] = S8("--build"); args[2] = S8("superbuild"); args[3] = S8("--parallel");
+        args[4] = string_format(arena, S8("{u32}"), matrix_phase.outer_jobs);
+        run->arguments = (SliceString8){.pointer = args, .length = 5};
     }
     coverage.output_path = path_join(arena, matrix_phase.root, S8("coverage.json"));
     matrix_coverage_completion_add(arena, &coverage);
@@ -682,6 +909,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
     return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 '''
+
+
+def ninja_statements(path):
+    """Map every output of every Ninja build statement to that statement's text.
+
+    CMake writes native separators in Ninja paths (backslashes on Windows), so
+    outputs are compared with forward slashes on every host.
+    """
+    statements = {}
+    for statement in path.read_text().split("\nbuild ")[1:]:
+        for output in statement.split(":", 1)[0].replace("\\", "/").split():
+            statements[output] = statement
+    return statements
 
 
 class ResourceWitnessTests(unittest.TestCase):
@@ -769,25 +1009,48 @@ class NativeObserverTests(unittest.TestCase):
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, timeout=10)
         return result, phases.read(next(root.glob("*.end.json")))
 
+    def export(self, **settings):
+        root = Path(tempfile.mkdtemp(dir=self.root))
+        env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), GITHUB_SHA="a" * 40,
+                   **{f"BUSTER_PHASE_FIXTURE_{key.upper()}": str(value) for key, value in settings.items() if key != "threads"})
+        env["BUSTER_MATRIX_THREADS"] = str(settings.get("threads", 4))
+        subprocess.run([str(self.driver), "coverage_manifest_self_test"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
+        return root, env
+
     def test_real_plan_serializer_direct_pooled_release_checks(self):
         for direct, linux_fixture, budget in ((False, False, 3), (True, False, 4), (False, True, 4)):
-            for checks in (False, True):
-                root = Path(tempfile.mkdtemp(dir=self.root))
-                env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT=str(int(direct)),
-                           BUSTER_PHASE_FIXTURE_CHECKS=str(int(checks)), BUSTER_PHASE_FIXTURE_LINUX=str(int(linux_fixture)),
-                           BUSTER_MATRIX_THREADS=str(budget), GITHUB_SHA="a" * 40)
-                subprocess.run([str(self.driver), "coverage_manifest_self_test"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
-                plan = phases.read(root / "plan.json")
-                coverage = phases.read(root / "coverage.json")
-                self.assertEqual(plan["identity"]["source_tree"], subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True).strip())
-                trees, tasks = phases.validate_plan(plan, coverage, env)
-                self.assertTrue(trees and tasks)
-                callback = phases.read(next(root.glob("matrix-evidence-coverage.*.end.json")))
-                self.assertEqual(callback["authority"], "driver_callback")
-                self.assertEqual(callback["result"], 0)
-                self.assertLessEqual(callback["start_us"], callback["end_us"])
-                if not direct:
-                    self.assertIn("matrix_phase_run", (root / "matrix.cmake").read_text())
+            # 16 GiB hosted Linux/Windows runners and the 7 GiB macOS runners.
+            for checks, memory_mib in ((False, 16384), (False, 7168), (True, 16384)):
+                with self.subTest(direct=direct, linux=linux_fixture, budget=budget, checks=checks, memory_mib=memory_mib):
+                    root, env = self.export(direct=int(direct), checks=int(checks), linux=int(linux_fixture), threads=budget,
+                                            memory_mib=memory_mib)
+                    plan = phases.read(root / "plan.json")
+                    coverage = phases.read(root / "coverage.json")
+                    self.assertEqual(plan["identity"]["source_tree"], subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True).strip())
+                    self.assertEqual(plan["memory_bytes"], memory_mib << 20)
+                    trees, tasks = phases.validate_plan(plan, coverage, env)
+                    self.assertTrue(trees and tasks)
+                    callback = phases.read(next(root.glob("matrix-evidence-coverage.*.end.json")))
+                    self.assertEqual(callback["authority"], "driver_callback")
+                    self.assertEqual(callback["result"], 0)
+                    self.assertLessEqual(callback["start_us"], callback["end_us"])
+                    if not direct:
+                        self.assertIn("matrix_phase_run", (root / "matrix.cmake").read_text())
+                    # Only the four-CPU large-memory release shard runs its
+                    # analyzers in their own slot beside the self-host worker.
+                    admitted = not direct and not checks and budget >= 4 and memory_mib >= 12288
+                    post_test = [task for task in tasks.values() if task["phase"] == "post_test"]
+                    self_host = [task for task in tasks.values() if task["phase"] == "self_host"]
+                    self.assertEqual(len(post_test), 0 if checks else 1)
+                    self.assertEqual(len(self_host), 0 if checks or direct else 1)
+                    if not direct:
+                        self.assertEqual(plan["outer_jobs"], min(len(trees), budget) + admitted)
+                    for task in post_test:
+                        self.assertEqual(task["pool_edge"].startswith(phases.POST_TEST_POOL), admitted)
+                        if not direct:
+                            self.assertEqual(task["inner_jobs"], 2 if budget >= 3 and memory_mib >= 12288 else 1)
+                    for task in self_host:
+                        self.assertEqual(task["dependency"].endswith("-validation-Release"), admitted)
 
     def test_real_separate_checks_shard_serializers(self):
         for linux_fixture in (False, True):
@@ -809,6 +1072,72 @@ class NativeObserverTests(unittest.TestCase):
                     if validations:
                         self.assertEqual(validations[0]["inner_jobs"], 4)
 
+    def configure_superbuild(self, root, label):
+        manifest = root / "matrix.cmake"
+        graph = root / "graph"
+        cmake = shutil.which("cmake")
+        ninja = shutil.which("ninja")
+        self.assertIsNotNone(cmake, "admission graph requires CMake")
+        self.assertIsNotNone(ninja, "admission graph requires Ninja")
+        # Configure and query the same Ninja; avoid unrelated tool discovery.
+        command = [cmake, "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
+                   f"-DCMAKE_MAKE_PROGRAM={Path(ninja).as_posix()}",
+                   f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"]
+        # The existing native deadline owner terminates/reaps the process
+        # tree before publishing status, including CMake's Ninja children.
+        observed = [str(self.driver), "matrix_phase_run", str(root), "admission-configure", "1",
+                    str(ADMISSION_CONFIGURE_TIMEOUT_SECONDS), "--", *command]
+        configured = subprocess.run(observed, cwd=ROOT, capture_output=True, text=True,
+                                    timeout=ADMISSION_CONFIGURE_TIMEOUT_SECONDS + 10)
+        record = phases.read(next(root.glob("admission-configure.*.end.json")))
+        diagnostic = dict(admission=label, command=command, deadline_seconds=ADMISSION_CONFIGURE_TIMEOUT_SECONDS,
+                          state=record["state"], spawned=record["spawned"], timed_out=record["timed_out"],
+                          result=record["result"], platform_status=record["platform_status"],
+                          termination_requested=record["termination_requested"], forcibly_terminated=record["forcibly_terminated"],
+                          elapsed_us=record["end_us"] - record["child_start_us"],
+                          stdout=configured.stdout, stderr=configured.stderr)
+        print("MATRIX_ADMISSION_CONFIGURE " + json.dumps(diagnostic, sort_keys=True), flush=True)
+        self.assertEqual(configured.returncode, 0, json.dumps(diagnostic, sort_keys=True))
+        self.assertEqual(record["state"], "success", json.dumps(diagnostic, sort_keys=True))
+        self.assertEqual(record["timed_out"], 0)
+        return graph, ninja
+
+    def test_real_release_post_test_slot_graph(self):
+        # #3912: a four-CPU release shard at 16 GiB runs its analyzers in their
+        # own pool after the tests, beside a self-host worker that waits for
+        # the tests; at 7 GiB the analyzers stay in the test edge.
+        for memory_mib, admitted in ((16384, True), (7168, False)):
+            with self.subTest(memory_mib=memory_mib):
+                root, env = self.export(checks=0, linux=0, threads=4, memory_mib=memory_mib)
+                plan = phases.read(root / "plan.json")
+                phases.validate_plan(plan, phases.read(root / "coverage.json"), env)
+                self.assertEqual(len(plan["trees"]), 1)
+                graph, ninja = self.configure_superbuild(root, f"release-{memory_mib}")
+                def query(target):
+                    output = subprocess.check_output([ninja, "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
+                    return {line.strip() for line in output.splitlines()}
+                statements = ninja_statements(graph / "build.ninja")
+                def edge(target):
+                    names = (f"CMakeFiles/{target}", f"CMakeFiles/{target}.util")
+                    found = [statements[name] for name in names if name in statements]
+                    self.assertTrue(found, f"no custom-command edge for {target}: {sorted(statements)[:40]}")
+                    return found[0]
+                self.assertEqual("buster_test_0" in query("buster_self_host"), admitted)
+                self.assertIn("buster_compile_0", query("buster_self_host"))
+                self.assertIn("pool = buster_matrix_cpu", edge("buster_self_host"))
+                self.assertIn("pool = buster_matrix_cpu", edge("buster_test_0"))
+                self.assertEqual("optnone_audit" in edge("buster_test_0"), not admitted)
+                rules = (graph / "CMakeFiles" / "rules.ninja").read_text()
+                self.assertIn("pool buster_matrix_cpu\n  depth = 1", rules)
+                self.assertEqual("pool buster_matrix_post_test\n  depth = 1" in rules, admitted)
+                if admitted:
+                    self.assertIn("buster_test_0", query("buster_post_test_0"))
+                    self.assertIn("pool = buster_matrix_post_test", edge("buster_post_test_0"))
+                    self.assertIn("optnone_audit", edge("buster_post_test_0"))
+                    self.assertIn("--parallel 2", edge("buster_post_test_0"))
+                else:
+                    self.assertFalse(any("buster_post_test" in name for name in statements))
+
     def test_real_admission_manifests_and_ninja_dependencies(self):
         for admission in ("overlap", "all-builds"):
             with self.subTest(admission=admission):
@@ -821,34 +1150,8 @@ class NativeObserverTests(unittest.TestCase):
                 coverage = phases.read(root / "coverage.json")
                 trees, tasks = phases.validate_plan(plan, coverage, env)
                 self.assertEqual(plan["test_admission"], admission)
-                manifest = root / "matrix.cmake"
-                self.assertIn("BUSTER_SUPERBUILD_TEST_ADMISSION", manifest.read_text())
-                graph = root / "graph"
-                cmake = shutil.which("cmake")
-                ninja = shutil.which("ninja")
-                self.assertIsNotNone(cmake, "admission graph requires CMake")
-                self.assertIsNotNone(ninja, "admission graph requires Ninja")
-                # Configure and query the same Ninja; avoid unrelated tool discovery.
-                command = [cmake, "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
-                           f"-DCMAKE_MAKE_PROGRAM={Path(ninja).as_posix()}",
-                           f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"]
-                # The existing native deadline owner terminates/reaps the process
-                # tree before publishing status, including CMake's Ninja children.
-                observed = [str(self.driver), "matrix_phase_run", str(root), "admission-configure", "1",
-                            str(ADMISSION_CONFIGURE_TIMEOUT_SECONDS), "--", *command]
-                configured = subprocess.run(observed, cwd=ROOT, capture_output=True, text=True,
-                                            timeout=ADMISSION_CONFIGURE_TIMEOUT_SECONDS + 10)
-                record = phases.read(next(root.glob("admission-configure.*.end.json")))
-                diagnostic = dict(admission=admission, command=command, deadline_seconds=ADMISSION_CONFIGURE_TIMEOUT_SECONDS,
-                                  state=record["state"], spawned=record["spawned"], timed_out=record["timed_out"],
-                                  result=record["result"], platform_status=record["platform_status"],
-                                  termination_requested=record["termination_requested"], forcibly_terminated=record["forcibly_terminated"],
-                                  elapsed_us=record["end_us"] - record["child_start_us"],
-                                  stdout=configured.stdout, stderr=configured.stderr)
-                print("MATRIX_ADMISSION_CONFIGURE " + json.dumps(diagnostic, sort_keys=True), flush=True)
-                self.assertEqual(configured.returncode, 0, json.dumps(diagnostic, sort_keys=True))
-                self.assertEqual(record["state"], "success", json.dumps(diagnostic, sort_keys=True))
-                self.assertEqual(record["timed_out"], 0)
+                self.assertIn("BUSTER_SUPERBUILD_TEST_ADMISSION", (root / "matrix.cmake").read_text())
+                graph, ninja = self.configure_superbuild(root, admission)
                 tests = [task for task in tasks.values() if task["phase"] == "validation"]
                 # #2657: grouped checks keep one runtime tree (sanitized
                 # Release); the sanitized Debug tree is build-only.

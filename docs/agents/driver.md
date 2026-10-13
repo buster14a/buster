@@ -643,9 +643,9 @@ The block-local CSE experiment (#3011) is selected only by
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
 `-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
-off the construction-time constant interning arm in C lowering (off by
-default, last one wins, independent of `-O` and FAST controls); see
-[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
+off construction-time constant interning in C lowering (on by default, last
+one wins, independent of `-O` and FAST controls); see
+[construction-time constant interning](../canonical-fast-pipeline.md#construction-time-constant-interning-3011).
 `-fcanonical-construction-fold` / `-fno-canonical-construction-fold` turn on
 and off the experimental construction-time fold of integer-constant
 conversions and truth tests in C lowering (off by default, last one wins,
@@ -671,7 +671,9 @@ select the optional defaults while required expansion uses independent per-calle
 work/storage guards (including one relocation of existing caller data); other zero API fields normalize to the named defaults.
 Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
-the shift sets the caller relocation bound described below.
+the shift sets the caller relocation bound described below. The callee limit
+defaults to 13 canonical rows (`IR_INLINE_TINY_INSTRUCTIONS`, 16 before
+#3854); the FAST pipeline contract records the per-callee census behind it.
 Without an explicit module limit, the optional module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when

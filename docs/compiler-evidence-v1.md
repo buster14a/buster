@@ -1,11 +1,11 @@
 # Sealed raw compiler evidence v1 (#2918)
 
 Status: the ordinary pull and main routes seal their raw evidence, and their
-publishers verify it natively; that includes the pull `snapshot-v1` route.
-Sealing is not yet required. An artifact with neither control file is
-`legacy-unsealed`: its outcome stands, but its retained raw bytes are
-unverified, never upgraded. Requiring v1 on the ordinary routes is the next
-step on #2918.
+publishers verify it natively and replay the lab and corpus from it; that
+includes the pull `snapshot-v1` route. Sealing is required: a measured
+ordinary attempt without both control files fails. Only publication-only
+recovery of a run whose producer predates sealing may be `legacy-unsealed`:
+its outcome stands, but its retained raw bytes are unverified, never upgraded.
 
 ## Producer and publisher
 
@@ -44,22 +44,75 @@ seal, fails the attempt.
 
 `compiler_publish.py` handles each artifact as follows:
 
-- **Neither control file:** the artifact is `legacy-unsealed`. The outcome
-  stands, and the report notes that the raw bytes are unverified.
+- **Neither control file:** a measured attempt fails, since v1 is required.
+  Only publication-only recovery may accept it, and only when the original
+  run's trusted `compiler_compare.py` has no `seal_evidence` step
+  (`sealing_required`). That artifact is `legacy-unsealed`: the outcome
+  stands, and the report notes that the raw bytes are unverified. An
+  unreadable or absent producer requires the seal.
 - **Manifest or seal present:**
   1. It reads the whole archive through the strict `sampling_archive` reader
      and extracts it.
   2. It runs `./build.sh compiler_evidence verify` under the identity that
      hosted authorization produced; the receipt's identity is not used. Only
      the [route lines](#snapshot-route) come from a `snapshot-v1` receipt.
-  3. A refusal fails the check.
-  4. A verified bundle must match the receipt's `evidence_bundle`, inventory
+  3. It replays the verified bytes, as described below.
+  4. A refusal at any step fails the check.
+  5. A verified bundle must match the receipt's `evidence_bundle`, inventory
      included.
 - **Publication-only recovery:** it verifies the same way. The request attempt
   comes from the original bench run's own run-name
   (`9700X request <run>.<attempt> head <sha>`), and that run must be the
   authenticated request run. A run-name that names another request run, or no
   run-name at all, cannot name a sealed bundle, so the bundle is refused.
+
+The report's note names the verified manifest and the replayed population:
+`raw evidence: sealed … verified natively, … replayed N lab pairs and M corpus
+cases`.
+
+## Replay
+
+Replay recomputes each saved verdict from the verified raw bytes with the
+trusted statistics. It never runs an artifact's executable or command, and
+it never measures. It is the same on both inventories, since the
+[snapshot inventory](#snapshot-route) carries every ordinary member.
+
+**Lab (`sealed_lab_replay`).**
+
+1. `lab/compare.json` must be the frozen `compiler-compare-v1` configuration:
+   - CPU 2, a 10-minute target, one warmup and no profile steps
+   - no fixed pair count and no flag pair
+   - an even ABBA plan of 10 to 1000 pairs, with exactly two `pairs.json`
+     records per pair
+2. Each variant's saved runs, failures, identical runs, path, hash and size
+   must follow from those records.
+3. Each record must be the next member of the declared ABBA order. It must
+   have exited 0, be deterministic and have a bounded span. Its counter state
+   must equal its variant's actual probe, and every counter or
+   compiler-metrics file its availability claims must be present. This
+   rejects duplicated, missing, failed and reordered members, which
+   `uarch_lab`'s own loader would silently accept.
+4. The trusted `uarch_lab` statistics then recompute the metrics, phases,
+   checks and verdict, and these must equal the saved summary
+   (`lab_raw_inference`, shared with the utility route).
+
+The cross-variant output and code-size facts read the unretained reference
+images, so they are not replayed. As accepted, a sealed bundle supports no
+code-size claim.
+
+**Corpus (`sealed_corpus_replay`).**
+
+1. The publisher copies `throughput/` to a disposable directory, because
+   `bench_throughput compare` rewrites its summaries.
+2. It runs its own checkout's `./build.sh bench_throughput compare --output
+   <copy>`. That checks the completion hashes and the sample population, and
+   recomputes the statistics.
+3. The regenerated `summary.json`, and `summary.md` when retained, must equal
+   the retained bytes. A valid regression stays report-only.
+
+The comparison has been byte-stable from the pinned historical harness
+`afe67cbe…` onward. A future change to its output, or to its result schema,
+therefore needs a reviewed replay transition before it lands on `main`.
 
 `publish-pull` bootstraps the driver with the pinned TinyCC, as
 `publish-compiler` does.

@@ -59,7 +59,7 @@
 // is the one way back into a closed block, retraction and SSA memory
 // restoration use the checked ir_block_* primitives, and
 // c_ir_finish_construction rejects a function with a refused row or an open
-// block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
+// block. Unless -fno-canonical-intern-constants, c_ir_emit_integer_value_at
 // reuses a constant built earlier in the current block (CIrConstantIntern),
 // re-proving the cached row against retraction and truncation on every hit.
 // Under the opt-in -fcanonical-construction-fold (#3010), c_ir_emit_cast and
@@ -1091,7 +1091,7 @@ struct CIrArrayTypeSlot
     bool used;
 };
 
-// Opt-in construction-time constant interning (#3011, c_ir_emit_integer_value_at).
+// Construction-time constant interning (#3011, c_ir_emit_integer_value_at), on by default.
 // One direct-mapped table serves a whole lowering; each function builder takes
 // a fresh generation, so no entry crosses a function and none is cleared.
 // An entry is only a hint: a lookup re-proves that its value is still defined
@@ -1259,49 +1259,48 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerTyp
 
 BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId unqualified, bool is_atomic, bool is_volatile)
 {
+    IrTypeId result = IR_TYPE_ID_INVALID;
     IrType* base = ir_type_from_id(&program->types, unqualified);
-    if (!base || base->is_atomic || base->is_volatile || base->kind == IR_TYPE_FUNCTION ||
-        (is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY)))
+    bool valid = base && !base->is_atomic && !base->is_volatile && base->kind != IR_TYPE_FUNCTION &&
+                 !(is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY));
+    // A recursive record needs the identity of its volatile pointee before
+    // its own pointer fields can be laid out. Reserve that view now; the
+    // existing qualified-type mapping retry completes its layout in place.
+    // Atomic construction still requires the complete promoted layout.
+    bool pending_record = valid && !is_atomic && is_volatile &&
+                          (base->kind == IR_TYPE_STRUCT || base->kind == IR_TYPE_UNION);
+    if (valid && (base->layout.resolved || pending_record))
     {
-        return IR_TYPE_ID_INVALID;
-    }
-    // The qualified type is a copy of the base, layout included, and an
-    // aggregate's mapping exists before its fields are laid out.  Copying then
-    // would freeze an unresolved layout into a type nothing revisits, which
-    // codegen rejects as invalid IR -- SQLite reaches one through
-    // `volatile WalCkptInfo *`.  The mapping pass keeps a qualified type
-    // pending, so refusing here is a retry, not a failure.
-    if (!base->layout.resolved)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
-    {
-        IrType* type = program->types.types + type_index;
-        if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
+        for (u32 type_index = 0; type_index < program->types.count && result.value == IR_ID_UNDERLYING_INVALID; type_index += 1)
         {
-            return type->id;
+            IrType* type = program->types.types + type_index;
+            if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
+            {
+                if (!type->layout.resolved && base->layout.resolved)
+                {
+                    type->layout = base->layout;
+                }
+                result = type->id;
+            }
+        }
+        if (result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            IrType qualified = *base;
+            qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
+            qualified.id = IR_TYPE_ID_INVALID;
+            qualified.unqualified_type = unqualified;
+            qualified.is_atomic = is_atomic;
+            qualified.is_volatile = is_volatile;
+            // Atomic construction promotes size and alignment, while plain
+            // volatile preserves the base record's eventual layout exactly.
+            if (is_atomic)
+            {
+                c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
+            }
+            result = ir_program_add_type(program, qualified);
         }
     }
-    IrType qualified = *base;
-    qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
-    qualified.id = IR_TYPE_ID_INVALID;
-    qualified.unqualified_type = unqualified;
-    qualified.is_atomic = is_atomic;
-    qualified.is_volatile = is_volatile;
-    // `_Atomic` is the one qualifier that does not copy the layout: Clang
-    // constructs a type from the operand rather than qualifying it, padding it
-    // up to the next power of two and aligning it there so the `__atomic`
-    // builtins can reach it lock-free.  This is the lowering half of that rule
-    // and c_parse_type_layout folds `sizeof` through the other half; the two
-    // read the same ceiling out of the preprocess target's data layout, which
-    // is what `program->data_layout` holds.  `volatile` alone changes nothing,
-    // which is why the test is on the atomic flag rather than on the copy.
-    if (is_atomic)
-    {
-        c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
-    }
-    return ir_program_add_type(program, qualified);
+    return result;
 }
 
 // GNU `__atomic_*` accepts an ordinary pointer, so qualifying its pointee for
@@ -3676,7 +3675,7 @@ struct CIntegerIrBuilder
     // (c_ir_initializer_slot_table); shared by the constant builder and
     // every function builder of one lowering, null in the test hooks.
     CIrInitializerSlotCache* slot_cache;
-    // Opt-in constant interning shared by every function builder of one
+    // Constant interning shared by every function builder of one
     // lowering, and this function's generation in it; null when off.
     CIrConstantIntern* constant_intern;
     u32 constant_intern_generation;
@@ -6481,6 +6480,10 @@ BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u
         if (first.kind != C_TOKEN_IDENTIFIER)
         {
             result = first.punctuator == C_PUNCTUATOR_LEFT_BRACKET;
+        }
+        else if (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SIZEOF))
+        {
+            result = false;
         }
         else if (first.symbol && !c_parse_type_name_start_word_token(builder->preprocess, first))
         {
@@ -18866,6 +18869,8 @@ struct CIrLowerAutomaticDeclarationListState
     u32 parentheses;
     u32 brackets;
     u32 braces;
+    // The `?:` nesting outside every group (c_token_conditional_depth_step).
+    u32 conditionals;
     u64 temporary_mark;
 };
 
@@ -46542,7 +46547,9 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
         {
             state->braces -= 1;
         }
-        bool separator = at_end || (!state->parentheses && !state->brackets && !state->braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
+        bool outside_groups = !state->parentheses && !state->brackets && !state->braces;
+        bool separator = at_end || (outside_groups && !state->conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
+        state->conditionals = outside_groups && !separator ? c_token_conditional_depth_step(&token, state->conditionals) : state->conditionals;
         if (!separator)
         {
             state->scan += 1;
@@ -50494,6 +50501,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 declaration_parentheses = 0;
                 u32 declaration_brackets = 0;
                 u32 declaration_braces = 0;
+                u32 declaration_conditionals = 0;
                 bool multiple_declarators = false;
                 for (u32 scan = index; scan < end; scan += 1)
                 {
@@ -50522,10 +50530,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         declaration_braces -= 1;
                     }
-                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && !declaration_conditionals &&
+                             c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
                     {
                         multiple_declarators = true;
                         break;
+                    }
+                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces)
+                    {
+                        declaration_conditionals = c_token_conditional_depth_step(&token, declaration_conditionals);
                     }
                 }
                 if (multiple_declarators)
@@ -61452,7 +61465,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 IrTypeId cast_type = IR_TYPE_ID_INVALID;
                 if (close < end)
                 {
-                    c_ir_query_type_name(builder, index + 1, close, true, &cast_type);
+                    c_ir_query_group_type_name(builder, index, close, &cast_type);
                     if (builder->queries->has_request)
                     {
                         return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
@@ -66441,8 +66454,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
-            .constant_intern = options.intern_block_constants ? &constant_intern : 0,
-            .constant_intern_generation = options.intern_block_constants ? ++constant_intern.generation : 0,
+            .constant_intern = options.disable_block_constant_interning ? 0 : &constant_intern,
+            .constant_intern_generation = options.disable_block_constant_interning ? 0 : ++constant_intern.generation,
             .construction_folds = options.construction_fold ? &result.construction_folds : 0,
             .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,

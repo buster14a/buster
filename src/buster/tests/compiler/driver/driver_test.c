@@ -5667,6 +5667,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         String8 expected_diagnostic;
         String8 dialect;
     } cases[] = {
+        {S8("enum E : int { N = sizeof(enum E[2]) }; enum E a[2];"), true, false, {0}, S8("-std=c23")},
+        {S8("typedef int F(void); F a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); typedef F A[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { F a[2]; }"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { (void)sizeof(F[2]); }"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; extern struct S a[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S (*p)[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; void f(struct S a[2]); struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int A[]; A a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); F *a[2]; struct S; struct S *b[2];"), true},
         // Function designators are never assignment places, even under sizeof (#3746).
         {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
         {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
@@ -48664,6 +48675,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_typeof_conditional.c"),
         S8("tests/basic_c_typeof_expression_frames.c"),
         S8("tests/basic_c_qualified_aggregate_call.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/volatile_recursive_record.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/git_array_size.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
     };
@@ -48685,6 +48698,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-typeof-conditional"),
         S8("buster-c-typeof-expression-frames"),
         S8("buster-c-qualified-aggregate-call"),
+        S8("buster-c-volatile-recursive-record"),
+        S8("buster-c-git-array-size"),
         S8("buster-c-qualified-compound"),
         S8("buster-c-fresh-binding-publication"),
     };
@@ -48937,6 +48952,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-target"),
         S8("x86_64-pc-windows-msvc"),
         S8("-fregister-allocator=quality"),
+        // The prolog decoder below expects `push rbp; mov rbp, rsp; sub rsp, N` with no
+        // callee-saved pushes, which an interned constant live across a call would add.
+        S8("-fno-canonical-intern-constants"),
         S8("-o"),
         c_float_abi_windows_path,
         S8("tests/basic_c_float_abi.c"),
