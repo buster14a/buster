@@ -21177,7 +21177,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_joins(UnitTe
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 output = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-joins"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], cpus[profile],
-                                         S8("-fverify-codegen"), S8("-o"), output, S8("tests/basic_c_wide_vector_joins.c")};
+                                         S8("-fverify-codegen"), S8("-o"), output, S8("src/buster/tests/compiler/driver/fixtures/basic_c_wide_vector_joins.c")};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
@@ -21196,7 +21196,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_joins(UnitTe
                     {
                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-joins-run"), S8(".exe"));
                         String8 native_command[] = {modes[mode], frontends[frontend], cpus[profile], S8("-fverify-codegen"), S8("-o"), executable,
-                                                    S8("tests/basic_c_wide_vector_joins.c")};
+                                                    S8("src/buster/tests/compiler/driver/fixtures/basic_c_wide_vector_joins.c")};
                         CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
                             (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
                         native_invocation.reject_machine_fallback = true;
