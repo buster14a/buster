@@ -1257,49 +1257,48 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerTyp
 
 BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId unqualified, bool is_atomic, bool is_volatile)
 {
+    IrTypeId result = IR_TYPE_ID_INVALID;
     IrType* base = ir_type_from_id(&program->types, unqualified);
-    if (!base || base->is_atomic || base->is_volatile || base->kind == IR_TYPE_FUNCTION ||
-        (is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY)))
+    bool valid = base && !base->is_atomic && !base->is_volatile && base->kind != IR_TYPE_FUNCTION &&
+                 !(is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY));
+    // A recursive record needs the identity of its volatile pointee before
+    // its own pointer fields can be laid out. Reserve that view now; the
+    // existing qualified-type mapping retry completes its layout in place.
+    // Atomic construction still requires the complete promoted layout.
+    bool pending_record = valid && !is_atomic && is_volatile &&
+                          (base->kind == IR_TYPE_STRUCT || base->kind == IR_TYPE_UNION);
+    if (valid && (base->layout.resolved || pending_record))
     {
-        return IR_TYPE_ID_INVALID;
-    }
-    // The qualified type is a copy of the base, layout included, and an
-    // aggregate's mapping exists before its fields are laid out.  Copying then
-    // would freeze an unresolved layout into a type nothing revisits, which
-    // codegen rejects as invalid IR -- SQLite reaches one through
-    // `volatile WalCkptInfo *`.  The mapping pass keeps a qualified type
-    // pending, so refusing here is a retry, not a failure.
-    if (!base->layout.resolved)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
-    {
-        IrType* type = program->types.types + type_index;
-        if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
+        for (u32 type_index = 0; type_index < program->types.count && result.value == IR_ID_UNDERLYING_INVALID; type_index += 1)
         {
-            return type->id;
+            IrType* type = program->types.types + type_index;
+            if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
+            {
+                if (!type->layout.resolved && base->layout.resolved)
+                {
+                    type->layout = base->layout;
+                }
+                result = type->id;
+            }
+        }
+        if (result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            IrType qualified = *base;
+            qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
+            qualified.id = IR_TYPE_ID_INVALID;
+            qualified.unqualified_type = unqualified;
+            qualified.is_atomic = is_atomic;
+            qualified.is_volatile = is_volatile;
+            // Atomic construction promotes size and alignment, while plain
+            // volatile preserves the base record's eventual layout exactly.
+            if (is_atomic)
+            {
+                c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
+            }
+            result = ir_program_add_type(program, qualified);
         }
     }
-    IrType qualified = *base;
-    qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
-    qualified.id = IR_TYPE_ID_INVALID;
-    qualified.unqualified_type = unqualified;
-    qualified.is_atomic = is_atomic;
-    qualified.is_volatile = is_volatile;
-    // `_Atomic` is the one qualifier that does not copy the layout: Clang
-    // constructs a type from the operand rather than qualifying it, padding it
-    // up to the next power of two and aligning it there so the `__atomic`
-    // builtins can reach it lock-free.  This is the lowering half of that rule
-    // and c_parse_type_layout folds `sizeof` through the other half; the two
-    // read the same ceiling out of the preprocess target's data layout, which
-    // is what `program->data_layout` holds.  `volatile` alone changes nothing,
-    // which is why the test is on the atomic flag rather than on the copy.
-    if (is_atomic)
-    {
-        c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
-    }
-    return ir_program_add_type(program, qualified);
+    return result;
 }
 
 // GNU `__atomic_*` accepts an ordinary pointer, so qualifying its pointee for

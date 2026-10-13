@@ -960,6 +960,14 @@ without facts for identical bitcode and diagnostics.
   See [diagnostics](../../diagnostics.md) for the recovery contract and its
   frozen equivalence test.
 
+- A volatile recursive record reserves its qualified canonical identity before
+  its base layout resolves. Pointer fields can then name it without a layout
+  dependency cycle; the existing qualified mapping retry refreshes the view
+  in place once the base resolves. Fields share the base storage, and volatile
+  loads/stores retain their access markers. Atomic construction still waits
+  for the complete layout before promotion. `c_test_volatile_recursive_records`
+  covers self/mutual recursion and unions on x86-64/AArch64 in both frontend
+  forms; the native driver executes the fixture under both allocators.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
@@ -2149,3 +2157,13 @@ checks that a returned-function call retains the positive reference scan.
 for typeof and qualified-typeof casts plus their interior-conjunction negatives.
 The landed decorated-label runtime controls, original deep lowering and
 runtime-order fixtures remain separate.
+
+## Type identity in array layout constants
+
+The layout bound rewriter consumes retained semantic identity answers as one
+integer leaf, skipping their unevaluated type operands. This lets nested
+`sizeof(char[...__builtin_types_compatible_p(...)...])` retain the same constant
+value as the direct builtin, including Git's ARRAY_SIZE macro. Missing answers
+stay unresolved. `c_test_array_size_identity_layout` covers static initializers,
+member bounds, local initialized arrays, four target layouts and both frontend
+forms; pointer misuse and genuinely variable bounds retain their refusals.
