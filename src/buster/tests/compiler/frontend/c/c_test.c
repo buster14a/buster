@@ -12344,12 +12344,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
                                 semantic_source |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
                                     string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
                             }
-                            BUSTER_TEST_RAW(arguments, semantic_source || template_index == 1 || template_index == 2, source);
+                            BUSTER_TEST_RAW(arguments, semantic_source, source);
                             c_test_scratch_end(temporary);
                         }
                     }
                 }
             }
+        }
+        // The exact target limit is admitted, and a following ordinary type
+        // remains usable after an oversized unqueried record is diagnosed.
+        {
+            u32 limit_bits = BUSTER_MIN(layout.pointer.bit_width, 61u);
+            u64 limit = limit_bits ? (UINT64_MAX >> (64 - limit_bits)) : 0;
+            TemporalArena boundary = scratch_begin(0, 0);
+            String8 accepted_source = string_format(boundary.arena,
+                S8("struct Boundary {{ char bytes[{u64}ULL]; }};\n"
+                   "struct Recovery {{ int value; }};\n"
+                   "_Static_assert(sizeof(struct Recovery) == sizeof(int), \"recovery\");\n"),
+                limit);
+            CPreprocessResult accepted_tokens = c_preprocess(boundary.arena, accepted_source,
+                (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_C17});
+            CParserResult accepted_syntax = c_parse_ast(boundary.arena, accepted_tokens);
+            CAnalysisResult accepted = c_analyze_semantics_only(boundary.arena, accepted_tokens, accepted_syntax);
+            BUSTER_TEST_RAW(arguments, accepted_tokens.diagnostic_count == 0 && accepted_syntax.diagnostic_count == 0 &&
+                            accepted.analysis_complete && accepted.diagnostic_count == 0, accepted_source);
+            c_test_scratch_end(boundary);
+
+            TemporalArena recovery = scratch_begin(0, 0);
+            String8 rejected_source = string_format(recovery.arena,
+                S8("struct TooLarge {{ char bytes[{u64}ULL]; char extra; }};\n"
+                   "struct Recovery {{ int value; }};\n"
+                   "_Static_assert(sizeof(struct Recovery) == sizeof(int), \"recovery\");\n"),
+                limit);
+            CPreprocessResult rejected_tokens = c_preprocess(recovery.arena, rejected_source,
+                (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_C17});
+            CParserResult rejected_syntax = c_parse_ast(recovery.arena, rejected_tokens);
+            CAnalysisResult rejected_semantic = c_analyze_semantics_only(recovery.arena, rejected_tokens, rejected_syntax);
+            bool record_diagnostic = false;
+            for (u32 index = 0; index < rejected_semantic.diagnostic_count; index += 1)
+            {
+                CDiagnostic diagnostic = rejected_semantic.diagnostics[index];
+                record_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 1 &&
+                    string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+            }
+            BUSTER_TEST_RAW(arguments, rejected_tokens.diagnostic_count == 0 && rejected_syntax.diagnostic_count == 0 &&
+                            rejected_semantic.analysis_complete && rejected_semantic.diagnostic_count == 1 && record_diagnostic, rejected_source);
+            c_test_scratch_end(recovery);
         }
         // A global initializer's sizeof of a too-large array of arrays points
         // at the written bound (#1479).

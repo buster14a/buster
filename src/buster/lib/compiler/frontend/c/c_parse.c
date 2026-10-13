@@ -5545,9 +5545,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_agenda(CParseLayoutContext* context, 
     return answered;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                 CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out,
-                                                 u32* member_alignment_out, bool agenda_allowed)
+BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                  CParseResult* result, CTypeId requested, u64* size_out, u32* alignment_out,
+                                                  u32 offset_member, u64* offset_out, u32* member_alignment_out,
+                                                  bool agenda_allowed, bool settle_pending)
 {
     if (requested.value >= result->type_count)
     {
@@ -5628,11 +5629,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         .result = result,
         .statistics = result->type_layout_statistics,
         .cache = cached && offset_out ? cache : 0,
-        // At an idle declaration machine a cold offset query settles the
-        // pending list once. Later member queries replay only their aggregate
-        // from committed dependencies. Speculative queries retain the passes'
-        // original stopping and publication rules.
-        .complete_pending = cache && offset_out && !machine->frame_count && !machine->mutation_count,
+        // At an idle declaration machine, an offset query or an explicit
+        // validator settle on an uncached root commits all resolvable rows.
+        // Later member queries replay only their aggregate from committed
+        // dependencies; speculative queries retain the passes' original rules.
+        .complete_pending = cache && (offset_out || (settle_pending && !cached)) &&
+                            !machine->frame_count && !machine->mutation_count,
         .offset_out = offset_out,
         .member_alignment_out = member_alignment_out,
         .requested = cached && offset_out ? offset_type : requested,
@@ -5656,7 +5658,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
     // The agenda grows its tables as the closure is discovered, so it never
     // runs in a function body's guarded scratch arena (#1256); the ordered
     // passes answer the same query there with checked tables.
-    if (agenda_allowed && !c_parse_body_scratch_guarded(query_arena) &&
+    if (agenda_allowed && !settle_pending && !c_parse_body_scratch_guarded(query_arena) &&
         (layout_context.cache || (!cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)))
     {
         answered = c_parse_type_layout_agenda(&layout_context, size_out, alignment_out, &settled);
@@ -5683,9 +5685,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                             CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out)
+                                             CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member,
+                                             u64* offset_out, bool settle_pending)
 {
-    bool answered = c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out, offset_member, offset_out, 0, true);
+    bool answered = c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out,
+                                               offset_member, offset_out, 0, true, settle_pending);
     // Count answers past the target object-size limit for the static-assertion
     // check (CObjectSizeFacts). target_data_layout gives pointers of 32 or 64
     // bits, so no limit is below C_PARSE_OBJECT_SIZE_LIMIT_FLOOR and an
@@ -5702,7 +5706,17 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                                            CTypeId requested, u64* size_out, u32* alignment_out)
 {
     IR_SEMANTIC_RECORD(LAYOUT_QUERIES, 1);
-    return c_parse_type_layout_core(machine, arena, preprocess, result, requested, size_out, alignment_out, UINT32_MAX, 0);
+    return c_parse_type_layout_core(machine, arena, preprocess, result, requested, size_out, alignment_out, UINT32_MAX, 0, false);
+}
+
+// One validation query may need every currently resolvable pending layout,
+// not only the closure of its requested type. The caller selects an uncached
+// root; the ordered-pass solver then commits all settled rows once.
+BUSTER_C_INTERNAL bool c_parse_type_layout_settle_pending(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                          CParseResult* result, CTypeId requested, u64* size_out, u32* alignment_out)
+{
+    IR_SEMANTIC_RECORD(LAYOUT_QUERIES, 1);
+    return c_parse_type_layout_core(machine, arena, preprocess, result, requested, size_out, alignment_out, UINT32_MAX, 0, true);
 }
 
 CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
@@ -6923,7 +6937,8 @@ bool c_test_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult
 {
     CTypeLayoutStatistics* production = result->type_layout_statistics;
     result->type_layout_statistics = statistics;
-    bool resolved = c_parse_type_layout_solve(0, arena, preprocess, result, type, size_out, alignment_out, offset_member, offset_out, 0, agenda_allowed);
+    bool resolved = c_parse_type_layout_solve(0, arena, preprocess, result, type, size_out, alignment_out,
+                                               offset_member, offset_out, 0, agenda_allowed, false);
     result->type_layout_statistics = production;
     return resolved;
 }
@@ -6955,7 +6970,7 @@ bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessResult preproces
             u32 alignment = 0;
             bool valid = type.value < result->type_count && member_index < result->types[type.value].member_count;
             correct &= valid && c_parse_type_layout_core(&machine, arena, preprocess, result, type, &size, &alignment,
-                valid ? result->types[type.value].member_start + member_index : UINT32_MAX, &offset) && offset == expected_offset;
+                valid ? result->types[type.value].member_start + member_index : UINT32_MAX, &offset, false) && offset == expected_offset;
         }
     }
     result->type_layout_statistics = production;
@@ -35291,7 +35306,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                     u64 size = 0;
                     u32 alignment = 0;
                     if (c_parse_type_layout_core(machine, arena, preprocess, result, item.type, &size, &alignment,
-                                                  type.member_start + member_index, &offset) &&
+                                                  type.member_start + member_index, &offset, false) &&
                         item.offset <= maximum && offset <= maximum - item.offset)
                     {
                         if (matches)
@@ -36618,7 +36633,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                     // Member queries bypass committed type-layout rows: only
                     // visiting the actual placement can supply this answer.
                     if (valid && c_parse_type_layout_solve(0, arena, preprocess, &query, aggregate, &size, &aggregate_alignment, member, &offset,
-                                                           &placed_alignment, true))
+                                                           &placed_alignment, true, false))
                     {
                         *member_alignment = placed_alignment;
                     }
@@ -43722,24 +43737,37 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
     u32 type_count = result->type_count;
     u8* seen = arena_allocate_zeroed(machine->scratch_arena, u8, bound_count);
     u32 pointer_bits = target_data_layout(preprocess.target).pointer.bit_width;
-    // A cache miss below is a whole-table pass solve, and a solve stops once
-    // its own request resolves. Asked in table order, every array therefore
-    // paid for the whole table again: quadratic, ~34k solves over ~170k types
-    // when self-hosting ide.c. Asking for the last array first attempts every
-    // earlier pending type in table order and commits what resolves, so the
-    // queries below read the cache. Layout answers do not depend on the order
-    // of attempts; this query only warms the cache and its answer is unused.
+    // One validation solve must not run once per array or record. Select
+    // the latest uncached array/complete record as an uncached root; in the
+    // idle validation phase, complete-pending mode settles every resolvable
+    // row once, and the cache scan below diagnoses oversized records that no
+    // expression asked to size. Later checks read those committed rows.
+    CTypeLayoutCache const* cache = &machine->layout_cache;
+    bool cached_layouts = preprocess.tokens && cache->tokens == preprocess.tokens;
     u32 prewarm = type_count;
     for (u32 index = type_count; prewarm == type_count && index > type_start; index -= 1)
     {
-        CType type = result->types[index - 1];
-        if (type.kind == C_TYPE_ARRAY && type.array_bound < bound_count) prewarm = index - 1;
+        u32 type_index = index - 1;
+        CType type = result->types[type_index];
+        bool candidate = (type.kind == C_TYPE_ARRAY && type.array_bound < bound_count) ||
+            ((type.kind == C_TYPE_STRUCT || type.kind == C_TYPE_UNION) && type.is_complete);
+        bool cached = cached_layouts && type_index < cache->capacity && cache->states[type_index];
+        if (candidate && !cached) prewarm = type_index;
     }
     if (prewarm < type_count)
     {
         u64 prewarm_size = 0;
         u32 prewarm_alignment = 0;
-        c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = prewarm}, &prewarm_size, &prewarm_alignment);
+        if (cached_layouts)
+        {
+            c_parse_type_layout_settle_pending(machine, machine->scratch_arena, preprocess, result,
+                                               (CTypeId){.value = prewarm}, &prewarm_size, &prewarm_alignment);
+        }
+        else
+        {
+            c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = prewarm},
+                                &prewarm_size, &prewarm_alignment);
+        }
     }
     for (u32 index = type_start; index < type_count; index += 1)
     {
@@ -43807,16 +43835,20 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
             }
         }
     }
-    // Records whose committed layout exceeds the same limit. This reads the
-    // cache columns the array queries above already filled; it asks no layout
-    // question, so a record nothing sized is diagnosed by lowering instead.
-    CTypeLayoutCache const* cache = &machine->layout_cache;
+    // Records whose committed layout exceeds the same limit. The
+    // complete-pending warm-up above supplies every settled record row even if
+    // no expression queried it; this scan issues the definition-site error.
     for (u32 index = 0; cache->tokens == preprocess.tokens && index < BUSTER_MIN(type_count, cache->capacity); index += 1)
     {
         CType const* type = result->types + index;
         if ((type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION) || !type->is_complete || !cache->states[index] ||
             cache->sizes[index] <= c_array_object_size_limit(pointer_bits) || type->definition_start >= preprocess.token_count) continue;
-        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[type->definition_start]);
+        // Keep the oversized-layout diagnostic if source tokens are unavailable for location recovery.
+        CSourceLocation location = {0};
+        if (preprocess.tokens)
+        {
+            location = c_preprocess_token_location(&preprocess, preprocess.tokens[type->definition_start]);
+        }
         bool reported = false;
         for (u32 diagnostic = 0; !reported && diagnostic < result->diagnostic_count; diagnostic += 1)
         {
