@@ -31,15 +31,18 @@ error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
 Before publishing a named output, the driver compares the followed file
-identity of the destination with every positional input path and explicit
-`-include` path. A match fails with an argument diagnostic before staging or
+identity of the destination with every positional input and each source or
+header path the C preprocessor actually resolved and lexed, including forced
+`-include` names. A match fails with an argument diagnostic before staging or
 replacing the destination, preserving both the input and any existing output
 bytes. This catches direct, symbolic-link, hard-link and case aliases whenever
-the filesystem reports the same identity. Executable link outputs are checked
-before native linking; ordinary `-o` outputs (`-E`, `-S` and `-c`) and
-`-MF` dependency outputs are checked before publication. The check does not
-resolve implicit `-lNAME` library searches or ordinary transitive
-preprocessor includes.
+the filesystem reports the same identity. Executable link outputs and
+`-MF` dependency outputs are checked against each unit's resolved files before
+publication. For multi-input `-c` and `-emit-llvm`, every derived `.o` or
+`.bc` destination is checked against the full positional input set before
+any unit runs, so an earlier output cannot replace a later input. The check
+does not resolve implicit `-lNAME` library searches or compiler-generated
+secondary evidence outputs.
 
 Publication (`file_publish_checked`, `file_publish_slices_checked` and
 `file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside

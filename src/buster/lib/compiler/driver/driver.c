@@ -61,8 +61,12 @@
 // and this driver renders their Makefile after the artifact writer succeeds.
 // The parser retains ordered -MT/-MQ fragments and joins them once, so
 // dependency target storage grows with argument and output bytes.
-// Every unit enters through compiler_driver_execute_unit. With
-// collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
+// Every unit enters through compiler_driver_execute_unit. The followed
+// identity checks in compiler_driver_output_input_alias and
+// compiler_driver_output_lexed_file_alias refuse named-output collisions with
+// positional or resolved C preprocessor inputs; multi-input object/bitcode
+// outputs are preflighted against the full positional list before unit work.
+// With collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
 // CompilerDriverPhase boundaries as offsets from metrics_origin) and
 // CompilerDriverArenaWatch measure each unit, and compiler_driver_input_record
@@ -7363,6 +7367,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, 
 }
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* arena, String8 input);
 
 // Per-unit measurement scratch for collect_input_metrics. A null pointer is
 // the ordinary compile: every phase boundary tests it once and reads no
@@ -7627,6 +7632,93 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_write_failure(Arena* arena, String8 
     return string_format(arena, S8("could not write {S8}: {S8}"), path, reason);
 }
 
+typedef struct CompilerDriverInputIdentitySlot CompilerDriverInputIdentitySlot;
+struct CompilerDriverInputIdentitySlot
+{
+    u64 device;
+    u64 index;
+    u32 input_index_plus_one;
+};
+
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_file_identity_hash(u64 device, u64 index)
+{
+    u64 hash = device;
+    hash ^= index + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverInputIdentitySlot* compiler_driver_input_identity_table_create(Arena* arena,
+                                                                                                  CompilerDriverInvocation invocation,
+                                                                                                  u64* table_capacity)
+{
+    CompilerDriverInputIdentitySlot* table = 0;
+    *table_capacity = (u64)invocation.input_count * 2 + 1;
+    table = arena_allocate_zeroed(arena, CompilerDriverInputIdentitySlot, *table_capacity);
+    if (table)
+    {
+        for (u32 index = 0; invocation.input_paths && index < invocation.input_count; index += 1)
+        {
+            String8 path = invocation.input_paths[index];
+            if (path.length && !string_equal(path, S8("-")))
+            {
+                FileStats stats = os_path_followed_stats(path);
+                if (stats.valid && stats.kind != OS_FILE_KIND_MISSING)
+                {
+                    u64 slot_index = compiler_driver_file_identity_hash(stats.device, stats.index) % *table_capacity;
+                    CompilerDriverInputIdentitySlot* slot = table + slot_index;
+                    while (slot->input_index_plus_one)
+                    {
+                        if (slot->device == stats.device && slot->index == stats.index)
+                        {
+                            break;
+                        }
+                        slot_index = (slot_index + 1) % *table_capacity;
+                        slot = table + slot_index;
+                    }
+                    if (!slot->input_index_plus_one)
+                    {
+                        slot->device = stats.device;
+                        slot->index = stats.index;
+                        slot->input_index_plus_one = index + 1;
+                    }
+                }
+            }
+        }
+    }
+    return table;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_cached_input_alias(CompilerDriverInvocation invocation, String8 output_path,
+                                                                       CompilerDriverInputIdentitySlot const* input_identities,
+                                                                       u64 identity_capacity)
+{
+    String8 alias = {0};
+    FileStats output_stats = {0};
+    if (output_path.pointer && output_path.length && !string_equal(output_path, S8("-")))
+    {
+        output_stats = os_path_followed_stats(output_path);
+    }
+    if (output_stats.valid && output_stats.kind != OS_FILE_KIND_MISSING && input_identities && identity_capacity)
+    {
+        u64 slot_index = compiler_driver_file_identity_hash(output_stats.device, output_stats.index) % identity_capacity;
+        for (u64 probe = 0; probe < identity_capacity && input_identities[slot_index].input_index_plus_one; probe += 1)
+        {
+            CompilerDriverInputIdentitySlot slot = input_identities[slot_index];
+            if (slot.device == output_stats.device && slot.index == output_stats.index)
+            {
+                u32 input_index = slot.input_index_plus_one - 1;
+                if (input_index < invocation.input_count)
+                {
+                    alias = invocation.input_paths[input_index];
+                }
+                break;
+            }
+            slot_index = (slot_index + 1) % identity_capacity;
+        }
+    }
+    return alias;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_input_alias(CompilerDriverInvocation invocation, String8 output_path)
 {
     String8 alias = {0};
@@ -7650,9 +7742,24 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_input_alias(CompilerDriverInv
                 }
             }
         }
-        for (u32 index = 0; invocation.forced_includes && !alias.length && index < invocation.forced_include_count; index += 1)
+    }
+    return alias;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_lexed_file_alias(String8 output_path, CSourceFileMetrics const* lexed_files,
+                                                                                u32 lexed_file_count)
+{
+    String8 alias = {0};
+    FileStats output_stats = {0};
+    if (output_path.pointer && output_path.length && !string_equal(output_path, S8("-")))
+    {
+        output_stats = os_path_followed_stats(output_path);
+    }
+    if (output_stats.valid && output_stats.kind != OS_FILE_KIND_MISSING)
+    {
+        for (u32 index = 0; lexed_files && !alias.length && index < lexed_file_count; index += 1)
         {
-            String8 input_path = invocation.forced_includes[index];
+            String8 input_path = lexed_files[index].path;
             if (input_path.length && !string_equal(input_path, S8("-")))
             {
                 FileStats input_stats = os_path_followed_stats(input_path);
@@ -7665,6 +7772,61 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_input_alias(CompilerDriverInv
         }
     }
     return alias;
+}
+
+typedef struct CompilerDriverResolvedOutputAlias CompilerDriverResolvedOutputAlias;
+struct CompilerDriverResolvedOutputAlias
+{
+    String8 output_path;
+    String8 input_path;
+};
+
+BUSTER_GLOBAL_LOCAL CompilerDriverResolvedOutputAlias compiler_driver_resolved_output_alias(
+    Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write, CPreprocessDetail const* preprocess_detail)
+{
+    CompilerDriverResolvedOutputAlias result = {0};
+    if ((!suppress_object_write || invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ||
+         invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY) &&
+        (invocation.action != COMPILER_DRIVER_ACTION_LINK ||
+         (!invocation.retain_linked_object && !invocation.retain_object)))
+    {
+        result.output_path = invocation.output_path;
+    }
+    if (!result.output_path.length && !suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
+    {
+        result.output_path = invocation.emit_llvm_bitcode
+                                ? compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0])
+                                : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+    }
+    else if (!result.output_path.length && !suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
+             !invocation.retain_linked_object && !invocation.retain_object)
+    {
+        result.output_path = compiler_driver_default_executable_path(invocation.target);
+    }
+    result.input_path = compiler_driver_output_lexed_file_alias(result.output_path, preprocess_detail->lexed_files,
+                                                                 preprocess_detail->lexed_file_count);
+    if (!result.input_path.length && !suppress_object_write && !invocation.emit_llvm_bitcode &&
+        (invocation.dependency_file ||
+         (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY &&
+          invocation.output_path.length)) &&
+        (invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+         (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY &&
+          invocation.output_path.length)))
+    {
+        String8 object_path = invocation.output_path.length
+                                  ? invocation.output_path
+                                  : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+        String8 dependency_path = invocation.dependency_path.pointer || invocation.dependency_path.length
+                                      ? invocation.dependency_path
+                                      : compiler_driver_dependency_path(arena, object_path);
+        result.input_path = compiler_driver_output_lexed_file_alias(dependency_path, preprocess_detail->lexed_files,
+                                                                     preprocess_detail->lexed_file_count);
+        if (result.input_path.length)
+        {
+            result.output_path = dependency_path;
+        }
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_publish_slices(Arena* arena, CompilerDriverInvocation invocation, String8 path,
@@ -8455,11 +8617,26 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, diagnostics, &preprocess, preprocess.diagnostics,
                                                                           preprocess.diagnostic_count, path, (String8){.pointer = split, .length = split_length},
                                                                           &promoted_warnings);
-    if (preprocess.error_count || promoted_warnings)
+    CompilerDriverResolvedOutputAlias output_alias = {0};
+    if (!preprocess.error_count && !promoted_warnings)
     {
-        result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
-        result.tokenizer_error_count = (u32)(preprocess.error_count + promoted_warnings);
-        result.diagnostic = preprocessing_error;
+        output_alias = compiler_driver_resolved_output_alias(arena, invocation, suppress_object_write,
+                                                              c_preprocess_detail(preprocess));
+    }
+    if (preprocess.error_count || promoted_warnings || output_alias.input_path.length)
+    {
+        if (preprocess.error_count || promoted_warnings)
+        {
+            result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
+            result.tokenizer_error_count = (u32)(preprocess.error_count + promoted_warnings);
+            result.diagnostic = preprocessing_error;
+        }
+        else
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = string_format(arena, S8("output {S8} aliases input {S8}; refusing to overwrite input"),
+                                              output_alias.output_path, output_alias.input_path);
+        }
         c_preprocess_release(&preprocess);
         return result;
     }
@@ -8719,6 +8896,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
         result.tokenizer_error_count = (u32)(preprocess.error_count + promoted_warnings);
         result.diagnostic = preprocessing_error;
+        goto end;
+    }
+    CompilerDriverResolvedOutputAlias output_alias =
+        compiler_driver_resolved_output_alias(arena, invocation, suppress_object_write, preprocess_detail);
+    if (output_alias.input_path.length)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = string_format(arena, S8("output {S8} aliases input {S8}; refusing to overwrite input"),
+                                          output_alias.output_path, output_alias.input_path);
         goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
@@ -10410,6 +10596,41 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     if (invocation.query == COMPILER_DRIVER_QUERY_NONE)
     {
+        if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && !invocation.output_path.length && invocation.input_count > 1)
+        {
+            u64 identity_capacity = 0;
+            CompilerDriverInputIdentitySlot* input_identities =
+                compiler_driver_input_identity_table_create(arena, invocation, &identity_capacity);
+            if (!input_identities)
+            {
+                result.error = COMPILER_DRIVER_ERROR_RESOURCE;
+                result.diagnostic = S8("could not reserve positional input identities for multi-input output safety");
+                goto finish;
+            }
+            for (u32 index = 0; invocation.input_paths && result.error == COMPILER_DRIVER_ERROR_NONE &&
+                                index < invocation.input_count; index += 1)
+            {
+                String8 input_path = invocation.input_paths[index];
+                if (!compiler_driver_archive_input(input_path) && !compiler_driver_object_input(input_path) &&
+                    !compiler_driver_native_shared_library_input(invocation, index))
+                {
+                    String8 output_path = invocation.emit_llvm_bitcode ? compiler_driver_default_llvm_bitcode_path(arena, input_path)
+                                                                         : compiler_driver_default_object_path(arena, input_path);
+                    String8 input_alias =
+                        compiler_driver_output_cached_input_alias(invocation, output_path, input_identities, identity_capacity);
+                    if (input_alias.length)
+                    {
+                        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        result.diagnostic = string_format(arena, S8("output {S8} aliases input {S8}; refusing to overwrite input"),
+                                                          output_path, input_alias);
+                    }
+                }
+            }
+            if (result.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                goto finish;
+            }
+        }
         if (invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.retain_linked_object && !invocation.retain_object)
         {
             String8 output_path = invocation.output_path.length ? invocation.output_path
@@ -11316,6 +11537,19 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 record.source = string_duplicate_arena(arena, record.source, false);
                 record.function = string_duplicate_arena(arena, record.function, false);
                 result.fallback_records[result.fallback_record_count++] = record;
+            }
+        }
+        if (unit.error == COMPILER_DRIVER_ERROR_NONE && link_inputs_retained &&
+            !invocation.retain_linked_object && !invocation.retain_object)
+        {
+            String8 output_path = invocation.output_path.length ? invocation.output_path
+                                                                 : compiler_driver_default_executable_path(invocation.target);
+            String8 input_alias = compiler_driver_output_lexed_file_alias(output_path, unit.lexed_files, unit.lexed_file_count);
+            if (input_alias.length)
+            {
+                unit.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                unit.diagnostic = string_format(arena, S8("output {S8} aliases input {S8}; refusing to overwrite input"),
+                                                output_path, input_alias);
             }
         }
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)

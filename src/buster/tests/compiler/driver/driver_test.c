@@ -8,7 +8,7 @@
 // compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
 // compiler_driver_test_output_input_collisions checks followed file identity
-// between named outputs and positional/forced-include inputs.
+// between named outputs, positional inputs and resolved preprocessor files.
 // compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_bit_field_assignment_results checks stored-width results.
@@ -1093,6 +1093,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     String8 object = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-object"), S8(".o")), false);
     String8 hard_link = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-hard-link"), S8(".o")), false);
     String8 symlink_path = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-symlink"), S8(".c")), false);
+    String8 forced_search_directory =
+        os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-forced-search"), S8("")), false);
+    String8 forced_search_header = string_format_z(arena, S8("{S8}/guard.h"), forced_search_directory);
+    String8 forced_search_input =
+        os_path_absolute(arena, string_format_z(arena, S8("{S8}/search.c"), forced_search_directory), false);
+    String8 multi_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-multi"), S8(".c")), false);
+    u64 multi_name = 0;
+    u64 multi_extension = multi_input.length;
+    for (u64 index = multi_input.length; index != 0; index -= 1)
+    {
+        char8 byte = multi_input.pointer[index - 1];
+        if (byte == '.' && multi_extension == multi_input.length)
+        {
+            multi_extension = index - 1;
+        }
+        if (byte == '/' || byte == '\\')
+        {
+            multi_name = index;
+            break;
+        }
+    }
+    String8 multi_stem = {.pointer = multi_input.pointer + multi_name, .length = multi_extension - multi_name};
+    String8 multi_output = string_format_z(arena, S8("{S8}.o"), multi_stem);
     String8 source = S8("int main(void) { return 0; }\n");
     String8 source_bytes = source;
     String8 target = S8("x86_64-unknown-linux-gnu");
@@ -1131,6 +1154,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         }
 
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8 searched_header = S8("#define SEARCHED_FORCED_VALUE 7\n");
+        String8 searched_source = S8("int searched_forced_value = SEARCHED_FORCED_VALUE;\n");
+        if (BUSTER_REQUIRE(arguments, forced_search_directory.length && forced_search_header.length && forced_search_input.length &&
+                                      os_make_directory_attempt(forced_search_directory) &&
+                                      file_write(forced_search_header, BUSTER_SLICE_TO_BYTE_SLICE(searched_header)) &&
+                                      file_write(forced_search_input, BUSTER_SLICE_TO_BYTE_SLICE(searched_source))))
+        {
+            String8 searched_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-I"), forced_search_directory,
+                                          S8("-include"), S8("guard.h"), S8("-c"), forced_search_input,
+                                          S8("-o"), forced_search_header};
+            CompilerDriverResult searched_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(searched_command)));
+            BUSTER_TEST_RAW(arguments, searched_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, searched_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(searched_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments,
+                               BYTE_SLICE_TO_STRING(8, file_read(arena, forced_search_header, (FileReadOptions){0})), searched_header);
+        }
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
         String8 header = S8("/* forced include input */\n");
         BUSTER_TEST(arguments, file_write(forced_include, BUSTER_SLICE_TO_BYTE_SLICE(header)));
         String8 forced_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-include"), forced_include,
@@ -1166,6 +1208,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         ByteSlice object_after = file_read(arena, object, (FileReadOptions){0});
         BUSTER_TEST(arguments, object_before.pointer && object_after.pointer && object_before.length == object_after.length &&
                                memcmp(object_before.pointer, object_after.pointer, object_before.length) == 0);
+
+        String8 invalid_positional_object = S8("invalid existing positional object\n");
+        BUSTER_TEST(arguments, multi_input.length && multi_output.length &&
+                               file_write(multi_input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)) &&
+                               file_write(multi_output, BUSTER_SLICE_TO_BYTE_SLICE(invalid_positional_object)));
+        String8 multi_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), multi_input, multi_output};
+        CompilerDriverResult multipositional_refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(multi_command)));
+        BUSTER_TEST_RAW(arguments, multipositional_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                        multipositional_refused.diagnostic);
+        BUSTER_TEST(arguments, string_first_sequence(multipositional_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, multi_output, (FileReadOptions){0})),
+                           invalid_positional_object);
 
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
         String8 case_alias = {.pointer = arena_allocate(arena, char8, input.length), .length = input.length};
@@ -1228,7 +1283,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         }
 #endif
     }
-    String8 cleanup_paths[] = {input, forced_include, object, hard_link, symlink_path};
+    String8 cleanup_paths[] = {input, forced_include, object, hard_link, symlink_path, forced_search_header,
+                                forced_search_input, multi_input, multi_output};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cleanup_paths); index += 1)
     {
         FileStats stats = os_path_followed_stats(cleanup_paths[index]);
@@ -1236,6 +1292,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         {
             BUSTER_TEST(arguments, os_file_delete(cleanup_paths[index]));
         }
+    }
+    FileStats forced_search_directory_stats = os_path_followed_stats(forced_search_directory);
+    if (forced_search_directory_stats.valid && forced_search_directory_stats.kind != OS_FILE_KIND_MISSING)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(forced_search_directory));
     }
     arena_set_position(arena, position);
 #else
