@@ -22486,7 +22486,10 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         {
             name = preprocess.tokens[name_index];
         }
-        type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, declarator_start, name_index, end, has_name);
+        // Keep trailing attributes in the original parameter range for the callback-type marker below,
+        // but do not make the declarator suffix parser consume them.
+        u32 suffix_end = c_parse_trailing_attribute_start(preprocess, declarator_start, end);
+        type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, declarator_start, name_index, suffix_end, has_name);
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
             return false;
