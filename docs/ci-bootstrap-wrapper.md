@@ -195,7 +195,10 @@ When a native deadline control returns an unexpected code, it prints one
 `WINDOWS_PROCESS_TREE_TEST_CONTEXT` line before the original assertion. The
 test-only snapshot retains the runtime and cleanup deadlines, cleanup and
 publication timestamps, clock validity, and the first failed publication
-operation with its immediate Win32 error when available. Diagnostic clock
+operation with its immediate Win32 error when available. It also timestamps
+the end of each publication stage (destination attributes, create, write,
+flush, close and rename; zero when not reached), so a late publication shows
+which operation consumed the allowance (#3816). Diagnostic clock
 sampling uses a copy of the owner's state; the status record, return-code
 rules, assertions and cleanup allowance are unchanged.
 

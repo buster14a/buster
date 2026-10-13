@@ -142,7 +142,9 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
                 "complete=%u clock_valid=%u cancelled=%u runtime_timed_out=%u root_status_known=%u root_returncode=%lu "
                 "runtime_deadline_ns=%llu root_finished_ns=%llu cleanup_started_ns=%llu cleanup_finished_ns=%llu "
                 "cleanup_limit_ns=%llu publication_started_ns=%llu publication_finished_ns=%llu "
-                "publication_clock_valid=%u publication_ok=%u publication_stage=%s win32_error_valid=%u win32_error=%lu\n",
+                "publication_clock_valid=%u publication_ok=%u publication_stage=%s win32_error_valid=%u win32_error=%lu "
+                "publication_marks_clock_valid=%u publication_attributes_ns=%llu publication_create_ns=%llu "
+                "publication_write_ns=%llu publication_flush_ns=%llu publication_close_ns=%llu publication_rename_ns=%llu\n",
                 mode, tick_clock ? "tick" : "qpc", code, expected, (unsigned)paths,
                 tree_test_startup_delay_ms, tree_test_cleanup_delay_ms, tree_test_status_delay_ms, cleanup_budget_ms,
                 (unsigned)observed->complete, (unsigned)observed->clock_valid, (unsigned)observed->cancelled,
@@ -153,7 +155,14 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
                 (unsigned long long)context->publication_started_ns, (unsigned long long)context->publication_finished_ns,
                 (unsigned)context->publication_clock_valid, (unsigned)context->publication_ok,
                 context->publication_stage ? context->publication_stage : (context->publication_ok ? "published" : "not-attempted"),
-                (unsigned)context->publication_error_valid, (unsigned long)context->publication_error);
+                (unsigned)context->publication_error_valid, (unsigned long)context->publication_error,
+                (unsigned)context->publication_marks_clock_valid,
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_ATTRIBUTES],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_CREATE],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_WRITE],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_FLUSH],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_CLOSE],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_RENAME]);
         }
         tree_test_startup_delay_ms = 0;
         tree_test_cleanup_delay_ms = 0;
