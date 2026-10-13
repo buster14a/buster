@@ -1,0 +1,15 @@
+{
+  "baseline_revision": "4cc00552818a05b335fa6a977ec59be1eb308d49",
+  "candidate_source_revision": "7a90e30645beefc61c80e87892c686590b1646ee",
+  "binary_sha256": {
+    "base": "c278d28666447c5835898ae1e5f634bf4f14986855ae02adf7cfe59bca292f03",
+    "cand": "4a9156d9204ba32d3d104d5be2adb0d7c7cd7d72c5a7bcae5eedd4bbc96b6648"
+  },
+  "build_root": "/home/david/Documents/Codex/2026-10-13/opti/work/buster",
+  "measurement_cwd": "/home/david/Documents/Codex/2026-10-13/opti/work/frozen",
+  "cpu_affinity": 2,
+  "compiler": "Clang 23.1.1",
+  "configuration": "Release unity, BUSTER_OPTIMIZE=1, BUSTER_INCLUDE_TESTS=0, -march=native",
+  "frozen_manifest_sha256": "c86a3a482e37d04e9b4df529760e1673017e12e805177c4fb0ebe344ebc55ced",
+  "compile_commands_identical": true
+}

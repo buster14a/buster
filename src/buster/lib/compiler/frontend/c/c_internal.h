@@ -165,7 +165,6 @@ BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
-BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // GNU `_Alignof(object)` answers the object's alignment, which its alignment
 // records raise; a record may itself spell `_Alignof(object)`, so each layout
 // engine counts the nested evaluations and refuses past this many rather than
@@ -976,6 +975,11 @@ typedef enum CSymbolWellKnown
 #define C_SYMBOL_WELL_KNOWN_BIT(name) (1ull << (u64)(C_SYMBOL_WELL_KNOWN_##name))
 BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
 
+// Preserve the legacy alignment-operator spelling set. Plain C23 `alignof`
+// is handled separately by the readers that already accept it.
+#define C_ALIGNOF_WORDS (C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
+#define C_SIZEOF_ALIGNOF_WORDS (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_ALIGNOF_WORDS)
+
 // The binding walk and __has_attribute share these spelling sets. Keep the
 // interned-token fast path: querying support must not add spelling comparisons
 // to every declaration's binding scan (#666).
@@ -1075,14 +1079,18 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
     {
         result = token.symbol < 64 && ((set >> token.symbol) & 1);
     }
-    else
+    else if (c_token_may_spell_word(token))
     {
         String8 spelling = c_token_spelling(spelling_base, token);
         result = false;
-        for (u64 remaining = c_token_may_spell_word(token) ? set : 0; remaining && !result; remaining &= remaining - 1)
+        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
         }
+    }
+    else
+    {
+        result = false;
     }
     return result;
 }

@@ -159,7 +159,7 @@ struct CAstWordSpelling
 
 // Every spelling the existing frontend's keyword predicates accept
 // (c_declaration_keyword_for_dialect, c_parse_type_word_for_dialect,
-// c_parse_type_qualifier_word, c_parse_alignof_word) with the same dialect
+// c_parse_type_qualifier_word, C_ALIGNOF_WORDS) with the same dialect
 // gates, plus the statement and expression words the syntax steers on. The
 // table is searched by spelling only for the symbols the unit's table already
 // holds (the build) and for tokens the intern pass never saw (the slow path).

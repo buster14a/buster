@@ -1880,11 +1880,6 @@ BUSTER_C_INTERNAL bool c_parse_alignment_run_has_standard(CParseResult const* re
     return found;
 }
 
-BUSTER_C_SHARED bool c_parse_alignof_word(String8 spelling)
-{
-    return string_equal(spelling, S8("_Alignof")) || string_equal(spelling, S8("__alignof")) || string_equal(spelling, S8("__alignof__"));
-}
-
 BUSTER_C_INTERNAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
                                                       u32* alignment_start, u32* alignment_count);
 BUSTER_C_INTERNAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
@@ -3682,7 +3677,7 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold(CParseLay
                             ? c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
                             : end;
             term_count += 1;
-            shaped = (c_parse_alignof_word(spelling) || string_equal(spelling, S8("sizeof"))) && close < end &&
+            shaped = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) && close < end &&
                      term_count <= C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY;
             index = shaped ? close : index;
         }
@@ -3720,7 +3715,7 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold(CParseLay
             CLayoutAlignmentFold operand = c_parse_layout_alignment_fold_operand(context, agenda, index + 2, close, &size, &alignment, &provisional);
             fold = operand == C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED ? C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED : fold;
             waiting |= operand == C_LAYOUT_ALIGNMENT_FOLD_WAIT;
-            term_values[term_index] = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token)) ? (u64)alignment : size;
+            term_values[term_index] = c_token_in_well_known_set(preprocess.spelling_base, token, C_ALIGNOF_WORDS) ? (u64)alignment : size;
             term_index += 1;
             index = close;
         }
@@ -3845,7 +3840,7 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
         {
             u32 specifier_end = specifier.token_start + specifier.token_count;
             bool alignof_type = specifier.token_count >= 4 && context->preprocess.tokens[specifier.token_start].kind == C_TOKEN_IDENTIFIER &&
-                                c_parse_alignof_word(c_token_spelling(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start])) &&
+                                c_token_in_well_known_set(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start], C_ALIGNOF_WORDS) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
             // Set when the declaration machine could not name the type of a
@@ -4012,8 +4007,7 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_layout_cast_operand_end(CParseResult* result, CP
     if (index < bound_end)
     {
         CToken token = preprocess.tokens[index];
-        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        bool word = token.kind == C_TOKEN_IDENTIFIER && (c_parse_alignof_word(spelling) || string_equal(spelling, S8("sizeof")));
+        bool word = token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
         bool group = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                      (word && index + 1 < bound_end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
         u32 open = word ? index + 1 : index;
@@ -4343,8 +4337,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         c_parse_layout_cast_close_emit(&bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
                     }
                     CToken token = preprocess.tokens[bound.token_start + bound_index];
-                    bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
-                    bool bound_word_is_sizeof = token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof"));
+                    bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_ALIGNOF_WORDS);
+                    bool bound_word_is_sizeof = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF);
                     if ((bound_word_is_sizeof || bound_word_is_alignof) && bound_index + 1 < bound.token_count)
                     {
                         u32 operand_start = bound.token_start + bound_index + 1;
@@ -7260,7 +7254,8 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
         {
             return pending->type;
         }
-        if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+        if ((c_token_in_well_known_set(preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF)) ||
+             string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
             start + 1 < end)
         {
             return c_parse_expression_scalar_type(result, c_parse_size_type_kind(preprocess.target));
@@ -10277,7 +10272,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
         // A unary-form `sizeof object` must use the typed evaluator so block-scope
         // locals and arrays resolve in the assertion's lexical scope.
         if (requires_typed_evaluation_out && token.kind == C_TOKEN_IDENTIFIER &&
-            string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) && expression_index + 1 < expression_count &&
+            c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF) && expression_index + 1 < expression_count &&
             !c_token_is_punctuator(&preprocess.tokens[expression_start + 1 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             *requires_typed_evaluation_out = true;
@@ -10344,7 +10339,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
                 }
             }
         }
-        if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))) &&
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) &&
             expression_index + 2 < expression_count && c_token_is_punctuator(&preprocess.tokens[expression_start + 1 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 type_start = expression_start + 2 + expression_index;
@@ -10412,7 +10407,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
             u64 size = 0;
             u32 alignment = 0;
             bool have_layout = false;
-            if ((type.value == C_ID_UNDERLYING_INVALID || type_index != type_end) && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")))
+            if ((type.value == C_ID_UNDERLYING_INVALID || type_index != type_end) && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF))
             {
                 if (machine)
                 {
@@ -10447,7 +10442,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
                 valid = false;
                 break;
             }
-            bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+            bool evaluation_word_is_alignof = c_token_in_well_known_set(preprocess.spelling_base, token, C_ALIGNOF_WORDS);
             token = c_parse_space_decimal(&evaluation_space, evaluation_word_is_alignof ? alignment : size);
             expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - expression_start;
             tokens[token_count++] = token;
@@ -10946,7 +10941,7 @@ BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMac
         else if (operand && token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-            size_word = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF) || c_parse_alignof_word(spelling) ||
+            size_word = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) ||
                         string_equal(spelling, S8("alignof"));
             bool prefix = size_word || string_equal(spelling, S8("__extension__")) || string_equal(spelling, S8("__real__")) ||
                           string_equal(spelling, S8("__imag__"));
@@ -16513,6 +16508,8 @@ u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token)
     classes |= c_parse_type_name_start_word_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE_NAME_START : 0;
     classes |= c_parse_type_qualifier_word_token(preprocess, token, &qualifier) ? C_TEST_WORD_CLASS_QUALIFIER : 0;
     classes |= c_parse_atomic_declaration_prefix_token(preprocess, token, &prefix) ? C_TEST_WORD_CLASS_ATOMIC_PREFIX : 0;
+    classes |= c_token_in_well_known_set(preprocess.spelling_base, token, C_ALIGNOF_WORDS) ? C_TEST_WORD_CLASS_ALIGNOF : 0;
+    classes |= c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) ? C_TEST_WORD_CLASS_SIZEOF_ALIGNOF : 0;
     classes |= qualifier.is_const ? C_TEST_WORD_CLASS_CONST : 0;
     classes |= qualifier.is_volatile ? C_TEST_WORD_CLASS_VOLATILE : 0;
     classes |= qualifier.is_restrict ? C_TEST_WORD_CLASS_RESTRICT : 0;
@@ -27774,7 +27771,7 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_at(CPreprocessResult 
         if (open != UINT32_MAX)
         {
             if (open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
-                (string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]))))
+                c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[open - 1], C_SIZEOF_ALIGNOF_WORDS))
             {
                 return false;
             }
@@ -27963,7 +27960,7 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
         return false;
     }
     if (open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
-        (string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]))))
+        c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[open - 1], C_SIZEOF_ALIGNOF_WORDS))
     {
         return false;
     }
@@ -35025,7 +35022,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             value.float_width = (u8)scalar.bit_width;
         }
     }
-    else if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(spelling, S8("sizeof")) || c_parse_alignof_word(spelling)))
+    else if (first.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, first, C_SIZEOF_ALIGNOF_WORDS))
     {
         u32 operand_start = start + 1;
         u32 operand_end = end;
@@ -35082,7 +35079,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         // A member's declared placement can resolve an alignof operand
         // which the enum-only natural-layout reader cannot type.
         u32 member_alignment = 0;
-        bool is_alignof = c_parse_alignof_word(spelling);
+        bool is_alignof = c_token_in_well_known_set(preprocess.spelling_base, first, C_ALIGNOF_WORDS);
         bool member_valid = !is_alignof || c_semantic_alignof_member(arena, preprocess, result, scope, operand_start, operand_end, &member_alignment);
         bool member_answer = is_alignof && (!member_valid || member_alignment != 0);
         value.valid = member_answer ? member_valid : !refused && (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
@@ -35114,7 +35111,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         {
             value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
         }
-        value.integer = c_parse_alignof_word(spelling) ? alignment : size;
+        value.integer = is_alignof ? alignment : size;
 #if BUSTER_INCLUDE_TESTS
         if (c_sizeof_handoff_on && expression_typed && value.valid && !is_alignof && !member_answer &&
             machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL)
@@ -35740,8 +35737,7 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CPreproc
             supported = after == index;
             if (supported && index != start && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
             {
-                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
-                supported = !string_equal(spelling, S8("sizeof")) && !c_parse_alignof_word(spelling);
+                supported = !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_SIZEOF_ALIGNOF_WORDS);
             }
         }
         if (after == index)
@@ -38246,7 +38242,7 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
         {
             String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]);
             bool parenthesized = cursor + 1 < frame->end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            bool unevaluated = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+            bool unevaluated = c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[cursor], C_SIZEOF_ALIGNOF_WORDS);
             if (unevaluated && parenthesized)
             {
                 u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
@@ -38378,14 +38374,13 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
                    c_parse_label_address_cast_at(result, preprocess, scope, start, cursor))))
             numeric = false;
         else if (token.kind == C_TOKEN_IDENTIFIER && (!c_parse_declaration_keyword_at(result, preprocess, cursor) ||
-                 string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) ||
-                 c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))))
+                 c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS)))
         {
             String8 name = c_token_spelling(preprocess.spelling_base, token);
             CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
-            bool keyword = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name) ||
+            bool keyword = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) ||
                            string_equal(name, S8("true")) || string_equal(name, S8("false"));
-            if ((string_equal(name, S8("sizeof")) || c_parse_alignof_word(name)) && cursor + 1 < end &&
+            if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) && cursor + 1 < end &&
                 c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
                 u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
@@ -38554,7 +38549,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
     {
         CToken token = preprocess.tokens[index];
         bool sizeof_word = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF);
-        bool alignof_word = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+        bool alignof_word = token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_ALIGNOF_WORDS);
         if (!sizeof_word && !alignof_word) continue;
         bool grouped = c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
         u32 close = grouped ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : end;
@@ -38738,8 +38733,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
     {
         if (skipped && skipped[index - start]) continue;
         CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF) ||
-                                               c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))) && index + 1 < end &&
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) && index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
@@ -38935,7 +38929,7 @@ BUSTER_C_INTERNAL u32 c_parse_unevaluated_unary_operand_end(CParseResult* result
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 name = c_token_spelling(preprocess.spelling_base, token);
-            size_keyword = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+            size_keyword = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
             keyword = size_keyword || c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_EXTENSION) ||
                       string_equal(name, S8("__real__")) || string_equal(name, S8("__imag__"));
         }
@@ -38993,7 +38987,7 @@ BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* re
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 name = c_token_spelling(preprocess.spelling_base, token);
-            size_or_alignment = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+            size_or_alignment = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
             type_of = parenthesized && (string_equal(name, S8("typeof")) || string_equal(name, S8("typeof_unqual")) ||
                                         string_equal(name, S8("__typeof")) || string_equal(name, S8("__typeof__")));
         }
@@ -40647,8 +40641,9 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* m
         if (index && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
         {
             String8 before = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]);
-            unary = string_equal(before, S8("return")) || string_equal(before, S8("case")) || string_equal(before, S8("sizeof")) ||
-                    c_parse_alignof_word(before) || string_equal(before, S8("else")) || string_equal(before, S8("do")) ||
+            unary = string_equal(before, S8("return")) || string_equal(before, S8("case")) ||
+                    c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1], C_SIZEOF_ALIGNOF_WORDS) ||
+                    string_equal(before, S8("else")) || string_equal(before, S8("do")) ||
                     c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index - 1], C_SYMBOL_WELL_KNOWN_EXTENSION);
         }
         if (index && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
@@ -40659,7 +40654,7 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* m
                 String8 before = open ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1]) : (String8){0};
                 bool control = string_equal(before, S8("if")) || string_equal(before, S8("while")) ||
                                string_equal(before, S8("for")) || string_equal(before, S8("switch"));
-                bool size = string_equal(before, S8("sizeof")) || c_parse_alignof_word(before);
+                bool size = open && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1], C_SIZEOF_ALIGNOF_WORDS);
                 unary = control || (!size && c_parse_type_name_stop(result, preprocess, scope, open + 1, index - 1) == index - 1);
             }
         }
@@ -41332,7 +41327,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         String8 name = c_token_spelling(preprocess.spelling_base, token);
         u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
-        bool sizeof_word = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+        bool sizeof_word = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
         if (sizeof_word && close < end && index + 3 < close &&
             c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -41794,8 +41789,7 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
         depth -= c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS);
     }
     bool operand = !depth && open > start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
-                   (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[open - 1], C_SYMBOL_WELL_KNOWN_SIZEOF) ||
-                    c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1])));
+                   c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1], C_SIZEOF_ALIGNOF_WORDS);
     if (!depth && !operand)
     {
         u32 cursor = open + 1;
