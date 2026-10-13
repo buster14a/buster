@@ -10,6 +10,7 @@
 #include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/tests/compiler/driver/driver_test_internal.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/file.h>
@@ -16098,7 +16099,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = 
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program);
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArguments* arguments, String8 label, String8 program,
-                                                                      bool disable_ast);
+                                                                      bool disable_ast, bool compile_with_cli);
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArguments* arguments)
 {
@@ -16172,11 +16173,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArgum
             c_test_append_source(source_bytes, source_capacity, &source_length, fixture_suffixes[fixture_index]);
             BUSTER_TEST_RAW(arguments, source_length < source_capacity, S8("isolated cast-depth fixture fits its input buffer"));
             String8 cast_program = {.pointer = source_bytes, .length = source_length};
-            UnitTestResult runtime = c_test_run_exit_zero_program(arguments, fixture_labels[fixture_index], cast_program);
+            UnitTestResult runtime = c_test_run_exit_zero_program_mode(arguments, fixture_labels[fixture_index], cast_program, false, true);
             result.test_count += runtime.test_count;
             result.succeeded_test_count += runtime.succeeded_test_count;
             String8 token_label = string_format(temporary.arena, S8("{S8}-no-ast"), fixture_labels[fixture_index]);
-            UnitTestResult token_runtime = c_test_run_exit_zero_program_mode(arguments, token_label, cast_program, true);
+            UnitTestResult token_runtime = c_test_run_exit_zero_program_mode(arguments, token_label, cast_program, true, true);
             result.test_count += token_runtime.test_count;
             result.succeeded_test_count += token_runtime.succeeded_test_count;
         }
@@ -16334,7 +16335,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime
 // executable to exit zero: the program folds the answers it checks into its
 // exit status, so a wrong answer names itself by the failing check's number.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArguments* arguments, String8 label, String8 program,
-                                                                      bool disable_ast)
+                                                                      bool disable_ast, bool compile_with_cli)
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -16349,17 +16350,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArg
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 output = buster_test_temporary_path(temporary.arena, string_format(temporary.arena, S8("{S8}-run"), label), S8(".exe"));
-                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fno-machine-fallback"),
+                                    S8("-fverify-codegen"), S8("-o"), output, source};
                 String8 token_command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fno-c-ast-pilot"),
-                                          S8("-fverify-codegen"), S8("-o"), output, source};
+                                          S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
                 SliceString8 selected_command = disable_ast ? (SliceString8)BUSTER_ARRAY_TO_SLICE(token_command)
                                                             : (SliceString8)BUSTER_ARRAY_TO_SLICE(command);
-                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, selected_command);
-                invocation.reject_machine_fallback = true;
-                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
-                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
-                    string_format(temporary.arena, S8("{S8} {S8} {S8}: {S8}"), label, modes[mode], frontends[form], compiled.diagnostic));
-                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                String8 compiler_diagnostic;
+                bool compiled;
+                if (compile_with_cli)
+                {
+                    // The CLI test helper gives this compile the production translation-unit reservation.
+                    String8 compiler_output = {0};
+                    String8 compiler_error = {0};
+                    compiled = compiler_driver_test_run_cc(arguments, selected_command, &compiler_output, &compiler_error);
+                    compiler_diagnostic = string_format(temporary.arena, S8("stdout={S8} stderr={S8}"), compiler_output, compiler_error);
+                }
+                else
+                {
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, selected_command);
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compile_result = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    compiled = compile_result.error == COMPILER_DRIVER_ERROR_NONE;
+                    compiler_diagnostic = compile_result.diagnostic;
+                }
+                BUSTER_TEST_RAW(arguments, compiled,
+                    string_format(temporary.arena, S8("{S8} {S8} {S8}: {S8}"),
+                                  label, modes[mode], frontends[form], compiler_diagnostic));
+                if (compiled)
                 {
                     String8 run[] = {output};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
@@ -16381,13 +16399,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArg
     BUSTER_UNUSED(label);
     BUSTER_UNUSED(program);
     BUSTER_UNUSED(disable_ast);
+    BUSTER_UNUSED(compile_with_cli);
 #endif
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program)
 {
-    return c_test_run_exit_zero_program_mode(arguments, label, program, false);
+    return c_test_run_exit_zero_program_mode(arguments, label, program, false, false);
 }
 
 // Short-circuit order and exactly-once evaluation through parenthesized
