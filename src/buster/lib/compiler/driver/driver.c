@@ -11178,6 +11178,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.inlining.recursion_skips += unit.inlining.recursion_skips;
         result.inlining.visits += unit.inlining.visits;
         result.inlining.released_bytes += unit.inlining.released_bytes;
+        result.inlining.splice_proofs += unit.inlining.splice_proofs;
+        result.inlining.splice_fallbacks += unit.inlining.splice_fallbacks;
+        result.inlining.reused_proofs += unit.inlining.reused_proofs;
         if (result.inlining.required_budget_reason == IR_INLINE_BUDGET_NONE &&
             unit.inlining.required_budget_reason != IR_INLINE_BUDGET_NONE)
         {
