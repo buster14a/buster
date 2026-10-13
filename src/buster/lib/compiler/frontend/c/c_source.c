@@ -5459,6 +5459,16 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
     return table;
 }
 
+// A seeded table in `arena` for a reader of a stream that carries none (a
+// hand-built CPreprocessResult): c_ast_build interns into it, and its ids are
+// that reader's own, never compared with another table's.
+CSymbolTable* c_symbol_table_standalone(Arena* arena)
+{
+    CSymbolTable* table = arena_allocate(arena, CSymbolTable, 1);
+    *table = c_symbol_table_create(arena);
+    return table;
+}
+
 // The intern pass over a lexed run. Identifiers are one token in five, and
 // the one-byte shape sidecar says which: a 64-token window is one masked
 // load and one compare, and only the identifier lanes are visited, where the

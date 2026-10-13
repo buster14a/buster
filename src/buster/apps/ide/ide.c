@@ -2169,6 +2169,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         {
             string_print(S8("C_AST_REJECTED units={u64}\n"), compile.c_ast.rejections);
         }
+        // Counts and sizes: the facts lowering retained for the unit (GitHub #3102 step 1), with or without the pilot.
+        {
+            CAstLowerStatistics retained = compile.c_ast.lower;
+            string_print(S8("C_AST_RETAINED trees_built={u64} tree_rejections={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64}\n"),
+                         retained.trees_built, retained.tree_rejections, retained.tree_nodes, retained.tree_bytes, retained.span_nodes,
+                         retained.span_bytes);
+        }
         if (compile.c_ast.units)
         {
             CompilerDriverCAstPilotResult tree = compile.c_ast;

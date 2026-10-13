@@ -8940,10 +8940,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
                                                                                          invocation.enable_pinned_debug_locals),
-                                                                    // Lowering reads root conditionals and statement extents
-                                                                    // from the pilot's tree; it is released at `end:`, after lowering.
+                                                                    // Lowering reads the pilot's tree, which is released at
+                                                                    // `end:`, after lowering; without the pilot it builds and
+                                                                    // releases the unit's tree itself.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
-                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0,
+                                                                    .ast_lower_statistics = &result.c_ast.lower,
                                                                     .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0,
                                                                     .syntax_facts = syntax.ast_facts});
     // Lowering was the facts' last reader.
@@ -11331,6 +11332,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
         result.c_ast.lower.fallbacks += unit.c_ast.lower.fallbacks;
+        result.c_ast.lower.trees_built += unit.c_ast.lower.trees_built;
+        result.c_ast.lower.tree_rejections += unit.c_ast.lower.tree_rejections;
+        result.c_ast.lower.tree_nodes += unit.c_ast.lower.tree_nodes;
+        result.c_ast.lower.tree_bytes += unit.c_ast.lower.tree_bytes;
+        result.c_ast.lower.span_nodes += unit.c_ast.lower.span_nodes;
+        result.c_ast.lower.span_bytes += unit.c_ast.lower.span_bytes;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

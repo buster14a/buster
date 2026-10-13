@@ -32,7 +32,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
     parts[65] = S8("return id(x);}");
     String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
     CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-    u32 counts[] = {4, 2, 2};
+    // Lowering's: the function arena, the tree's extent table and spans (#3102
+    // step 1), and the arena a 64 KiB first reservation grows into.
+    u32 counts[] = {4, 2, 4};
     String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -46,7 +48,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
                 CPreprocessResult preprocess;
                 CAnalysisResult analysis;
                 CIRLowerResult lowered;
-                c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
+                c_test_lowering_initial_reservation(phase == 2 && ordinal == 4 ? BUSTER_KB(64) : 0);
                 c_test_fail_frontend_reservation(phases[phase], ordinal);
                 preprocess = c_preprocess(temporary.arena, source, options);
                 CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
@@ -42927,8 +42929,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         BUSTER_TEST_RAW(arguments,
                         objects[0].length && objects[0].length == objects[1].length && memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
                         string_format(arena, S8("{S8}: the pilot's object differs from the default's"), debug[level]));
+        // Without the pilot lowering builds the unit's tree itself (GitHub
+        // #3102 step 1) and reads it the same way.
         CAstLowerStatistics lower = compiled[1].c_ast.lower;
-        BUSTER_TEST(arguments, compiled[0].c_ast.lower.bodies == 0 && compiled[0].c_ast.lower.answers == 0);
+        CAstLowerStatistics own = compiled[0].c_ast.lower;
+        BUSTER_TEST(arguments, own.trees_built == 1 && lower.trees_built == 0);
+        BUSTER_TEST(arguments, own.bodies == lower.bodies && own.conditionals == lower.conditionals && own.answers == lower.answers &&
+                                   own.negatives == lower.negatives && own.fallbacks == lower.fallbacks && own.span_nodes == lower.span_nodes);
         BUSTER_TEST(arguments, lower.bodies == 3);
         BUSTER_TEST(arguments, lower.conditionals >= 30);
         BUSTER_TEST(arguments, lower.answers >= 20);

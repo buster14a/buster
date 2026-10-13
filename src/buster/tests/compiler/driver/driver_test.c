@@ -35331,7 +35331,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-        u32 counts[] = {4, 2, 2};
+        // Lowering's: the function arena, the tree's extent table and spans (#3102
+        // step 1), and the arena a 64 KiB first reservation grows into.
+        u32 counts[] = {4, 2, 4};
         String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
         String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
@@ -35351,7 +35353,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                         String8 command[] = {S8("-g0"), S8("-fno-c-ast-pilot"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output,
                                              input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
+                        c_test_lowering_initial_reservation(phase == 2 && ordinal == 4 ? BUSTER_KB(64) : 0);
                         c_test_fail_frontend_reservation(phases[phase], ordinal);
                         CompilerDriverResult failed = compiler_driver_execute_invocation(arena, invocation);
                         bool pending = c_test_frontend_reservation_pending();

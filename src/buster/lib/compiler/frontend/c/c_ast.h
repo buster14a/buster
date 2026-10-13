@@ -86,7 +86,8 @@
 //
 // Entry points: c_ast_build, c_ast_release, c_ast_validate, c_ast_dump,
 // c_ast_child_count, c_ast_list_count, c_ast_child_at, c_ast_children,
-// c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name.
+// c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name,
+// c_ast_span_rule, c_ast_spans_build, c_ast_spans_locate.
 
 #include <buster/lib/compiler/frontend/c/c.h>
 
@@ -520,3 +521,68 @@ struct CAstWalk
 
 BUSTER_F_DECL CAstWalk c_ast_walk_begin(Arena* arena, CAst const* ast, u32 node);
 BUSTER_F_DECL CAstWalkEvent c_ast_walk_next(CAstWalk* walk, u32* node_out);
+
+// Token spans (GitHub #3102 step 1, lowering's retained facts). A node's span
+// is [first, end) in the final token stream: it starts at the node's leftmost
+// operand or operator and ends after its last token. An operand's span is
+// widened over every balanced pair of parentheses that wraps it exactly,
+// because the tree has no parenthesis node, so an operator's span begins or
+// ends outside its operand's. c_ast_span_rule is the one statement of these
+// rules; the tree expression typer (c_ast_types.c) and CAstSpans both apply it.
+// Kinds outside the rule (declarations, statements, type names, designators,
+// _Generic associations) and nodes over an unmatched delimiter have no span.
+#define C_AST_SPAN_NONE UINT32_MAX
+
+// The operands c_ast_span_rule reads: the token stream, its matching-delimiter
+// index (closer + 1 at each opener, as CPositionIndex publishes it) and the
+// spans already computed for the node's operands, at `first[n - base]` and
+// `end[n - base]`.
+typedef struct CAstSpanInput CAstSpanInput;
+struct CAstSpanInput
+{
+    CAst const* ast;
+    CToken const* tokens;
+    u32 const* matches_plus_one;
+    u32 const* first;
+    u32 const* end;
+    u32 token_total;
+    u32 base;
+};
+
+// The span of `node` from its operands' spans; false, with both outputs
+// C_AST_SPAN_NONE, when none can be established.
+BUSTER_F_DECL bool c_ast_span_rule(CAstSpanInput const* input, u32 node, u32* first_out, u32* end_out);
+// The span at `relative` (n - base), widened over every balanced pair of
+// parentheses that wraps it exactly.
+BUSTER_F_DECL void c_ast_span_expand(CAstSpanInput const* input, u32 relative, u32* first_out, u32* end_out);
+
+// The span of every node of one tree, computed once in index order (children
+// precede parents, so each operand's span is known when its parent is
+// reached), with a per-start-token chain that maps a token range back to its
+// node. Lowering builds it once per unit and keeps it for the whole call; it
+// holds token and node indices only, and no node id leaves the frontend.
+typedef struct CAstSpans CAstSpans;
+struct CAstSpans
+{
+    u32* first;
+    u32* end;
+    // The previous node (index + 1) that starts at the same token, 0 for
+    // none; start_head[token] holds the newest, which is the outermost.
+    u32* link;
+    u32* start_head;
+    u32 node_count;
+    u32 token_total;
+    // Nodes that received a span.
+    u32 spanned;
+    // The bytes of the four columns.
+    u64 retained_bytes;
+};
+
+// Fills `spans` in `arena`. Returns false, leaving `spans` empty, when the
+// tree is empty or the delimiter index is missing.
+BUSTER_F_DECL bool c_ast_spans_build(Arena* arena, CAst const* ast, CToken const* tokens, u32 token_total, u32 const* matches_plus_one,
+                                     CAstSpans* spans);
+// The node whose span is exactly [start, end), after stripping balanced outer
+// parentheses one pair at a time; the outermost such node when several share
+// the span. C_AST_NODE_INVALID when none does.
+BUSTER_F_DECL u32 c_ast_spans_locate(CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u32 start, u32 end);
