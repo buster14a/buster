@@ -397,6 +397,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_tentative_object_complet
         {S8("struct S;\nstruct S *values[];\n"), true, {0}, S8("values"), sizeof(void*)},
         {S8("int values[];\nint values[2];\n"), true, {0}, S8("values"), 8},
         {S8("int values[];\nint values[2] = {0};\n"), true, {0}, S8("values"), 8},
+        {S8("static int values[2];\nstatic int values[];\n"), true, {0}, S8("values"), 8},
+        {S8("static int values[2] = {0};\nstatic int values[];\n"), true, {0}, S8("values"), 8},
         {S8("int matrix[][3];\n"), true, {0}, S8("matrix"), 12},
         {S8("typedef int A[];\nA values;\n"), true, {0}, S8("values"), 4},
         {S8("struct S;\nstruct S object;\n"), false, S8("tentative definition of 'object' has incomplete type"), {0}, 0},

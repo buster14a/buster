@@ -43157,6 +43157,25 @@ BUSTER_C_INTERNAL bool c_parse_type_is_complete_object(CParseResult* result, CTy
     }
     return complete;
 }
+
+// Check an internal tentative declaration against the composite type visible at this point.
+// The declaration row keeps its source-spelled type; the entity carries compatible redeclaration merging.
+BUSTER_C_INTERNAL void c_parse_validate_internal_tentative_object_declaration(CParseResult* result, CPreprocessResult preprocess,
+                                                                              const CDeclaration* declaration, const CEntity* entity)
+{
+    bool incomplete_tentative = entity && entity->kind == C_ENTITY_OBJECT && entity->has_internal_linkage &&
+                                !declaration->is_definition &&
+                                !c_parse_declaration_declares_no_storage(preprocess, declaration) &&
+                                c_parse_type_is_incomplete_object(result, entity->type);
+    if (incomplete_tentative)
+    {
+        String8 message = c_parse_message(
+            result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
+        c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location),
+                           C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+    }
+}
+
 // Resolve tentative definitions only after every ordinary source expression
 // has been checked. An external incomplete array is completed on a fresh
 // per-object declarator copy; the typedef and declaration-point type stay open.
@@ -44079,17 +44098,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declares_static |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_STATIC);
             declares_extern |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_EXTERN);
         }
-        bool incomplete_internal_tentative =
-            kind == C_DECLARATION_OBJECT && declares_static && !declaration->is_definition &&
-            !c_parse_declaration_declares_no_storage(preprocess, declaration) &&
-            c_parse_type_is_incomplete_object(&result, declaration->type);
-        if (incomplete_internal_tentative)
-        {
-            String8 message = c_parse_message(
-                arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
-            c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location),
-                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
-        }
 #if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(declaration_name_token >= token_count ||
                      string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_name_token]), declaration->name));
@@ -44244,6 +44252,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     }
                 }
             }
+            c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, existing);
             continue;
         }
         if (conflicting && !(kind == C_DECLARATION_FUNCTION && conflicting->kind == C_ENTITY_FUNCTION && overloadable))
@@ -44320,6 +44329,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                      .value = 0,
                                  },
                                  entity, declaration_symbol);
+        c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, result.entities + entity.value);
     }
     if (result.enum_member_count)
     {
