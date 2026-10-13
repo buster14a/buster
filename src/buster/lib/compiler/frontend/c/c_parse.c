@@ -44410,8 +44410,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u32 for_count = census.for_count;
     u32 maximum_delimiter_depth = census.maximum_delimiter_depth;
     // Flat casts can keep one frame per token live; delimiter-owned grammar
-    // frames receive separate slack. Only aggregate segments and CORE typeof/
-    // _Atomic operands save result snapshots, and their openers bound that pool.
+    // frames receive separate slack. Aggregate segments and SCALAR frames that
+    // parse typeof/_Atomic operands save snapshots, bounded by their openers.
     u64 snapshot_capacity_u64 = (u64)maximum_delimiter_depth * 4 + 32;
     u64 type_frame_capacity_u64 = (u64)token_count + 1 + snapshot_capacity_u64;
     if (maximum_delimiter_depth > (UINT32_MAX - 64) / 8 || token_count == UINT32_MAX ||

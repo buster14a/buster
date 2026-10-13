@@ -550,13 +550,13 @@ depth. The root query's `CPreprocessResult` is shared by pointer and outlives
 the run, which pops its frames before returning or failing.
 
 Rollback snapshots use a separate reusable pool rather than one
-`CParseResult` row per frame. Only aggregate-segment frames (owned by the
-aggregate brace) and CORE `typeof`/`_Atomic` operand frames (owned by their
-open parenthesis) save snapshots; flat cast chains do not. Their live snapshot
-count is bounded by the same delimiter census and checked separately. On
-failure the machine unwinds frames from the top, releases each frame's
-accounting once, restores the oldest discarded `sizeof` task/arena mark, and
-then returns the storage blocks and snapshot slots to their pools.
+`CParseResult` row per frame. Aggregate-segment frames (owned by the aggregate
+brace) and SCALAR frames that parse `typeof`/`_Atomic` operands (owned by
+their opening parenthesis) save snapshots; flat cast chains do not. Their live
+snapshot count is bounded by the delimiter census and checked separately. On
+failure the machine walks frames top-down, releases each frame's accounting,
+and recycles snapshot slots and emptied storage blocks. It then restores the
+oldest discarded `sizeof` task and scratch-arena marks.
 `c_test_type_parse_snapshot_rows` continues to check row independence in the
 fixed-array test machine.
 
