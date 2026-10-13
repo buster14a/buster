@@ -65,8 +65,11 @@ BUSTER_GLOBAL_LOCAL void mp_diagnostic(FILE *f, const MpDiagnostic *d)
     fputs(",\"field\":", f); if (d->field) cm_quote(f, d->field); else fputs("null", f);
     fputs(",\"path\":", f); cm_quote(f, d->path);
     fputs(",\"filter\":", f); if (d->filter[0]) cm_quote(f, d->filter); else fputs("null", f);
-    fprintf(f, ",\"page\":%u,\"per_page\":100,\"request\":%u,\"attempt\":%u,\"row\":%u,\"retryable\":%s",
-        d->page, d->request, d->attempt, d->row, d->retryable ? "true" : "false");
+    fputs(",\"page\":", f); if (d->page) fprintf(f, "%u", d->page); else fputs("null", f);
+    fputs(",\"per_page\":", f); fputs(d->page ? "100" : "null", f);
+    fprintf(f, ",\"request\":%u,\"attempt\":%u,\"row\":", d->request, d->attempt);
+    if (d->row) fprintf(f, "%u", d->row); else fputs("null", f);
+    fprintf(f, ",\"retryable\":%s", d->retryable ? "true" : "false");
     fputs(",\"expected_total\":", f); if (d->has_expected) fprintf(f, "%" PRIu64, d->expected); else fputs("null", f);
     fputs(",\"observed_total\":", f); if (d->has_total) fprintf(f, "%" PRIu64, d->total); else fputs("null", f);
     fputs(",\"rows\":", f); if (d->has_rows) fprintf(f, "%u", d->rows); else fputs("null", f);
@@ -356,6 +359,7 @@ BUSTER_GLOBAL_LOCAL int mp_runs(MpState *s)
                 }
                 if (rows_valid && relevant) rows_valid = mp_remember(s, &run);
             }
+            if (s->retryable) s->query.row = 0;
             valid = valid && rows_valid;
             complete = valid && seen == expected;
             cm_json_free(&j);
@@ -601,6 +605,12 @@ BUSTER_GLOBAL_LOCAL int mp_self_test(void)
     MpState incomplete = {.workflow = "test.yml", .number = 10, .target = "target", .fixture = 1, .active = 1001};
     incomplete.runs = calloc(MP_ROWS, sizeof(*incomplete.runs)); valid &= incomplete.runs != NULL;
     if (incomplete.runs) { valid &= !mp_discover(&incomplete) && incomplete.error; free(incomplete.runs); }
+    MpState first_rejection = {.workflow = "test.yml", .target = "target", .number = 2, .fixture = 1,
+        .scenario = 15, .active = 1, .attempt = 1};
+    first_rejection.runs = calloc(MP_ROWS, sizeof(*first_rejection.runs));
+    valid &= first_rejection.runs && !mp_runs(&first_rejection) && first_rejection.requests == 2 &&
+        cm_equal(first_rejection.error, "count-list-mismatch") && first_rejection.query.page == 1;
+    free(first_rejection.runs);
     // #4019 synthetic controls do not identify the original incident's
     // unresolved predicate; the original response was not retained.
     struct { int scenario; unsigned active; const char *error; } cases[] = {
