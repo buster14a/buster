@@ -24988,6 +24988,226 @@ BUSTER_C_SHARED bool c_parse_type_start_token(CParseResult* result, CPreprocessR
     return c_parse_type_start_token_lookup(result, preprocess, scope, token, &type_word, &entity);
 }
 
+// The `(` that encloses the token at `index`, or UINT32_MAX when a statement or
+// block boundary comes first. Brackets are stepped over, so an array bound
+// inside a parameter belongs to the parameter list that holds it.
+BUSTER_GLOBAL_LOCAL u32 c_parse_enclosing_open_parenthesis(CPreprocessResult preprocess, u32 index)
+{
+    u32 found = UINT32_MAX;
+    u32 depth = 0;
+    bool searching = true;
+    for (u32 cursor = index; searching && cursor > 0;)
+    {
+        cursor -= 1;
+        CToken token = preprocess.tokens[cursor];
+        if (token.kind == C_TOKEN_PUNCTUATOR)
+        {
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                if (depth)
+                {
+                    depth -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    found = cursor;
+                    searching = false;
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                searching = false;
+            }
+        }
+    }
+    return found;
+}
+
+// The `(` that matches the `)` at `close`, or UINT32_MAX when a statement or
+// block boundary comes first.
+BUSTER_GLOBAL_LOCAL u32 c_parse_matching_open_parenthesis_backward(CPreprocessResult preprocess, u32 close)
+{
+    u32 found = UINT32_MAX;
+    u32 depth = 0;
+    bool searching = true;
+    for (u32 cursor = close; searching && cursor > 0;)
+    {
+        cursor -= 1;
+        CToken token = preprocess.tokens[cursor];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            if (depth)
+            {
+                depth -= 1;
+            }
+            else
+            {
+                found = cursor;
+                searching = false;
+            }
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            searching = false;
+        }
+    }
+    return found;
+}
+
+// Whether the group closed at `close` holds an abstract declarator only: the
+// pointer or block marks, qualifiers and array suffixes of `(*)`, `(*const)`,
+// `(*[3])` or `(*(*)(int n))`. No expression can spell one, so a parameter
+// list that follows it belongs to a type name.
+BUSTER_GLOBAL_LOCAL bool c_parse_abstract_declarator_group(CPreprocessResult preprocess, u32 close)
+{
+    u32 open = c_parse_matching_open_parenthesis_backward(preprocess, close);
+    bool found = open != UINT32_MAX;
+    bool abstract = found && open + 1 < close &&
+                    (c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_STAR) ||
+                     c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_CARET));
+    for (u32 index = open + 1; abstract && index < close; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        CType qualifiers = {0};
+        bool skip = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                    (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                     c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS));
+        if (skip)
+        {
+            u32 nesting = 0;
+            for (; index < close; index += 1)
+            {
+                CToken inner = preprocess.tokens[index];
+                nesting += c_token_is_punctuator(&inner, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&inner, C_PUNCTUATOR_LEFT_BRACKET);
+                nesting -= c_token_is_punctuator(&inner, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&inner, C_PUNCTUATOR_RIGHT_BRACKET);
+                if (!nesting)
+                {
+                    break;
+                }
+            }
+            abstract = index < close;
+        }
+        else if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            abstract = c_parse_type_qualifier_word_token(preprocess, token, &qualifiers);
+        }
+        else
+        {
+            abstract = c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_CARET) ||
+                       c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
+    }
+    return abstract;
+}
+
+// Whether the identifier at `index` follows the shape of a parameter's
+// declarator name: after a specifier, pointer mark or qualifier, and before a
+// separator, suffix or the end of its list.
+BUSTER_GLOBAL_LOCAL bool c_parse_parameter_declarator_name_shape(CPreprocessResult preprocess, u32 index)
+{
+    bool shape = index > 0 && index + 1 < preprocess.token_count && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER;
+    if (shape)
+    {
+        CToken previous = preprocess.tokens[index - 1];
+        CToken next = preprocess.tokens[index + 1];
+        shape = (previous.kind == C_TOKEN_IDENTIFIER || c_token_is_punctuator(&previous, C_PUNCTUATOR_STAR)) &&
+                (c_token_is_punctuator(&next, C_PUNCTUATOR_COMMA) || c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                 c_token_is_punctuator(&next, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&next, C_PUNCTUATOR_LEFT_PARENTHESIS));
+    }
+    return shape;
+}
+
+// Whether the identifier at `index` is declared by a parameter of a function
+// declarator inside a type name, or is a use of one declared in the same list
+// (`int (*)(int n, int a[n])`). The names live in that prototype's scope only
+// (C17 6.2.1p4), so they bind nothing outside it. The list is recognised by
+// the abstract group it follows -- `(*)`, `(^)` -- which only a type name
+// spells; a named group such as `(*callback)` inside such a list is climbed
+// through to the list that holds it. Run for an unresolved name alone.
+BUSTER_GLOBAL_LOCAL bool c_parse_type_name_parameter_name(CPreprocessResult preprocess, u32 index)
+{
+    u32 cursor = index;
+    u32 list = UINT32_MAX;
+    bool climbing = true;
+    while (climbing)
+    {
+        u32 open = c_parse_enclosing_open_parenthesis(preprocess, cursor);
+        climbing = open != UINT32_MAX && open > 0;
+        if (climbing && c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            if (c_parse_abstract_declarator_group(preprocess, open - 1))
+            {
+                list = open;
+                climbing = false;
+            }
+            else
+            {
+                // The group before the list may itself be a named declarator
+                // of an outer parameter: continue from its own `(`.
+                u32 group = c_parse_matching_open_parenthesis_backward(preprocess, open - 1);
+                climbing = group != UINT32_MAX && group + 1 < open &&
+                           (c_token_is_punctuator(&preprocess.tokens[group + 1], C_PUNCTUATOR_STAR) ||
+                            c_token_is_punctuator(&preprocess.tokens[group + 1], C_PUNCTUATOR_CARET));
+                cursor = climbing ? group : cursor;
+            }
+        }
+        else if (climbing && c_parse_parameter_declarator_name_shape(preprocess, open - 1) &&
+                 c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            // A parameter of function type, `int callback(int n)`.
+            cursor = open - 1;
+        }
+        else if (climbing && open + 1 < preprocess.token_count && (c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_STAR) ||
+                                                                      c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_CARET)))
+        {
+            cursor = open;
+        }
+        else
+        {
+            climbing = false;
+        }
+    }
+    bool declared = false;
+    if (list != UINT32_MAX)
+    {
+        declared = c_parse_parameter_declarator_name_shape(preprocess, index);
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+        u32 depth = 0;
+        for (u32 scan = list + 1; !declared && scan < preprocess.token_count; scan += 1)
+        {
+            CToken token = preprocess.tokens[scan];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                if (!depth)
+                {
+                    break;
+                }
+                depth -= 1;
+            }
+            else
+            {
+                declared = c_parse_parameter_declarator_name_shape(preprocess, scan) &&
+                           string_equal(c_token_spelling(preprocess.spelling_base, token), spelling);
+            }
+        }
+    }
+    return declared;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index,
                                                       CEntityId entity);
 
@@ -25091,6 +25311,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                 c_token_is_punctuator(&preprocess.tokens[type_end], C_PUNCTUATOR_RIGHT_PARENTHESIS);
         }
         predefined_function_name |= storage_type_slot || storage_type_name_group;
+        predefined_function_name |= c_parse_type_name_parameter_name(preprocess, token_index);
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
@@ -36971,6 +37192,14 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                                     c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) &&
                                     !(index > start + 1 && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 2],
                                         C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)));
+        // The array suffix of a parameter named in a type name's prototype
+        // (`sizeof(void (*)(int a[2]))`) is a declarator too, whether or not
+        // an object of that name is in scope. The shape test comes first so an
+        // ordinary subscript costs two token compares.
+        expression_subscript = expression_subscript && !(index > start + 1 && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                                                          (preprocess.tokens[index - 2].kind == C_TOKEN_IDENTIFIER ||
+                                                           c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_STAR)) &&
+                                                          c_parse_type_name_parameter_name(preprocess, index - 1));
         // A declarator may contain a bound expression. Its expression
         // subscripts remain constraints even when the declaration mask
         // covers the whole range; only parsed declarator openers are exempt.
