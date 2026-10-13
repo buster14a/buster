@@ -1361,7 +1361,8 @@ statement from the cursor and dispatches on its kind:
   inside a statement (`switch (x) { if (y) case 1: ...`), that statement and
   the items after it, up to the next label that owns statements, lower from
   a block no edge enters, and the dispatch reaches the label inside them. The
-  token walker flattened the `if` shape and refused the block shape.
+  token walker flattened that shape. A first label inside a block is still
+  refused, by semantic analysis's lowering-constraint mirror (`c_parse.c`).
 - **Dead code** after a terminator is skipped statement by statement unless
   the statement holds a label (`c_ir_node_holds_label`). A block opens as
   usual and its own walk skips up to the label; any other statement with a
