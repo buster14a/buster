@@ -231,9 +231,66 @@ BUSTER_GLOBAL_LOCAL int cm_publication_tests(void)
         "matrix ordinal binds the complete selected include configuration and rejects an absent cell");
     return failures;
 }
+BUSTER_GLOBAL_LOCAL int cm_controller_tests(void)
+{
+    int failures = 0;
+    const char *head = "1111111111111111111111111111111111111111";
+    const char *names[] = {"Main integration admission", "Native retirement merge admission"};
+    const char *prefixes[] = {"buster-merge-queue-admission-v1", "buster-native-retirement-admission-v1"};
+    CmStore store;
+    int initialized = cm_store_init(&store);
+    if (initialized)
+    {
+        for (unsigned context = 0; context < 2; ++context)
+        {
+            for (unsigned mutation = 0; mutation < 10; ++mutation)
+            {
+                char job_text[2048], check_text[2048], run_text[256];
+                snprintf(run_text, sizeof(run_text), "{\"id\":1,\"head_sha\":\"%s\"}", head);
+                snprintf(job_text, sizeof(job_text), "{\"id\":99,\"run_id\":1,\"run_attempt\":1,\"head_sha\":\"%s\","
+                    "\"name\":\"%s\",\"status\":\"in_progress\",\"conclusion\":%s,\"runner_id\":%u,"
+                    "\"runner_name\":null,\"runner_group_id\":null,\"labels\":%s,\"steps\":%s,"
+                    "\"html_url\":\"https://github.com/%s/runs/99\"}", head,
+                    mutation == 6 ? "ordinary unfinished job" : names[context], mutation == 9 ? "\"null\"" : "null",
+                    mutation == 1 ? 7u : 0u, mutation == 2 ? "[\"ubuntu-26.04\"]" : "[]",
+                    mutation == 7 ? "[{}]" : "[]", mutation == 8 ? "foreign/repository" : CM_REPO);
+                snprintf(check_text, sizeof(check_text), "{\"id\":99,\"head_sha\":\"%s\",\"name\":\"%s\","
+                    "\"status\":\"in_progress\",\"conclusion\":null,\"external_id\":\"%s:%s\","
+                    "\"details_url\":\"https://github.com/" CM_REPO "/runs/99\","
+                    "\"app\":{\"id\":%u,\"slug\":\"github-actions\"}}",
+                    mutation == 3 ? "2222222222222222222222222222222222222222" : head, names[context],
+                    mutation == 4 ? "foreign-check" : prefixes[context], head, mutation == 5 ? 9u : 15368u);
+                CmResponse response = {"check-runs/99", "GET", check_text, 1, 0};
+                CmTransport transport = {0}; transport.deadline = cm_clock() + 60;
+                transport.fixture = &response; transport.fixture_count = 1;
+                CmCollection collection = {0}; collection.transport = &transport; collection.store = &store; collection.quiet = 1;
+                CmJson job = cm_json_parse(job_text, strlen(job_text)), run = cm_json_parse(run_text, strlen(run_text));
+                int accepted = cm_collect_job(&collection, &job, 1, &run, 1);
+                failures += cm_test_check(accepted == (mutation == 0), "only authenticated nonexecuting owned checks bypass terminal-job requirement");
+                failures += cm_test_check(collection.executions == 0 && store.count == 0,
+                    "controller checks never manufacture physical observations");
+                failures += cm_test_check(collection.skipped == (mutation == 0 ? 1u : 0u), "controller-only exclusion is explicit");
+                cm_json_free(&job); cm_json_free(&run);
+            }
+        }
+        cm_store_free(&store);
+    }
+    else ++failures;
+    return failures;
+}
 BUSTER_GLOBAL_LOCAL int cm_self_test(void)
 {
-    int failures = cm_inventory_tests() + cm_publication_tests();
+    int failures = cm_inventory_tests() + cm_publication_tests() + cm_controller_tests();
+    failures += cm_test_check(cm_http_status("gh: Not Found (HTTP 404)\n") == 404, "GitHub API absent response");
+    failures += cm_test_check(cm_http_status("gh: HTTP 404\n") == 404, "redirected expired log blob is absent");
+    failures += cm_test_check(cm_http_status("notice\ngh: HTTP 404\r\n") == 404, "redirected status line after notice");
+    failures += cm_test_check(cm_http_status("gh: Forbidden (HTTP 403)\n") == 403, "permission failure is not absence");
+    failures += cm_test_check(cm_http_status("gh: HTTP 500\n") == 500, "server failure remains a transport failure");
+    failures += cm_test_check(cm_http_status("gh: timeout\n") == 0, "unknown transport remains unknown");
+    failures += cm_test_check(cm_http_status("gh: HTTP 4040\n") == 0 && cm_http_status("gh: HTTP 40\n") == 0,
+        "malformed status cannot become absence");
+    failures += cm_test_check(cm_http_status("upstream payload gh: HTTP 404\n") == 0,
+        "only standalone redirected status lines are recognized");
     const char *valid[] = {"{}", "[]", "{\"a\":[1,true,false,null,\"a\\n\\u20ac\\ud83d\\ude00\"]}", "0", "-1.25e+2"};
     const char *invalid[] = {"", "{\"a\":1,\"a\":2}", "[1,]", "{\"a\":}", "{\"a\":1,}", "[01]", "[NaN]",
         "[Infinity]", "[1e]", "\"\\u0000\"", "\"\\ud800\"", "\"\\udc00\"", "{}{}", "\"bad\nstring\""};

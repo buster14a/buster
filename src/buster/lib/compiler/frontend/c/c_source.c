@@ -25,6 +25,9 @@
 //                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
+//   c_source_trim_row_pair                     per-file token and checkpoint
+//                                              reservations trimmed to their
+//                                              counts after each file
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
@@ -70,6 +73,9 @@
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
 //   c_preprocess_directive_line_end             comment-aware directive ends
+//   c_token_kind_name                          token-kind spelling (one
+//                                              definition for unity and
+//                                              split builds)
 //   c_frame_wrap_conditional_tokens             conditional whitespace and sites
 //   c_integer_operation,                       C integer operators over the
 //   c_integer_constant_binary/unary            shared ir_integer_* semantics:
@@ -1451,6 +1457,39 @@ bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
 }
 #endif
 
+// Each translated file reserves one checkpoint row per source byte and each
+// lexed file one token row per byte, but uses a few percent of them. Two
+// arrays filled together sit back to back; left as reserved, the first one's
+// unwritten tail separates live rows, and the pages and huge pages around it
+// fault in for nothing (#1307). When the pair is still the arena's newest
+// allocation, the second array's used rows move down behind the first one's
+// written prefix and the cursor returns to their end, so the next file packs
+// against them. The vacated rows are cleared again: everything above the
+// pair's written extent stays zero, and the arena's dirty mark stops there
+// instead of covering the gap no row ever reached. No reader goes past a
+// count. Returns the second array's possibly moved start.
+BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 first_used, u64 first_written, u64 first_reserved, u8* second,
+                                               u64 second_used, u64 second_reserved, u64 second_alignment)
+{
+    u8* result = second;
+    u8* base = (u8*)arena;
+    if (second_used && second == first + first_reserved && base + arena->position == second + second_reserved)
+    {
+        u8* moved = (u8*)align_forward_unchecked((u64)(first + first_used), second_alignment);
+        if (moved < second)
+        {
+            memmove(moved, second, second_used);
+            u8* moved_end = moved + second_used;
+            u8* vacated = BUSTER_MAX(moved_end, second);
+            memset(vacated, 0, (u64)(second + second_used - vacated));
+            u8* written_end = BUSTER_MAX(moved_end, first + BUSTER_MIN(first_written, first_reserved));
+            arena_release_unwritten_tail(arena, (u64)(moved_end - base), (u64)(written_end - base));
+            result = moved;
+        }
+    }
+    return result;
+}
+
 // GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
@@ -1729,6 +1768,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             .pointer = translated,
             .length = output,
         };
+        checkpoint_offsets = (u32*)c_source_trim_row_pair(arena, (u8*)checkpoints, sizeof(*checkpoints) * checkpoint_count,
+                                                          sizeof(*checkpoints) * checkpoint_count, sizeof(*checkpoints) * plan->checkpoint_capacity, (u8*)checkpoint_offsets,
+                                                          sizeof(*checkpoint_offsets) * checkpoint_count,
+                                                          sizeof(*checkpoint_offsets) * plan->checkpoint_capacity, BUSTER_ALIGN_OF(u32));
         result.checkpoints = checkpoints;
         result.checkpoint_offsets = checkpoint_offsets;
         result.checkpoint_count = checkpoint_count;
@@ -3815,6 +3858,12 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
                     C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
                     C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
+                    // The emitter's full-width stores may have written its
+                    // sixteen slack rows past the count.
+                    result.token_shapes = (CTokenShape*)c_source_trim_row_pair(arena, (u8*)result.tokens, sizeof(CToken) * result.token_count,
+                                                                               sizeof(CToken) * (result.token_count + 16), sizeof(CToken) * token_capacity, (u8*)result.token_shapes,
+                                                                               sizeof(CTokenShape) * result.token_count,
+                                                                               sizeof(CTokenShape) * token_capacity, BUSTER_ALIGN_OF(CTokenShape));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
@@ -4278,6 +4327,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
     { S8_INITIALIZER("__builtin_complex"), C_SYMBOL_BUILTIN_COMPLEX },
+    // Clang's source-location builtins: the expansion point's presumed line
+    // (an int constant), file name and enclosing function name.
+    { S8_INITIALIZER("__builtin_LINE"), C_SYMBOL_BUILTIN_SOURCE_LINE },
+    { S8_INITIALIZER("__builtin_FILE"), C_SYMBOL_BUILTIN_SOURCE_FILE },
+    { S8_INITIALIZER("__builtin_FUNCTION"), C_SYMBOL_BUILTIN_SOURCE_FUNCTION },
     { S8_INITIALIZER("__builtin_strlen"), C_SYMBOL_BUILTIN_STRLEN },
     { S8_INITIALIZER("__builtin___clear_cache"), C_SYMBOL_BUILTIN_CLEAR_CACHE },
     { S8_INITIALIZER("__builtin_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
@@ -4399,9 +4453,13 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_infl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nanl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_valf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_huge_val"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_vall"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnan"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
@@ -4564,6 +4622,15 @@ BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
                   builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
                   builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
                   builtin == C_SYMBOL_BUILTIN_VA_END;
+    return result;
+}
+
+// Clang's __builtin_LINE, __builtin_FILE and __builtin_FUNCTION: argument-free
+// queries of the call's expansion point, typed and lowered without an entity.
+BUSTER_C_SHARED bool c_semantic_source_location_builtin(CSymbolBuiltin builtin)
+{
+    bool result = builtin == C_SYMBOL_BUILTIN_SOURCE_LINE || builtin == C_SYMBOL_BUILTIN_SOURCE_FILE ||
+                  builtin == C_SYMBOL_BUILTIN_SOURCE_FUNCTION;
     return result;
 }
 
@@ -4839,7 +4906,26 @@ bool c_semantic_math_link_is_long_double(String8 link_name)
     CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
            string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
-           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+           c_semantic_math_special_value(link_name).kind == C_TYPE_LONG_DOUBLE || (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+}
+
+// The constant-valued special-float builtins by link name: the census every
+// result-type query, arity check, constant folder and runtime lowering reads.
+// c_ir_math_builtin_link_name folds the spellings onto six link names:
+// `__builtin_inf` onto huge_val, `__builtin_huge_valf` onto inff, and
+// `__builtin_huge_vall` and `__builtin_infl` onto infl.
+CMathSpecialValue c_semantic_math_special_value(String8 link_name)
+{
+    CMathSpecialValue result = {.kind = C_TYPE_INVALID, .special = C_MATH_SPECIAL_NONE};
+    bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val")) || string_equal(link_name, S8("infl"));
+    bool quiet_nan = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanl"));
+    if (infinity || quiet_nan)
+    {
+        char8 last = link_name.pointer[link_name.length - 1];
+        result.kind = last == 'f' ? C_TYPE_FLOAT : string_equal(link_name, S8("infl")) || string_equal(link_name, S8("nanl")) ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+        result.special = infinity ? C_MATH_SPECIAL_INFINITY : C_MATH_SPECIAL_QUIET_NAN;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -5234,27 +5320,21 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
 enum
 {
     C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 512,
+    C_SYMBOL_INITIAL_SLOT_CAPACITY = 1u << 14,
+    C_SYMBOL_INITIAL_NAME_CAPACITY = 1u << 12,
 };
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_SHARED u16 c_parse_word_bits_compute(String8 spelling);
 
-BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
+// Interns the predefined range into a table whose arrays are allocated at the
+// initial capacities, and derives its builtin kinds and class and word bits.
+BUSTER_C_INTERNAL void c_symbol_table_seed(CSymbolTable* table)
 {
-    CSymbolTable table = {
-        .arena = arena,
-        .slot_capacity = 1u << 14,
-        .name_capacity = 1u << 12,
-    };
-    table.names = arena_allocate(arena, String8, table.name_capacity);
-    table.slots = arena_allocate(arena, CSymbolSlot, table.slot_capacity);
-    memset(table.slots, 0, sizeof(*table.slots) * table.slot_capacity);
-    table.builtin_kinds = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    table.word_bits = arena_allocate(arena, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    memset(table.builtin_kinds, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    memset(table.class_bits, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    memset(table.word_bits, 0, sizeof(*table.word_bits) * C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table->slots, 0, sizeof(*table->slots) * table->slot_capacity);
+    memset(table->builtin_kinds, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table->class_bits, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table->word_bits, 0, sizeof(*table->word_bits) * C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     // The well-known names go in first and in enumerator order, because the
     // passes that compare against them spell the id as the enumerator itself
     // rather than reading it back out of the table.
@@ -5264,35 +5344,111 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
         // match nothing, so the gap is caught here rather than as a pass
         // that silently stops recognizing its keyword.
         BUSTER_CHECK(c_symbol_well_known_spellings[well_known].length);
-        u32 id = c_symbol_intern(&table, c_symbol_well_known_spellings[well_known]);
+        u32 id = c_symbol_intern(table, c_symbol_well_known_spellings[well_known]);
         BUSTER_CHECK(id == well_known);
     }
     for (u64 index = 0; index < C_SYMBOL_PREDEFINED_COUNT; index += 1)
     {
-        u32 id = c_symbol_intern(&table, c_symbol_predefined[index].name);
+        u32 id = c_symbol_intern(table, c_symbol_predefined[index].name);
         BUSTER_CHECK(id == C_SYMBOL_WELL_KNOWN_COUNT + index);
         // Routed through the spelling scan instead of reading
         // c_symbol_predefined[index].builtin directly, so the two
         // classification paths cannot drift.
-        table.builtin_kinds[id] = (u8)c_symbol_builtin_from_spelling(c_symbol_predefined[index].name);
+        table->builtin_kinds[id] = (u8)c_symbol_builtin_from_spelling(c_symbol_predefined[index].name);
     }
     // The declaration keywords and the classified extras join the predefined
     // range; their class bits come from the same compute the spelling
     // fallback uses, so the two classification paths cannot drift.
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings); index += 1)
     {
-        c_symbol_intern(&table, c_declaration_keyword_spellings[index]);
+        c_symbol_intern(table, c_declaration_keyword_spellings[index]);
     }
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_symbol_classified_extras); index += 1)
     {
-        c_symbol_intern(&table, c_symbol_classified_extras[index]);
+        c_symbol_intern(table, c_symbol_classified_extras[index]);
     }
-    BUSTER_VALIDATE(table.count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    table.predefined_limit = table.count;
-    for (u32 id = 1; id <= table.count; id += 1)
+    BUSTER_VALIDATE(table->count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table->predefined_limit = table->count;
+    for (u32 id = 1; id <= table->count; id += 1)
     {
-        table.class_bits[id] = c_parse_token_class_compute(table.names[id]);
-        table.word_bits[id] = c_parse_word_bits_compute(table.names[id]);
+        table->class_bits[id] = c_parse_token_class_compute(table->names[id]);
+        table->word_bits[id] = c_parse_word_bits_compute(table->names[id]);
+    }
+}
+
+// Every table starts with the same predefined range: nothing above depends on
+// the unit, its options or its arena. Deriving it -- about five hundred
+// interns and spelling classifications -- was repeated by every compile, so a
+// process that compiles more than once derives it into this prototype once
+// and starts each later table as a copy of it (#3913). The first table of a
+// process still seeds itself, so a one-compile process does no extra work.
+// The prototype's names are the static spellings above, which every copy can
+// share; a copy allocates the same arrays at the same capacities, in the same
+// order, as a seeded table.
+BUSTER_GLOBAL_LOCAL String8 c_symbol_prototype_names[C_SYMBOL_INITIAL_NAME_CAPACITY];
+BUSTER_GLOBAL_LOCAL CSymbolSlot c_symbol_prototype_slots[C_SYMBOL_INITIAL_SLOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u8 c_symbol_prototype_builtin_kinds[C_SYMBOL_PREDEFINED_LIMIT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u8 c_symbol_prototype_class_bits[C_SYMBOL_PREDEFINED_LIMIT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u16 c_symbol_prototype_word_bits[C_SYMBOL_PREDEFINED_LIMIT_CAPACITY];
+BUSTER_GLOBAL_LOCAL CSymbolTable c_symbol_prototype;
+BUSTER_GLOBAL_LOCAL bool c_symbol_prototype_built;
+// Whether a table has seeded itself, written only while no other thread runs.
+BUSTER_GLOBAL_LOCAL bool c_symbol_table_seeded_once;
+
+BUSTER_C_INTERNAL void c_symbol_prototype_build(void)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    c_symbol_prototype = (CSymbolTable){
+        .names = c_symbol_prototype_names,
+        .slots = c_symbol_prototype_slots,
+        .builtin_kinds = c_symbol_prototype_builtin_kinds,
+        .class_bits = c_symbol_prototype_class_bits,
+        .word_bits = c_symbol_prototype_word_bits,
+        .slot_capacity = C_SYMBOL_INITIAL_SLOT_CAPACITY,
+        .name_capacity = C_SYMBOL_INITIAL_NAME_CAPACITY,
+    };
+    c_symbol_table_seed(&c_symbol_prototype);
+    // The predefined range never grows a table or decodes a UCN name, so the
+    // prototype has no arena and still owns only the static arrays above.
+    BUSTER_CHECK(c_symbol_prototype.names == c_symbol_prototype_names && c_symbol_prototype.slots == c_symbol_prototype_slots &&
+                 !c_symbol_prototype.has_ucn_names);
+    c_symbol_prototype_built = true;
+}
+
+BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
+{
+    CSymbolTable table = {
+        .arena = arena,
+        .slot_capacity = C_SYMBOL_INITIAL_SLOT_CAPACITY,
+        .name_capacity = C_SYMBOL_INITIAL_NAME_CAPACITY,
+    };
+    table.names = arena_allocate(arena, String8, table.name_capacity);
+    table.slots = arena_allocate(arena, CSymbolSlot, table.slot_capacity);
+    table.builtin_kinds = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table.word_bits = arena_allocate(arena, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    bool serial = os_is_only_live_thread();
+    if (!c_symbol_prototype_built && serial && c_symbol_table_seeded_once)
+    {
+        c_symbol_prototype_build();
+    }
+    if (c_symbol_prototype_built)
+    {
+        memcpy(table.names, c_symbol_prototype_names, sizeof(*table.names) * (c_symbol_prototype.count + 1u));
+        memcpy(table.slots, c_symbol_prototype_slots, sizeof(c_symbol_prototype_slots));
+        memcpy(table.builtin_kinds, c_symbol_prototype_builtin_kinds, sizeof(c_symbol_prototype_builtin_kinds));
+        memcpy(table.class_bits, c_symbol_prototype_class_bits, sizeof(c_symbol_prototype_class_bits));
+        memcpy(table.word_bits, c_symbol_prototype_word_bits, sizeof(c_symbol_prototype_word_bits));
+        table.count = c_symbol_prototype.count;
+        table.predefined_limit = c_symbol_prototype.predefined_limit;
+    }
+    else
+    {
+        c_symbol_table_seed(&table);
+        if (serial)
+        {
+            c_symbol_table_seeded_once = true;
+        }
     }
     return table;
 }
@@ -8209,7 +8365,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_inf",           "__builtin_inff", "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_inf",           "__builtin_inff", "__builtin_infl", "__builtin_nan", "__builtin_nanf", "__builtin_nanl",
+        "__builtin_huge_val",      "__builtin_huge_valf", "__builtin_huge_vall", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
         "__builtin_isnormal",      "__builtin_fpclassify", "__builtin_isgreater", "__builtin_isgreaterequal",
@@ -8227,6 +8384,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
         "__builtin_ia32_psrlqi128",
         "__builtin_types_compatible_p", "__builtin_classify_type", "__builtin_offsetof",
+        "__builtin_LINE",          "__builtin_FILE", "__builtin_FUNCTION",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",
@@ -14928,34 +15086,49 @@ void c_prewarm(void)
     {
         c_declaration_keyword_slots_build();
     }
+    if (!c_symbol_prototype_built)
+    {
+        c_symbol_prototype_build();
+    }
 }
 
-#if !BUSTER_UNITY_BUILD
 String8 c_token_kind_name(CTokenKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case C_TOKEN_INVALID:
-        return S8("invalid");
+        result = S8("invalid");
+        break;
     case C_TOKEN_END_OF_FILE:
-        return S8("end of file");
+        result = S8("end of file");
+        break;
     case C_TOKEN_IDENTIFIER:
-        return S8("identifier");
+        result = S8("identifier");
+        break;
     case C_TOKEN_PREPROCESSING_NUMBER:
-        return S8("preprocessing number");
+        result = S8("preprocessing number");
+        break;
     case C_TOKEN_CHARACTER_LITERAL:
-        return S8("character literal");
+        result = S8("character literal");
+        break;
     case C_TOKEN_STRING_LITERAL:
-        return S8("string literal");
+        result = S8("string literal");
+        break;
     case C_TOKEN_PUNCTUATOR:
-        return S8("punctuator");
+        result = S8("punctuator");
+        break;
     case C_TOKEN_NEWLINE:
-        return S8("newline");
+        result = S8("newline");
+        break;
     case C_TOKEN_PRAGMA:
-        return S8("pragma");
+        result = S8("pragma");
+        break;
     case C_TOKEN_KIND_COUNT:
-        return S8("invalid token kind");
+    default:
+        result = S8("invalid token kind");
+        break;
     }
-    return S8("invalid token kind");
+
+    return result;
 }
-#endif

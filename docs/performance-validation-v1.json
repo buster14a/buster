@@ -2,8 +2,8 @@
   "schema": "buster-performance-validation-v1",
   "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
   "routes": {
-    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
-    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2, scaling-v1 or exact clang-analyze-full-v1/v2 opt-in, #2769)",
+    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752; compiler-compare-v1 plus the full throughput-corpus-v2 FAST/QUALITY corpus; the disabled docs/compiler-main-profile-routing-v1.tsv switch may select compiler-main-40pairs-v1 for this authenticated automatic route only after a reviewed #3212 certificate, with rollback to compiler-compare-v1)",
+    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2 (or throughput-corpus-historical-v1 for a pre-floor merge base, #3714), scaling-v1 or exact clang-analyze-full-v1/v2 opt-in, #2769)",
     "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)",
     "sampling-qualification": "9700x-direct-bench.yml job sampling (disabled staged owner-fresh predeclared acquisition/pilot/confirm route; separate unqualified research check, #3212)"
   },
@@ -35,6 +35,17 @@
       "kind": "build-command",
       "validation": "performance",
       "measures": "#2761 fixed throughput-real-source-v1 on an owner request line: the base revision's bench_throughput run --real-source times the pinned cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 version-2 descriptors' compile_link_argv to a linked executable on the matched baseline/candidate binaries, FAST and QUALITY, two warmups and two rounds of 20 A/B pairs, on staged trees bound to pinned archive, descriptor and input-tree hashes; report-only with the guard off",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:bench_throughput@throughput-corpus-historical",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "#3714 fixed throughput-corpus-historical-v1 on an owner request line, admitted only when hosted authorization finds the pull request's merge base predates the FAST/QUALITY harness floor 293132e4: tools/throughput at pinned main revision afe67cbe, built and run by that revision's bench_throughput in a detached worktree, times the throughput-corpus-v2 arguments and FAST/QUALITY population on the matched baseline/candidate binaries; report-only; it never discharges the v2 corpus row",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
@@ -138,6 +149,17 @@
       }
     },
     {
+      "id": "uarch_lab:compare@constant-reuse-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #3011 fixed constant-reuse-acceptance-v1: one candidate-HEAD ide on the -g0 unity self-host -c compile, A default and B with -fcanonical-intern-constants (intern cell) or -fcanonical-fast-cse (cse cell), 20 ABBA pairs per cell, wall time with 95% CI, available retired instructions, peak RSS, executable-section code bytes and identical diagnostics; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
       "id": "uarch_lab:retirement",
       "kind": "lab-mode",
       "validation": "performance",
@@ -165,13 +187,13 @@
       "id": "ide:bench",
       "kind": "ide-command",
       "validation": "performance",
-      "measures": "`ide bench` frontend microbenchmark",
+      "measures": "#2761 fixed frontend-selector-v1 on an owner request line: `ide bench` (preprocess, parse and analyze tests/basic_c_operations.c of the base checkout, 30 timed in-process iterations) in 20 alternating pairs of fresh pinned processes of the baseline and candidate binaries; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Runs inside uarch_lab's micro step only; it links the compiler, so it cannot be a standalone direct workload. A frontend claim needs pull-compare.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-selector-v1",
+        "request": "one exact fresh line, profile: frontend-selector-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -189,26 +211,39 @@
       "id": "tool:benchmark_frontend_scaling.py",
       "kind": "tool",
       "validation": "performance",
-      "measures": "two trusted compilers on frontend scaling inputs",
+      "measures": "#2761 fixed frontend-selector-v1 on an owner request line: the base revision's tool compares the baseline and candidate binaries on --suite all (54 syntax/object cells), one warmup and eleven pinned repetitions each, with byte-identical objects required; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Run locally or hosted it is diagnostic; a claim needs pull-compare evidence.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-selector-v1",
+        "request": "one exact fresh line, profile: frontend-selector-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "tool:benchmark_frontend_scaling.py@frontend-nesting",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#2676 fixed frontend-nesting-v1 on an owner request line: the base revision's tool compares the baseline and candidate binaries on --suite nesting (eleven families of control statements nested 2000, 8000 and 32000 levels deep, 68 syntax/object cells), one warmup and eleven pinned repetitions each, with byte-identical objects required; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-nesting-v1",
+        "request": "one exact fresh line, profile: frontend-nesting-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
       "id": "tool:selection_benchmark.py",
       "kind": "tool",
       "validation": "performance",
-      "measures": "selector replay and end-to-end object compilation",
+      "measures": "#2761 fixed frontend-selector-v1 on an owner request line: the base revision's tool replays selection and compiles -O2 objects under both allocators for its three generated workloads, fifteen pinned samples per binary, with --check, identical work counts and identical objects required; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "No 9700X route; a selector claim needs pull-compare evidence (end-to-end) until a targeted route exists.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-selector-v1",
+        "request": "one exact fresh line, profile: frontend-selector-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -241,13 +276,39 @@
       "id": "tool:wild_linker_bench.c",
       "kind": "tool",
       "validation": "performance",
-      "measures": "linker experiment (#2645), link-only cells",
+      "measures": "#2761 fixed wild-linker-v1 on an owner request line: the trusted revision's wild_linker_acceptance.c --link-only (sharing this harness's process capture and paired statistics) times the host-installed Wild against mold, or the host's default ld when mold is absent, on the audit's three direct link-only ide cells built from the head without LTO, at default threads and one thread, under --no-gc-sections --icf=none --no-fork and the fixed build ID; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Linker timing on the 9700X has no route; results stay diagnostic.",
-        "claim_route": "none"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "wild-linker-v1",
+        "request": "one exact fresh line, profile: wild-linker-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "tool:link_tls_bench.py",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#1915 fixed link-tls-v1 on an owner request line: the trusted revision's link_tls_bench.py builds frozen TLS-heavy inputs (8192 to 32768 general-dynamic sites as object, -fno-plt object, archive and PIE cells, plus a no-TLS control) with the host clang, requires byte-identical images from the matched baseline and candidate ide binaries that print the frozen output, then times fresh ide cc link processes of both, 2 warmups and 20 alternating pairs per cell on CPU 2; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "link-tls-v1",
+        "request": "one exact fresh line, profile: link-tls-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@self-host-inline-compare",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "#58 fixed self-host-inline-compare-v1 on an owner request line: each side's Clang Release ide builds its own revision's stage-1 compiler with -fcanonical-inline, then the trusted selfhost_inline_compare.py times the two stage-1 compilers compiling the frozen merge-base tree with -fcanonical-inline, byte-identical outputs required, 30 ABBA pairs on CPU 2 with wall time, PMU counters, executable-section code bytes, topdown metric groups and sampling; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "self-host-inline-compare-v1",
+        "request": "one exact fresh line, profile: self-host-inline-compare-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {

@@ -1,0 +1,316 @@
+{
+  "source_revision": "47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+  "check": {
+    "id": 114851188525,
+    "name": "9700X compiler benchmark",
+    "head_sha": "47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+    "external_id": "buster-9700x-compiler-main-v1:47594ab02bb2fd8a23263a6f42b59963edbf2d74:38260981679.1:1",
+    "details_url": "https://github.com/buster14a/buster/runs/114851188525",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "completed_at": "2026-10-12T14:12:27Z",
+    "output": {
+      "title": "Not measured: terminal lifecycle reconciliation",
+      "summary": "**9700X compiler benchmark: queued** (report-only; it never blocks merging)\n\nLifecycle protocol: terminal-native-v1.\nCandidate `47594ab02bb2fd8a23263a6f42b59963edbf2d74`.\nBaseline: its first parent, the main commit it landed on, or, when that commit has no valid measurement, the nearest earlier main commit with one (a range comparison). Mode: main, profile `compiler-compare-v1`.\nRequest run 38260981679 attempt 1: https://github.com/buster14a/buster/actions/runs/38260981679/attempts/1\n\nWaiting for the main comparison's concurrency group: one main comparison runs at a time and GitHub keeps only the newest pending main commit, so this commit may be displaced and is then marked **Not measured**. The comparison run will appear under https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run.\n\n**9700X compiler benchmark: not measured.** The exact benchmark run finished with conclusion `cancelled` without a validated terminal measurement check. This recovery closes bookkeeping only; it does not validate evidence or claim a successful measurement. Repository `buster14a/buster`, candidate `47594ab02bb2fd8a23263a6f42b59963edbf2d74`, request 38260981679 attempt 1. Executor identity run 38261019120 attempt 1. Trusted harness `47594ab02bb2fd8a23263a6f42b59963edbf2d74`. Baseline remains as recorded above; if setup never ran it is unavailable. Native Actions owns execution state: https://github.com/buster14a/buster/actions/runs/38261019120/attempts/1"
+    },
+    "app": {
+      "id": 15368
+    }
+  },
+  "reads": {
+    "actions/runs/38260981679/attempts/1": {
+      "id": 38260981679,
+      "run_attempt": 1,
+      "path": ".github/workflows/9700x-compiler-request.yml",
+      "event": "push",
+      "head_sha": "47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+      "head_branch": "main",
+      "status": "completed",
+      "conclusion": "success",
+      "display_title": "Merge pull request #3785 from buster14a/claude/relaxed-babbage-6d49np",
+      "created_at": "2026-10-12T14:10:30Z",
+      "updated_at": "2026-10-12T14:10:46Z",
+      "repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "head_repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      }
+    },
+    "actions/runs/38260981679/attempts/1/jobs?per_page=100": {
+      "total_count": 2,
+      "jobs": [
+        {
+          "id": 114851100319,
+          "name": "Record the compiler benchmark request",
+          "run_id": 38260981679,
+          "run_attempt": 1,
+          "head_sha": "47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1,
+              "started_at": "2026-10-12T14:10:33Z",
+              "completed_at": "2026-10-12T14:10:36Z"
+            },
+            {
+              "name": "Machine specifications",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2,
+              "started_at": "2026-10-12T14:10:36Z",
+              "completed_at": "2026-10-12T14:10:40Z"
+            },
+            {
+              "name": "Record the request",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3,
+              "started_at": "2026-10-12T14:10:40Z",
+              "completed_at": "2026-10-12T14:10:40Z"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4,
+              "started_at": "2026-10-12T14:10:40Z",
+              "completed_at": "2026-10-12T14:10:40Z"
+            }
+          ]
+        },
+        {
+          "id": 114851101202,
+          "name": "Show the queued compiler benchmark check",
+          "run_id": 38260981679,
+          "run_attempt": 1,
+          "head_sha": "47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1,
+              "started_at": "2026-10-12T14:10:33Z",
+              "completed_at": "2026-10-12T14:10:36Z"
+            },
+            {
+              "name": "Machine specifications",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2,
+              "started_at": "2026-10-12T14:10:36Z",
+              "completed_at": "2026-10-12T14:10:41Z"
+            },
+            {
+              "name": "Check out the trusted check writer",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3,
+              "started_at": "2026-10-12T14:10:41Z",
+              "completed_at": "2026-10-12T14:10:42Z"
+            },
+            {
+              "name": "Record actual checkout identity",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4,
+              "started_at": "2026-10-12T14:10:42Z",
+              "completed_at": "2026-10-12T14:10:42Z"
+            },
+            {
+              "name": "Create the queued check",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5,
+              "started_at": "2026-10-12T14:10:42Z",
+              "completed_at": "2026-10-12T14:10:43Z"
+            },
+            {
+              "name": "Post Check out the trusted check writer",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 10,
+              "started_at": "2026-10-12T14:10:43Z",
+              "completed_at": "2026-10-12T14:10:43Z"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 11,
+              "started_at": "2026-10-12T14:10:43Z",
+              "completed_at": "2026-10-12T14:10:43Z"
+            }
+          ]
+        }
+      ]
+    },
+    "actions/runs/38261019120/attempts/1": {
+      "id": 38261019120,
+      "run_attempt": 1,
+      "path": ".github/workflows/9700x-direct-bench.yml",
+      "event": "workflow_run",
+      "head_sha": "47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+      "head_branch": "main",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "display_title": "9700X request 38260981679.1 head 47594ab02bb2fd8a23263a6f42b59963edbf2d74",
+      "created_at": "2026-10-12T14:10:48Z",
+      "updated_at": "2026-10-12T14:12:04Z",
+      "repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "head_repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      }
+    },
+    "actions/artifacts?name=9700x-lifecycle-38261019120-1&per_page=100": {
+      "total_count": 1,
+      "artifacts": [
+        {
+          "id": 11752441561,
+          "name": "9700x-lifecycle-38261019120-1",
+          "size_in_bytes": 2499,
+          "expired": false,
+          "digest": "sha256:946776ad2bdec2fb541043e7759e59ad18c68488b5c875d4e8dc490c73b73616",
+          "created_at": "2026-10-12T14:12:29Z",
+          "workflow_run": {
+            "id": 38261177183,
+            "repository_id": 1071732997,
+            "head_repository_id": 1071732997,
+            "head_branch": "main",
+            "head_sha": "c3d58cfecdae1d77d89776cbfd61eb69ee10e8b5"
+          }
+        }
+      ]
+    },
+    "actions/runs/38261177183": {
+      "id": 38261177183,
+      "run_attempt": 1,
+      "path": ".github/workflows/9700x-lifecycle.yml",
+      "event": "workflow_run",
+      "head_sha": "c3d58cfecdae1d77d89776cbfd61eb69ee10e8b5",
+      "head_branch": "main",
+      "status": "completed",
+      "conclusion": "success",
+      "display_title": "9700X terminal lifecycle recovery",
+      "created_at": "2026-10-12T14:12:06Z",
+      "updated_at": "2026-10-12T14:12:33Z",
+      "repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "head_repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      }
+    },
+    "actions/runs/38261177183/attempts/1/jobs?per_page=100": {
+      "total_count": 1,
+      "jobs": [
+        {
+          "id": 114851763130,
+          "name": "Reconcile the exact completed benchmark attempt",
+          "run_id": 38261177183,
+          "run_attempt": 1,
+          "head_sha": "c3d58cfecdae1d77d89776cbfd61eb69ee10e8b5",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1,
+              "started_at": "2026-10-12T14:12:11Z",
+              "completed_at": "2026-10-12T14:12:16Z"
+            },
+            {
+              "name": "Machine specifications",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2,
+              "started_at": "2026-10-12T14:12:16Z",
+              "completed_at": "2026-10-12T14:12:17Z"
+            },
+            {
+              "name": "Check out the trusted lifecycle controller",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3,
+              "started_at": "2026-10-12T14:12:17Z",
+              "completed_at": "2026-10-12T14:12:23Z"
+            },
+            {
+              "name": "Record actual checkout identity",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4,
+              "started_at": "2026-10-12T14:12:23Z",
+              "completed_at": "2026-10-12T14:12:23Z"
+            },
+            {
+              "name": "Compile the trusted native controller",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5,
+              "started_at": "2026-10-12T14:12:23Z",
+              "completed_at": "2026-10-12T14:12:24Z"
+            },
+            {
+              "name": "Reconcile terminal checks and record separate Actions costs",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 6,
+              "started_at": "2026-10-12T14:12:24Z",
+              "completed_at": "2026-10-12T14:12:28Z"
+            },
+            {
+              "name": "Retain safe machine records",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7,
+              "started_at": "2026-10-12T14:12:28Z",
+              "completed_at": "2026-10-12T14:12:28Z"
+            },
+            {
+              "name": "Retain bounded lifecycle observations",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8,
+              "started_at": "2026-10-12T14:12:28Z",
+              "completed_at": "2026-10-12T14:12:29Z"
+            },
+            {
+              "name": "Post Check out the trusted lifecycle controller",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 16,
+              "started_at": "2026-10-12T14:12:29Z",
+              "completed_at": "2026-10-12T14:12:29Z"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 17,
+              "started_at": "2026-10-12T14:12:29Z",
+              "completed_at": "2026-10-12T14:12:29Z"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

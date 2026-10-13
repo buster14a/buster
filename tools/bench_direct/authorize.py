@@ -14,6 +14,10 @@ compiler comparison (an added or modified COMPARE_REQUEST, #2769, or
 SCALING_REQUEST, #424, whose scaling leg runs inside the comparison). For a
 comparison it resolves the merge base with the base branch and both trees from
 GitHub's records, so the host job and the publisher bind the same identities.
+It then admits the merge base's corpus harness (harness_admission, #3714): a
+base without THROUGHPUT_HARNESS_FLOOR is "unsupported" and never dispatched,
+unless one fresh THROUGHPUT_HISTORICAL_REQUEST_LINE selects the named
+historical recipe ("historical").
 """
 
 from __future__ import annotations
@@ -40,6 +44,10 @@ API = "https://api.github.com"
 COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
 # Kept equal to compiler_receipt.SCALING_REQUEST; this file imports nothing local.
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
+# Kept equal to compiler_receipt's THROUGHPUT_HARNESS_FLOOR and
+# THROUGHPUT_HISTORICAL_REQUEST_LINE (#3714); authorize_test pins the equality.
+THROUGHPUT_HARNESS_FLOOR = "293132e418cb2449b36e3b92ae38aaa487813e43"
+THROUGHPUT_HISTORICAL_REQUEST_LINE = "profile: throughput-corpus-historical-v1"
 FILE_PAGES = 30
 FILE_PAGE_SIZE = 100
 # GitHub's compare endpoint never returns more than 300 files.
@@ -195,6 +203,63 @@ def comparison(head: str, compared: object, head_commit: object) -> tuple[list[s
         if not holds:
             failures.append(name)
     return failures, ({} if failures else {"merge_base": base_sha, "merge_base_tree": base_tree, "head_tree": head_tree})
+
+
+def harness_admission(floor_compared: object, request_deltas: list[int] | None) -> tuple[str, list[str]]:
+    """The pull corpus disposition before dispatch: admitted, historical or unsupported (#3714).
+
+    floor_compared is GitHub's compare of THROUGHPUT_HARNESS_FLOOR...merge base:
+    "ahead" or "identical" means the base carries the FAST/QUALITY harness.
+    request_deltas are the historical selector's count changes at the head
+    against each parent (None when unreadable). The recipe is selected only by
+    one fresh exact line and only for a base that predates the floor; any other
+    use, and an unreadable comparison, refuses authorization.
+    """
+    failures: list[str] = []
+    status = floor_compared.get("status") if isinstance(floor_compared, dict) else None
+    requested = request_deltas is not None and bool(request_deltas) and all(delta == 1 for delta in request_deltas)
+    if request_deltas is None:
+        failures.append("historical corpus selector count against every head parent")
+    elif any(delta > 0 for delta in request_deltas) and not requested:
+        failures.append("historical corpus selector must be added exactly once relative to every head parent")
+    state = ""
+    if status in ("ahead", "identical"):
+        state = "admitted"
+        if requested:
+            failures.append("historical corpus recipe requested for a merge base that carries the harness floor")
+    elif status in ("behind", "diverged"):
+        state = "historical" if requested else "unsupported"
+    else:
+        failures.append("harness floor comparison with the merge base")
+    return ("" if failures else state), failures
+
+
+def historical_request_deltas(read, head: str, parents: list) -> list[int] | None:
+    """Exact historical selector-count deltas at head against each parent; None when any read fails.
+
+    read(revision) returns COMPARE_REQUEST's text at that revision, or None when
+    the file is absent there; it raises when the content cannot be proven.
+    """
+    deltas: list[int] | None = None
+    try:
+        texts = [read(revision) for revision in (head, *parents)]
+        counts = [(text or "").splitlines().count(THROUGHPUT_HISTORICAL_REQUEST_LINE) for text in texts]
+        if 1 <= len(parents) <= 2:
+            deltas = [counts[0] - count for count in counts[1:]]
+    except (OSError, ValueError, TypeError, UnicodeDecodeError, urllib.error.URLError):
+        deltas = None
+    return deltas
+
+
+def request_text(repository: str, revision: str, token: str) -> str | None:
+    """COMPARE_REQUEST at revision, or None when GitHub says it is absent there."""
+    text = None
+    try:
+        text = sampling_content(repository, COMPARE_REQUEST, revision, token)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    return text
 
 
 def verify(repository: str, run_id: int, head: str, run: object, pulls: object,
@@ -442,6 +507,38 @@ def sampling_executor_inventory(repository: str, token: str, since: str, *, api=
     return values
 
 
+def closed_request_pulls(repository: str, request: dict, sha: str, number: int | None, read) -> list[dict]:
+    """Closed-unmerged same-repository pulls on the request's head ref that contain `sha`."""
+    branch = request.get("head_branch")
+    if not isinstance(branch, str) or not branch or full_name(request.get("head_repository")) != repository:
+        return []
+    owner = repository.split("/", 1)[0]
+    query = urllib.parse.urlencode({"state": "closed", "head": owner + ":" + branch, "per_page": 100})
+    listed = read(f"/repos/{repository}/pulls?{query}")
+    if not isinstance(listed, list) or len(listed) >= 100:
+        raise ValueError("sampling closed request pull lookup is unavailable or capped")
+    candidates = [pull for pull in listed if isinstance(pull, dict) and pull.get("state") == "closed" and
+                  "merged_at" in pull and pull["merged_at"] is None and type(pull.get("number")) is int and pull["number"] > 0 and
+                  (number is None or pull["number"] == number) and isinstance(pull.get("head"), dict) and
+                  pull["head"].get("ref") == branch]
+    owned = []
+    for pull in candidates:
+        commits = []
+        # GitHub lists at most 250 commits for a pull; a full list may be truncated.
+        for page in range(1, 4):
+            values = read(f"/repos/{repository}/pulls/{pull['number']}/commits?per_page=100&page={page}")
+            if not isinstance(values, list):
+                raise ValueError("sampling closed request pull commits are unavailable")
+            commits.extend(values)
+            if len(values) < 100:
+                break
+        if len(commits) >= 250:
+            raise ValueError("sampling closed request pull commits are capped")
+        if any(isinstance(commit, dict) and commit.get("sha") == sha for commit in commits):
+            owned.append(pull)
+    return owned
+
+
 def sampling_attempt_history(repository: str, token: str, current: str, since: str,
                              freeze_revision: str, campaign: str, parent_revision: str,
                              parent_campaign: str, ancestor_revision: str = "-", ancestor_campaign: str = "-",
@@ -554,6 +651,11 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             raise ValueError("sampling history request has no canonical pull number")
         matches = [pull for pull in associated if isinstance(pull, dict) and
                    (number is None or pull.get("number") == number)] if isinstance(associated, list) else []
+        if not matches and isinstance(associated, list):
+            # GitHub drops a closed-unmerged pull from commits/{sha}/pulls and
+            # from the run snapshot (#3955); recover it by head ref and prove
+            # membership through the pull's own commit list.
+            matches = closed_request_pulls(repository, request, sha, number, read)
         if len(matches) != 1:
             raise ValueError("sampling history request has no unique owning pull")
         pull = matches[0]
@@ -1782,6 +1884,7 @@ def main() -> int:
     failures.extend(problems)
     request_files: list[dict] = []
     compared_parents: list = []
+    parents: list = []
     sampling_requested = False
     preparation_requested = False
     utility_requested = False
@@ -1801,9 +1904,16 @@ def main() -> int:
         failures.extend(problems)
         workloads, compare = workloads and fresh_workloads, compare and fresh_compare
     extra = {"merge_base": "", "merge_base_tree": "", "head_tree": ""}
+    admission = ""
     if not failures and compare:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
         problems, extra = comparison(head, compared, fetch(f"/repos/{repository}/commits/{head}", token))
+        failures.extend(problems)
+    if not failures and compare:
+        # Admit the merge base's corpus harness before any host is dispatched (#3714).
+        floor_compared = fetch(f"/repos/{repository}/compare/{THROUGHPUT_HARNESS_FLOOR}...{extra['merge_base']}", token)
+        deltas = historical_request_deltas(lambda revision: request_text(repository, revision, token), head, parents)
+        admission, problems = harness_admission(floor_compared, deltas)
         failures.extend(problems)
     if not failures and compare and sampling_patch_requested(compared_parents, UTILITY_PREFIX):
         marker = sampling_content(repository, COMPARE_REQUEST, head, token)
@@ -1846,7 +1956,8 @@ def main() -> int:
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
                          f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\npreparation_requested={str(preparation_requested).lower()}\nutility_requested={str(utility_requested).lower()}\nmerge_base={extra['merge_base']}\n"
-                         f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
+                         f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n"
+                         f"harness_admission={admission}\n")
             for key, value in transported.items():
                 stream.write(f"{key}={value}\n")
     return 1 if failures else 0

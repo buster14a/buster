@@ -2,11 +2,14 @@
  * arena, process capture and paired statistics. No production source changes.
  * direct_link freezes the compiler's printed linker argv; traced_inputs pins
  * successful read opens, including linker scripts, startup and system files.
+ * link_only_main is the #2761 Zen 5 route (profile wild-linker-v1): it times
+ * only the direct link-only ide cells, with the host's installed linkers.
  */
 #define main wild_linker_campaign_main
 #include "wild_linker_bench.c"
 #undef main
 #include <ctype.h>
+#include <sched.h>
 
 static char* linker_argv(const char* text)
 {
@@ -258,10 +261,170 @@ static void build_shares(const char* directory)
     must("review-source-restored", "git diff --exit-code -- src");
 }
 
+/* #2761 link-only Zen 5 route. compiler_compare builds the head's ide trees
+ * under BUILD_ROOT, pins this process and passes absolute paths of the host's
+ * Wild and of its comparator, with the comparator's own policy and one-thread
+ * arguments (an empty string when its kind has no such option). The cells and
+ * populations below are frozen by compiler_receipt.WILD_LINKER_PROFILE.
+ */
+#define LINK_ONLY_BUILD_ID "0x2645264526452645264526452645264526452645"
+#define LINK_ONLY_WILD_POLICY "--no-fork --icf=none"
+#define LINK_ONLY_CONTROL_PAIRS 9
+
+typedef struct LinkOnlyCell
+{
+    const char* name;
+    const char* directory;
+    const char* config;
+} LinkOnlyCell;
+
+static const LinkOnlyCell link_only_cells[] = {
+    {"ide-debug", "build-wild-separate", "Debug"},
+    {"ide-unity-release", "build-wild-unity", "Release"},
+    {"ide-separate-release", "build-wild-separate", "Release"},
+};
+
+static char* without_linker_selection(const char* command)
+{
+    char* result = format("%s", command);
+    const char* prefixes[] = {" -fuse-ld=", " --ld-path="};
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        char* at;
+        while ((at = strstr(result, prefixes[i])))
+        {
+            char* end = strchr(at + 1, ' ');
+            if (end) memmove(at, end, strlen(end) + 1);
+            else *at = 0;
+        }
+    }
+    return result;
+}
+
+/* The cell's ide link step as the direct Wild argv Clang prints, plus the
+ * shared policy; the comparator later replaces only the executable. */
+static char* link_only_command(const char* directory, const LinkOnlyCell* cell, const char* wild)
+{
+    BenchResult captured = must("capture-link-command", format("ninja -C %s -f build-%s.ninja -t commands ide", quote(directory), cell->config));
+    char* text = read_text(captured.log);
+    char* last = NULL;
+    for (char* at = text; *at;)
+    {
+        char* end = strchr(at, '\n');
+        if (end) *end = 0;
+        if (*at) last = at;
+        at = end ? end + 1 : at + strlen(at);
+    }
+    if (!last || !strstr(last, " -o ") || strstr(last, " -c ")) fail("the last ide command is not its link step");
+    char* stripped = without_linker_selection(last);
+    size_t length = strlen(stripped);
+    if (length >= 5 && !strcmp(stripped + length - 5, " && :")) stripped[length - 5] = 0;
+    BenchResult dry = must("capture-direct-linker", format("cd %s && %s --ld-path=%s -###", quote(directory), stripped, quote(wild)));
+    const char* printed = format("\"%s\"", wild);
+    char* found = NULL;
+    char* records = read_text(dry.log);
+    for (char* line = records; *line;)
+    {
+        char* end = strchr(line, '\n');
+        if (end) *end = 0;
+        char* start = line;
+        while (*start == ' ' || *start == '\t') ++start;
+        if (!strncmp(start, printed, strlen(printed))) found = start;
+        line = end ? end + 1 : line + strlen(line);
+    }
+    if (!found) fail("Clang dry-run did not print the host Wild linker");
+    write_text(format("%s/%s-argv.txt", evidence, cell->name), found);
+    return format("cd %s && %s --no-gc-sections --build-id=%s", quote(directory), found, LINK_ONLY_BUILD_ID);
+}
+
+static void link_only_cell(const char* root, const LinkOnlyCell* cell, const char* wild, const char* comparator,
+                           const char* comparator_policy, const char* comparator_threads)
+{
+    const char* directory = format("%s/%s", root, cell->directory);
+    const char* base = link_only_command(directory, cell, wild);
+    const char* candidate = format("%s %s", base, LINK_ONLY_WILD_POLICY);
+    const char* reference = format("%s %s", change_linker(base, directory, comparator), comparator_policy);
+    const char* inputs = format("%s/%s-inputs.sha256", evidence, cell->name);
+    must("freeze-object-manifest", format("find %s -type f \\( -name '*.o' -o -name '*.a' \\) -print0 | sort -z | xargs -0 sha256sum > %s",
+         quote(directory), quote(inputs)));
+    compare(format("%s-default", cell->name), reference, candidate, BUSTER_BENCH_SAMPLES);
+    compare(format("%s-threads1", cell->name), format("%s %s", reference, comparator_threads),
+            format("%s --threads=1", candidate), BUSTER_BENCH_SAMPLES);
+    if (!strcmp(cell->name, "ide-debug"))
+    {
+        compare("ide-debug-aa-comparator", reference, reference, LINK_ONLY_CONTROL_PAIRS);
+        compare("ide-debug-aa-wild", candidate, candidate, LINK_ONLY_CONTROL_PAIRS);
+    }
+    const char* commands_pair[] = {reference, candidate};
+    const char* names[] = {"comparator", "wild"};
+    const char* binary = format("%s/%s/ide", directory, cell->config);
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        const char* saved = format("%s/%s-%s.elf", directory, cell->name, names[i]);
+        must("validated-link", commands_pair[i]);
+        must("output-identity", format("cp %s %s && sha256sum < %s | cut -c1-64 > %s", quote(binary), quote(saved), quote(saved),
+             quote(format("%s/%s-%s.output.sha256", evidence, cell->name, names[i]))));
+        must("linked-compiler-smoke", format("%s cc -c %s -o %s", quote(saved), quote(format("%s/probe.c", evidence)),
+             quote(format("%s/check.o", directory))));
+        must("same-linker-repeat", commands_pair[i]);
+        must("same-linker-byte-identity", format("cmp %s %s", quote(binary), quote(saved)));
+    }
+    must("unchanged-object-manifest", format("sha256sum --quiet --check %s", quote(inputs)));
+}
+
+static int link_only_main(char** argv)
+{
+    evidence = argv[2];
+    const char* root = argv[3];
+    const char* wild = argv[4];
+    const char* comparator = argv[5];
+    if (wild[0] != '/' || comparator[0] != '/') fail("linker paths must be absolute");
+    raw = fopen(format("%s/raw.csv", evidence), "wx");
+    commands = fopen(format("%s/commands.tsv", evidence), "wx");
+    summary = fopen(format("%s/summary.csv", evidence), "wx");
+    FILE* affinity = fopen(format("%s/affinity.txt", evidence), "wx");
+    if (!raw || !commands || !summary || !affinity) fail("fresh link-only outputs required");
+    fprintf(raw, "sequence,cell,variant,round,exit,wall_ms,user_ms,system_ms,maxrss_kib,minor_faults,major_faults\n");
+    fprintf(summary, "cell,n,median_A_ms,median_B_ms,mad_A_ms,mad_B_ms,median_paired_B_over_A,ci95_low,ci95_high\n");
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set)) fail("affinity");
+    const char* separator = "";
+    fprintf(affinity, "affinity=");
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+    {
+        if (CPU_ISSET(cpu, &set))
+        {
+            fprintf(affinity, "%s%d", separator, cpu);
+            separator = ",";
+        }
+    }
+    fprintf(affinity, "\n");
+    if (fclose(affinity)) fail("affinity close");
+    self_test();
+    write_text(format("%s/method.txt", evidence),
+        "#2761 wild-linker-v1: direct link-only ide cells on the head's own clang-built, no-LTO objects. A=comparator, B=host Wild; A/A controls name their linker.\n"
+        "Each cell links Clang's printed Wild argv; the comparator replaces only the executable. Shared policy: --no-gc-sections and the fixed 20-byte benchmark-only build ID. Wild adds --no-fork --icf=none; the comparator adds its own equivalent options.\n"
+        "Seed 2645; 2 warmups and 21 randomized AB/BA pairs per cell at default threads and at one thread; 9 A/A pairs per linker on ide-debug. Warm page cache, output closed without fsync, wall includes /bin/sh and fork/wait.\n"
+        "Each linker's output is linked again and must be byte-identical; each output compiles a probe; the object/archive manifest must be unchanged at the end. No build, debugger, strace or end-to-end step is timed.\n");
+    write_text(format("%s/probe.c", evidence), "long probe(long x) { return x * 3 + 1; }\n");
+    for (unsigned i = 0; i < sizeof(link_only_cells) / sizeof(link_only_cells[0]); ++i)
+    {
+        link_only_cell(root, &link_only_cells[i], wild, comparator, argv[6], argv[7]);
+    }
+    write_text(format("%s/completion.txt", evidence), "link_only=PASS\n");
+    if (fclose(raw) || fclose(commands) || fclose(summary)) fail("final link-only flush");
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     int result = 2;
-    if (argc == 4)
+    if (argc == 8 && !strcmp(argv[1], "--link-only"))
+    {
+        result = link_only_main(argv);
+    }
+    else if (argc == 4)
     {
         driver = argv[1];
         evidence = argv[2];
@@ -348,6 +511,7 @@ int main(int argc, char** argv)
         if (fclose(raw) || fclose(commands) || fclose(summary)) fail("final review flush");
         result = failures ? 1 : 0;
     }
-    else fprintf(stderr, "usage: %s BUILD_DRIVER EVIDENCE ORIGINAL_EVIDENCE\n", argv[0]);
+    else fprintf(stderr, "usage: %s BUILD_DRIVER EVIDENCE ORIGINAL_EVIDENCE\n"
+                         "       %s --link-only EVIDENCE BUILD_ROOT WILD COMPARATOR COMPARATOR_POLICY COMPARATOR_THREADS1\n", argv[0], argv[0]);
     return result;
 }
