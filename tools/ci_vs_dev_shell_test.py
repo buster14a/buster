@@ -166,20 +166,6 @@ class Probe:
             output.close()
 
 
-# Probes that reach the vendor shell and exit successfully, or run a fake
-# compiler, each take 24-39 s on hosted Windows AArch64, while the early
-# failures take under a second. Fixed two-owner batches finish with their
-# slower member, so the slow probes share batches instead of each holding up a
-# fast one (#3912).
-SLOW_PROBES = ("combination", "msvc", "wrong clang target", "relative filesystem")
-
-
-def probe_order(plan):
-    """Return the same plan with the slow probes admitted first."""
-    names = [name for name in SLOW_PROBES if name in plan] + [name for name in plan if name not in SLOW_PROBES]
-    return {name: plan[name] for name in names}
-
-
 def probe_plan_run(shell, root, llvm_bin, plan, environment, probes):
     """Start at most two independent helper owners; preserve all plan slots."""
     entries = list(plan.items())
@@ -253,27 +239,31 @@ class HelperBehaviorTests(unittest.TestCase):
             FAKE_VSWHERE_STATUS="0",
             FAKE_CLANG_TARGET="x86_64-pc-windows-msvc",
         )
+        # The four probes that pass the vendor shell take 24-39 s each on hosted
+        # AArch64 and the early failures under a second; batches end with their
+        # slower member, so the slow probes are admitted together first (#3912).
         plan = {
             "combination": (vswhere, {}, (
                 "-LlvmBin '<llvm_bin>' -GithubEnv '<github_env>' "
                 "-Require cl, clang, gcc, zig -ClangArch x86_64")),
             "msvc": (vswhere, {"FAKE_CLANG_TARGET": "wrong-target"}, ""),
+            "wrong clang target": (vswhere, *cls.FAILURES["wrong clang target"]),
+            "relative filesystem": (Path(vswhere.name), {
+                "FAKE_PS_LOCATION": str(cls.root),
+                "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
+                "PATH": environment["PATH"] + ";caf\u00e9-fixture",
+            }, "-GithubEnv 'relative-env'"),
             "missing vswhere": (cls.root / "missing-vswhere.cmd", {}, ""),
         }
         for name, (overrides, arguments) in cls.FAILURES.items():
-            plan[name] = (vswhere, overrides, arguments)
+            plan.setdefault(name, (vswhere, overrides, arguments))
         plan["vswhere directory"] = (cls.root / "vs", {}, "")
         plan["vswhere provider"] = ("Env:FAKE_VS_PATH", {}, "")
-        plan["relative filesystem"] = (Path(vswhere.name), {
-            "FAKE_PS_LOCATION": str(cls.root),
-            "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
-            "PATH": environment["PATH"] + ";caf\u00e9-fixture",
-        }, "-GithubEnv 'relative-env'")
         cls.probes = {}
         # Registered before the first launch and run before the fixture
         # directory is removed, so an early failure never leaks a child.
         cls.addClassCleanup(cls.stop_probes)
-        probe_plan_run(shell, cls.root, cls.llvm_bin, probe_order(plan), environment, cls.probes)
+        probe_plan_run(shell, cls.root, cls.llvm_bin, plan, environment, cls.probes)
 
     @classmethod
     def stop_probes(cls):
@@ -400,12 +390,6 @@ class ProbeSchedulingTests(unittest.TestCase):
         self.assertEqual([event[1] for event in events if event[0] == "finish"], list(range(10)))
         self.assertEqual(max(event[2] for event in events), 2)
         self.assertFalse(live)
-
-    def test_slow_probes_share_batches_and_inventory_is_unchanged(self):
-        ordered = probe_order(self.plan())
-        self.assertEqual(sorted(ordered), sorted(self.plan()))
-        self.assertEqual(list(ordered)[:len(SLOW_PROBES)], list(SLOW_PROBES))
-        self.assertEqual(len(SLOW_PROBES) % PROBE_CONCURRENT_LIMIT, 0)
 
     def test_timeout_does_not_drop_later_cases(self):
         probes, events, live = self.run_fake_plan(timeout_slot=0)

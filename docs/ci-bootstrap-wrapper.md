@@ -76,10 +76,10 @@ logs and environment outputs; each retains its 120-second deadline measured
 from its own launch and its existing ten-second cleanup deadline. This bounds
 PowerShell startup pressure while the other two suite lanes compile their
 fixtures. A timed-out owner remains a failure and does not suppress later
-controls. `probe_order` admits the four probes that pass the vendor shell
-(`SLOW_PROBES`, 24-39 s each on hosted AArch64) before the sub-second early
-failures, so the fixed batches no longer pair each slow probe with a fast one
-(#3912). Cleanup attempts every registered child even if one cleanup fails,
+controls. The plan admits the four probes that pass the vendor shell (24-39 s
+each on hosted AArch64) before the sub-second early failures, so the fixed
+batches no longer pair each slow probe with a fast one (#3912). Cleanup
+attempts every registered child even if one cleanup fails,
 then propagates that error. `VS_PROBE_START`/`VS_PROBE_END` records retain slot,
 case, outcome and duration. Host-independent scheduling controls cover the
 owner limit, complete inventory after timeout, launch failure, cleanup failure
