@@ -115,12 +115,12 @@ qualification or ranking.
 
 ## Hosted scheduling
 
-[The workflow](../../../.github/workflows/ffmpeg-compatibility.yml) runs on
-explicit manual dispatch, plus changes on the implementation's named opt-in
-diagnostic branch `codex/3177-ffmpeg-qualification`. It does not run on PR,
-merge-group or main events and adds no required check. Execution is on a
-GitHub-hosted Linux runner, with machine records and diagnostics retained even
-on failure. Broader scheduling needs its own runner-cost review.
+FFmpeg has no workflow of its own. Under
+[main-only external-project scheduling](../../external-project-ci.md) (#3501)
+the census is an opt-in local harness: run `./build.sh test_ffmpeg` as shown
+above. It adds no PR, merge-group, branch-push or manual workload and no
+required check. A qualified pinned recipe belongs later in the shared
+main-only external-projects workflow, after its own runner-cost review.
 
 ## Remaining qualification
 
