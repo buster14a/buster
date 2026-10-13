@@ -4,10 +4,13 @@
 //   verify BUNDLE IDENTITY  refuse unless the retained bytes reproduce that sealed manifest
 //   self-test               native normal and negative controls
 // IDENTITY is the trusted attempt identity as key<TAB>value lines in
-// COMPILER_EVIDENCE_IDENTITY_KEYS order. Required members are derived here from
-// the admitted profiles and the bundle's own lab plan/availability records,
-// never from a producer's role column: compiler_evidence_manifest regenerates
-// the canonical manifest from disk, and verify compares it byte for byte.
+// COMPILER_EVIDENCE_IDENTITY_KEYS order, optionally followed by the
+// compiler_evidence_route_keys lines of a snapshot-v1 attempt (#3211), which
+// select the snapshot inventory and its exact owned-phase count. Required
+// members are derived here from the admitted profiles, that route and the
+// bundle's own lab plan/availability records, never from a producer's role
+// column: compiler_evidence_manifest regenerates the canonical manifest from
+// disk, and verify compares it byte for byte.
 // receipt.json binds the seal; machine-specifications/ is appended by the
 // workflow after the producer exits and is validated by the publisher's own
 // machine record, so neither is a manifest row.
@@ -15,7 +18,8 @@
 // Map: compiler_evidence_identity (trusted header), compiler_evidence_path_valid
 // (path identity rules), compiler_evidence_collect (bounded nofollow walk; hidden
 // entries are not retained),
-// compiler_evidence_facts / compiler_evidence_required (inventory v1),
+// compiler_evidence_facts / compiler_evidence_required / compiler_evidence_phase_member
+// (inventory v1, ordinary and snapshot),
 // compiler_evidence_omissions_valid, compiler_evidence_manifest,
 // compiler_evidence_seal_text, compiler_evidence_seal, compiler_evidence_verify,
 // compiler_evidence_self_test, compiler_evidence_main.
@@ -24,6 +28,8 @@
 // compiler_closure; other driver builds report an explicit unsupported result.
 #define COMPILER_EVIDENCE_MANIFEST_SCHEMA "buster-compiler-evidence-manifest-v1"
 #define COMPILER_EVIDENCE_INVENTORY "buster-compiler-ordinary-raw-v1"
+// The same inventory plus the snapshot-v1 closure records and owned-phase population.
+#define COMPILER_EVIDENCE_SNAPSHOT_INVENTORY "buster-compiler-snapshot-raw-v1"
 #define COMPILER_EVIDENCE_SEAL_SCHEMA "buster-compiler-evidence-seal-v1"
 #define COMPILER_EVIDENCE_OMISSIONS_SCHEMA "buster-compiler-evidence-omissions-v1"
 #define COMPILER_EVIDENCE_MANIFEST "evidence-manifest.tsv"
@@ -45,6 +51,9 @@
 #define COMPILER_EVIDENCE_PAIRS_MIN 10ull
 #define COMPILER_EVIDENCE_PAIRS_MAX 1000ull
 #define COMPILER_EVIDENCE_HARNESS_REVISION "afe67cbebcb257e7fe130a8eccdd5ff08a79b555"
+// compiler_owned_phase.PHASE_LIMIT: the native owner admits at most this many phases.
+#define COMPILER_EVIDENCE_PHASE_LIMIT 256ull
+#define COMPILER_EVIDENCE_PHASE_DIRECTORY "owned-phases/"
 
 #if BUSTER_LINUX
 // The trusted identity header, in manifest order after schema and inventory.
@@ -54,7 +63,8 @@ struct CompilerEvidenceKey
     String8 name;
     u8 kind;
 };
-// Kinds: r repository, d positive decimal, h 40 lowercase hex, l lab profile, c corpus profile.
+// Kinds: r repository, d positive decimal, h 40 lowercase hex, l lab profile, c corpus profile,
+// p snapshot preparation policy, n owned-phase count.
 BUSTER_GLOBAL_LOCAL CompilerEvidenceKey const compiler_evidence_identity_keys[] = {
     {S8_INITIALIZER("repository"), 'r'}, {S8_INITIALIZER("request_run"), 'd'}, {S8_INITIALIZER("request_attempt"), 'd'},
     {S8_INITIALIZER("executor_run"), 'd'}, {S8_INITIALIZER("executor_attempt"), 'd'},
@@ -62,6 +72,24 @@ BUSTER_GLOBAL_LOCAL CompilerEvidenceKey const compiler_evidence_identity_keys[] 
     {S8_INITIALIZER("candidate_revision"), 'h'}, {S8_INITIALIZER("baseline_tree"), 'h'},
     {S8_INITIALIZER("candidate_tree"), 'h'}, {S8_INITIALIZER("lab_profile"), 'l'},
     {S8_INITIALIZER("corpus_profile"), 'c'}, {S8_INITIALIZER("corpus_harness_revision"), 'h'},
+};
+
+// The optional trailing route lines of a snapshot-v1 attempt; absent means legacy-rebuild.
+BUSTER_GLOBAL_LOCAL CompilerEvidenceKey const compiler_evidence_route_keys[] = {
+    {S8_INITIALIZER("preparation_policy"), 'p'}, {S8_INITIALIZER("owned_phases"), 'n'},
+};
+
+// The snapshot-v1 closure records and their manifests, written beside the receipt.
+BUSTER_GLOBAL_LOCAL String8 const compiler_evidence_closure_members[] = {
+    S8_INITIALIZER("closure-snapshot.json"), S8_INITIALIZER("closure-snapshot.json.manifest.tsv"),
+    S8_INITIALIZER("closure-restore.json"), S8_INITIALIZER("closure-restore.json.manifest.tsv"),
+    S8_INITIALIZER("closure-verify.json"), S8_INITIALIZER("closure-verify.json.manifest.tsv"),
+};
+
+// The five members the native owner writes for each phase NNNN.json.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_phase_suffixes[] = {
+    S8_INITIALIZER(""), S8_INITIALIZER(".argv"), S8_INITIALIZER(".stdout"), S8_INITIALIZER(".stderr"),
+    S8_INITIALIZER(".bootstrap.complete"),
 };
 
 // The trusted frozen corpus population (THROUGHPUT_PROFILE["workloads"]).
@@ -101,6 +129,8 @@ typedef struct CompilerEvidenceFacts CompilerEvidenceFacts;
 struct CompilerEvidenceFacts
 {
     u64 pairs;
+    // Trusted owned-phase count of a snapshot-v1 attempt; 0 for legacy-rebuild.
+    u64 phases;
     bool counters[2];
     bool metrics[2];
 };
@@ -166,42 +196,84 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_value_valid(String8 value, u8 kind)
     {
         result = string_equal(value, S8("throughput-corpus-v2")) || string_equal(value, S8("throughput-corpus-historical-v1"));
     }
+    else if (kind == 'p')
+    {
+        result = string_equal(value, S8("snapshot-v1"));
+    }
+    else if (kind == 'n')
+    {
+        u64 count = 0;
+        result = value.length && value.length <= 3 && value.pointer[0] >= '1' && value.pointer[0] <= '9';
+        for (u64 index = 0; result && index < value.length; index += 1)
+        {
+            result = value.pointer[index] >= '0' && value.pointer[index] <= '9';
+            count = count * 10 + (u64)(value.pointer[index] - '0');
+        }
+        result = result && count <= COMPILER_EVIDENCE_PHASE_LIMIT;
+    }
     return result;
 }
 
+// The value of the key<TAB>value line at *cursor, advancing past it, or empty when malformed.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_identity_line(String8 text, u64* cursor, CompilerEvidenceKey key)
+{
+    u64 end = *cursor;
+    while (end < text.length && text.pointer[end] != '\n') { end += 1; }
+    String8 line = {.pointer = text.pointer + *cursor, .length = end - *cursor};
+    bool valid = end < text.length && line.length > key.name.length + 1 && string_starts_with_sequence(line, key.name) &&
+        line.pointer[key.name.length] == '\t';
+    String8 value = valid ? (String8){.pointer = line.pointer + key.name.length + 1, .length = line.length - key.name.length - 1} : (String8){0};
+    valid = valid && compiler_evidence_value_valid(value, key.kind);
+    if (valid) { *cursor = end + 1; }
+    return valid ? value : (String8){0};
+}
+
 // The trusted identity file becomes the manifest's identity header lines. The
-// historical recipe always names its pinned harness revision.
-BUSTER_GLOBAL_LOCAL String8 compiler_evidence_identity(Arena* arena, String8 text, String8* problem)
+// historical recipe always names its pinned harness revision. Trailing route
+// lines select the snapshot inventory and set *phases; the snapshot route runs
+// only the frozen throughput-corpus-v2 recipe, as the producer requires.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_identity(Arena* arena, String8 text, u64* phases, String8* problem)
 {
     String8List lines = {0};
-    string8_list_push(arena, &lines, S8("schema\t" COMPILER_EVIDENCE_MANIFEST_SCHEMA "\n"));
-    string8_list_push(arena, &lines, S8("inventory\t" COMPILER_EVIDENCE_INVENTORY "\n"));
     u64 cursor = 0;
     String8 corpus = {0};
     String8 harness = {0};
+    u64 count = 0;
     bool valid = text.length != 0;
     for (u64 key = 0; valid && key < BUSTER_ARRAY_LENGTH(compiler_evidence_identity_keys); key += 1)
     {
-        u64 end = cursor;
-        while (end < text.length && text.pointer[end] != '\n') { end += 1; }
-        String8 line = {.pointer = text.pointer + cursor, .length = end - cursor};
-        String8 name = compiler_evidence_identity_keys[key].name;
-        valid = end < text.length && line.length > name.length + 1 && string_starts_with_sequence(line, name) &&
-            line.pointer[name.length] == '\t';
-        String8 value = valid ? (String8){.pointer = line.pointer + name.length + 1, .length = line.length - name.length - 1} : (String8){0};
-        valid = valid && compiler_evidence_value_valid(value, compiler_evidence_identity_keys[key].kind);
+        String8 value = compiler_evidence_identity_line(text, &cursor, compiler_evidence_identity_keys[key]);
+        valid = value.length != 0;
         if (valid)
         {
-            string8_list_push(arena, &lines, string_format(arena, S8("{S8}\n"), line));
-            if (string_equal(name, S8("corpus_profile"))) { corpus = value; }
-            if (string_equal(name, S8("corpus_harness_revision"))) { harness = value; }
-            cursor = end + 1;
+            string8_list_push(arena, &lines, string_format(arena, S8("{S8}\t{S8}\n"), compiler_evidence_identity_keys[key].name, value));
+            if (string_equal(compiler_evidence_identity_keys[key].name, S8("corpus_profile"))) { corpus = value; }
+            if (string_equal(compiler_evidence_identity_keys[key].name, S8("corpus_harness_revision"))) { harness = value; }
+        }
+    }
+    bool snapshot = valid && cursor < text.length;
+    for (u64 key = 0; snapshot && valid && key < BUSTER_ARRAY_LENGTH(compiler_evidence_route_keys); key += 1)
+    {
+        String8 value = compiler_evidence_identity_line(text, &cursor, compiler_evidence_route_keys[key]);
+        valid = value.length != 0;
+        if (valid)
+        {
+            string8_list_push(arena, &lines, string_format(arena, S8("{S8}\t{S8}\n"), compiler_evidence_route_keys[key].name, value));
+            for (u64 index = 0; compiler_evidence_route_keys[key].kind == 'n' && index < value.length; index += 1)
+            {
+                count = count * 10 + (u64)(value.pointer[index] - '0');
+            }
         }
     }
     valid = valid && cursor == text.length &&
-        (!string_equal(corpus, S8("throughput-corpus-historical-v1")) || string_equal(harness, S8(COMPILER_EVIDENCE_HARNESS_REVISION)));
+        (!string_equal(corpus, S8("throughput-corpus-historical-v1")) || string_equal(harness, S8(COMPILER_EVIDENCE_HARNESS_REVISION))) &&
+        (!snapshot || string_equal(corpus, S8("throughput-corpus-v2")));
     if (!valid) { compiler_evidence_refuse(problem, S8("trusted identity is malformed")); }
-    return valid ? compiler_evidence_join(arena, lines) : (String8){0};
+    *phases = valid ? count : 0;
+    String8 inventory = snapshot ? S8("inventory\t" COMPILER_EVIDENCE_SNAPSHOT_INVENTORY "\n") : S8("inventory\t" COMPILER_EVIDENCE_INVENTORY "\n");
+    String8 result = valid ? string_format(arena, S8("schema\t" COMPILER_EVIDENCE_MANIFEST_SCHEMA "\n{S8}{S8}"), inventory,
+        compiler_evidence_join(arena, lines)) : (String8){0};
+    return result;
 }
 
 // Printable ASCII without backslash, at most 512 bytes, relative, no empty, `.` or `..` component.
@@ -406,10 +478,36 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_facts(Arena* arena, String8 bundle, C
     return success;
 }
 
-// Inventory v1 obligation of one retained path, from the admitted profile and facts only.
+// owned-phases/NNNN.json or one of its four siblings, with 1 <= NNNN <= phases.
+BUSTER_GLOBAL_LOCAL bool compiler_evidence_phase_member(String8 path, u64 phases)
+{
+    String8 prefix = S8(COMPILER_EVIDENCE_PHASE_DIRECTORY);
+    bool result = path.length >= prefix.length + 9 && string_starts_with_sequence(path, prefix);
+    String8 leaf = result ? (String8){.pointer = path.pointer + prefix.length, .length = path.length - prefix.length} : (String8){0};
+    u64 number = 0;
+    for (u64 index = 0; result && index < 4; index += 1)
+    {
+        result = leaf.pointer[index] >= '0' && leaf.pointer[index] <= '9';
+        number = number * 10 + (u64)(leaf.pointer[index] - '0');
+    }
+    result = result && number >= 1 && number <= phases && memcmp(leaf.pointer + 4, ".json", 5) == 0;
+    String8 suffix = result ? (String8){.pointer = leaf.pointer + 9, .length = leaf.length - 9} : (String8){0};
+    bool known = false;
+    for (u64 index = 0; result && !known && index < BUSTER_ARRAY_LENGTH(compiler_evidence_phase_suffixes); index += 1)
+    {
+        known = string_equal(suffix, compiler_evidence_phase_suffixes[index]);
+    }
+    return result && known;
+}
+
+// Inventory v1 obligation of one retained path, from the admitted profile, route and facts only.
 BUSTER_GLOBAL_LOCAL bool compiler_evidence_required(Arena* arena, CompilerEvidenceFacts facts, String8 path)
 {
-    bool result = string_equal(path, S8(COMPILER_EVIDENCE_OMISSIONS));
+    bool result = string_equal(path, S8(COMPILER_EVIDENCE_OMISSIONS)) || (facts.phases && compiler_evidence_phase_member(path, facts.phases));
+    for (u64 index = 0; facts.phases && !result && index < BUSTER_ARRAY_LENGTH(compiler_evidence_closure_members); index += 1)
+    {
+        result = string_equal(path, compiler_evidence_closure_members[index]);
+    }
     for (u64 index = 0; !result && index < BUSTER_ARRAY_LENGTH(compiler_evidence_lab_fixed); index += 1)
     {
         result = string_equal(path, compiler_evidence_lab_fixed[index]);
@@ -480,6 +578,18 @@ BUSTER_GLOBAL_LOCAL String8List compiler_evidence_obligations(Arena* arena, Comp
     {
         string8_list_push(arena, &result, string_format(arena, S8("throughput/inputs/{S8}.c"), compiler_evidence_workloads[index]));
     }
+    for (u64 index = 0; facts.phases && index < BUSTER_ARRAY_LENGTH(compiler_evidence_closure_members); index += 1)
+    {
+        string8_list_push(arena, &result, compiler_evidence_closure_members[index]);
+    }
+    for (u64 phase = 1; phase <= facts.phases; phase += 1)
+    {
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(compiler_evidence_phase_suffixes); index += 1)
+        {
+            string8_list_push(arena, &result, string_format(arena, S8(COMPILER_EVIDENCE_PHASE_DIRECTORY "{u64:width=[0,4]}.json{S8}"),
+                phase, compiler_evidence_phase_suffixes[index]));
+        }
+    }
     return result;
 }
 
@@ -544,13 +654,15 @@ BUSTER_GLOBAL_LOCAL u64 compiler_evidence_member_limit(String8 path)
 
 // The canonical manifest of the retained bytes: identity header, counts, then
 // one role/bytes/sha256/path row per non-control file in bytewise path order.
-BUSTER_GLOBAL_LOCAL String8 compiler_evidence_manifest(Arena* arena, String8 bundle, String8 header, CompilerEvidenceBundle* totals,
-    String8* problem)
+// A snapshot attempt's owned-phases/ holds exactly the trusted phase population.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_manifest(Arena* arena, String8 bundle, String8 header, u64 phases,
+    CompilerEvidenceBundle* totals, String8* problem)
 {
     CompilerEvidenceBundle files = {0};
     CompilerEvidenceFacts facts = {0};
     bool success = header.length && compiler_evidence_collect(arena, bundle, &files, problem) &&
         compiler_evidence_facts(arena, bundle, &facts, problem);
+    facts.phases = phases;
     if (success)
     {
         success = compiler_evidence_omissions_valid(arena, bundle);
@@ -573,11 +685,16 @@ BUSTER_GLOBAL_LOCAL String8 compiler_evidence_manifest(Arena* arena, String8 bun
         struct stat status = {0};
         success = compiler_closure_hash(arena, path_join(arena, bundle, path), &digest, &status) &&
             (u64)status.st_size <= compiler_evidence_member_limit(path);
-        if (success)
+        bool required = success && compiler_evidence_required(arena, facts, path);
+        if (success && phases && !required && string_starts_with_sequence(path, S8(COMPILER_EVIDENCE_PHASE_DIRECTORY)))
+        {
+            success = false;
+            compiler_evidence_refuse(problem, string_format(arena, S8("owned-phase population differs from the trusted phase count: {S8}"), path));
+        }
+        else if (success)
         {
             payload += (u64)status.st_size;
-            String8 role = S8("optional");
-            if (compiler_evidence_required(arena, facts, path)) { role = S8("required"); }
+            String8 role = required ? S8("required") : S8("optional");
             string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{u64}\t{S8}\t{S8}\n"),
                 role, (u64)status.st_size, digest, path));
         }
@@ -633,10 +750,10 @@ BUSTER_GLOBAL_LOCAL String8 compiler_evidence_seal_text(Arena* arena, String8 ma
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_evidence_identity_file(Arena* arena, String8 path, String8* problem)
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_identity_file(Arena* arena, String8 path, u64* phases, String8* problem)
 {
     String8 text = compiler_closure_read(arena, path, COMPILER_EVIDENCE_SEAL_LIMIT);
-    return compiler_evidence_identity(arena, text, problem);
+    return compiler_evidence_identity(arena, text, phases, problem);
 }
 
 // Write the manifest, then the seal last. Any existing control file refuses:
@@ -655,9 +772,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_seal(Arena* arena, String8 bundle, St
     struct stat status = {0};
     bool fresh = lstat((char*)manifest_path.pointer, &status) != 0 && lstat((char*)seal_path.pointer, &status) != 0;
     if (!fresh) { compiler_evidence_refuse(problem, S8("bundle already carries a manifest or seal")); }
-    String8 header = fresh ? compiler_evidence_identity_file(arena, identity_path, problem) : (String8){0};
+    u64 phases = 0;
+    String8 header = fresh ? compiler_evidence_identity_file(arena, identity_path, &phases, problem) : (String8){0};
     CompilerEvidenceBundle totals = {0};
-    String8 manifest = header.length ? compiler_evidence_manifest(arena, bundle, header, &totals, problem) : (String8){0};
+    String8 manifest = header.length ? compiler_evidence_manifest(arena, bundle, header, phases, &totals, problem) : (String8){0};
     String8 seal = manifest.length ? compiler_evidence_seal_text(arena, manifest) : (String8){0};
     u64 controls = manifest.length + seal.length + COMPILER_EVIDENCE_RECEIPT_LIMIT;
     bool fits = seal.length && totals.receipt_bytes <= COMPILER_EVIDENCE_RECEIPT_LIMIT &&
@@ -671,7 +789,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_seal(Arena* arena, String8 bundle, St
     }
     // Refuse if the retained set changed while sealing.
     CompilerEvidenceBundle again_totals = {0};
-    String8 again = success ? compiler_evidence_manifest(arena, bundle, header, &again_totals, problem) : (String8){0};
+    String8 again = success ? compiler_evidence_manifest(arena, bundle, header, phases, &again_totals, problem) : (String8){0};
     success = success && string_equal(again, manifest);
     if (fits && !success)
     {
@@ -686,14 +804,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_seal(Arena* arena, String8 bundle, St
 // trusted identity, and the seal must bind those manifest bytes.
 BUSTER_GLOBAL_LOCAL bool compiler_evidence_verify(Arena* arena, String8 bundle, String8 identity_path, String8* problem, String8* summary)
 {
-    String8 header = compiler_evidence_identity_file(arena, identity_path, problem);
+    u64 phases = 0;
+    String8 header = compiler_evidence_identity_file(arena, identity_path, &phases, problem);
     String8 retained = header.length ? compiler_closure_read(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST)), COMPILER_EVIDENCE_MANIFEST_LIMIT) : (String8){0};
     String8 seal = retained.length ? compiler_closure_read(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_SEAL)), COMPILER_EVIDENCE_SEAL_LIMIT) : (String8){0};
     if (header.length && !seal.length) { compiler_evidence_refuse(problem, S8("bundle has no bounded manifest and seal")); }
     String8 receipt = seal.length ? compiler_closure_read(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_RECEIPT)), COMPILER_EVIDENCE_RECEIPT_LIMIT) : (String8){0};
     if (seal.length && !receipt.length) { compiler_evidence_refuse(problem, S8("final receipt is missing or exceeds its 1 MiB bound")); }
     CompilerEvidenceBundle totals = {0};
-    String8 expected = receipt.length ? compiler_evidence_manifest(arena, bundle, header, &totals, problem) : (String8){0};
+    String8 expected = receipt.length ? compiler_evidence_manifest(arena, bundle, header, phases, &totals, problem) : (String8){0};
     bool success = expected.length && string_equal(expected, retained);
     if (expected.length && !success) { compiler_evidence_refuse(problem, S8("retained bytes, roles or identity do not reproduce the sealed manifest")); }
     success = success && string_equal(seal, compiler_evidence_seal_text(arena, retained));

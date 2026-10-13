@@ -153,6 +153,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     };
     CompilerDriverInvocation serial = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(serial_command));
     CompilerDriverInvocation parallel = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parallel_command));
+    // The tiny positional inputs sit below the minimum-work gate; force the
+    // lane path so the two-input cohort is still exercised.
+    compiler_driver_test_set_lane_work(0, 0);
     CompilerDriverResult serial_result = compiler_driver_execute_invocation(arena, serial);
     CompilerDriverResult parallel_result = compiler_driver_execute_invocation(arena, parallel);
     if (serial_result.error != COMPILER_DRIVER_ERROR_NONE)
@@ -187,6 +190,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     }
     BUSTER_TEST(arguments, boundary_result.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, boundary_result.compilation_workers == 1);
+    compiler_driver_test_restore_lane_work();
 #endif
 
     scratch_end(temporary);

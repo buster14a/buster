@@ -698,8 +698,13 @@ hosts execute its independent expected-value fixture.
   stores and ABI transport. One-, two-, four-, eight- and sixteen-byte
   signatures follow the shared classifier on SysV and Win64; incoming and
   outgoing XMM transfers preserve the complete sixteen-byte part. Canonical
-  joins use the existing pair mapping, allocated only when a vector participates
-  in an edge. Baseline wider local vector images can also use frame copies;
+  joins through 64 bytes use eightbyte register parts, allocated only when a
+  frame-backed vector participates in an edge. Incoming definitions snapshot
+  every part and parallel edge copies preserve cycles before destination frame
+  stores restore the whole image. Native ZMM values retain vector-register edges.
+  `compiler_driver_test_wide_vector_joins` executes integer and double vectors
+  through branches, ternaries, loops and three-way rotations with calls in both
+  allocators and frontend forms. Baseline wider local vector images use frame copies;
   this does not admit missing vector arithmetic or split wide signatures.
   `compiler_driver_test_native_frame_vectors` preserves four whole original
   fixtures and a new conditional/loop/cross-compiler fixture over all six x86
@@ -922,10 +927,12 @@ hosts execute its independent expected-value fixture.
   the scalar arithmetic rules. Keep the entire vector fixture strict in
   FAST and QUALITY; scalar expansion must remain visible to MIR
   validation and register allocation.
-- AArch64 vectors through sixteen bytes use the existing two-general-register
-  canonical edge mapping at joins. Every incoming value is snapshotted at its
-  definition; destination stores restore its frame image. Short images that
-  enter a pair receive sixteen bytes of owned storage for both limb reads.
+- AArch64 vectors through sixty-four bytes use eightbyte general-register
+  parts at canonical joins. Every incoming value is snapshotted at its
+  definition; parallel edge copies precede destination frame stores. Short
+  images receive sixteen bytes of owned storage for the minimum two-part form.
+  `compiler_driver_test_wide_vector_joins` checks all lanes of 32/64-byte integer
+  and double vectors across branches, loop backedges, calls and rotation cycles.
   One-, two- and four-byte arguments use W registers. Results use the vector
   file; two- and four-byte multi-lane integer vectors expand their elements
   across D0's ABI lanes and compact again on receipt, matching Clang on ELF,

@@ -565,6 +565,8 @@ captures (#2741).
   being published. Sealed raw evidence for this route (#2918) follows
   [compiler-evidence-v1.md](../compiler-evidence-v1.md): an ordinary attempt
   seals its lab and corpus last, and the publisher verifies the seal natively.
+  A pull `snapshot-v1` attempt also seals its closure records and owned-phase
+  population.
   An artifact without a seal is `legacy-unsealed`, and its raw bytes are
   reported unverified.
   Optional facts keep the collector's own `unknown` or
@@ -618,9 +620,11 @@ captures (#2741).
   plus one maintained report comment on the commit (#2804). The linked
   Actions `compare` job supplies live preparation/measurement state; a queued
   custom check does not prove that the physical job has not started. During merge bursts only
-  the newest pending commit is measured; the others' checks read
-  **Not measured** and name the range comparison that covers their change.
-  A range result does not isolate one commit. A range since the last actual
+  the newest pending commit is measured; displaced commits remain
+  **Not measured**. Native recovery reports verified pre-execution pending
+  replacement as neutral, retaining the native cancellation and its exact
+  attempt. It claims no successor result or range coverage from a request
+  alone. A validated range result does not isolate one commit. A range since the last actual
   measurement that changes only reviewed prose is completed as neutral
   **Not measured** without allocating the 9700X
   ([unchanged-input skip](../compiler-main-unchanged-skip.md), #3923). See the
@@ -1453,8 +1457,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    would self-build with `-fcanonical-inline`. The #48 profile above times
    one head against itself, inliner off against on; this one times base
    against head, both with the inliner on. It cannot be combined with any
-   other opt-in profile, `canonical-inline-self-host-v1` and the scaling leg
-   included; both the harness and the publisher refuse the combination. The
+   other opt-in profile, the scaling leg included; both the harness and the
+   publisher refuse the combination. The #48 `canonical-inline-self-host-v1`
+   leg is the exception: `inline_acceptance_requested` selects it whenever its
+   line is anywhere in the request file, as it has been on main since #48, so
+   it runs beside this leg (its 12-pair stages add a few minutes). The
    trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
    two parts:
    - **Stage 1, untimed.** Right after each role's Clang Release build, with
