@@ -35347,6 +35347,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     }
                     conditional_depth += 1;
                     operand = false;
+                    size_operator_operand = false;
                 }
                 else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) && conditional_depth)
                 {
@@ -35356,6 +35357,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                         colon = cursor;
                     }
                     operand = false;
+                    size_operator_operand = false;
                 }
                 else
                 {
@@ -35379,10 +35381,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     else
                     {
                         operand = c_parse_expression_token_ends_operand(token);
-                        if (operand)
-                        {
-                            size_operator_operand = false;
-                        }
+                        // A unary punctuation prefix such as plus or star owns its following cast group;
+                        // only a direct group after the size word is the parenthesized type form.
+                        size_operator_operand = false;
                     }
                 }
             }
