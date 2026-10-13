@@ -1474,6 +1474,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
         defined->defined = true;
         defined->section = builder->current_section;
         defined->value = (u64)value.constant;
+        builder->symbol_alias[symbol] = true;
     }
     else if (valid)
     {
@@ -1693,19 +1694,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     {
         return !operands.length && assembly_unit_directive_section_return(builder, string_equal(directive, S8(".popsection")));
     }
-    // Mach-O spells replaceable definitions with `.weak_definition`; plain `.weak`
-    // is an unknown directive there, as llvm-mc reports.
-    if (string_equal(directive, S8(".weak")) && assembly_unit_target_is_macho(builder))
-    {
-        *recognized = false;
-        return false;
-    }
     if (string_equal(directive, S8(".weak_definition")) && assembly_unit_target_is_macho(builder))
     {
         return assembly_unit_directive_weak_definition(builder, operands);
     }
+    // Mach-O's plain `.weak` is unknown; let it reach the terminal refusal.
     if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
-        string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
+        (string_equal(directive, S8(".weak")) && !assembly_unit_target_is_macho(builder)) ||
+        string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
     {
         return assembly_unit_directive_symbol(builder, directive, operands);
     }

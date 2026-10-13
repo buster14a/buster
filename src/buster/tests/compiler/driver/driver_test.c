@@ -9383,6 +9383,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
          {S8(".text\n_a:\n    ret\n.globl _s\n.set _s, _a\n.weak_definition _s\n"),
           S8(".text\n_a:\n    ret\n.globl _s\n.set _s, _a\n.weak_definition _s\n")},
          true, true, false},
+        {S8("set location alias stays strong"),
+         {S8(".text\n.globl _s\n.set _s, .\n.weak_definition _s\n"),
+          S8(".text\n.globl _s\n.set _s, .\n.weak_definition _s\n")},
+         true, true, false},
         {S8("same-section weak difference"),
          {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n"),
           S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n")},
@@ -9423,7 +9427,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
                 {
                     ObjectFile reread = object_read(arena, file_read(arena, object, (FileReadOptions){0}), assembled.object.target);
                     // The reader drops the Mach-O C-level underscore.
-                    String8 symbol_name = string_equal(weak_case->name, S8("set alias stays strong")) ? S8("s") : S8("w");
+                    bool set_alias_case = string_equal(weak_case->name, S8("set alias stays strong")) ||
+                                          string_equal(weak_case->name, S8("set location alias stays strong"));
+                    String8 symbol_name = set_alias_case ? S8("s") : S8("w");
                     ObjectSymbol const* symbol = reread.error == OBJECT_ERROR_NONE ? compiler_driver_test_object_symbol(&reread, symbol_name) : 0;
                     if (BUSTER_REQUIRE(arguments, symbol != 0))
                     {
@@ -9438,6 +9444,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
                             BUSTER_TEST_RAW(arguments, symbol->section == target_symbol->section && symbol->value == target_symbol->value,
                                 weak_case->name);
                         }
+                    }
+                    else if (string_equal(weak_case->name, S8("set location alias stays strong")))
+                    {
+                        BUSTER_TEST_RAW(arguments, symbol->section == OBJECT_SECTION_TEXT && symbol->value == 0, weak_case->name);
                     }
                     if (string_first_sequence(weak_case->text[index], S8(".weak_definition _w, _x")) != BUSTER_STRING_NO_MATCH)
                     {
