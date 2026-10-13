@@ -5315,7 +5315,7 @@ BUSTER_GLOBAL_LOCAL u64 c_ast_test_instruction_total(CIRLowerResult const* lower
     return total;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     for (u32 tamper = 0; tamper < C_AST_EXTENT_TAMPER_COUNT; tamper += 1)
@@ -6022,7 +6022,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_lookups);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_split);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statements);
-    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_extents);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statement_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_specifiers);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);

@@ -1372,9 +1372,9 @@ marked for step 5 (#4058) to delete:
 `-v` adds three fields to `C_AST_LOWER`: `statement_bodies`, `statements` and
 `range_adapters`, the token ranges the adapter derived.
 
-Tests: `c_ast_test_extents` lowers one body with every controlled-substatement
-shape alike in every layout and with or without a passed tree, and refuses a
-tree whose body brace or `if` anchor is moved. `c_test_statement_nodes_kinds`
+Tests: `c_ast_test_statement_nodes` lowers one body with every
+controlled-substatement shape alike in every layout and with or without a
+passed tree, and refuses a tree whose body brace or `if` anchor is moved. `c_test_statement_nodes_kinds`
 and `c_test_statement_nodes_deep_nesting` (blocks, `if` blocks, an `else if`
 chain, a braceless loop nest, a run of labels and nested statement
 expressions, thousands deep) lower to certified IR, and

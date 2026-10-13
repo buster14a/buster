@@ -44811,7 +44811,7 @@ struct CIrSwitchCase
 };
 
 // One case label whose block the statement stream has to branch into when it
-// reaches the label, keyed by the label's token index. Nested switches reuse
+// reaches the label, keyed by the label's node. Nested switches reuse
 // the switch-case scratch array, so this registry lives for the whole body.
 // A declaration between a switch's `{` and its first case label declares
 // objects the cases go on to use, but no statement stream ever reaches it:
@@ -44860,7 +44860,6 @@ typedef struct CIrSubstatementCase CIrSubstatementCase;
 struct CIrSubstatementCase
 {
     u32 node;
-    u32 statement;
     IrBlockId block;
 };
 
@@ -45025,7 +45024,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
     u32 body_node = node - 1;
     CIrNodeList const* list = body.list ? body.list : c_ir_node_single_list(builder, body_node, after);
     bool result = list != 0;
-    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
     u32 floor = c_ast_subtree_begin(ast, body_node);
     u32 found_count = 0;
     for (u32 cursor = body_node + 1; result && cursor > floor;)
@@ -45035,10 +45033,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
         found_count += kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT;
         cursor = kind == C_AST_SWITCH ? c_ast_subtree_begin(ast, visited) : visited;
     }
-    u64* keys = arena_allocate(temporary.arena, u64, found_count + 1);
-    u64* scratch = arena_allocate(temporary.arena, u64, found_count + 1);
-    u32* ranged_nodes = arena_allocate(temporary.arena, u32, found_count + 1);
-    u32* ranged_items = arena_allocate(temporary.arena, u32, found_count + 1);
+    // The body's scratch carries the rows for the rest of the body, as it
+    // carries the case rows themselves.
+    result = result && c_ir_lower_scratch_reservation(builder, (sizeof(u64) * 2 + sizeof(u32) * 2) * ((u64)found_count + 1), 1, 16);
+    u64* keys = result ? arena_allocate(builder->scratch_arena, u64, found_count + 1) : 0;
+    u64* scratch = result ? arena_allocate(builder->scratch_arena, u64, found_count + 1) : 0;
+    u32* ranged_nodes = result ? arena_allocate(builder->scratch_arena, u32, found_count + 1) : 0;
+    u32* ranged_items = result ? arena_allocate(builder->scratch_arena, u32, found_count + 1) : 0;
     u32 key_count = 0;
     for (u32 cursor = body_node + 1; result && cursor > floor;)
     {
@@ -45050,7 +45051,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
         }
         cursor = kind == C_AST_SWITCH ? c_ast_subtree_begin(ast, visited) : visited;
     }
-    c_ir_tree_sort_keys(keys, scratch, key_count);
+    if (result)
+    {
+        c_ir_tree_sort_keys(keys, scratch, key_count);
+    }
     // The labels that own statements, in source order: an item's prefixes
     // come in source order from the outermost in.
     u32 ranged_count = 0;
@@ -45168,7 +45172,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
             cases[case_count++] = switch_case;
         }
     }
-    scratch_end(temporary);
     state->switch_case_count = case_count;
     state->switch_list = list;
     return result;
@@ -48144,8 +48147,7 @@ BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuil
     bool ok = !open_count || c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 3, BUSTER_ALIGN_OF(u32));
     if (ok && open_count)
     {
-        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-        u32* begins = arena_allocate(temporary.arena, u32, open_count * 3);
+        u32* begins = arena_allocate(builder->scratch_arena, u32, open_count * 3);
         u32* opens = begins + open_count;
         u32* closes = opens + open_count;
         u32 depth = 0;
@@ -48176,7 +48178,6 @@ BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuil
                 }
             }
         }
-        scratch_end(temporary);
     }
     return ok;
 }
@@ -48188,7 +48189,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
 BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     CAst const* ast = builder->ast;
-    CDeclaration declaration = state->declaration;
     state->list = state->compound != C_AST_NODE_INVALID ? c_ir_node_block_list(builder, state->compound) : 0;
     bool initialized = state->list != 0;
     u32 begin = 0;
@@ -48202,7 +48202,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
     {
         label_capacity += ast->kinds[node] == C_AST_LABELED;
     }
-    BUSTER_UNUSED(declaration);
     initialized = initialized &&
                   c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel)) &&
                   c_ir_lower_scratch_reservation(builder, sizeof(u32), c_ir_label_slot_count(label_capacity), BUSTER_ALIGN_OF(u32)) &&
@@ -48780,7 +48779,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     state->substatement_cases[state->substatement_case_count++] = (CIrSubstatementCase){
                         .node = switch_cases[current].node,
-                        .statement = switch_cases[current].statement,
                         .block = switch_cases[current].block,
                     };
                     continue;
