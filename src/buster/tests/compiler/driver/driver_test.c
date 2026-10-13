@@ -4825,8 +4825,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, Compi
 // -fsyntax-only, -c -g0 and -c -g. Valid controls must stay valid.
 // #1561 deliberately replaces alignment_redeclaration's frozen syntax-only
 // success with the later-declaration conflict shared by all three modes.
-// #3743: an unevaluated operand retains the address-of constraint. Check
-// structured diagnostic parity and absence of an object across driver routes.
+// #3743: an unevaluated operand retains the bit-field address constraint.
+// #3758: selected Generic entities must retain their C value category through
+// update and address checks. Check diagnostic parity and no object on refusal.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4834,6 +4835,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
     {
         String8 source;
         bool valid;
+        String8 expected_message;
     } cases[] = {
         {S8("struct S{int b:2;}; long f(struct S s){return (long)&s.b;}"), false},
         {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof &s.b;}"), false},
@@ -4869,6 +4871,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
         {S8("int *f(int x){return &_Generic(0,int:x);}"), true},
         {S8("struct S{int c;}; int *f(struct S *p){return &_Generic(0,int:p->c);}"), true},
         {S8("struct S{int c;}; int *f(struct S *p){return &_Generic(0,int:_Generic(1,int:p->c));}"), true},
+        {S8("int *f(void){enum { E=0 }; return &_Generic(0,int:E);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue")},
+        {S8("int f(void){enum { E=0 }; return _Generic(0,int:E)++;}"), false,
+         S8("increment or decrement operand is not a modifiable place")},
+        {S8("int *f(void){register int x=0; return &_Generic(0,int:x);}"), false,
+         S8("address of register variable 'x' requested")},
+        {S8("int f(void){int x=0; return _Generic(0,int:x)++;}"), true},
+        {S8("int f(void){register int x=0; return _Generic(0,int:x)++;}"), true},
+        {S8("int function(void); int (*f(void))(void){return &_Generic(0,int:function);}"), true},
         {S8("struct S{int b:2;}; int f(int x,struct S s){return x & s.b;}"), true},
         {S8("struct S{int b:2;}; int f(int x,struct S s){return (x) & s.b;}"), true},
         {S8("struct S{int b:2;}; int f(struct S s){return sizeof(int) & s.b;}"), true},
@@ -4898,7 +4909,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
                     CompilerDriverResult object = compiler_driver_execute_invocation(arena,
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
-                    String8 description = string_format(arena, S8("bit-field address row={u32} dialect={S8} form={S8} target={S8}\nsource={S8}\nsyntax={S8}\nobject={S8}"),
+                    String8 description = string_format(arena, S8("selected place row={u32} dialect={S8} form={S8} target={S8}\nsource={S8}\nsyntax={S8}\nobject={S8}"),
                         row, dialects[dialect], forms[form], targets[target], cases[row].source, syntax.diagnostic, object.diagnostic);
                     BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[row].valid, description);
                     BUSTER_TEST_RAW(arguments, syntax.error == object.error, description);
@@ -4908,8 +4919,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
                         BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 1 && object.diagnostic_count == 1, description);
                         if (syntax.diagnostic_count == 1 && object.diagnostic_count == 1)
                         {
-                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, S8("cannot take address of bit-field"));
-                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, S8("c.unsupported-semantics"));
+                            String8 expected_message = cases[row].expected_message.length ? cases[row].expected_message
+                                                                                       : S8("cannot take address of bit-field");
+                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, expected_message);
+                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, object.diagnostics[0].code);
+                            if (!cases[row].expected_message.length)
+                            {
+                                BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, S8("c.unsupported-semantics"));
+                            }
                             BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, syntax.diagnostics[0]),
                                 compiler_diagnostic_render(arena, object.diagnostics[0]));
                         }

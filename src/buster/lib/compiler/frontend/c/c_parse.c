@@ -7483,12 +7483,11 @@ BUSTER_C_INTERNAL bool c_parse_complex_part_token(CPreprocessResult preprocess, 
     return string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__imag__"));
 }
 
-BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_parse_expression_place_range(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                      u32* normalized_start_out, u32* normalized_end_out)
 {
-    // A complex part designates the same object as its operand. Strip these
-    // unary prefixes together with complete groups; the remaining shape must
-    // still be an object, not a cast, call or arithmetic value.
-    while (start < end)
+    bool valid = start < end && end <= preprocess.token_count;
+    while (valid && start < end)
     {
         if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
             c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
@@ -7503,21 +7502,25 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
         else if (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
                  string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Generic")))
         {
-            // C 6.5.1.1 gives the generic expression its selected association's
-            // value category. Use the resolver's retained range, not tokens in
-            // its controller or discarded associations, to decide place shape.
+            // C 6.5.1.1 preserves the selected expression's value category.
+            // Follow only the resolver's retained range, never controller or
+            // discarded-association tokens.
             CTypeIdentityQuery* selection = c_parse_type_identity_find(result, start);
-            bool selected = selection && selection->token_end == end && selection->result_start != UINT32_MAX &&
-                            selection->result_start > start && selection->result_start < selection->result_end &&
-                            selection->result_end <= selection->token_end;
-            if (selected)
+            bool selected = selection && selection->result_start != UINT32_MAX && selection->result_start > start &&
+                            selection->result_start < selection->result_end && selection->result_end <= selection->token_end &&
+                            selection->token_end <= end;
+            if (selected && selection->token_end == end)
             {
                 start = selection->result_start;
                 end = selection->result_end;
             }
-            else
+            else if (selected && selection->token_end < end)
             {
                 break;
+            }
+            else
+            {
+                valid = false;
             }
         }
         else
@@ -7525,8 +7528,19 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
             break;
         }
     }
-    bool place = false;
-    if (start < end)
+    if (valid)
+    {
+        *normalized_start_out = start;
+        *normalized_end_out = end;
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_expression_place_shape_range(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                            u32* normalized_start_out, u32* normalized_end_out)
+{
+    bool place = c_parse_expression_place_range(result, preprocess, start, end, &start, &end);
+    if (place && start < end)
     {
         CToken first = preprocess.tokens[start];
         CToken last = preprocess.tokens[end - 1];
@@ -7544,7 +7558,7 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
                     c_parse_matching_delimiter_indexed(result, preprocess, close + 1) + 1 == end;
         }
     }
-    if (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND)) place = false;
+    if (place && start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND)) place = false;
     for (u32 cursor = start; place && cursor < end; cursor += 1)
     {
         CToken token = preprocess.tokens[cursor];
@@ -7567,23 +7581,31 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
             place = false;
         }
     }
+    if (place && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    {
+        // An enumerator has an integer type but does not designate an object.
+        u32 use = c_parse_identifier_use_index(result, start);
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID
+                               ? result->identifier_uses[use].entity
+                               : c_parse_lookup_entity_token(result, preprocess.spelling_base,
+                                                             c_parse_scope_for_token(result, (CScopeId){.value = 0}, start),
+                                                             &preprocess.tokens[start]);
+        place = entity.value >= result->entity_count || result->entities[entity.value].kind != C_ENTITY_ENUMERATOR;
+    }
+    if (place)
+    {
+        *normalized_start_out = start;
+        *normalized_end_out = end;
+    }
     return place;
 }
 
-// A parameter keeps its declared array spelling in its entity type, so a
-// type query reports `int a[4]` or `char *argv[]` as an array. C17 6.7.6.3p7
-// adjusts it to a pointer to the element, qualified by what the brackets
-// carry: `int a[const 2]` is a const pointer. The array type's own `const`
-// is what c_ir_mark_local_read_only also keeps read-only for that pointer.
-BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* result, CTypeId type)
+BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
-    bool is_const = false;
-    if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
-    {
-        CType array = result->types[type.value];
-        is_const = array.is_const || (array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const);
-    }
-    return is_const;
+    u32 normalized_start = 0;
+    u32 normalized_end = 0;
+    bool place = c_parse_expression_place_shape_range(result, preprocess, start, end, &normalized_start, &normalized_end);
+    return place;
 }
 
 // A type query retains the operand's qualifiers and does not evaluate it.
@@ -7595,26 +7617,12 @@ BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* re
 // adjusted and stays unmodifiable.
 BUSTER_C_SHARED bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type, bool nonplace_projection)
 {
-    bool valid = !nonplace_projection && type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
-    // Match the place-shape normalization before resolving an identifier:
-    // component prefixes cannot turn an enumerator into a modifiable object.
-    while (valid && start < end)
-    {
-        if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
-        {
-            start += 1;
-            end -= 1;
-        }
-        else if (c_parse_complex_part_token(preprocess, preprocess.tokens[start]))
-        {
-            start += 1;
-        }
-        else
-        {
-            break;
-        }
-    }
+    u32 normalized_start = 0;
+    u32 normalized_end = 0;
+    bool valid = !nonplace_projection && type.value < result->type_count &&
+                 c_parse_expression_place_shape_range(result, preprocess, start, end, &normalized_start, &normalized_end);
+    start = normalized_start;
+    end = normalized_end;
     bool identifier = valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
     CEntityId entity = C_ENTITY_ID_INVALID;
     if (identifier)
@@ -40752,10 +40760,36 @@ BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result,
     {
         CToken token = preprocess.tokens[index];
         CToken operand = preprocess.tokens[index + 1];
-        if (skipped[index - start] || !c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND) || operand.kind != C_TOKEN_IDENTIFIER ||
-            (index + 2 < end && (c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_ARROW) ||
-                                 c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_BRACKET) ||
-                                 c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))))
+        bool address_operator = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND);
+        bool generic_operand = address_operator && operand.kind == C_TOKEN_IDENTIFIER &&
+                               string_equal(c_token_spelling(preprocess.spelling_base, operand), S8("_Generic"));
+        bool direct_operand = address_operator && operand.kind == C_TOKEN_IDENTIFIER && !generic_operand;
+        bool generic_identifier = false;
+        u32 entity_index = index + 1;
+        if (generic_operand)
+        {
+            CTypeIdentityQuery* selection = c_parse_type_identity_find(result, index + 1);
+            if (selection && selection->token_end > index + 2 && selection->token_end <= end)
+            {
+                u32 selected_start = 0;
+                u32 selected_end = 0;
+                bool selected_place = c_parse_expression_place_shape_range(result, preprocess, index + 1, selection->token_end,
+                                                                             &selected_start, &selected_end);
+                bool postfix = selection->token_end < end &&
+                              (c_token_is_punctuator(&preprocess.tokens[selection->token_end], C_PUNCTUATOR_DOT) ||
+                               c_token_is_punctuator(&preprocess.tokens[selection->token_end], C_PUNCTUATOR_ARROW) ||
+                               c_token_is_punctuator(&preprocess.tokens[selection->token_end], C_PUNCTUATOR_LEFT_BRACKET) ||
+                               c_token_is_punctuator(&preprocess.tokens[selection->token_end], C_PUNCTUATOR_LEFT_PARENTHESIS));
+                generic_identifier = selected_place && !postfix && selected_start + 1 == selected_end &&
+                                     preprocess.tokens[selected_start].kind == C_TOKEN_IDENTIFIER;
+                if (generic_identifier) entity_index = selected_start;
+            }
+        }
+        bool direct_postfix = direct_operand && index + 2 < end &&
+                              (c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_ARROW) ||
+                               c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_BRACKET) ||
+                               c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS));
+        if (skipped[index - start] || !address_operator || (!direct_operand && !generic_identifier) || direct_postfix)
         {
             continue;
         }
@@ -40778,8 +40812,8 @@ BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result,
                 continue;
             }
         }
-        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, declaration->scope, index + 1),
-                                                       &preprocess.tokens[index + 1]);
+        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, declaration->scope, entity_index),
+                                                       &preprocess.tokens[entity_index]);
         if (entity.value < result->entity_count && result->entities[entity.value].is_register)
         {
             c_parse_lowering_constraint_consider(diagnostic,
