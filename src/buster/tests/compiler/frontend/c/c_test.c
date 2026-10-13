@@ -23340,6 +23340,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
          S8("__fp16")},
         {deep_pointer_source, S8("__fp16 storage objects")},
         {S8("__fp16 value;"), S8("__fp16 storage objects")},
+        {S8("int consume(unsigned long); __fp16 value; int bad_context(void) { return consume(sizeof(__fp16)); }"),
+         S8("__fp16 storage objects")},
+        {S8("int bad_local(void) { __fp16 value; return (int)sizeof(__fp16); }"), S8("__fp16 storage objects")},
+        {S8("int bad_type_name(void) { return sizeof(__fp16 + 1); }"), S8("use of undeclared identifier '__fp16'")},
         {S8("void bad_parameter(__fp16 value);"), S8("__fp16 storage objects")},
         {S8("__fp16 bad_result(void);"), S8("__fp16 storage objects")},
         {S8("typedef __fp16 BadVector __attribute__((__vector_size__(3)));"), S8("__fp16 vector_size")},
@@ -46248,10 +46252,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
 // first program covers the shapes that still reached that scan in the test
 // corpus and now have strict-walk leaves of their own; it checks sizeof
 // results and conditional values at run time against what GCC and Clang
-// answer, including the storage-only __fp16 operands the scan folded to 4
-// (`sizeof(__fp16)`, a four-lane __fp16 vector), where Clang answers 2 and 8:
-// their unevaluated size comes from the C layout. The second part requires a
-// diagnostic for __fp16 values that are evaluated, which have no IR type.
+// answer, including storage-only __fp16 operands whose unevaluated size comes
+// from C layout. The body-type source also checks pointer/array and grouped
+// pointer-to-array declarators, pointer alignment, and larger call/initializer/
+// cast contexts in syntax-only and object modes with both frontend forms
+// (GitHub #3900, #3918). Malformed, undeclared, negative and non-integer bounds
+// must fail in both modes. The final part requires a diagnostic for evaluated
+// __fp16 values, which have no IR type.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -46262,6 +46269,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "typedef __fp16 v4h __attribute__((__vector_size__(8)));\n"
         "typedef float v4f __attribute__((__vector_size__(16)));\n"
         "static int g(void) { return 3; }\n"
+        "static unsigned long consume_size(unsigned long value) { return value; }\n"
+        "static unsigned long half_pointer_size(void) { return sizeof(__fp16*); }\n"
+        "static unsigned long half_array_size(void) { return sizeof(__fp16[5]); }\n"
+        "static unsigned long half_grouped_pointer_array_size(void) { return sizeof(__fp16 (*)[5]); }\n"
+        "static unsigned long half_pointer_alignment(void) { return _Alignof(__fp16*); }\n"
+        "static unsigned long half_qualified_pointer_array_size(void) { return sizeof(__fp16 * const[3]); }\n"
+        "static unsigned long half_qualified_pointer_array_alignment(void) { return _Alignof(__fp16 * const[3]); }\n"
+        "static unsigned long half_qualified_matrix_size(void) { return sizeof(const volatile __fp16[2][5]); }\n"
+        "static unsigned long half_size_call(void) { return consume_size(sizeof(__fp16)); }\n"
+        "static unsigned long half_size_initializer(void) { unsigned long x = sizeof(__fp16); return x; }\n"
+        "static unsigned long half_size_cast(void) { return consume_size(sizeof(int)) + (int)sizeof(__fp16); }\n"
         "static int call(int (*p)(void)) { return sizeof(*(*p)) == 1 ? (*(*(*p)))() : 0; }\n"
         "static long double va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
         "    long double d = n & 1 ? __builtin_va_arg(ap, double) : __builtin_va_arg(ap, long double); __builtin_va_end(ap); return d; }\n"
@@ -46289,9 +46307,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "    if (sizeof(__builtin_bit_cast(__fp16, bits)) != 2 || sizeof(const __fp16) != 2 || sizeof(v4h[2]) != 16) return 14;\n"
         "    if (_Alignof(__fp16) != 2 || _Alignof(v4h) != 8 || __alignof__(__builtin_bit_cast(__fp16, bits)) != 2) return 15;\n"
         "    if (__builtin_convertvector((v4f){(float)sizeof(v4h), 0, 0, 0}, v4f)[0] != 8) return 16;\n"
+        "    if (half_pointer_size() != sizeof(void*) || half_array_size() != 10 || half_grouped_pointer_array_size() != sizeof(void*) || half_pointer_alignment() != _Alignof(void*)) return 17;\n"
+        "    if (half_qualified_pointer_array_size() != 3 * sizeof(void*) || half_qualified_pointer_array_alignment() != _Alignof(void*) || half_qualified_matrix_size() != 20) return 18;\n"
+        "    if (half_size_call() != 2 || half_size_initializer() != 2 || half_size_cast() != sizeof(int) + 2) return 19;\n"
         "    return w[3] != 8 || e != 6 ? 12 : 0;\n"
         "}\n");
     String8 path = buster_test_temporary_path(arguments->arena, S8("untyped-operands"), S8(".c"));
+    String8 body_types = S8(
+        "static unsigned long g(unsigned long value) { return value; }\n"
+        "unsigned long body_pointer_size(void) { return sizeof(__fp16*); }\n"
+        "unsigned long body_array_size(void) { return sizeof(__fp16[5]); }\n"
+        "unsigned long body_grouped_pointer_array_size(void) { return sizeof(__fp16 (*)[5]); }\n"
+        "unsigned long body_pointer_alignment(void) { return _Alignof(__fp16*); }\n"
+        "unsigned long body_qualified_pointer_array_size(void) { return sizeof(__fp16 * const[3]); }\n"
+        "unsigned long body_qualified_pointer_array_alignment(void) { return _Alignof(__fp16 * const[3]); }\n"
+        "unsigned long body_qualified_matrix_size(void) { return sizeof(const volatile __fp16[2][5]); }\n"
+        "unsigned long body_call_argument(void) { return g(sizeof(__fp16)); }\n"
+        "unsigned long body_local_initializer(void) { unsigned long x = sizeof(__fp16); return x; }\n"
+        "unsigned long body_cast_operand(void) { return g(sizeof(int)) + (int)sizeof(__fp16); }\n");
+    String8 body_types_path = buster_test_temporary_path(arguments->arena, S8("storage-half-body-types"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(body_types_path, BUSTER_SLICE_TO_BYTE_SLICE(body_types))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 object = buster_test_temporary_path(temporary.arena, S8("storage-half-body-types"), S8(".o"));
+                String8 command[12];
+                u32 command_count = 0;
+                command[command_count++] = S8("-nostdinc");
+                command[command_count++] = S8("-std=gnu17");
+                command[command_count++] = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
+                if (mode)
+                {
+                    command[command_count++] = S8("-c");
+                    command[command_count++] = S8("-fverify-codegen");
+                    command[command_count++] = S8("-o");
+                    command[command_count++] = object;
+                }
+                else
+                {
+                    command[command_count++] = S8("-fsyntax-only");
+                }
+                command[command_count++] = body_types_path;
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    temporary.arena, (SliceString8){.pointer = command, .length = command_count});
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("storage-half body types form={u32} mode={u32}: {S8}"),
+                        form, mode, compiled.diagnostic));
+                scratch_end(temporary);
+            }
+        }
+    }
+    String8 invalid_body_bounds[] = {
+        S8("int malformed_bound(void) { return sizeof(__fp16[1 +]); }\n"),
+        S8("int undeclared_bound(void) { return sizeof(__fp16[missing]); }\n"),
+        S8("int negative_grouped_bound(void) { return sizeof(__fp16 (*)[-1]); }\n"),
+        S8("int noninteger_grouped_bound(void) { return sizeof(__fp16 (*)[1.5]); }\n"),
+    };
+    String8 invalid_bound_fragments[] = {S8("expected"), S8("missing"), S8("negative"), S8("integer")};
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_body_bounds); invalid_index += 1)
+    {
+        String8 invalid_path = buster_test_temporary_path(arguments->arena, S8("storage-half-invalid-bound"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(invalid_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid_body_bounds[invalid_index]))))
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 mode = 0; mode < 2; mode += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("storage-half-invalid-bound"), S8(".o"));
+                    String8 command[12];
+                    u32 command_count = 0;
+                    command[command_count++] = S8("-nostdinc");
+                    command[command_count++] = S8("-std=gnu17");
+                    command[command_count++] = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
+                    if (mode)
+                    {
+                        command[command_count++] = S8("-c");
+                        command[command_count++] = S8("-fverify-codegen");
+                        command[command_count++] = S8("-o");
+                        command[command_count++] = object;
+                    }
+                    else
+                    {
+                        command[command_count++] = S8("-fsyntax-only");
+                    }
+                    command[command_count++] = invalid_path;
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        temporary.arena, (SliceString8){.pointer = command, .length = command_count});
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("storage-half invalid bound {u32} form={u32} mode={u32} was accepted"),
+                            invalid_index, form, mode));
+                    BUSTER_TEST_RAW(arguments,
+                        string_first_sequence(compiled.diagnostic, invalid_bound_fragments[invalid_index]) != BUSTER_STRING_NO_MATCH,
+                        string_format(temporary.arena, S8("storage-half invalid bound {u32} form={u32} mode={u32}: {S8}"),
+                            invalid_index, form, mode, compiled.diagnostic));
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         for (u32 form = 0; form < 2; form += 1)
@@ -48638,6 +48759,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_word_class_token_kinds(UnitTestArgumen
         {S8("double"), type_name, 0, 0},
         {S8("struct"), type_name, 0, 0},
         {S8("__bf16"), type_name, 0, 0},
+        {S8("__fp16"), type_name, 0, 0},
         {S8("_Alignas"), type_name, 0, 0},
         {S8("unsigned"), type_name, 0, 0},
         {S8("__signed"), type_name, 0, 0},

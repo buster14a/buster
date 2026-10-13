@@ -150,12 +150,26 @@ in both frontend forms.
   `__builtin_complex`, GNU vector arithmetic, C23 `true`/`false`/`nullptr`,
   `__func__` and `*` on a function designator. A storage-only `__fp16` type
   has no IR type, so when the IR mapping is missing for a `sizeof`/`_Alignof`
-  operand whose type is `__fp16` or an array or GNU vector of it,
-  `c_semantic_storage_half_operand_layout` answers from the C type layout
-  (Clang's 2, and the vector's own size); the scan once folded 4. Only these
-  unevaluated operands are answered; an evaluated `__fp16` value keeps its
-  canonical-lowering refusal. `c_test_untyped_operand_diagnostics` runs the
-  leaves and the `__fp16` sizes natively and requires the evaluated refusals.
+  operand whose type is `__fp16` or is derived through array, pointer or
+  GNU vector layers, `c_semantic_storage_half_operand_layout` answers from
+  the C type layout (including 2-byte scalar and 8-byte vector cases); the scan
+  once folded 4. The earlier declaration check traverses the type graph rooted
+  at declarations, validates every reachable edge, and ignores unrelated
+  provisional expression rows because function-body sizeof operands are
+  typed afterward. The token-only exception admits a grouped pointer-to-array
+  form such as `sizeof(__fp16 (*)[5])`; its layout probe uses the full
+  abstract-declarator reader outside binding and rolls back the speculative
+  model. Late type-name bounds receive the same syntax check as declaration
+  bounds. Only unevaluated operands are answered; an evaluated `__fp16` value
+  keeps its canonical-lowering refusal.
+  `c_test_untyped_operand_diagnostics` runs the leaves and sizes natively,
+  checks pointer, array, qualified and grouped pointer-to-array declarators,
+  call, initializer and cast contexts through syntax-only and object modes in
+  both frontend forms, and rejects malformed/undeclared bounds, negative
+  grouped bounds and non-integer grouped bounds, as well as malformed type
+  names (GitHub #3900, #3918). Function abstract
+  declarators remain outside this exception: target Clang behavior for a
+  storage-only `__fp16` function return type has not been verified.
 - **The parser's expression typer gives builtins the same results.**
   `c_parse_expression_leaf_without_cast` answers `__builtin_expect` as `long`,
   `object_size`, `strlen` and `__builtin_offsetof` as `size_t`,
