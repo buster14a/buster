@@ -287,7 +287,6 @@ enum
 // because every specifier-word spelling is interned into the predefined
 // range. Defined after the spelling ladders they derive from.
 BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
-BUSTER_C_INTERNAL bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_INTERNAL bool c_parse_auto_type_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_INTERNAL bool c_parse_type_qualifier_word_token(CPreprocessResult preprocess, CToken token, CType* type);
 BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult preprocess, CToken token, CType* qualifiers);
@@ -16003,7 +16002,7 @@ BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CTok
     return bits;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token)
+BUSTER_C_SHARED bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token)
 {
     u16 mask = C_WORD_TYPE;
     if (c_preprocess_dialect_is_gnu(preprocess.dialect))
