@@ -220,41 +220,56 @@ entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
-**Minimum-work gate.** Entering the multi-lane path costs a fixed preparation
-of the cohort's native family per invocation. Before that preparation was
-narrowed to one family it was about 14 ms on the 9700X, which made small
-populations slower than serial (#53). Before dispatch,
-`compiler_driver_unit_worker_limit` therefore estimates the work of every
-eligible native C input of the invocation:
+**Lane gate.** Entering the multi-lane path costs a fixed preparation of the
+cohort's native family per invocation, and each extra worker adds its own
+overhead. Before dispatch, `compiler_driver_unit_worker_limit` therefore
+estimates the work of every eligible native C input of the invocation (#53):
 
 - each input adds `COMPILER_DRIVER_LANE_INPUT_WORK_BYTES`, a fixed charge per
   translation unit, plus its file size from `os_path_followed_stats`;
-- inputs are stat'ed only until the sum reaches
-  `COMPILER_DRIVER_LANE_MIN_WORK_BYTES`, so a large population costs a few
+- inputs are stat'ed only until the sum covers both the serial minimum and the
+  per-worker floor at the requested width, so a large population costs a few
   stats. A missing or unreadable input adds no bytes and still fails in input
   order.
 
-A population below the minimum keeps exactly the `-fcompile-jobs=1` path: no
-prewarm, no gang and the same output. `CompilerDriverResult.lane_gate` records
-the decision:
+A population below `COMPILER_DRIVER_LANE_MIN_WORK_BYTES` keeps exactly the
+`-fcompile-jobs=1` path: no prewarm, no gang and the same output. Otherwise the
+worker count is capped at the estimated work divided by
+`COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES`, never below two; a capped run is
+the ordinary `-fcompile-jobs=N` path at that smaller N and links the same
+image. `CompilerDriverResult.lane_gate` records the decision:
 
 | Value | Meaning |
 |---|---|
 | `none` | Lanes cannot apply: one worker after clamping, fewer than two eligible inputs, an embedding gang or a source cache. |
-| `lanes` | Lanes were permitted; `compilation_workers` still reports the cohorts that actually ran. |
+| `lanes` | Lanes were permitted at the requested width; `compilation_workers` still reports the cohorts that actually ran. |
 | `serial` | The population was below the minimum; `compilation_workers` is 1. |
+| `capped` | Fewer workers than requested ran, so each keeps the per-worker floor; `compilation_workers` reports them. |
 
-Both constants are named in `driver.h` and must come from 9700X measurement:
-the scaling-v1 `size-nN` series (equal TUs, 2–64 inputs at 1, 2 and 7 cores),
-fitted together with `tiny` for the per-input charge. They are zero, which
-disables the gate, until that calibration lands. The estimate reads file bytes
-only, so a small file that includes large headers is underestimated: that
-costs a possible gain, never a loss against serial. Any change to the
-prewarm or lane entry cost (#3584 and the other prewarm reductions on #53)
-moves the right threshold, so re-derive both constants from a fresh
-`scaling.request`. `compiler_driver_test_set_lane_work` (`driver_internal.h`)
-overrides both for tests; `compiler_driver_test_unit_lane_gate` covers each
-bound.
+The three constants in `driver.h` come from the 9700X `scaling-v1` receipt of
+#3943 (check run 115115906751, main `10e44760` with the one-family prewarm and
+the lane-safe on-demand x86 fills):
+
+- **Serial minimum 0.** Two equal TUs (11.7 ms serial) already gain 1.20× at
+  two workers, so no measured population is protected by staying serial.
+- **Per-input charge 513 bytes.** Serial wall time over the `size-n2`…`n64`
+  series is about 5.6 ms + 0.067 µs per byte; `tiny`'s 112 one-function TUs
+  then imply about 0.035 ms per input.
+- **Per-worker floor 32 KiB.** `tiny` (about 76 KB of estimated work) loses at
+  7 workers (10.8 KB per worker, 0.93×). It gains most at 2 workers (37.8 KB
+  per worker: 1.15× and, in the validation run 115276385855, 1.09×), ahead of
+  4 workers (1.11× and 1.04×), so the floor caps it at 2. A 16 KiB floor
+  (4 workers) brought `tiny` at 7 workers to 0.99× and at 13 SMT workers to
+  1.01× in that run. Every `equal`, `count` and `size` row keeps more than
+  48 KB per worker and is unaffected.
+
+The estimate reads file bytes only, so a small file that includes large
+headers is underestimated: that costs a possible gain, never a loss against
+serial. Any change to the lane entry cost moves all three values, so re-derive
+them from a fresh `scaling.request`; the `size`, `tiny` and `count` series are
+the inputs. `compiler_driver_test_set_lane_work` (`driver_internal.h`)
+overrides them for tests; `compiler_driver_test_unit_lane_gate` covers each
+bound and the cap.
 
 This is a bounded feature, **not an accepted throughput improvement**. The
 default stays one pending paired representative measurements. A large input
@@ -407,7 +422,7 @@ The header comes first, then each input followed by its functions. Between
 identical runs only the `*_ns` fields, `peak_rss_bytes` and possibly
 `arena_peak_bytes` (granule-boundary padding) vary, plus
 `compile_jobs`/`compilation_workers`/`intervals`/`lane_gate` across worker
-counts. `lane_gate` (`none`, `lanes` or `serial`; see the minimum-work gate
+counts. `lane_gate` (`none`, `lanes`, `serial` or `capped`; see the lane gate
 above) was appended after `peak_rss_bytes`.
 `peak_rss_bytes` is the process high water (`os_get_peak_resident_memory_size`:
 `ru_maxrss` on Linux and Apple, the peak working set on Windows, 0 when

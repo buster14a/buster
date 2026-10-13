@@ -2167,3 +2167,21 @@ value as the direct builtin, including Git's ARRAY_SIZE macro. Missing answers
 stay unresolved. `c_test_array_size_identity_layout` covers static initializers,
 member bounds, local initialized arrays, four target layouts and both frontend
 forms; pointer misuse and genuinely variable bounds retain their refusals.
+
+## Git expression compatibility controls
+
+`c_test_git_expression_shapes` keeps inferred-bound compound literals valid
+through parenthesized subscript sizeof queries, preserves chained assignments
+in control operands, and retains static string-address relocations cast to
+pointer-width integers. GNU statement-expression tails skip extension markers
+before deciding whether the tail is a declaration. The alignment collector
+recognizes GNU aligned spellings only inside attribute payloads, retaining existing C23 attribute behavior; ordinary
+identifiers remain names and standard _Alignas retains its checks.
+
+Dead-code label recovery preserves the containing statement when a jump enters
+a nested control body. It starts that statement in a disconnected block so its
+else and loop continuations still exist when the label becomes reachable.
+The regression validates four target layouts and both frontend forms; native
+execution checks exact effects and values under both allocators. Invalid
+alignments, a declaration-only void tail and a narrow symbolic address cast
+retain diagnostics. No frozen retirement fixture input is changed.

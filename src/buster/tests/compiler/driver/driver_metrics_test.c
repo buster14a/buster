@@ -594,7 +594,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
     workers = BUSTER_MAX(workers, (u32)1);
     // These one-line inputs sit below the minimum-work gate; force lanes so
     // the concurrent record path is what is measured.
-    compiler_driver_test_set_lane_work(0, 0);
+    compiler_driver_test_set_lane_work(0, 0, 0);
     if (BUSTER_REQUIRE(arguments, written))
     {
         String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-fmetrics-out=unused.txt"), S8("-fmetrics-functions"),

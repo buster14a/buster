@@ -35946,9 +35946,12 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
         {
             return C_IR_SIZEOF_STEP_FAIL;
         }
-        if (named && cast_type.value != IR_ID_UNDERLYING_INVALID)
+        bool compound_literal = close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE);
+        // An inferred-bound array has no standalone mapped type yet. Its
+        // initializer completes that type through the compound query below.
+        if ((named && cast_type.value != IR_ID_UNDERLYING_INVALID) || compound_literal)
         {
-            if (close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE))
+            if (compound_literal)
             {
                 u32 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
                 if (initializer_close >= end)
@@ -39536,7 +39539,10 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         frame->as.condition_leaf.place = place;
         frame->as.condition_leaf.type = builder->function->values[place.value].canonical_type;
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT;
-        if (!c_ir_lower_expression_core_frame_push(builder, frame->as.condition_leaf.start, frame->as.condition_leaf.end))
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+            .as.expression = {.start = frame->as.condition_leaf.start, .end = frame->as.condition_leaf.end},
+        }))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
@@ -42273,6 +42279,10 @@ BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder
             tail_is_expression = true;
             statement_start = index + 1;
         }
+    }
+    while (tail_start < tail_end && c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+    {
+        tail_start += 1;
     }
     bool result = tail_is_expression && tail_start < tail_end && statement_start >= close;
     if (result)
@@ -58227,6 +58237,16 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
     CIrConstantValue source = *source_input;
     IrType* target = ir_type_from_id(&builder->program->types, target_type);
     IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
+    // The cast's operand undergoes array-to-pointer conversion even when
+    // its destination is an integer. Preserve the existing S+A carrier and
+    // pointer-width checks instead of trying to load an aggregate constant.
+    if (target && c_ir_constant_type_is_integer(target) && source.kind == C_IR_CONSTANT_LVALUE && source_type && source_type->kind == IR_TYPE_ARRAY)
+    {
+        source.type = c_ir_add_pointer_type(builder->program, builder->pointer_types, source_type->element_type);
+        source.kind = C_IR_CONSTANT_POINTER;
+        target = ir_type_from_id(&builder->program->types, target_type);
+        source_type = ir_type_from_id(&builder->program->types, source.type);
+    }
     bool success = false;
     if (target)
     {
@@ -61338,9 +61358,18 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
             return true;
         }
-        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end))
+        bool too_many_scalar_braces =
+            !builder->function && !aggregate_type && start < end &&
+            c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+            c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end) || too_many_scalar_braces)
         {
-            builder->failure_message = S8("invalid initializer separator");
+            builder->failure_message = too_many_scalar_braces ? S8("too many braces around scalar initializer") : S8("invalid initializer separator");
+            if (too_many_scalar_braces)
+            {
+                builder->failure_token_index = start;
+            }
             return false;
         }
     }

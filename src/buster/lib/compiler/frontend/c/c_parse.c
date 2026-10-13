@@ -6479,7 +6479,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
     }
     if (indirect)
     {
-        if (type_value->kind != C_TYPE_POINTER || type_value->element_type.value >= result->type_count)
+        if ((type_value->kind != C_TYPE_POINTER && type_value->kind != C_TYPE_ARRAY) || type_value->element_type.value >= result->type_count)
         {
             type = C_TYPE_ID_INVALID;
             break;
@@ -8061,6 +8061,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         tail_end = index;
                         statement = index + 1;
                     }
+                }
+                while (tail_start < tail_end && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+                {
+                    tail_start += 1;
                 }
                 // The final statement belongs to the body's parsed scope:
                 // a local value there can shadow an enclosing typedef name.
@@ -16606,6 +16610,7 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
         frame->alignment_count = 0;
         frame->index = frame->start;
         frame->depth = 0;
+        frame->pending_index = 0;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
     else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
@@ -16651,7 +16656,29 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
             frame->index += 1;
             continue;
         }
-        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !c_parse_alignment_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])))
+        u32 c23_attribute_end = 0;
+        if (!frame->depth && c_parse_c23_attribute_at(preprocess, index, frame->end, &c23_attribute_end))
+        {
+            frame->pending_index = c23_attribute_end - 2;
+            frame->index = index + 2;
+            continue;
+        }
+        CAttributeGroup attribute = {0};
+        if (!frame->depth && c_parse_attribute_group_at(preprocess, index, frame->end, &attribute))
+        {
+            frame->pending_index = attribute.payload_end;
+            frame->index = attribute.payload_start;
+            continue;
+        }
+        if (!frame->depth && index < frame->pending_index && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            frame->index = close < frame->pending_index ? close + 1 : frame->pending_index;
+            continue;
+        }
+        String8 word = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+        bool alignment = c_parse_alignas_word(word) || (index < frame->pending_index && c_parse_aligned_attribute_word(word));
+        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !alignment)
         {
             frame->index += 1;
             continue;
@@ -21189,7 +21216,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
         {
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
             {
-                valid = record->kind == C_TYPE_POINTER && record->element_type.value < result->type_count;
+                valid = (record->kind == C_TYPE_POINTER || record->kind == C_TYPE_ARRAY) && record->element_type.value < result->type_count;
                 record = valid ? &result->types[record->element_type.value] : record;
             }
             valid = valid && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
@@ -35733,7 +35760,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                     if (valid && c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_ARROW))
                     {
                         CType pointer = query.types[aggregate.value];
-                        aggregate = pointer.kind == C_TYPE_POINTER ? pointer.element_type : C_TYPE_ID_INVALID;
+                        aggregate = pointer.kind == C_TYPE_POINTER || pointer.kind == C_TYPE_ARRAY ? pointer.element_type : C_TYPE_ID_INVALID;
                     }
                     valid &= aggregate.value < query.type_count &&
                         (query.types[aggregate.value].kind == C_TYPE_STRUCT || query.types[aggregate.value].kind == C_TYPE_UNION);
@@ -38003,7 +38030,8 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
         {
             cursor += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        else if (token.kind == C_TOKEN_STRING_LITERAL || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
         // A label address, as in the GNU difference `&&b - &&a`, is an
         // address constant like `&object`: IR lowering decides it.
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
