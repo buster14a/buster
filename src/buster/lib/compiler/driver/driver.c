@@ -3436,7 +3436,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             // translation units that run before thread-local storage exists,
             // where the canary's own load would fault; accepting the flag lets
             // one flag set drive this compiler and the reference one.
-            string_equal(argument, S8("-fno-stack-protector"));
+            string_equal(argument, S8("-fno-stack-protector")) ||
+            // Presentation-only options (#4041). No diagnostic here is colored,
+            // and doc-comment commands only affect Clang's -Wdocumentation, so
+            // both are accepted and ignored for build-system probes.
+            string_equal(argument, S8("-fcolor-diagnostics")) || string_equal(argument, S8("-fno-color-diagnostics")) ||
+            (string_starts_with_sequence(argument, S8("-fcomment-block-commands=")) && argument.length > 25);
         if (warning_option)
         {
             compiler_driver_warning_policy_apply(&invocation.warning_policy, argument);
@@ -3695,6 +3700,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 invocation.input_paths[input_index] = resolved;
             }
         }
+    }
+    // GCC ignores linker arguments when nothing is linked and Clang warns and
+    // ignores them, so -c/-S/-E/-fsyntax-only probes drop them (#4041). A
+    // leading --version stays so the linker query keeps rejecting it.
+    if (invocation.action != COMPILER_DRIVER_ACTION_LINK && invocation.linker_argument_count && invocation.linker_arguments &&
+        !string_equal(invocation.linker_arguments[0], S8("--version")))
+    {
+        invocation.linker_argument_count = 0;
     }
     compiler_driver_validate_linker_query(&invocation);
     compiler_driver_consume_linker_as_needed(&invocation);

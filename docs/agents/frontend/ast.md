@@ -934,7 +934,9 @@ two cases:
    interned id, with one bound compare and one `word_bits` read. A specifier
    run of at most four interned type words, with no tag keyword, is checked
    only of the run's own tokens, so its verdict depends on its ids alone. A
-   run spelled like one that already validated clean is skipped.
+   run spelled like one that already validated clean is skipped. The
+   walker's unmatched-`?` check (#4072) is not repeated: the split runs
+   only over a tree that built, and the tree builds no `?` without its `:`.
 2. **The walker would read a shape differently from the grammar, or no rule
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,

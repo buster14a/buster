@@ -84,8 +84,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     String8 compile_verbose[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Wl,-v"), S8("a.c")};
     CompilerDriverInvocation compile_linker_verbose =
         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_verbose));
-    BUSTER_TEST(arguments, compile_linker_verbose.error == COMPILER_DRIVER_ERROR_ARGUMENT && !compile_linker_verbose.linker_verbose &&
-                               compiler_driver_test_string_contains(compile_linker_verbose.diagnostic, S8("-v")));
+    BUSTER_TEST(arguments, compile_linker_verbose.error == COMPILER_DRIVER_ERROR_NONE && !compile_linker_verbose.linker_verbose &&
+                               !compile_linker_verbose.linker_argument_count);
+    // #4041: compile-only probes ignore every linker argument, as GCC and Clang
+    // do, while the same arguments stay validated when linking.
+    String8 probe_linker_arguments[] = {S8("-Wl,--enable-new-dtags"), S8("-Wl,-rpath,/x"), S8("-Wl,--bogus,-z,bogus")};
+    String8 probe_actions[] = {S8("-c"), S8("-S"), S8("-E"), S8("-fsyntax-only")};
+    for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(probe_actions); action += 1)
+    {
+        for (u32 linker = 0; linker < BUSTER_ARRAY_LENGTH(probe_linker_arguments); linker += 1)
+        {
+            String8 probe[] = {S8("--target=x86_64-linux-gnu"), probe_actions[action], probe_linker_arguments[linker], S8("a.c")};
+            CompilerDriverInvocation probed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe));
+            BUSTER_TEST(arguments, probed.error == COMPILER_DRIVER_ERROR_NONE && !probed.linker_argument_count);
+        }
+    }
+    String8 probe_xlinker[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Xlinker"), S8("--enable-new-dtags"), S8("a.c")};
+    CompilerDriverInvocation xlinker_probe = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe_xlinker));
+    BUSTER_TEST(arguments, xlinker_probe.error == COMPILER_DRIVER_ERROR_NONE && !xlinker_probe.linker_argument_count);
+    String8 probe_link[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,--bogus"), S8("a.c")};
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe_link)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 probe_query[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Wl,--version"), S8("a.c")};
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe_query)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 presentation_options[] = {S8("-fcolor-diagnostics"), S8("-fno-color-diagnostics"), S8("-fcomment-block-commands=threadsafety"),
+                                      S8("-fcomment-block-commands=a,b")};
+    for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(presentation_options); option += 1)
+    {
+        String8 presentation[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), presentation_options[option], S8("a.c")};
+        CompilerDriverInvocation accepted = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(presentation));
+        BUSTER_TEST(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE);
+    }
+    String8 empty_commands[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-fcomment-block-commands="), S8("a.c")};
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empty_commands)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
     String8 query_verbose[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,--version,-v")};
     CompilerDriverInvocation query_linker_verbose =
         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(query_verbose));
@@ -224,11 +254,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
                           S8("-Xlinker"), S8("libexample.so"), S8("-Xlinker"), S8("-z"), S8("-Xlinker"), S8("defs"), S8("tests/basic_c_multi_main.c")};
     CompilerDriverInvocation paired = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(separate));
     BUSTER_TEST(arguments, paired.error == COMPILER_DRIVER_ERROR_NONE && paired.linker_argument_count == 4);
-    String8 modes[] = {S8("-c"), S8("-S"), S8("-E"), S8("-fsyntax-only"), S8("-emit-llvm")};
+    // Bitcode output has no native link, so linker arguments stay refused there.
+    String8 bitcode_linker[] = {S8("--target=x86_64-unknown-linux"), S8("-emit-llvm"), S8("-Wl,--export-dynamic"), S8("tests/basic_c_multi_main.c")};
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bitcode_linker)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 modes[] = {S8("-c"), S8("-S"), S8("-E"), S8("-fsyntax-only")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
     {
         String8 command[] = {S8("--target=x86_64-unknown-linux"), modes[index], S8("-Wl,--export-dynamic"), S8("tests/basic_c_multi_main.c")};
-        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_NONE);
     }
     String8 export_flag[] = {S8("--export-dynamic")};
     NativeExecutableLinkOptions options = {.linker_arguments = export_flag, .linker_argument_count = 1};
@@ -886,7 +919,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_arguments(Un
                      !direct.link_operations[2].as_needed && !direct.link_operations[3].as_needed);
     }
     String8 compile[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Wl,--as-needed"), S8("main.c")};
-    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)).error == COMPILER_DRIVER_ERROR_NONE);
     String8 raw[] = {S8("--as-needed")};
     NativeExecutableLinkOptions options = {.linker_arguments = raw, .linker_argument_count = 1};
     BUSTER_TEST(arguments, !link_validate_linker_arguments(parsed.target, options, true, 0));
