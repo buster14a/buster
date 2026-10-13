@@ -625,8 +625,19 @@ into a row past the solve's table (builtin, pointer and array spellings) is
 answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
 from the target layout, an array from its element, and a table element waits for
 its own layout like any other table type, which is also what keeps
-`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
-is an expression is first offered to `c_parse_layout_alignment_fold` (#3269):
+`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A qualified
+copy of an aligned typedef can also be appended past that column snapshot. Its
+inherited sparse `CTypeAlignment` row identifies the matching in-column alias
+fact, so `_Alignof(const A16)` and `_Alignof(const A16) + 0` reuse its
+resolved size and replacement alignment instead of mistaking the copy's scalar
+kind for its natural alignment. A qualified unaligned scalar still uses its natural
+base layout, and a pointer to an aligned typedef still uses the target's
+pointer layout. The fold no longer sends every qualified copy through the
+typed query merely because the unit contains some aligned typedef.
+`c_test_declaration_constraints` pins plain and expression forms, unqualified,
+const and volatile aliases, pointer and natural-type controls on x86-64 and
+AArch64. A request that is an expression is first offered to
+`c_parse_layout_alignment_fold` (#3269):
 when its `sizeof`/`_Alignof` terms (at most
 `C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY`) name a typedef, tag or primitive
 with only trailing `*` and qualifiers, and the terms are joined by `+`, `*`,

@@ -12885,7 +12885,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("struct S0 { char c[3]; }; struct S1 { _Alignas(sizeof(struct S0)) char c; };"), S8("not a power of two"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct A { _Alignas(sizeof(struct A *)) char c; struct A *next; }; typedef struct A TA; struct B { _Alignas(sizeof(const TA) + 0 * sizeof(int)) char c; }; struct C { _Alignas(sizeof(struct B) * 2) char c; }; _Static_assert(sizeof(struct B) == 16 && _Alignof(struct C) == 32, \"fold\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("void g(void) { struct X { char c[3]; }; { struct X { char c[64]; }; struct Y { _Alignas(sizeof(struct X)) char c; }; _Static_assert(_Alignof(struct Y) == 64, \"inner\"); } struct Z { _Alignas(sizeof(struct X) + 1) char c; }; _Static_assert(_Alignof(struct Z) == 4, \"outer\"); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); struct V { _Alignas(_Alignof(const A16)) char c; }; _Static_assert(_Alignof(struct V) == 16, \"v\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("typedef int A16 __attribute__((aligned(16))); struct V { _Alignas(_Alignof(const A16) + 0) char c; }; _Static_assert(_Alignof(struct V) == 16, \"v\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); struct VPlain { _Alignas(_Alignof(A16)) char c; }; struct VVolatile { _Alignas(_Alignof(volatile A16)) char c; }; struct VPointer { _Alignas(_Alignof(const A16 *)) char c; }; struct VNatural { _Alignas(_Alignof(const int)) char c; }; _Static_assert(_Alignof(struct VPlain) == 16 && _Alignof(struct VVolatile) == 16, \"qualified alias\"); _Static_assert(_Alignof(struct VPointer) == _Alignof(void *), \"pointer\"); _Static_assert(_Alignof(struct VNatural) == _Alignof(int), \"natural\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         // Only a type that reaches itself is refused, however deep a chain of
         // distinct types runs.
         {S8("struct S0 { double d; }; struct S1 { _Alignas(sizeof(struct S0)) char c; }; struct S2 { _Alignas(sizeof(struct S1)) char c; }; struct S3 { _Alignas(sizeof(struct S2)) char c; }; struct S4 { _Alignas(sizeof(struct S3)) char c; }; struct S5 { _Alignas(sizeof(struct S4)) char c; }; struct S6 { _Alignas(sizeof(struct S5)) char c; }; struct S7 { _Alignas(sizeof(struct S6)) char c; }; _Static_assert(sizeof(struct S7) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -13133,6 +13135,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_regressions(UnitTestArgume
                 c_test_scratch_end(invocation_arena);
             }
         }
+    }
+    // The qualified-copy alignment path reads an inherited CTypeAlignment
+    // row outside the active solve's type columns. Keep the invariant across
+    // both 64-bit data layouts, including pointer and natural-type controls.
+    String8 aligned_qualified_source = S8(
+        "typedef int A16 __attribute__((aligned(16)));"
+        " struct VPlain { _Alignas(_Alignof(A16)) char c; };"
+        " struct VConst { _Alignas(_Alignof(const A16)) char c; };"
+        " struct VExpression { _Alignas(_Alignof(const A16) + 0) char c; };"
+        " struct VVolatile { _Alignas(_Alignof(volatile A16)) char c; };"
+        " struct VPointer { _Alignas(_Alignof(const A16 *)) char c; };"
+        " struct VNatural { _Alignas(_Alignof(const int)) char c; };"
+        " _Static_assert(_Alignof(struct VPlain) == 16 && _Alignof(struct VConst) == 16 &&"
+        " _Alignof(struct VExpression) == 16 && _Alignof(struct VVolatile) == 16, \"qualified aliases\");"
+        " _Static_assert(_Alignof(struct VPointer) == _Alignof(void *), \"pointer\");"
+        " _Static_assert(_Alignof(struct VNatural) == _Alignof(int), \"natural\");");
+    for (u32 target_index = 0; target_index < 2; target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Target target = target_native;
+        target.cpu_arch = target_index ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        CPreprocessResult tokens = c_preprocess(temporary.arena, aligned_qualified_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+                               semantic.analysis_complete && semantic.diagnostic_count == 0);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("qualified-aligned-typedef.c"), tokens, syntax, target,
+                                                          (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
