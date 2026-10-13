@@ -814,6 +814,25 @@ and `unsigned char` keep their specified behavior. The options apply to C
 frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
 pipelines reject them because their toolchains do not use Buster's C frontend.
 
+## Short wchar_t and x86-64 code models
+
+`-fshort-wchar` (#4052) sets `Target.short_wchar`, which makes
+`target_uses_16_bit_wchar` and `target_uses_unsigned_wchar` true on any
+native target, so `wchar_t` is `unsigned short`. The type layer, wide
+character and `L"..."` literals, `<stddef.h>` `wchar_t`, `__WCHAR_TYPE__`,
+`__SIZEOF_WCHAR_T__`, `__WCHAR_MAX__`, `__WCHAR_WIDTH__` and
+`__WCHAR_UNSIGNED__` all follow it. `wint_t` keeps the ABI's own width, as in
+GCC. External GPU pipelines reject the option.
+
+`-mcmodel=small` is the x86-64 default and a no-op. The backend emits only the
+small model (rip-relative or GOT-relative references; no kernel-model
+sign-extended absolute addressing, no large-model `movabs`), so
+`-mcmodel=kernel`, `medium` and `large` fail with
+`unsupported option: -mcmodel=<model> (the x86-64 backend implements only the
+small code model)` rather than aliasing small. Unknown values report
+`invalid value for -mcmodel`, and non-x86-64 or GPU targets report
+`unsupported option ... for this target`.
+
 ## C input phase selection
 
 `--target=spirv-vulkan1.2-compute -c` selects the direct Vulkan 1.2 / SPIR-V 1.5

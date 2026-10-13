@@ -19747,6 +19747,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_contexts(UnitTest
     return result;
 }
 
+// #4052: -fshort-wchar narrows wchar_t, wide literals and the predefined
+// wchar macros on an ABI whose wchar_t is 32-bit; wint_t keeps its width.
+BUSTER_GLOBAL_LOCAL String8 const c_test_short_wchar_source = S8_INITIALIZER(
+    "#include <stddef.h>\n"
+    "#if SHORT\n"
+    "#define WIDTH 2\n"
+    "#define WCHAR_MAXIMUM 65535\n"
+    "#define WIDE_TYPE unsigned short\n"
+    "#else\n"
+    "#define WIDTH 4\n"
+    "#define WCHAR_MAXIMUM 2147483647\n"
+    "#define WIDE_TYPE int\n"
+    "#endif\n"
+    "_Static_assert(sizeof(wchar_t) == WIDTH, \"wchar_t size\");\n"
+    "_Static_assert(sizeof(L'a') == WIDTH, \"wide character size\");\n"
+    "_Static_assert(_Generic(L'a', WIDE_TYPE: 1, default: 0), \"wide character type\");\n"
+    "_Static_assert(_Generic((wchar_t)0, WIDE_TYPE: 1, default: 0), \"wchar_t type\");\n"
+    "_Static_assert(_Generic(L\"ab\"[0], WIDE_TYPE: 1, default: 0), \"wide string element\");\n"
+    "_Static_assert(sizeof(L\"ab\") == 3 * WIDTH, \"wide string size\");\n"
+    "_Static_assert(_Generic((__WCHAR_TYPE__)0, WIDE_TYPE: 1, default: 0), \"__WCHAR_TYPE__\");\n"
+    "_Static_assert(__SIZEOF_WCHAR_T__ == WIDTH, \"__SIZEOF_WCHAR_T__\");\n"
+    "_Static_assert(__WCHAR_MAX__ == WCHAR_MAXIMUM, \"__WCHAR_MAX__\");\n"
+    "_Static_assert(__WCHAR_WIDTH__ == WIDTH * 8, \"__WCHAR_WIDTH__\");\n"
+    "_Static_assert(__SIZEOF_WINT_T__ == 4, \"wint_t keeps its width\");\n"
+    "#if SHORT\n"
+    "#ifndef __WCHAR_UNSIGNED__\n"
+    "#error short wchar_t is unsigned\n"
+    "#endif\n"
+    "_Static_assert((wchar_t)-1 > 0, \"unsigned wchar_t\");\n"
+    "#else\n"
+    "#ifdef __WCHAR_UNSIGNED__\n"
+    "#error wchar_t is signed on this ABI\n"
+    "#endif\n"
+    "_Static_assert((wchar_t)-1 < 0, \"signed wchar_t\");\n"
+    "#endif\n"
+    "int main(void) { return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_short_wchar_override(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 short_wchar = 0; short_wchar < 2; short_wchar += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = target_native;
+        target.cpu_arch = CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        target.short_wchar = short_wchar != 0;
+        BUSTER_TEST(arguments, target_uses_16_bit_wchar(target) == (short_wchar != 0));
+        BUSTER_TEST(arguments, target_uses_unsigned_wchar(target) == (short_wchar != 0));
+        String8 source = string_format(temporary.arena, S8("#define SHORT {u32}\n{S8}"), short_wchar, c_test_short_wchar_source);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+            semantic.diagnostic_count == 0 && semantic.analysis_complete,
+            tokens.diagnostic_count ? tokens.diagnostics[0].message :
+            syntax.diagnostic_count ? syntax.diagnostics[0].message :
+            semantic.diagnostic_count ? semantic.diagnostics[0].message : source);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -67273,6 +67337,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);
+    C_TEST_FIXTURE(arguments, c_test_short_wchar_override);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_runtime);
     C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     C_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
