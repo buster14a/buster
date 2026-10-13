@@ -63,14 +63,7 @@ BUSTER_GLOBAL_LOCAL int cm_unsigned(const char *text, uint64_t *out)
 }
 BUSTER_GLOBAL_LOCAL void cm_copy(char *out, size_t capacity, const char *text)
 {
-    if (capacity)
-    {
-        const char *source = text ? text : "";
-        size_t count = strlen(source);
-        if (count >= capacity) count = capacity - 1;
-        memmove(out, source, count);
-        out[count] = 0;
-    }
+    if (capacity) snprintf(out, capacity, "%s", text ? text : "");
 }
 BUSTER_GLOBAL_LOCAL uint64_t cm_hash(const char *s)
 {
