@@ -3,11 +3,13 @@
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
 // one forward pass and takes each scalar rule from ir_fast_fold_rule, which
 // the diagnostic-only ir_construction_fold_census also asks at C-builder
-// commit (#3010; ir_construction.fold_birth_*/fold_late_*). That census tags
-// the row (IrInstruction.fold_birth, IR_FAST_BIRTH_*), and
-// ir_fast_fold_census_late matches each late fold against the tag
-// (fold_match_direct/cascade/post/clone_*), while ir_fast_fold_census_entry
-// and _exit follow birth folds into FAST (fold_survival_*); ir_fast_dce uses
+// commit (#3010; ir_construction.fold_birth_*/fold_late_*), and
+// ir_construction_fold_census_begin/_hold/_end at the end of a C body
+// (fold_net_*, fold_form_*, fold_size_*). The commit census also tags the
+// row (IrInstruction.fold_birth, IR_FAST_BIRTH_*): ir_fast_fold_census_late
+// matches each late fold against the tag (fold_match_direct/cascade/post/
+// clone_*), while ir_fast_fold_census_entry and _exit follow birth folds into
+// FAST (fold_survival_*); ir_fast_dce uses
 // counts plus a deletion queue (no use CSR); ir_fast_parameters has a hard
 // sweep cap. The opt-in ir_fast_cse (#3011) value-numbers admitted rows within
 // each block through a bounded generation-tagged table and runs between address
@@ -624,6 +626,306 @@ void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrIns
         row->fold_birth = (u8)(tag | (u32)rule);
     }
 }
+
+// The end-of-body half of the census, taken where the C builder has committed
+// a function's rows but SSA finish has not yet renumbered values or forwarded
+// stores: the rows are those the birth probe saw, less retracted ones. It
+// counts objects, never bytes times a presumed per-row size. A birth fold
+// leaves no operand slice for its row; an identity also needs no row or value;
+// a literal whose every reader is a folded row needs no row, value or
+// immediate. FAST's own work for these rows is not matched here: promotion
+// renumbers rows first, so fold_late_* and fold_late_dce_constants only bound
+// it (#3010; docs/canonical-fast-pipeline.md).
+typedef enum IrFoldCensusShape
+{
+    IR_FOLD_CENSUS_SHAPE_REINTERPRET,
+    IR_FOLD_CENSUS_SHAPE_SIGN_EXTEND,
+    IR_FOLD_CENSUS_SHAPE_ZERO_EXTEND,
+    IR_FOLD_CENSUS_SHAPE_TRUNCATE,
+    IR_FOLD_CENSUS_SHAPE_BOOL_COMPARE,
+    IR_FOLD_CENSUS_SHAPE_OTHER,
+    IR_FOLD_CENSUS_SHAPE_COUNT,
+} IrFoldCensusShape;
+
+typedef enum IrFoldCensusConsumer
+{
+    IR_FOLD_CENSUS_CONSUMER_STORE,
+    IR_FOLD_CENSUS_CONSUMER_AGGREGATE,
+    IR_FOLD_CENSUS_CONSUMER_RETURN,
+    IR_FOLD_CENSUS_CONSUMER_CALL,
+    IR_FOLD_CENSUS_CONSUMER_BRANCH,
+    IR_FOLD_CENSUS_CONSUMER_OPERATOR,
+    IR_FOLD_CENSUS_CONSUMER_OTHER,
+    IR_FOLD_CENSUS_CONSUMER_UNUSED,
+    IR_FOLD_CENSUS_CONSUMER_COUNT,
+} IrFoldCensusConsumer;
+
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_OTHER_UNUSED - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE + 1 ==
+                (u32)IR_FOLD_CENSUS_SHAPE_COUNT * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT);
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_TRUNCATE_STORE - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE ==
+                (u32)IR_FOLD_CENSUS_SHAPE_TRUNCATE * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT);
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_BRANCH - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE == (u32)IR_FOLD_CENSUS_CONSUMER_BRANCH);
+
+// Upper row bounds of the size buckets; the last bucket is unbounded.
+BUSTER_GLOBAL_LOCAL u32 const ir_fold_census_size_limits[] = {64, 256, 1024, 4096};
+#define IR_FOLD_CENSUS_SIZE_FIELDS (IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_256_FUNCTIONS - IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_64_FUNCTIONS)
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_SIZE_ROWS_GE_4096_DEAD_LITERALS - IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_64_FUNCTIONS + 1 ==
+                IR_FOLD_CENSUS_SIZE_FIELDS * (BUSTER_ARRAY_LENGTH(ir_fold_census_size_limits) + 1));
+
+// Per-value marks: the low bits hold a folded row's shape plus one.
+enum
+{
+    IR_FOLD_CENSUS_MARK_SHAPE = 0x07,
+    IR_FOLD_CENSUS_MARK_CONSUMED = 0x08,
+    IR_FOLD_CENSUS_MARK_HELD = 0x10,
+    IR_FOLD_CENSUS_MARK_DEAD = 0x20,
+};
+
+// Scratch lives in its own thread-local arena and is carved with the raw arena
+// primitive, so allocation.* request counts and every other arena's dirty
+// prefix stay exactly as without the census. The arena is reserved once per
+// thread, reused per function and never released before process exit.
+// A function with more values than fit the default 256 MiB reservation at
+// five bytes each is skipped and counted rather than refused.
+#define IR_FOLD_CENSUS_VALUE_LIMIT ((u32)1 << 25)
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* ir_fold_census_arena;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 ir_fold_census_arena_start;
+
+IrFoldCensus ir_construction_fold_census_begin(IrFunction* function)
+{
+    IrFoldCensus census = {0};
+    if (!ir_fold_census_arena)
+    {
+        ir_fold_census_arena = arena_create((ArenaCreation){0});
+        ir_fold_census_arena_start = ir_fold_census_arena->position;
+    }
+    arena_set_position(ir_fold_census_arena, ir_fold_census_arena_start);
+    if (function && function->value_count && function->value_count <= IR_FOLD_CENSUS_VALUE_LIMIT)
+    {
+        census.value_count = function->value_count;
+        census.uses = (u32*)arena_benchmark_allocate_zeroed_bytes_raw(ir_fold_census_arena, arena_array_size(sizeof(u32), census.value_count),
+                                                                      BUSTER_ALIGN_OF(u32));
+        census.marks = (u8*)arena_benchmark_allocate_zeroed_bytes_raw(ir_fold_census_arena, census.value_count, 1);
+    }
+    IR_CONSTRUCTION_RECORD(FOLD_NET_SKIPPED_FUNCTIONS, function && function->value_count > IR_FOLD_CENSUS_VALUE_LIMIT);
+    return census;
+}
+
+void ir_construction_fold_census_hold(IrFoldCensus* census, IrValueId value)
+{
+    if (value.value < census->value_count)
+    {
+        census->uses[value.value] += 1;
+        census->marks[value.value] |= IR_FOLD_CENSUS_MARK_HELD;
+        IR_CONSTRUCTION_RECORD(FOLD_NET_SSA_USES, 1);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IrFoldCensusConsumer ir_fold_census_consumer(u8 opcode)
+{
+    IrFoldCensusConsumer consumer;
+    switch (opcode)
+    {
+    case IR_OPCODE_STORE:
+    case IR_OPCODE_ATOMIC_STORE: consumer = IR_FOLD_CENSUS_CONSUMER_STORE; break;
+    case IR_OPCODE_ARRAY:
+    case IR_OPCODE_AGGREGATE: consumer = IR_FOLD_CENSUS_CONSUMER_AGGREGATE; break;
+    case IR_OPCODE_RETURN: consumer = IR_FOLD_CENSUS_CONSUMER_RETURN; break;
+    case IR_OPCODE_CALL: consumer = IR_FOLD_CENSUS_CONSUMER_CALL; break;
+    case IR_OPCODE_BRANCH_IF:
+    case IR_OPCODE_SWITCH: consumer = IR_FOLD_CENSUS_CONSUMER_BRANCH; break;
+    case IR_OPCODE_CAST:
+    case IR_OPCODE_UNARY:
+    case IR_OPCODE_BINARY: consumer = IR_FOLD_CENSUS_CONSUMER_OPERATOR; break;
+    default: consumer = IR_FOLD_CENSUS_CONSUMER_OTHER; break;
+    }
+    return consumer;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_fold_census_literal(IrFunction* function, u32 value)
+{
+    u32 definition = function->values[value].definition.value;
+    return definition < function->instruction_count && function->instructions[definition].opcode == IR_OPCODE_CONSTANT_INTEGER;
+}
+
+// The birth rule of row `index` from the operands as committed, or NONE when
+// an operand's definition does not precede the row, as at commit.
+BUSTER_GLOBAL_LOCAL IrFastFoldRule ir_fold_census_row_rule(IrProgram* program, IrFunction* function, u32 index, u32* replacement)
+{
+    IrInstruction const* row = function->instructions + index;
+    IrFastFoldRule rule = IR_FAST_FOLD_RULE_NONE;
+    if (row->result.value < function->value_count && row->operand_count && row->operands &&
+        (row->opcode == IR_OPCODE_CAST || row->opcode == IR_OPCODE_UNARY || row->opcode == IR_OPCODE_BINARY))
+    {
+        u64 bits = 0;
+        IrFastFoldOperands committed = {
+            .first = row->operands[0].value,
+            .second = row->operand_count > 1 ? row->operands[1].value : IR_PROMOTE_NONE,
+        };
+        bool suppressed = ir_semantic_suppress(true);
+        committed.left_constant = committed.first != IR_PROMOTE_NONE && ir_fast_constant(program, function, committed.first, &committed.left);
+        committed.right_constant = committed.second != IR_PROMOTE_NONE && ir_fast_constant(program, function, committed.second, &committed.right);
+        rule = ir_fast_fold_rule(program, function, row, &committed, replacement, &bits);
+        ir_semantic_suppress(suppressed);
+        if (*replacement != IR_PROMOTE_NONE && !ir_fast_replacement_compatible(function, row->result.value, *replacement))
+        {
+            rule = IR_FAST_FOLD_RULE_NONE;
+        }
+        for (u32 operand = 0; rule != IR_FAST_FOLD_RULE_NONE && operand < row->operand_count; operand += 1)
+        {
+            u32 definition = function->values[row->operands[operand].value].definition.value;
+            rule = definition < index || definition >= function->instruction_count ? rule : IR_FAST_FOLD_RULE_NONE;
+        }
+    }
+    return rule;
+}
+
+BUSTER_GLOBAL_LOCAL IrFoldCensusShape ir_fold_census_shape(IrProgram* program, IrFunction* function, IrInstruction const* row, IrFastFoldRule rule)
+{
+    IrFoldCensusShape shape = IR_FOLD_CENSUS_SHAPE_OTHER;
+    if (rule == IR_FAST_FOLD_RULE_CAST_CONSTANT)
+    {
+        shape = row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET   ? IR_FOLD_CENSUS_SHAPE_REINTERPRET
+                : row->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ? IR_FOLD_CENSUS_SHAPE_SIGN_EXTEND
+                : row->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ? IR_FOLD_CENSUS_SHAPE_ZERO_EXTEND
+                : row->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE    ? IR_FOLD_CENSUS_SHAPE_TRUNCATE
+                                                                                  : shape;
+    }
+    else if (rule == IR_FAST_FOLD_RULE_BINARY_CONSTANT)
+    {
+        IrType* type = ir_type_from_id(&program->types, function->values[row->result.value].canonical_type);
+        shape = type && type->kind == IR_TYPE_BOOLEAN ? IR_FOLD_CENSUS_SHAPE_BOOL_COMPARE : shape;
+    }
+    return shape;
+}
+
+void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, IrFoldCensus* census)
+{
+    if (census->value_count == function->value_count)
+    {
+        u32* uses = census->uses;
+        u8* marks = census->marks;
+        u64 folds = 0;
+        u64 dead = 0;
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction const* row = function->instructions + index;
+            for (u32 operand = 0; operand < row->operand_count; operand += 1)
+            {
+                u32 value = row->operands[operand].value;
+                if (value < census->value_count)
+                {
+                    uses[value] += 1;
+                }
+            }
+        }
+        for (u32 block = 0; block < function->block_count; block += 1)
+        {
+            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+            {
+                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                {
+                    if (incoming->value.value < census->value_count)
+                    {
+                        uses[incoming->value.value] += 1;
+                    }
+                }
+            }
+        }
+        // Folded rows: mark each result with its shape and drop the reads a
+        // folded row makes of literals it does not forward.
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction const* row = function->instructions + index;
+            u32 replacement = IR_PROMOTE_NONE;
+            IrFastFoldRule rule = ir_fold_census_row_rule(program, function, index, &replacement);
+            IR_CONSTRUCTION_RECORD(FOLD_NET_SCALAR_ROWS, row->opcode == IR_OPCODE_CAST || row->opcode == IR_OPCODE_UNARY ||
+                                                             row->opcode == IR_OPCODE_BINARY);
+            if (rule != IR_FAST_FOLD_RULE_NONE)
+            {
+                folds += 1;
+                marks[row->result.value] |= (u8)(ir_fold_census_shape(program, function, row, rule) + 1);
+                IR_CONSTRUCTION_RECORD(FOLD_NET_IDENTITY_ROWS, replacement != IR_PROMOTE_NONE);
+                IR_CONSTRUCTION_RECORD(FOLD_NET_CONSTANT_ROWS, replacement == IR_PROMOTE_NONE);
+                IR_CONSTRUCTION_RECORD(FOLD_NET_OPERAND_SLOTS, row->operand_count);
+                for (u32 operand = 0; operand < row->operand_count; operand += 1)
+                {
+                    u32 value = row->operands[operand].value;
+                    if (value != replacement && ir_fold_census_literal(function, value))
+                    {
+                        BUSTER_CHECK(uses[value] != 0);
+                        uses[value] -= 1;
+                        IR_CONSTRUCTION_RECORD(FOLD_NET_LITERAL_USES, 1);
+                    }
+                }
+            }
+        }
+        // Each folded result is attributed once: to a frontend store when SSA
+        // holds it, otherwise to its first reader in row order.
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction const* row = function->instructions + index;
+            for (u32 operand = 0; operand < row->operand_count; operand += 1)
+            {
+                u32 value = row->operands[operand].value;
+                u8 mark = value < census->value_count ? marks[value] : 0;
+                if ((mark & IR_FOLD_CENSUS_MARK_SHAPE) && !(mark & IR_FOLD_CENSUS_MARK_CONSUMED))
+                {
+                    IrFoldCensusConsumer consumer = (mark & IR_FOLD_CENSUS_MARK_HELD) ? IR_FOLD_CENSUS_CONSUMER_STORE
+                                                                                       : ir_fold_census_consumer(row->opcode);
+                    u32 shape = (u32)(mark & IR_FOLD_CENSUS_MARK_SHAPE) - 1;
+                    ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE +
+                                                                   shape * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT + (u32)consumer), 1);
+                    marks[value] = (u8)(mark | IR_FOLD_CENSUS_MARK_CONSUMED);
+                }
+            }
+        }
+        // Results no row reads, and literals left with no reader.
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction const* row = function->instructions + index;
+            u32 result = row->result.value;
+            u8 mark = result < census->value_count ? marks[result] : 0;
+            if ((mark & IR_FOLD_CENSUS_MARK_SHAPE) && !(mark & IR_FOLD_CENSUS_MARK_CONSUMED))
+            {
+                IrFoldCensusConsumer consumer = (mark & IR_FOLD_CENSUS_MARK_HELD) ? IR_FOLD_CENSUS_CONSUMER_STORE
+                                                : uses[result] ? IR_FOLD_CENSUS_CONSUMER_OTHER
+                                                               : IR_FOLD_CENSUS_CONSUMER_UNUSED;
+                u32 shape = (u32)(mark & IR_FOLD_CENSUS_MARK_SHAPE) - 1;
+                ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE +
+                                                               shape * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT + (u32)consumer), 1);
+                marks[result] = (u8)(mark | IR_FOLD_CENSUS_MARK_CONSUMED);
+            }
+            for (u32 operand = 0; (mark & IR_FOLD_CENSUS_MARK_SHAPE) && operand < row->operand_count; operand += 1)
+            {
+                u32 value = row->operands[operand].value;
+                if (!uses[value] && !(marks[value] & IR_FOLD_CENSUS_MARK_DEAD) && ir_fold_census_literal(function, value))
+                {
+                    u32 definition = function->values[value].definition.value;
+                    marks[value] |= IR_FOLD_CENSUS_MARK_DEAD;
+                    dead += 1;
+                    // Committed straight before its only folded reader in the
+                    // same block: the frontend could have rewritten it in place.
+                    IR_CONSTRUCTION_RECORD(FOLD_NET_ADJACENT_DEAD_LITERALS,
+                                           definition + 1 == index && function->instructions[definition].next.value == index);
+                }
+            }
+        }
+        u32 bucket = 0;
+        while (bucket < BUSTER_ARRAY_LENGTH(ir_fold_census_size_limits) && function->instruction_count >= ir_fold_census_size_limits[bucket])
+        {
+            bucket += 1;
+        }
+        u32 offset = bucket * IR_FOLD_CENSUS_SIZE_FIELDS;
+        ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_64_FUNCTIONS + offset), 1);
+        ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_64_ROWS + offset), function->instruction_count);
+        ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_64_FOLDS + offset), folds);
+        ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_SIZE_ROWS_LT_64_DEAD_LITERALS + offset), dead);
+        IR_CONSTRUCTION_RECORD(FOLD_NET_FUNCTIONS, 1);
+        IR_CONSTRUCTION_RECORD(FOLD_NET_ROWS, function->instruction_count);
+        IR_CONSTRUCTION_RECORD(FOLD_NET_DEAD_LITERALS, dead);
+    }
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u32* replacements, u8* removed,
@@ -664,6 +966,9 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
         removed[index] = 1;
         statistics->changes += 1;
         statistics->visits += 1;
+        // Bounds the DCE work a birth fold's dead literals would have spared
+        // (#3010); folded rows rewritten to constants count here too.
+        IR_CONSTRUCTION_RECORD(FOLD_LATE_DCE_CONSTANTS, row->opcode == IR_OPCODE_CONSTANT_INTEGER);
         for (u32 operand = 0; operand < row->operand_count; operand += 1)
         {
             u32 value = ir_promote_root(replacements, row->operands[operand].value);

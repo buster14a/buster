@@ -628,7 +628,12 @@ captures (#2741).
   These ordinary compiler A/B paths run no profile steps and no A/A. The
   separately versioned [sampling qualification](../compiler-main-sampling.md)
   route (#3212) is staged disabled; its explicitly admitted, predeclared research
-  controls do not change either immutable ordinary profile. `native-retirement-performance-v1` remains blocked,
+  controls do not change either immutable ordinary profile. The single
+  [MAIN routing switch](../compiler-main-profile-routing-v1.md) stays
+  `disabled` until a reviewed certificate qualifies `compiler-main-40pairs-v1`;
+  it can route only the authenticated automatic post-merge comparison, keeps
+  the full FAST/QUALITY corpus, and rolls back to `compiler-compare-v1`.
+  Explicit pull-request and acceptance requests keep their requested profiles. `native-retirement-performance-v1` remains blocked,
   and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
   removed (#2741; tag `bench-service-final` retains them). Use the local
   trusted capture methods above for ad-hoc profiling. Historical audit notes retain
@@ -986,6 +991,30 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    not accepted; a different flag pair needs its own versioned profile.
    `compiler_publish.py` re-validates every raw cell document, the tree probe
    and the recomputed verdict on the 9700X evidence.
+
+   **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
+   fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
+   same every-parent freshness rule. It cannot be combined with an analyzer
+   profile, inline acceptance, the ast-pilot profile, or the other opt-in legs
+   it excludes in `compiler_compare.py`. `constant_reuse_acceptance.py` runs
+   it after the tests-off candidate build, on the same frozen candidate-HEAD
+   tree. It times the one candidate binary as both A (default) and B with
+   `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity
+   `-c` compile. The `intern` cell passes `-fcanonical-intern-constants` to B
+   and the `cse` cell passes `-fcanonical-fast-cse`. Each cell is 20 ABBA
+   pairs after one warmup on CPU 2 with fresh copies. It records:
+   - wall time with its 95% CI;
+   - retired instructions when perf can count them (NA needs a recorded
+     reason);
+   - peak RSS;
+   - executable-section code bytes of each object.
+
+   A's and B's diagnostics must be identical. Their objects differ by design.
+   The profile is report-only and has no verdict, and it accepts no request
+   flags, pair counts or compiler arguments. `compiler_publish.py`
+   re-validates every raw cell document on the 9700X evidence. The flags and
+   their hosted census are described in
+   [the canonical FAST pipeline guide](../canonical-fast-pipeline.md).
 
    **Issue #2761 opt-in real-source throughput profile.** The same route
    accepts one fresh exact line `profile: throughput-real-source-v1`, selected
@@ -1409,6 +1438,69 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    evidence was 68 KB. Its 20-minute timeout keeps it inside the unchanged
    90-minute `compare-pull` job next to the roughly 14-minute ordinary
    comparison. No job timeout changed.
+
+   **Issue #58 opt-in self-built inline-mode leg.** The same route accepts
+   one fresh exact line `profile: self-host-inline-compare-v1`, selected by
+   the same every-parent freshness rule. It is the Zen 5 route for
+   `uarch_lab:compare@self-host-inline-compare`, the compilers each side
+   would self-build with `-fcanonical-inline`. The #48 profile above times
+   one head against itself, inliner off against on; this one times base
+   against head, both with the inliner on. It cannot be combined with any
+   other opt-in profile, `canonical-inline-self-host-v1` and the scaling leg
+   included; both the harness and the publisher refuse the combination. The
+   trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
+   two parts:
+   - **Stage 1, untimed.** Right after each role's Clang Release build, with
+     that revision and its `build/generated` still checked out,
+     `build_selfhost_inline_stage1` runs the role's `ide` once with the
+     profile's `stage1_command`: the unity source with `-fcanonical-inline`.
+     It refuses a checkout that is not the role's revision, and inputs or a
+     compiler that change during the build. Each `stage1.json` records the
+     building compiler's SHA-256 and the stage-1 compiler's.
+   - **Timed comparison.** After the corpus leg, on the ordinary comparison's
+     frozen merge-base tree, `measure_selfhost_inline` runs
+     `uarch_lab.py compare` on the two stage-1 compilers with fixed
+     arguments: `--pairs 30 --warmups 1 --cpu 2 --profile-steps
+     topdown,sampling --require-identical-output --min-effect 0.5 --
+     -fcanonical-inline`. The outputs must be byte-identical before anything
+     is timed. Topdown runs each Zen 5 metric group (PipelineL1 and L2,
+     branch, decoder and op-cache, cache and TLB) for both compilers, and
+     the report lists the front-end rows. Sampling adds per-symbol movers.
+
+   `compiler_publish.py` re-validates the receipt's `selfhost_inline` record
+   against the seven exported documents under `selfhost_inline/`
+   (`validate_selfhost_inline` and
+   `selfhost_inline_compare.validate_compare_documents`). It refuses:
+   - a stage-1 record not built from its role's revision by the receipt's
+     binary with the frozen command;
+   - a result that did not time those stage-1 compilers on the merge-base
+     tree;
+   - a run that is not 30 complete deterministic fresh-copy ABBA pairs with
+     the fixed flags, CPU, floor and profile steps;
+   - outputs that differ, or a prepare, timed, topdown or sampling step that
+     did not complete;
+   - missing wall-time intervals, unavailable hardware counters, or missing
+     instruction, cycle or branch-miss counts;
+   - front-end evidence that is not usable (`selfhost_inline_frontend_problems`):
+     a malformed topdown row, no level-1 `frontend_bound` metric with finite
+     values for both compilers, or a front-end row measured for only one.
+     The topdown step is marked ok even when a group fails or is
+     unavailable, so cache or backend rows never stand in for it;
+   - a receipt digest that the exported summary does not give.
+
+   Every value is report-only. On a pull request the merge base is the
+   baseline; for #58 a draft head carries one selector variant against the
+   production selector.
+
+   Cost is an estimate (no hosted host has perf, and no Zen 5 group count is
+   on record). Each stage-1 build took 4.7 s with the Clang-built compiler on
+   a hosted Xeon, and one self-built compile took about 19 s there; the 9700X
+   compiles the same source with a Clang-built compiler in about 1.5 s. That
+   puts a self-built compile near 5 s, and 30 pairs, both profiles and their
+   multiplexed metric re-runs near 220 compiles, about 25 to 30 minutes. Its
+   45-minute leg timeout keeps it inside the unchanged 90-minute
+   `compare-pull` job. No job timeout changed; record the first receipt's
+   `selfhost_inline_seconds` before relying on the estimate.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits

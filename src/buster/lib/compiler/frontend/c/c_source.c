@@ -73,6 +73,9 @@
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
 //   c_preprocess_directive_line_end             comment-aware directive ends
+//   c_token_kind_name                          token-kind spelling (one
+//                                              definition for unity and
+//                                              split builds)
 //   c_frame_wrap_conditional_tokens             conditional whitespace and sites
 //   c_integer_operation,                       C integer operators over the
 //   c_integer_constant_binary/unary            shared ir_integer_* semantics:
@@ -4324,6 +4327,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
     { S8_INITIALIZER("__builtin_complex"), C_SYMBOL_BUILTIN_COMPLEX },
+    // Clang's source-location builtins: the expansion point's presumed line
+    // (an int constant), file name and enclosing function name.
+    { S8_INITIALIZER("__builtin_LINE"), C_SYMBOL_BUILTIN_SOURCE_LINE },
+    { S8_INITIALIZER("__builtin_FILE"), C_SYMBOL_BUILTIN_SOURCE_FILE },
+    { S8_INITIALIZER("__builtin_FUNCTION"), C_SYMBOL_BUILTIN_SOURCE_FUNCTION },
     { S8_INITIALIZER("__builtin_strlen"), C_SYMBOL_BUILTIN_STRLEN },
     { S8_INITIALIZER("__builtin___clear_cache"), C_SYMBOL_BUILTIN_CLEAR_CACHE },
     { S8_INITIALIZER("__builtin_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
@@ -4614,6 +4622,15 @@ BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
                   builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
                   builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
                   builtin == C_SYMBOL_BUILTIN_VA_END;
+    return result;
+}
+
+// Clang's __builtin_LINE, __builtin_FILE and __builtin_FUNCTION: argument-free
+// queries of the call's expansion point, typed and lowered without an entity.
+BUSTER_C_SHARED bool c_semantic_source_location_builtin(CSymbolBuiltin builtin)
+{
+    bool result = builtin == C_SYMBOL_BUILTIN_SOURCE_LINE || builtin == C_SYMBOL_BUILTIN_SOURCE_FILE ||
+                  builtin == C_SYMBOL_BUILTIN_SOURCE_FUNCTION;
     return result;
 }
 
@@ -8297,6 +8314,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
         "__builtin_ia32_psrlqi128",
         "__builtin_types_compatible_p", "__builtin_classify_type", "__builtin_offsetof",
+        "__builtin_LINE",          "__builtin_FILE", "__builtin_FUNCTION",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",
@@ -14725,18 +14743,21 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
 #if BUSTER_INCLUDE_TESTS
 #define C_TEST_UNIT_REGISTRY_RESERVED_SIZE BUSTER_MB(64)
 // One unit this thread preprocessed and has not yet released: its three
-// private arenas, the arena its result lives in, and that arena's position
-// when preprocessing began (rewinding below it kills the result).
+// private arenas, the arena its result lives in, that arena's position
+// when preprocessing began (rewinding below it kills the result), and the
+// thread's registration serial, which orders units against test scopes.
 typedef struct CTestUnitEntry CTestUnitEntry;
 struct CTestUnitEntry
 {
     Arena* arenas[3];
     Arena* owner;
     u64 owner_position;
+    u64 serial;
 };
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
 BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
 {
@@ -14751,8 +14772,9 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Ar
         {
             c_test_unit_registry = entry;
         }
-        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position};
+        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position, .serial = c_test_unit_serial};
         c_test_unit_registry_count += 1;
+        c_test_unit_serial += 1;
     }
 }
 
@@ -14821,14 +14843,17 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_unregister(Arena* spelling)
     }
 }
 
-void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+// Releases every unit the predicate selects: those owned by `owner` at or
+// above `position` (every unit when `owner` is null) that registered at or
+// after `serial`.
+BUSTER_GLOBAL_LOCAL void c_test_release_preprocess_units(Arena* owner, u64 position, u64 serial)
 {
     u64 index = c_test_unit_registry_count;
     while (index > 0)
     {
         index -= 1;
         CTestUnitEntry entry = c_test_unit_registry[index];
-        if (!owner || (entry.owner == owner && entry.owner_position >= position))
+        if (entry.serial >= serial && (!owner || (entry.owner == owner && entry.owner_position >= position)))
         {
             c_test_unit_remove(index);
             for (u32 arena_index = 0; arena_index < BUSTER_ARRAY_LENGTH(entry.arenas); arena_index += 1)
@@ -14837,6 +14862,21 @@ void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
             }
         }
     }
+}
+
+void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+{
+    c_test_release_preprocess_units(owner, position, 0);
+}
+
+u64 c_test_preprocess_unit_mark(void)
+{
+    return c_test_unit_serial;
+}
+
+void c_test_release_preprocess_arenas_since(u64 mark)
+{
+    c_test_release_preprocess_units(0, 0, mark);
 }
 
 void c_test_release_preprocess_arenas(void)
@@ -14978,32 +15018,43 @@ void c_prewarm(void)
     }
 }
 
-#if !BUSTER_UNITY_BUILD
 String8 c_token_kind_name(CTokenKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case C_TOKEN_INVALID:
-        return S8("invalid");
+        result = S8("invalid");
+        break;
     case C_TOKEN_END_OF_FILE:
-        return S8("end of file");
+        result = S8("end of file");
+        break;
     case C_TOKEN_IDENTIFIER:
-        return S8("identifier");
+        result = S8("identifier");
+        break;
     case C_TOKEN_PREPROCESSING_NUMBER:
-        return S8("preprocessing number");
+        result = S8("preprocessing number");
+        break;
     case C_TOKEN_CHARACTER_LITERAL:
-        return S8("character literal");
+        result = S8("character literal");
+        break;
     case C_TOKEN_STRING_LITERAL:
-        return S8("string literal");
+        result = S8("string literal");
+        break;
     case C_TOKEN_PUNCTUATOR:
-        return S8("punctuator");
+        result = S8("punctuator");
+        break;
     case C_TOKEN_NEWLINE:
-        return S8("newline");
+        result = S8("newline");
+        break;
     case C_TOKEN_PRAGMA:
-        return S8("pragma");
+        result = S8("pragma");
+        break;
     case C_TOKEN_KIND_COUNT:
-        return S8("invalid token kind");
+    default:
+        result = S8("invalid token kind");
+        break;
     }
-    return S8("invalid token kind");
+
+    return result;
 }
-#endif

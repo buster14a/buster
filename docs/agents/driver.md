@@ -192,11 +192,28 @@ and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
-`compiler_parallel_prewarm()` prepares both native target families, including
-all x86 per-form caches and exact plans, before the first persistent worker.
-Both are needed because a later invocation may switch architectures while
-workers are parked. Embedding callers must call it before starting their own
-gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
+Before its first multi-lane cohort, the driver prepares only the
+invocation's native family (`compiler_driver_native_family_prepare`): all
+x86 per-form caches and exact plans for x86-64, or canonical-form validity and
+semantic blobs for AArch64. Prepared families are tracked in driver state.
+Parked workers count as live threads, so a later invocation on the same thread
+that needs a family not yet prepared first releases the parked gang with
+`lane_release()`, prewarms that family serially, and lets the next `lane_run`
+recreate the gang. This applies to a later cohort and to a serial compile of
+that family while a cohort's gang is parked: the serial compile fills x86
+tables lazily under a serial check. Only a transition to a family not yet
+prepared releases the gang; once both are prepared, alternating targets reuses
+the parked gang.
+A process that never runs a cohort keeps the serial lazy path. The motivation
+is a baseline attribution, not a measurement of this design: the #53
+diagnostic split attributed about 9% of the both-family prewarm to the
+AArch64 half on an x86 input. The end-to-end effect awaits the 9700X
+`scaling-v1` rows.
+
+`compiler_parallel_prewarm()` still prepares both families. Embedding callers
+must call it before starting their own gang, or before calling the driver from
+more than one thread, because the driver cannot release a gang it does not
+own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
@@ -585,6 +602,10 @@ The block-local CSE experiment (#3011) is selected only by
 `-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+`-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
+off the construction-time constant interning arm in C lowering (off by
+default, last one wins, independent of `-O` and FAST controls); see
+[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables

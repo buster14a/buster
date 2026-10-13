@@ -2,6 +2,7 @@
 // These publication-boundary checks protect the row/temporary reduction and
 // reject constructors that smuggle a memory place in as a captured value.
 #include <buster/lib/file.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 BUSTER_GLOBAL_LOCAL CIRLowerResult ir_complex_test_lower(Arena* arena, String8 source, Target target, bool disable_direct_ssa)
 {
@@ -79,7 +80,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validation_value_tests(UnitTestArguments* 
         BUSTER_TEST(arguments, prepared.boundary == (module->local_promotion.promoted_locals ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
                                                                                           : IR_VALIDATION_BOUNDARY_UNSPECIFIED));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -184,7 +185,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_complex_value_mode_tests(UnitTestArguments
             BUSTER_TEST(arguments, ir_test_binary_operation_count(function, IR_BINARY_FLOAT_ADD) == 2 * (IR_COMPLEX_TEST_TERMS - 1));
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 

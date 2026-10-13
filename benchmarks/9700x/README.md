@@ -251,6 +251,13 @@ the ordinary comparison: the candidate binary without and with the flag on
 `-fsyntax-only` and `-c` cells. Its method, budget and evidence are in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: constant-reuse-acceptance-v1` line, added once
+against every parent, adds issue #3011's fixed constant-reuse profile. It
+times the candidate binary on the `-g0` unity `-c` compile, without and with
+`-fcanonical-intern-constants` and without and with `-fcanonical-fast-cse`.
+Its method and evidence are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 A fresh exact `profile: throughput-real-source-v1` line, added once against
 every parent, adds the real-source throughput leg (#2761) after the corpus
 leg. The merge base's `./build.sh bench_throughput run --real-source` times
@@ -344,6 +351,18 @@ alternating pairs per cell on CPU 2. It is report-only and cannot be
 combined with the other opt-in profiles. Its evidence is under `link_tls/`
 in the artifact, and a partial, failed or cancelled leg fails the check.
 Its method is in [benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: self-host-inline-compare-v1` line, added once against
+every parent, adds the self-built inline-mode leg (#58). After each role's
+Clang Release build, that `ide` builds its own revision's stage-1 compiler
+with `-fcanonical-inline`. After the corpus leg, the trusted
+`tools/bench_direct/selfhost_inline_compare.py` times the two stage-1
+compilers compiling the frozen merge-base tree with the same flag. It runs 30
+ABBA pairs on CPU 2 and requires byte-identical outputs, then runs the topdown
+and sampling profile steps for both. It is report-only and cannot be combined
+with the other opt-in profiles. Its evidence is under `selfhost_inline/` in
+the artifact, and a partial, failed or cancelled leg fails the check. Its
+method is in [benchmarking.md](../../docs/agents/benchmarking.md).
 
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
