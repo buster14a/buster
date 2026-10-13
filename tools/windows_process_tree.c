@@ -350,6 +350,17 @@ BUSTER_GLOBAL_LOCAL u32 tree_test_startup_delay_ms;
 BUSTER_GLOBAL_LOCAL WCHAR const* tree_test_startup_cancel_path;
 BUSTER_GLOBAL_LOCAL u32 tree_test_cleanup_delay_ms;
 BUSTER_GLOBAL_LOCAL u32 tree_test_status_delay_ms;
+// Publication stages, each timestamped once its operation returns (#3816).
+typedef enum TreeTestPublicationMark
+{
+    TREE_TEST_PUBLICATION_MARK_ATTRIBUTES,
+    TREE_TEST_PUBLICATION_MARK_CREATE,
+    TREE_TEST_PUBLICATION_MARK_WRITE,
+    TREE_TEST_PUBLICATION_MARK_FLUSH,
+    TREE_TEST_PUBLICATION_MARK_CLOSE,
+    TREE_TEST_PUBLICATION_MARK_RENAME,
+    TREE_TEST_PUBLICATION_MARK_COUNT,
+} TreeTestPublicationMark;
 typedef struct TreeTestLaunchContext TreeTestLaunchContext;
 struct TreeTestLaunchContext
 {
@@ -364,6 +375,9 @@ struct TreeTestLaunchContext
     char const* publication_stage;
     DWORD publication_error;
     bool publication_error_valid;
+    // Zero marks a stage that was not reached.
+    u64 publication_mark_ns[TREE_TEST_PUBLICATION_MARK_COUNT];
+    bool publication_marks_clock_valid;
 };
 BUSTER_GLOBAL_LOCAL TreeTestLaunchContext tree_test_launch_context;
 
@@ -380,8 +394,10 @@ BUSTER_GLOBAL_LOCAL bool tree_test_publication_check(bool passed, char const* st
     return passed;
 }
 #define TREE_TEST_PUBLICATION_CHECK(value, stage, win32_error) tree_test_publication_check((value), stage, win32_error)
+#define TREE_TEST_PUBLICATION_MARK(status, mark) tree_test_publication_mark(status, mark)
 #else
 #define TREE_TEST_PUBLICATION_CHECK(value, stage, win32_error) (value)
+#define TREE_TEST_PUBLICATION_MARK(status, mark) ((void)0)
 #endif
 
 // Match the adapter's actual Windows CPython monotonic clock: <=3.12 uses
@@ -428,6 +444,19 @@ BUSTER_GLOBAL_LOCAL u64 tree_clock_ns(TreeLaunchStatus* status)
     status->clock_valid = status->clock_valid && valid;
     return result;
 }
+
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+// Observe through a copy, as tree_launch's publication clock does. Called after
+// the stage's failure check has retained its Win32 error.
+BUSTER_GLOBAL_LOCAL void tree_test_publication_mark(TreeLaunchStatus const* status, TreeTestPublicationMark mark)
+{
+    TreeLaunchStatus clock = *status;
+    clock.clock_valid = true;
+    tree_test_launch_context.publication_mark_ns[mark] = tree_clock_ns(&clock);
+    tree_test_launch_context.publication_marks_clock_valid =
+        tree_test_launch_context.publication_marks_clock_valid && clock.clock_valid;
+}
+#endif
 
 // The parent requests cancellation without racing creation/opening of the job.
 // Only this native owner decides whether to launch and certifies owned teardown.
@@ -490,11 +519,13 @@ BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus 
 #else
         result = GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND;
 #endif
+        TREE_TEST_PUBLICATION_MARK(status, TREE_TEST_PUBLICATION_MARK_ATTRIBUTES);
     }
     if (result)
     {
         file = CreateFileW(temporary, GENERIC_WRITE, 0, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
         result = TREE_TEST_PUBLICATION_CHECK(file != INVALID_HANDLE_VALUE, "create-temporary", true);
+        TREE_TEST_PUBLICATION_MARK(status, TREE_TEST_PUBLICATION_MARK_CREATE);
     }
     if (result)
     {
@@ -509,16 +540,23 @@ BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus 
         DWORD written = 0;
         result = TREE_TEST_PUBLICATION_CHECK(bytes > 0 && (size_t)bytes < sizeof(record), "format-record", false) &&
                  TREE_TEST_PUBLICATION_CHECK(WriteFile(file, record, (DWORD)bytes, &written, 0), "write-record", true) &&
-                 TREE_TEST_PUBLICATION_CHECK(written == (DWORD)bytes, "write-length", false) &&
-                 TREE_TEST_PUBLICATION_CHECK(FlushFileBuffers(file), "flush-record", true);
+                 TREE_TEST_PUBLICATION_CHECK(written == (DWORD)bytes, "write-length", false);
+        TREE_TEST_PUBLICATION_MARK(status, TREE_TEST_PUBLICATION_MARK_WRITE);
+        if (result)
+        {
+            result = TREE_TEST_PUBLICATION_CHECK(FlushFileBuffers(file), "flush-record", true);
+            TREE_TEST_PUBLICATION_MARK(status, TREE_TEST_PUBLICATION_MARK_FLUSH);
+        }
     }
     if (file != INVALID_HANDLE_VALUE)
     {
         result = TREE_TEST_PUBLICATION_CHECK(CloseHandle(file) != 0, "close-temporary", true) && result;
+        TREE_TEST_PUBLICATION_MARK(status, TREE_TEST_PUBLICATION_MARK_CLOSE);
     }
     if (result)
     {
         result = TREE_TEST_PUBLICATION_CHECK(MoveFileExW(temporary, path, MOVEFILE_WRITE_THROUGH) != 0, "rename-record", true);
+        TREE_TEST_PUBLICATION_MARK(status, TREE_TEST_PUBLICATION_MARK_RENAME);
     }
     return result;
 }
@@ -669,6 +707,7 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     TreeLaunchStatus publication_clock = status;
     tree_test_launch_context.publication_started_ns = tree_clock_ns(&publication_clock);
     tree_test_launch_context.publication_clock_valid = publication_clock.clock_valid;
+    tree_test_launch_context.publication_marks_clock_valid = true;
 #endif
     bool publication_ok = tree_launch_status(status_path, &status);
     if (!publication_ok)

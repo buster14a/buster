@@ -276,6 +276,8 @@ request's verified head, never the trusted harness revision `github.sha`.
 - **Completed.** `publish-compiler` / `publish-pull` complete the same check:
   success for a valid measurement, failure for a refused authorization or
   missing or invalid evidence, neutral for a superseded pull request head.
+  Native recovery also reports verified pending routine-main replacement as
+  neutral, with no measurement claim (below).
   The check summary links the workflow attempt and the evidence artifact
   explicitly, because GitHub may not honour `details_url` for checks written
   with `GITHUB_TOKEN`.
@@ -319,6 +321,33 @@ request's verified head, never the trusted harness revision `github.sha`.
   existing evidence validator. Unavailable provenance/API records are
   reported as unavailable, never as a pass. No host job is started and the
   9700X receives no publication credential.
+
+  For an automatic main comparison only, recovery can present pending
+  replacement as `neutral`, titled **Not measured: superseded before
+  execution** (#3885). Its request must have succeeded; executor and request
+  must both still be attempt 1. Existing app/name/head/marker/protocol and
+  exact request bindings remain mandatory. The complete exact-attempt jobs
+  response must declare numeric zero with an empty jobs array. Recovery reads
+  the workflow at the executor's trusted revision and requires the existing
+  main-compare concurrency stanza, then reads GitHub's public exact-attempt
+  page through the already installed `gh` CLI. Only GitHub's native annotation
+  **Canceling since a higher priority waiting request for
+  buster-9700x-direct-bench-main-compare exists**, inside the annotation markup
+  bound to that executor's workflow link, establishes the cancellation cause.
+  Fresh current executor/request records must retain the joined identities
+  and attempts. These bounded reads add no polling or physical-runner work.
+  A changed HTML shape, unavailable page, incomplete/malformed job listing,
+  changed policy/attempt, any recorded job, manual/unknown cancellation or
+  failed request cannot receive this exception. The native executor stays
+  cancelled. The annotation does not identify a successor run; a newer commit
+  or nearby timestamp never supplies one or transfers a measurement result.
+
+  Terminal recovery starts its summary with the current not-measured state,
+  retains exact request/executor/head/harness provenance and a concrete
+  baseline SHA when setup recorded one, and otherwise reports the baseline
+  unavailable. Previous waiting text is quoted as explicitly historical.
+  Published measurements and already-terminal checks remain immutable; PR
+  comparisons and research keep their existing outcome semantics.
 
   If a callback failed or ran before a controller repair landed, an owner can
   dispatch the same lifecycle workflow on `main` with the original completed

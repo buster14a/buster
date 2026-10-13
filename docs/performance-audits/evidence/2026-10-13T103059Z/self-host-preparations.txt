@@ -1,0 +1,5 @@
+Breakpoint 1 at 0x1c918a1: file /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/lib/compiler/frontend/c/c_gen.c, line 8178.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/libthread_db.so.1".
+[Inferior 1 (process 335303) exited normally]
+Loop-exit preparation calls: 0

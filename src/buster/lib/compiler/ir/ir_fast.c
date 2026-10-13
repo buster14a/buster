@@ -9,7 +9,8 @@
 // row (IrInstruction.fold_birth, IR_FAST_BIRTH_*): ir_fast_fold_census_late
 // matches each late fold against the tag (fold_match_direct/cascade/post/
 // clone_*), while ir_fast_fold_census_entry and _exit follow birth folds into
-// FAST (fold_survival_*); ir_fast_dce uses
+// FAST (fold_survival_*). ir_fast_fold_candidate asks the same rule of a row C
+// lowering has not committed (-fcanonical-construction-fold); ir_fast_dce uses
 // counts plus a deletion queue (no use CSR); ir_fast_parameters has a hard
 // sweep cap. The opt-in ir_fast_cse (#3011) value-numbers admitted rows within
 // each block through a bounded generation-tagged table and runs between address
@@ -384,6 +385,30 @@ BUSTER_GLOBAL_LOCAL IrFastFoldRule ir_fast_fold_rule(IrProgram* program, IrFunct
         *bits = ir_integer_from_u64(folded_bits, width).low;
     }
     return rule;
+}
+
+bool ir_fast_fold_candidate(IrProgram* program, IrFunction* function, IrInstruction const* candidate, u64 const* right_bits, u64* bits)
+{
+    bool result = false;
+    if (candidate->operands && candidate->operand_count && candidate->operand_count <= 2 && candidate->operands[0].value < function->value_count &&
+        (candidate->operand_count < 2 || candidate->operands[1].value < function->value_count) &&
+        (candidate->opcode == IR_OPCODE_CAST || candidate->opcode == IR_OPCODE_BINARY))
+    {
+        u32 replacement = IR_PROMOTE_NONE;
+        u64 folded = 0;
+        IrFastFoldOperands operands = {
+            .first = candidate->operands[0].value,
+            .second = candidate->operand_count > 1 ? candidate->operands[1].value : IR_PROMOTE_NONE,
+        };
+        operands.left_constant = ir_fast_constant(program, function, operands.first, &operands.left);
+        operands.right_constant = operands.second != IR_PROMOTE_NONE &&
+                                  (right_bits || ir_fast_constant(program, function, operands.second, &operands.right));
+        operands.right = right_bits ? *right_bits : operands.right;
+        IrFastFoldRule rule = ir_fast_fold_rule(program, function, candidate, &operands, &replacement, &folded);
+        result = rule == IR_FAST_FOLD_RULE_CAST_CONSTANT || rule == IR_FAST_FOLD_RULE_UNARY_CONSTANT || rule == IR_FAST_FOLD_RULE_BINARY_CONSTANT;
+        *bits = result ? folded : *bits;
+    }
+    return result;
 }
 
 // A row may be replaced by an existing value only when the two values are

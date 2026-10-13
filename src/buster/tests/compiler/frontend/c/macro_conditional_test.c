@@ -1122,20 +1122,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_parameter_scaling_tests(UnitTestArgum
     return result;
 }
 
-UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
+// Trailing tokens after conditional directives, include and macro-definition
+// diagnostics, character-literal types in #if arithmetic, conditionals inside
+// macro arguments against reference preprocessors and as errors, and a
+// compiled program that runs the expansions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_directive_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, c_file_table_scaling_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_macro_parameter_scaling_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
-    UnitTestResult demand = c_macro_argument_demand_tests(arguments);
-    result.test_count += demand.test_count;
-    result.succeeded_test_count += demand.succeeded_test_count;
     struct
     {
         String8 source;
@@ -1562,6 +1555,32 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         c_test_scratch_end(temporary);
     }
 #endif
+    return result;
+}
+
+// Every fixture ends each scratch that holds a unit with c_test_scratch_end,
+// after the last read of the unit's tokens, and C_TEST_BOUNDED_FIXTURE checks
+// that it returned every reservation it made (GitHub #3431).
+UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The thread's unit registry reserves its own arena at its first unit;
+    // reserve it before the first fixture's reading.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+        c_test_scratch_end(temporary);
+    }
+    C_TEST_BOUNDED_FIXTURE(arguments, c_file_table_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_parameter_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_rescan_boundary_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_skipped_group_text_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_punctuator_separator_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_trigraph_preprocess_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_demand_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_conditional_directive_tests);
     return result;
 }
 #endif
