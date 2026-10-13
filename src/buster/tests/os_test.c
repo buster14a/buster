@@ -1087,6 +1087,56 @@ void os_test_process_child_run(UnitTestArguments* arguments)
         bool written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(S8("owned")));
         os_exit(written ? 0 : 90);
     }
+    if (string_equal(process_test_mode, S8("deadline-hot-writer")) ||
+        string_equal(process_test_mode, S8("deadline-parked-writer")))
+    {
+        u8 output[4096];
+        memset(output, 'H', sizeof(output));
+        bool written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), (ByteSlice){output, sizeof(output)});
+        String8 ready = os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY"));
+        written = written && os_test_create_empty_file(ready);
+        if (written && string_equal(process_test_mode, S8("deadline-hot-writer")))
+        {
+            for (;;)
+            {
+                if (!os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), (ByteSlice){output, sizeof(output)}))
+                {
+                    os_test_sleep_milliseconds(1);
+                }
+            }
+        }
+        if (written)
+        {
+            for (;;)
+            {
+                os_test_sleep_milliseconds(10);
+            }
+        }
+        os_exit(96);
+    }
+    if (string_equal(process_test_mode, S8("deadline-hot-writer-parent")))
+    {
+        String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE")};
+        String8 override_values[] = {S8("deadline-parked-writer")};
+        OsTestEnvironment child_environment =
+            os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        ProcessSpawnResult child =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), child_environment.keys, child_environment.values,
+                             (ProcessSpawnOptions){0});
+        if (child.handle)
+        {
+            String8 ready = os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY"));
+            u32 polls = 0;
+            while (polls < 3000 && !os_test_regular_file_exists(ready))
+            {
+                os_test_sleep_milliseconds(1);
+                polls += 1;
+            }
+            os_exit(os_test_regular_file_exists(ready) ? 0 : 97);
+        }
+        os_exit(98);
+    }
     if (string_starts_with_sequence(process_test_mode, S8("flood")))
     {
         u8 output[4096];
@@ -1772,6 +1822,126 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_spill(UnitTestArguments*
         }
     }
     BUSTER_TEST(arguments, os_file_delete(marker) && os_file_delete(ready));
+    return result;
+}
+#endif
+
+#if BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_deadline_windows(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 arena_position = arena->position;
+    String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+    String8 ready = buster_test_temporary_path(arena, S8("process-deadline-hot-writer-ready"), S8(".txt"));
+    String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_PROCESS_READY"), S8("BUSTER_TEST_JOBS")};
+    String8 values[] = {S8("deadline-hot-writer"), ready, S8("1")};
+    OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+    ProcessSpawnOptions options = {
+        .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+        .new_process_group = 1,
+    };
+    u64 resources_before = os_process_spawn_test_resource_count();
+    BUSTER_TEST(arguments, os_file_delete(ready));
+    ProcessSpawnResult hot_spawn =
+        os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, options);
+    BUSTER_TEST(arguments, hot_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && hot_spawn.error.v == 0);
+    if (hot_spawn.handle)
+    {
+        u32 polls = 0;
+        while (polls < 3000 && !os_test_regular_file_exists(ready))
+        {
+            os_test_sleep_milliseconds(1);
+            polls += 1;
+        }
+        bool ready_observed = os_test_regular_file_exists(ready);
+        BUSTER_TEST(arguments, ready_observed);
+        os_process_wait_windows_test_begin(1000000, 30000, 128);
+        ProcessWaitResult waited = os_process_wait_deadline(arena, hot_spawn, 100000);
+        OsProcessWaitWindowsTestStats stats = os_process_wait_windows_test_end();
+        BUSTER_TEST(arguments, waited.timed_out && waited.termination_requested && waited.forcibly_terminated);
+        BUSTER_TEST(arguments, !waited.process_tree_cleanup_failed);
+        BUSTER_TEST(arguments, !stats.scan_limit_reached && stats.scans >= 3 &&
+                               stats.progress_scans > 0 && stats.child_polls == stats.scans &&
+                               stats.clock_calls == stats.scans + 1);
+        BUSTER_TEST(arguments, waited.observed_bytes[STANDARD_STREAM_OUTPUT] >= 4096 &&
+                               waited.streams[STANDARD_STREAM_OUTPUT].length >= 4096);
+        if (waited.streams[STANDARD_STREAM_OUTPUT].length >= 4096 &&
+            waited.streams[STANDARD_STREAM_OUTPUT].pointer)
+        {
+            BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].pointer[0] == 'H');
+        }
+        BUSTER_TEST(arguments, hot_spawn.process_tree != 0);
+    }
+    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+    BUSTER_TEST(arguments, os_file_delete(ready));
+
+    String8 tree_ready = buster_test_temporary_path(arena, S8("process-deadline-final-snapshot-ready"), S8(".txt"));
+    String8 tree_values[] = {S8("deadline-hot-writer-parent"), tree_ready, S8("1")};
+    OsTestEnvironment tree_environment = os_test_environment(arena, keys, tree_values, BUSTER_ARRAY_LENGTH(keys));
+    BUSTER_TEST(arguments, os_file_delete(tree_ready));
+    ProcessSpawnResult tree_spawn =
+        os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), tree_environment.keys, tree_environment.values, options);
+    BUSTER_TEST(arguments, tree_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && tree_spawn.error.v == 0);
+    bool tree_ready_observed = false;
+    bool leader_exited = false;
+    if (tree_spawn.handle)
+    {
+        u32 polls = 0;
+        while (polls < 3000 && !os_test_regular_file_exists(tree_ready))
+        {
+            os_test_sleep_milliseconds(1);
+            polls += 1;
+        }
+        tree_ready_observed = os_test_regular_file_exists(tree_ready);
+        polls = 0;
+        DWORD process_wait = WAIT_TIMEOUT;
+        while (tree_ready_observed && polls < 3000 && process_wait == WAIT_TIMEOUT)
+        {
+            process_wait = WaitForSingleObject((HANDLE)tree_spawn.handle, 0);
+            if (process_wait == WAIT_TIMEOUT)
+            {
+                os_test_sleep_milliseconds(1);
+                polls += 1;
+            }
+        }
+        leader_exited = process_wait == WAIT_OBJECT_0;
+        BUSTER_TEST(arguments, tree_ready_observed && leader_exited);
+        os_process_wait_windows_test_begin(1000000, 0, 128);
+        ProcessWaitResult waited = os_process_wait_deadline(arena, tree_spawn, 0);
+        OsProcessWaitWindowsTestStats stats = os_process_wait_windows_test_end();
+        BUSTER_TEST(arguments, !waited.timed_out && waited.platform_status == 0 && !waited.process_tree_cleanup_failed);
+        BUSTER_TEST(arguments, waited.observed_total == 4096 && waited.captured_total == 4096);
+        BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 4096 &&
+                               waited.streams[STANDARD_STREAM_OUTPUT].pointer != 0);
+        if (waited.streams[STANDARD_STREAM_OUTPUT].length == 4096 &&
+            waited.streams[STANDARD_STREAM_OUTPUT].pointer)
+        {
+            BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].pointer[0] == 'H');
+        }
+        BUSTER_TEST(arguments, stats.scans == 2 && stats.progress_scans == 1 && stats.child_polls == 2 &&
+                               stats.leader_exit_observations == 2 && !stats.scan_limit_reached && stats.clock_calls == 0);
+        BUSTER_TEST(arguments, tree_spawn.process_tree != 0);
+    }
+    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+    BUSTER_TEST(arguments, os_file_delete(tree_ready));
+
+    String8 small_values[] = {S8("capture-small"), ready, S8("1")};
+    OsTestEnvironment small_environment = os_test_environment(arena, keys, small_values, BUSTER_ARRAY_LENGTH(keys));
+    ProcessSpawnResult small_spawn =
+        os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), small_environment.keys, small_environment.values, options);
+    BUSTER_TEST(arguments, small_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && small_spawn.error.v == 0);
+    if (small_spawn.handle)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arena, small_spawn, 0);
+        BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && waited.platform_status == 0);
+        BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 5 &&
+                               waited.streams[STANDARD_STREAM_OUTPUT].pointer != 0 &&
+                               memory_compare(waited.streams[STANDARD_STREAM_OUTPUT].pointer, "owned", 5));
+    }
+    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+    BUSTER_TEST(arguments, os_file_delete(ready));
+    arena_set_position(arena, arena_position);
     return result;
 }
 #endif
@@ -2485,6 +2655,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_native);
+#endif
+
+#if BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_process_deadline_windows);
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS

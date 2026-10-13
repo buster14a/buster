@@ -5471,6 +5471,100 @@ OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, Process
 }
 #endif
 
+#if BUSTER_WINDOWS && BUSTER_INCLUDE_TESTS
+typedef struct OsProcessWaitWindowsTestState OsProcessWaitWindowsTestState;
+struct OsProcessWaitWindowsTestState
+{
+    OsProcessWaitWindowsTestStats stats;
+    u64 next_clock_microseconds;
+    u64 clock_step_microseconds;
+    u64 scan_limit;
+    bool active;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessWaitWindowsTestState os_process_wait_windows_test_state;
+
+void os_process_wait_windows_test_begin(u64 start_microseconds, u64 step_microseconds, u64 scan_limit)
+{
+    os_process_wait_windows_test_state = (OsProcessWaitWindowsTestState){
+        .next_clock_microseconds = start_microseconds,
+        .clock_step_microseconds = step_microseconds,
+        .scan_limit = scan_limit,
+        .active = true,
+    };
+}
+
+OsProcessWaitWindowsTestStats os_process_wait_windows_test_end(void)
+{
+    OsProcessWaitWindowsTestStats result = os_process_wait_windows_test_state.stats;
+    os_process_wait_windows_test_state.active = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_wait_windows_test_scan_begin(void)
+{
+    bool result = true;
+    if (os_process_wait_windows_test_state.active)
+    {
+        if (os_process_wait_windows_test_state.scan_limit &&
+            os_process_wait_windows_test_state.stats.scans >= os_process_wait_windows_test_state.scan_limit)
+        {
+            os_process_wait_windows_test_state.stats.scan_limit_reached = true;
+            result = false;
+        }
+        else
+        {
+            os_process_wait_windows_test_state.stats.scans += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_wait_windows_test_scan_end(bool made_progress)
+{
+    if (os_process_wait_windows_test_state.active)
+    {
+        if (made_progress) { os_process_wait_windows_test_state.stats.progress_scans += 1; }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_wait_windows_test_child_poll(bool child_exited)
+{
+    if (os_process_wait_windows_test_state.active)
+    {
+        os_process_wait_windows_test_state.stats.child_polls += 1;
+        if (child_exited) { os_process_wait_windows_test_state.stats.leader_exit_observations += 1; }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u64 os_process_deadline_clock_microseconds(void)
+{
+    u64 result;
+#if BUSTER_WINDOWS && BUSTER_INCLUDE_TESTS
+    if (os_process_wait_windows_test_state.active)
+    {
+        result = os_process_wait_windows_test_state.next_clock_microseconds;
+        if (os_process_wait_windows_test_state.clock_step_microseconds <= ~(u64)0 - result)
+        {
+            os_process_wait_windows_test_state.next_clock_microseconds += os_process_wait_windows_test_state.clock_step_microseconds;
+        }
+        else
+        {
+            os_process_wait_windows_test_state.next_clock_microseconds = ~(u64)0;
+        }
+        os_process_wait_windows_test_state.stats.clock_calls += 1;
+    }
+    else
+    {
+        result = os_now_microseconds();
+    }
+#else
+    result = os_now_microseconds();
+#endif
+    return result;
+}
+
 // Milliseconds left until `deadline`, clamped into a poll/wait argument. Zero
 // when the deadline has passed, and `no_deadline` when there is none.
 BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microseconds, u64 no_deadline)
@@ -5482,7 +5576,7 @@ BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microsecon
     }
     else
     {
-        u64 now = os_now_microseconds();
+        u64 now = os_process_deadline_clock_microseconds();
         if (now >= deadline_microseconds)
         {
             result = 0;
@@ -6863,7 +6957,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
     if (spawn.handle)
     {
-        u64 deadline = timeout_microseconds ? os_now_microseconds() + timeout_microseconds : 0;
+        u64 deadline = timeout_microseconds ? os_process_deadline_clock_microseconds() + timeout_microseconds : 0;
         bool timed_out = false;
         // The captured streams must be drained together: reading one pipe to
         // EOF while the child blocks writing a full second pipe deadlocks both
@@ -6892,6 +6986,13 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         bool child_exit_observed = false;
         while (open_pipe_count)
         {
+#if BUSTER_INCLUDE_TESTS
+            if (!os_process_wait_windows_test_scan_begin())
+            {
+                timed_out = true;
+                break;
+            }
+#endif
             bool made_progress = false;
 
             for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
@@ -6930,39 +7031,47 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 }
             }
 
-            if (!made_progress)
+            // Every nonterminal bounded pass observes the leader and
+            // services a finite deadline, even when output was readable.
+            DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
+#if BUSTER_INCLUDE_TESTS
+            os_process_wait_windows_test_scan_end(made_progress);
+            os_process_wait_windows_test_child_poll(process_wait == WAIT_OBJECT_0);
+#endif
+            if (process_wait == WAIT_OBJECT_0)
             {
-                DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
-                if (process_wait == WAIT_OBJECT_0)
+                if (child_exit_observed && !made_progress)
                 {
-                    if (child_exit_observed)
+                    // The leader was already known to have exited before this
+                    // complete empty scan. A descendant may retain an
+                    // inherited writer; close it only after preserving this
+                    // final snapshot of the buffered bytes.
+                    for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
                     {
-                        // The child was already known to have exited before
-                        // this complete empty scan. A descendant may retain an
-                        // inherited writer, but its lifetime must not turn the
-                        // completed child's wait into a false timeout.
-                        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                        if (read_pipes[stream])
                         {
-                            if (read_pipes[stream])
-                            {
-                                CloseHandle(read_pipes[stream]);
-                                read_pipes[stream] = 0;
-                                open_pipe_count -= 1;
-                            }
+                            CloseHandle(read_pipes[stream]);
+                            read_pipes[stream] = 0;
+                            open_pipe_count -= 1;
                         }
-                        break;
                     }
-                    // The child may have written between the scan above and
-                    // this observation. Perform one final complete scan before
-                    // closing any writer kept alive outside the child.
-                    child_exit_observed = true;
-                    continue;
-                }
-                if (deadline && !os_process_deadline_milliseconds(deadline, 1))
-                {
-                    timed_out = true;
                     break;
                 }
+                if (!child_exit_observed)
+                {
+                    // The leader may have written between the scan above and
+                    // this observation. Perform another full scan before
+                    // considering closure of an inherited writer.
+                    child_exit_observed = true;
+                }
+            }
+            if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+            {
+                timed_out = true;
+                break;
+            }
+            if (!made_progress && process_wait != WAIT_OBJECT_0)
+            {
                 // Nothing readable right now: sleep briefly instead of
                 // spinning. The pipes report ERROR_BROKEN_PIPE once the child
                 // exits and the buffered data has been drained.
