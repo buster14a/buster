@@ -12700,10 +12700,12 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
 // compile reaches a few hundred of them; buster_x86_metadata_prewarm_all_forms
 // still runs it whole for the audits and the test harness.
 //
-// The operand facts are written only while the generated ranges partition
-// the table (buster_x86_metadata_form_facts_ready): then every entry belongs
-// to the one form whose claim is held.  Without a partition no reader uses
-// them, so nothing is written.
+// The operand facts are written whether or not the prewarm has yet proven
+// that the generated ranges partition the table (a form may be prepared
+// before buster_x86_metadata_prewarm runs, and readers gate on
+// buster_x86_metadata_form_facts_ready, not on when the facts were written).
+// The checked-in ranges partition it, so every entry belongs to the one form
+// whose facts claim is held.
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_prepare_form_facts(u32 form_id)
 {
     // The row is published (buster_x86_metadata_normalized_form), so it is read
@@ -12719,7 +12721,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_prepare_form_facts(u32 form_id)
             BusterX86MetadataOperand operand = {0};
             if (!buster_x86_metadata_operand(form_id, operand_index, &operand)) continue;
             BusterX86MetadataFormOperandFacts* operand_facts =
-                buster_x86_metadata_form_facts_ready ? buster_x86_metadata_form_operand_facts_for(form, operand_index) : 0;
+                buster_x86_metadata_form_operand_facts_for(form, operand_index);
             if (!operand_facts) continue;
             // Mirror the plan-less binding loop exactly: the pattern-aware
             // source replaces the declared one, and the effective source is
