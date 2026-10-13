@@ -187,6 +187,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* i
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU89;
     }
+    else if (string_equal(dialect, S8("c89")) || string_equal(dialect, S8("c90")) || string_equal(dialect, S8("iso9899:1990")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_C89;
+    }
     else if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU99;
@@ -248,6 +252,8 @@ BUSTER_GLOBAL_LOCAL CPreprocessDialect compiler_driver_preprocess_dialect(Compil
         return C_PREPROCESS_DIALECT_C23;
     case COMPILER_DRIVER_C_DIALECT_GNU89:
         return C_PREPROCESS_DIALECT_GNU89;
+    case COMPILER_DRIVER_C_DIALECT_C89:
+        return C_PREPROCESS_DIALECT_C89;
     case COMPILER_DRIVER_C_DIALECT_COUNT:
         return C_PREPROCESS_DIALECT_COUNT;
     }
@@ -2438,6 +2444,22 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.suppress_warnings = true;
             continue;
         }
+        // -P suppresses -E linemarkers. The -E serializer never writes
+        // linemarkers, so the request is already satisfied. -Qunused-arguments
+        // is Clang's unused-argument warning switch; no unused-argument
+        // warning exists to suppress.
+        if (string_equal(argument, S8("-P")) || string_equal(argument, S8("-Qunused-arguments")))
+        {
+            continue;
+        }
+        // -ansi is -std=c90 for C.
+        if (string_equal(argument, S8("-ansi")))
+        {
+            invocation.c_dialect = COMPILER_DRIVER_C_DIALECT_C89;
+            invocation.c_dialect_explicit = true;
+            invocation.trigraph_mode = C_TRIGRAPH_MODE_DIALECT;
+            continue;
+        }
         if (string_equal(argument, S8("-v")) || string_equal(argument, S8("--verbose")))
         {
             invocation.verbose = true;
@@ -3239,7 +3261,31 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
-        if (string_starts_with_sequence(argument, S8("-Wp,")) || string_starts_with_sequence(argument, S8("-Wa,")))
+        if (string_starts_with_sequence(argument, S8("-Wa,")))
+        {
+            // The assembler pass-through accepts only the comma-separated
+            // --noexecstack: every ELF object already carries a non-executable
+            // .note.GNU-stack, so it has nothing to change.
+            String8 list = string_slice(argument, 4, argument.length);
+            bool supported = list.length != 0;
+            u64 start = 0;
+            while (supported && start <= list.length)
+            {
+                u64 end = start;
+                while (end < list.length && list.pointer[end] != ',')
+                {
+                    end += 1;
+                }
+                supported = string_equal(string_slice(list, start, end), S8("--noexecstack"));
+                start = end + 1;
+            }
+            if (!supported)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-Wp,")))
         {
             String8 passthrough_prefix = string_starts_with_sequence(argument, S8("-Wp,-MMD,")) ? S8("-Wp,-MMD,")
                                         : string_starts_with_sequence(argument, S8("-Wp,-MD,")) ? S8("-Wp,-MD,")

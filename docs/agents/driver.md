@@ -2200,7 +2200,36 @@ switches, runtime paths, and other `-z` modes are refused.
 `-Wp,` and `-Wa,` are never warning options. Only the exact
 `-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
 supported; other pass-through requests, including macro/include operations,
-are refused. Direct `-D`, `-U`, and `-I` remain available.
+are refused. The one accepted `-Wa,` value is `--noexecstack` (alone or as a
+comma-separated list of it): every Linux and Android ELF object already ends
+in an empty non-allocated `.note.GNU-stack` marking a non-executable stack
+unless an assembly input requests `"x"`, so the option changes nothing, for
+`-c`, `-S` and `-E` alike. Any other `-Wa,` value, including `--execstack`,
+an empty item and `-Wa,` alone, is refused with `unsupported pass-through
+option`.
+
+## C90 dialects, `-P` and `-Qunused-arguments`
+
+`-std=c89`, `-std=c90`, `-std=iso9899:1990` and `-ansi` select a strict ISO C90
+preprocessing dialect (`C_PREPROCESS_DIALECT_C89`), separate from the existing
+`-std=gnu89`/`-std=gnu90`. Like the other strict dialects it defines
+`__STRICT_ANSI__`, leaves out the GNU `linux`/`unix` macros and the GNU
+keywords (`typeof`, `asm`), and replaces trigraphs by default. Like `gnu89` it
+leaves `__STDC_VERSION__` undefined and defines `__GNUC_GNU_INLINE__`, with
+GNU inline semantics for `inline`. `-ansi` is exactly `-std=c90`; the last of
+`-ansi` and `-std=` wins. `-std=iso9899:199409` and `-std=c88` stay refused.
+
+The dialect is a preprocessing and keyword switch only. The frontend has no
+C90 language-rule switches, so `//` comments, mixed declarations and
+statements, and compound literals and other C99 constructs that GCC and Clang
+diagnose or reject under `-std=c90 -pedantic` are accepted. What the dialect
+supplies is the predefined-macro and header-selection behavior real C90
+projects (SDL's tests, parson) depend on, not a conformance check.
+
+`-P` (suppress linemarkers) and `-Qunused-arguments` (suppress Clang's
+unused-argument warning) are accepted for every action. The `-E` serializer
+never writes linemarkers, so `-P` already holds, and no unused-argument
+warning exists to suppress. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
 ## Macro filename prefix maps
