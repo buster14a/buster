@@ -1639,6 +1639,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_produced_defined_tests(UnitTestArgume
         },
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    String8 dialect_names[] = {S8("c17"), S8("gnu17")};
     for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
     {
         for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
@@ -1647,13 +1648,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_produced_defined_tests(UnitTestArgume
             CPreprocessResult actual = c_preprocess(temporary.arena, cases[case_index].source,
                                                      (CPreprocessOptions){.source_path = S8("macro-produced-defined.c"),
                                                                           .dialect = dialects[dialect_index]});
-            String8 context = string_format(temporary.arena, S8("macro-produced defined case={S8} dialect={u32}"),
-                                            cases[case_index].name, dialect_index);
+            String8 context = string_format(temporary.arena, S8("macro-produced defined case={S8} dialect={S8}"),
+                                            cases[case_index].name, dialect_names[dialect_index]);
             BUSTER_TEST_RAW(arguments, actual.error_count == 0, context);
             BUSTER_TEST_RAW(arguments, actual.warning_count == 0, context);
             if (BUSTER_REQUIRE(arguments, actual.tokens && actual.spelling_base))
             {
-                UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual, cases[case_index].expected);
+                UnitTestResult compared = c_macro_conditional_expect_preprocessed(
+                    arguments, temporary.arena, actual, cases[case_index].expected);
                 result.test_count += compared.test_count;
                 result.succeeded_test_count += compared.succeeded_test_count;
             }

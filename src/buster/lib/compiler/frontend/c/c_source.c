@@ -8963,8 +8963,6 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
     return true;
 }
 
-// Parse-side constant queries share the reducer but retain their existing
-// semantics; only conditional-inclusion arithmetic widens decoded types.
 // Macro expansion may introduce a defined operator after the source-token pass.
 // The rescan context has already marked its identifier operand no-expand; reduce
 // those operators here before the conditional expression's ordinary identifiers
@@ -9005,6 +9003,8 @@ BUSTER_C_INTERNAL bool c_conditional_defined_operators(CSpellingSpace* space, CS
     return valid;
 }
 
+// Parse-side constant queries share the reducer but retain their existing
+// semantics; only conditional-inclusion arithmetic widens decoded types.
 BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
                                                                      bool preprocessor_arithmetic, CPreprocessResult* result,
