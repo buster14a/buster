@@ -772,11 +772,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_paths(UnitTestArg
     String8 version_arguments[] = {S8("--version")};
     CompilerDriverInvocation version_invocation =
         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments));
-    BUSTER_TEST(arguments, version_invocation.error == COMPILER_DRIVER_ERROR_NONE && version_invocation.input_count == 0);
+    BUSTER_TEST(arguments, version_invocation.error == COMPILER_DRIVER_ERROR_NONE && version_invocation.input_count == 0 &&
+                            version_invocation.query == COMPILER_DRIVER_QUERY_VERSION);
     version_invocation.input_paths = 0;
     CompilerDriverResult version_result = compiler_driver_execute_invocation(arena, version_invocation);
-    BUSTER_TEST_RAW(arguments, version_result.error == COMPILER_DRIVER_ERROR_NONE && version_result.output.length != 0,
-                    version_result.diagnostic);
+    BUSTER_TEST(arguments, version_result.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
+    BUSTER_STRING_TEST(arguments, version_result.diagnostic, S8("the C frontend currently requires exactly one C input"));
 
     CompilerDriverInvocation missing_input_paths = {
         .target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target,
