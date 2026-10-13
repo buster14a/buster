@@ -2703,10 +2703,10 @@ BUSTER_C_SHARED void c_ast_types_publish(CTypeParseMachine* machine, CParseResul
 #define C_AST_FACT_NODE_BYTES (sizeof(u32) + sizeof(u32) + sizeof(u8))
 
 BUSTER_GLOBAL_LOCAL String8 const c_ast_fact_gap_names[C_AST_FACT_GAP_COUNT] = {
-    [C_AST_FACT_GAP_UNSPANNED] = S8("unspanned"),
-    [C_AST_FACT_GAP_INVALID] = S8("invalid"),
-    [C_AST_FACT_GAP_APPENDS] = S8("appends"),
-    [C_AST_FACT_GAP_BUSY] = S8("busy"),
+    [C_AST_FACT_GAP_UNSPANNED] = S8_INITIALIZER("unspanned"),
+    [C_AST_FACT_GAP_INVALID] = S8_INITIALIZER("invalid"),
+    [C_AST_FACT_GAP_APPENDS] = S8_INITIALIZER("appends"),
+    [C_AST_FACT_GAP_BUSY] = S8_INITIALIZER("busy"),
 };
 
 String8 c_ast_fact_gap_name(CAstFactGap gap)
