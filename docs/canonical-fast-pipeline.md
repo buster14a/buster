@@ -592,10 +592,12 @@ row this experiment never builds is never seen by the commit census. So the
 
 ## Tests
 
-`ir_test_inline_required_work_budget` exercises 600 required sites whose
-previous repeated-projection charge alone exceeded the 4 Mi caller allowance,
-then confirms that an explicit call-site limit still refuses expansion. Its
-5000-site flat caller uses a leaf with no body statements and derives a
+`ir_test_inline_required_work_budget` exercises 400 required sites and 16
+assignment statements. Its actual copied-row floor for the old repeated-
+projection formula exceeds the unchanged 4 Mi work allowance, while the full
+retained-storage estimate remains subject to its unchanged cap. The explicit
+399-site case confirms that the configured site limit still refuses expansion.
+Its 5000-site flat caller uses a leaf with no body statements and derives a
 prefix-search lower bound above twice the base allowance before confirming
 refusal at the existing per-caller work cap.
 `ir_test_canonical_inline` continues to cover mandatory cycles and the

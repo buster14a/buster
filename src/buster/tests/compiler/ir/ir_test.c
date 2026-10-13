@@ -3073,8 +3073,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
     // Module-relative row growth remains saturating for impossible demands.
     BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
 
-    // Keep this required-inline witness inside the independent retained-storage cap.
-    // The IR-derived old-charge floor below must still exceed the unchanged work cap.
+    // The production guard prices retained callee payload, table growth, marginal
+    // reservations, clone maps and alignment against the unchanged storage cap.
+    // The actual preparation below checks the complete sum for this fixture.
     enum { required_call_sites = 400, excessive_call_sites = 5000, required_statements = 16 };
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
