@@ -1402,9 +1402,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                ir_inline_storage_multiply(callee->local_count, 3u));
                             callee_work = ir_inline_storage_add(callee_work,
                                                                ir_inline_storage_multiply(callee->debug_local_count, 3u));
-                            // The callee's debug scopes are validated during planning and again at splice.
-                            callee_work = ir_inline_storage_add(callee_work,
-                                                               ir_inline_storage_multiply(callee->debug_scope_count, 2u));
+                            if (phase == 0)
+                            {
+                                // Required callee debug scopes are validated during planning and again at splice.
+                                callee_work = ir_inline_storage_add(callee_work,
+                                                                   ir_inline_storage_multiply(callee->debug_scope_count, 2u));
+                            }
                             callee_work = ir_inline_storage_add(callee_work,
                                                                callee_signature ? ir_inline_storage_multiply(callee_signature->parameter_count, 2u) : 0u);
                             u64 support_scratch = callee_signature
