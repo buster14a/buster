@@ -314,11 +314,19 @@ With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
 given one either), so the builder creates and retires its own. A build that is
-not complete fails the unit with the parse error class; its diagnostic is
-published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
-never reach the hook.
+not complete no longer fails the unit: since the default switch the unit
+compiles without a tree, exactly as under `-fno-c-ast-pilot`, so its
+diagnostics come from `c_parse_ast` and analysis as before, and the driver
+counts it in `CompilerDriverCAstPilotResult.rejections`. On the corpus at the
+switch, every rejected unit was invalid input that also fails without the tree
+(missing `-std=c23` or `-D` options, deliberate syntax errors); the builder
+diagnosed the syntax error before analysis could give its semantic one.
+[#4069](https://github.com/buster14a/buster/issues/4069) owns making the tree
+mandatory, which needs those diagnoses in the builder or analysis first.
+`-E` and assembly inputs never reach the hook.
 
-Under `-v` the driver prints six rows with the other verbose counters:
+Under `-v` the driver prints six rows with the other verbose counters, plus
+`C_AST_REJECTED units=<n>` when the builder refused a unit:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>

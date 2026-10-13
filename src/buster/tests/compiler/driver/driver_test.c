@@ -6453,8 +6453,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
 // same object bytes with and without it in every layout (semantic analysis
 // answers expression types from the tree), -v adds the timed diagnostic passes
 // and the counters, an unknown layout is an argument
-// error, and input the tree builder rejects fails with the parse error class
-// and a located diagnostic.
+// error, and input the tree builder rejects compiles without a tree, failing
+// exactly as under -fno-c-ast-pilot.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6526,20 +6526,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         String8 empty[] = {S8("-fc-ast-pilot="), S8("-fsyntax-only"), input};
         BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empty)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
 
-        // Invalid input fails with and without the tree; with it the tree
-        // builder is the one that reports, as a parse error with a location.
+        // Invalid input the tree builder rejects compiles without a tree: it
+        // fails with the same error class and diagnostic as -fno-c-ast-pilot,
+        // and the hook counts the rejection instead of a unit.
         String8 flags[] = {S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot")};
+        CompilerDriverResult failed[2] = {0};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(flags); index += 1)
         {
             String8 command[] = {flags[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, invalid};
-            CompilerDriverResult failed = compiler_driver_execute_invocation(
-                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            BUSTER_TEST(arguments, failed.error != COMPILER_DRIVER_ERROR_NONE);
-            BUSTER_TEST(arguments, index == 0 || failed.error == COMPILER_DRIVER_ERROR_PARSE);
-            BUSTER_TEST(arguments, index == 0 || failed.parser_diagnostic_count == 1);
-            BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8("expected an expression")) != BUSTER_STRING_NO_MATCH);
-            BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8(":1:")) != BUSTER_STRING_NO_MATCH);
+            failed[index] = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, failed[index].error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(failed[index].diagnostic, S8(":1:")) != BUSTER_STRING_NO_MATCH);
         }
+        BUSTER_TEST(arguments, failed[0].error == failed[1].error && failed[0].parser_diagnostic_count == failed[1].parser_diagnostic_count);
+        BUSTER_STRING_TEST(arguments, failed[1].diagnostic, failed[0].diagnostic);
+        BUSTER_TEST(arguments, failed[0].c_ast.rejections == 0 && failed[1].c_ast.rejections == 1 && failed[1].c_ast.units == 0);
     }
     BUSTER_TEST(arguments, os_file_delete(input));
     BUSTER_TEST(arguments, os_file_delete(invalid));

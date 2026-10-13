@@ -144,7 +144,7 @@ typedef enum CompilerDriverCDialect
 // -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
 // tree of each C input after preprocessing and before c_parse_ast, inside the
 // parse phase, for analysis and lowering to read; a unit the tree builder
-// rejects fails with the parse error class. compiler_driver_parse_arguments
+// rejects compiles without a tree (CompilerDriverCAstPilotResult.rejections). compiler_driver_parse_arguments
 // defaults to IMPLICIT; -fno-c-ast-pilot selects OFF, the tree-free reference
 // path, until #4058 deletes it. A zero-initialized invocation is OFF.
 typedef enum CompilerDriverCAstPilot
@@ -562,7 +562,8 @@ struct CompilerDriverFallbackRecord
 };
 
 // What the -fc-ast-pilot hook measured, summed over the inputs that built a
-// tree. `units` is zero when the hook did not run. The walk, scan and
+// tree. `units` is zero when the hook did not run; `rejections` counts the
+// units whose tree the builder refused, which compiled without one. The walk, scan and
 // children rows are diagnostic passes over the finished tree and are timed
 // only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
 // over the kinds column counting CALL nodes (`scan_calls`), and
@@ -572,6 +573,7 @@ typedef struct CompilerDriverCAstPilotResult CompilerDriverCAstPilotResult;
 struct CompilerDriverCAstPilotResult
 {
     u64 units;
+    u64 rejections;
     u64 nodes;
     u64 tokens;
     u64 build_nanoseconds;
