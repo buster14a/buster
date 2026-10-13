@@ -4,8 +4,9 @@
 // (general packing, including mixed-width CRC32),
 // select_form/prepare_source_tuple_query/prepare_scalar_store_source_memory_query
 // (source contracts),
-// emit_machine_fast (derived hot plans), tls_prepare
-// and forwarding_prepare/got_prepare (fixed-envelope recipes),
+// emit_machine_fast (derived hot plans), tls_prepare,
+// forwarding_prepare/got_prepare and nop_prepare (fixed-envelope recipes;
+// forwarding and NOP pin their selector form keys),
 // buster_x86_metadata_entry_ready/exact_plan_build (once-claimed per-entry
 // caches any lane may fill), prewarm_for_lanes/prewarm_all_forms (serial
 // preparation), condition_parse/condition_mnemonic (shared ordinary
@@ -9806,10 +9807,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_xchg_accumulator_projection(
     return true;
 }
 
-// Linker PLT padding uses a byte-sized physical memory token for NOP even
-// though the architectural 0F 1F /0 form is an untyped 32-bit r/m NOP. Keep
-// that linker token canonical by projecting only the exact one-memory NOP
-// shape; ordinary NOP queries and all other mnemonics retain their widths.
+// A byte-sized physical memory token for NOP selects the architectural
+// 0F 1F /0 form, an untyped 32-bit r/m NOP. Keep that token canonical by
+// projecting only the exact one-memory NOP shape; ordinary NOP queries and
+// all other mnemonics retain their widths. Exact emission takes the
+// architectural width, which is what the linker's pinned PLT padding spells.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_memory_projection(
     BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* projected_operand,
     BusterX86MetadataPhysicalQuery* projected_query)
@@ -13303,9 +13305,32 @@ u32 buster_x86_metadata_relax_tls_local_dynamic(u8* sequence, u32 capacity)
     return result;
 }
 
+// The forwarding and padding recipes below emit forms the selector would pick,
+// and the selector normalizes every candidate of a mnemonic on its first
+// query, which cost more than all the rest of each recipe (#1125).  Each
+// recipe instruction therefore pins the durable form key the selector picks
+// for it, as the codegen shape cache and the linker's stub shapes do, and is
+// emitted through buster_x86_metadata_emit_form_exact.  A key names a form,
+// never an opcode or a field, and a stale one fails closed in the key lookup,
+// which fails the recipe.  buster_x86_metadata_test_recipe_pins runs the
+// selector over every pinned query and requires the pinned form and bytes.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFormKey const buster_x86_metadata_forwarding_zero_key = {9701u, UINT64_C(0x915fb23b51f8b7d1)};
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFormKey const buster_x86_metadata_forwarding_jump_key = {10060u, UINT64_C(0xab9c4b53fce14f6e)};
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFormKey const buster_x86_metadata_nop_key = {9852u, UINT64_C(0x6ec378240ea40a5e)};
+BUSTER_GLOBAL_LOCAL u16 const buster_x86_metadata_forwarding_zero_registers[] = {6, 2}; // SysV's second and third arguments, written at width 32.
+
+// The symbolic near branch of the forwarding recipe.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand buster_x86_metadata_forwarding_target(void)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE, .width = 32,
+        .has_symbol = true, .symbol = S8("forwarding_target"),
+    };
+}
+
 // Forwarding ABI recipes: derive the two 32-bit zero idioms and a symbolic
 // near branch once, then copy the fixed envelope per object, not per stub.
-// No opcode, form ID, register-field or relocation-offset table lives here.
+// No opcode, register-field or relocation-offset table lives here.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_forwarding_bytes[BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE];
 BUSTER_GLOBAL_LOCAL BusterX86MetadataRelocation buster_x86_metadata_forwarding_branch;
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_forwarding_prepared;
@@ -13324,34 +13349,31 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_forwarding_prepare(void)
             .mnemonic = S8("XOR"), .operands = operands, .operand_count = 2,
             .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         };
-        u16 const zero_registers[] = {6, 2}; // SysV's second and third arguments, written at width 32.
         u32 count = 0;
         bool valid = true;
-        for (u32 index = 0; valid && index < BUSTER_ARRAY_LENGTH(zero_registers); index += 1)
+        for (u32 index = 0; valid && index < BUSTER_ARRAY_LENGTH(buster_x86_metadata_forwarding_zero_registers); index += 1)
         {
             operands[0] = (BusterX86MetadataPhysicalOperand){
                 .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 32,
-                .reg = {.index = zero_registers[index], .width = 32, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                .reg = {.index = buster_x86_metadata_forwarding_zero_registers[index], .width = 32,
+                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
             };
             operands[1] = operands[0];
-            BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form_exact((BusterX86MetadataEmitQuery){
                 .physical = physical, .output = candidate + count, .output_capacity = (u32)sizeof(candidate) - count,
-            });
+            }, buster_x86_metadata_forwarding_zero_key);
             valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == 2 && emitted.relocation_count == 0;
             if (valid) count += emitted.byte_count;
         }
         if (valid)
         {
-            operands[0] = (BusterX86MetadataPhysicalOperand){
-                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE, .width = 32,
-                .has_symbol = true, .symbol = S8("forwarding_target"),
-            };
+            operands[0] = buster_x86_metadata_forwarding_target();
             physical.mnemonic = S8("JMP");
             physical.operand_count = 1;
-            BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form_exact((BusterX86MetadataEmitQuery){
                 .physical = physical, .output = candidate + count, .output_capacity = (u32)sizeof(candidate) - count,
                 .relocations = &branch, .relocation_capacity = 1,
-            });
+            }, buster_x86_metadata_forwarding_jump_key);
             // This is an ABI envelope check, not another encoding decision.
             // The descriptor's field must end exactly at the near-branch end.
             valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
@@ -13409,10 +13431,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_prepare(void)
         BUSTER_CHECK_SERIAL_INITIALIZATION();
         buster_x86_metadata_prewarm();
         u8 byte = 0;
-        BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        BusterX86MetadataEmitResult encoded = buster_x86_metadata_emit_form_exact((BusterX86MetadataEmitQuery){
             .physical = {.mnemonic = S8("NOP"), .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64},
             .output = &byte, .output_capacity = 1,
-        });
+        }, buster_x86_metadata_nop_key);
         bool valid = encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count == 1 && !encoded.relocation_count;
         if (valid) buster_x86_metadata_nop_byte = byte;
         buster_x86_metadata_nop_valid = valid;
@@ -13907,6 +13929,69 @@ void buster_x86_metadata_prewarm_all_forms(void)
 }
 
 #if BUSTER_INCLUDE_TESTS
+// The generic selector and one pinned recipe emission must agree on a query:
+// the same form, bytes and relocation, which names the query's own symbol.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_recipe_pin_agrees(BusterX86MetadataPhysicalQuery physical, BusterX86MetadataFormKey key)
+{
+    u8 selected_bytes[16] = {0};
+    u8 pinned_bytes[16] = {0};
+    BusterX86MetadataRelocation selected_relocation = {0};
+    BusterX86MetadataRelocation pinned_relocation = {0};
+    BusterX86MetadataEmitResult selected = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = physical, .output = selected_bytes, .output_capacity = sizeof(selected_bytes),
+        .relocations = &selected_relocation, .relocation_capacity = 1,
+    });
+    BusterX86MetadataEmitResult pinned = buster_x86_metadata_emit_form_exact((BusterX86MetadataEmitQuery){
+        .physical = physical, .output = pinned_bytes, .output_capacity = sizeof(pinned_bytes),
+        .relocations = &pinned_relocation, .relocation_capacity = 1,
+    }, key);
+    bool result = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && pinned.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                  selected.form_id == key.form_id && selected.stable_hash == key.stable_hash && selected.byte_count == pinned.byte_count &&
+                  memcmp(selected_bytes, pinned_bytes, selected.byte_count) == 0 && selected.relocation_count == pinned.relocation_count &&
+                  selected_relocation.offset == pinned_relocation.offset && selected_relocation.width == pinned_relocation.width &&
+                  selected_relocation.kind == pinned_relocation.kind && selected_relocation.addend == pinned_relocation.addend &&
+                  selected_relocation.symbol.pointer == pinned_relocation.symbol.pointer &&
+                  selected_relocation.symbol.length == pinned_relocation.symbol.length;
+    return result;
+}
+
+// Runs the generic selector over every pinned recipe query: the forwarding
+// zero idiom in every register, not just the two the recipe zeroes, its
+// symbolic branch, and the padding NOP.  Returns how many disagree with the
+// pinned emission; query_count receives how many ran.
+u32 buster_x86_metadata_test_recipe_pins(u32* query_count)
+{
+    u32 queries = 0;
+    u32 disagreements = 0;
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    BusterX86MetadataPhysicalQuery physical = {
+        .mnemonic = S8("XOR"), .operands = operands, .operand_count = 2,
+        .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+    };
+    for (u16 reg = 0; reg < 16; reg += 1)
+    {
+        operands[0] = (BusterX86MetadataPhysicalOperand){
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 32,
+            .reg = {.index = reg, .width = 32, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+        };
+        operands[1] = operands[0];
+        disagreements += !buster_x86_metadata_test_recipe_pin_agrees(physical, buster_x86_metadata_forwarding_zero_key);
+        queries += 1;
+    }
+    operands[0] = buster_x86_metadata_forwarding_target();
+    physical.mnemonic = S8("JMP");
+    physical.operand_count = 1;
+    disagreements += !buster_x86_metadata_test_recipe_pin_agrees(physical, buster_x86_metadata_forwarding_jump_key);
+    queries += 1;
+    physical.mnemonic = S8("NOP");
+    physical.operands = 0;
+    physical.operand_count = 0;
+    disagreements += !buster_x86_metadata_test_recipe_pin_agrees(physical, buster_x86_metadata_nop_key);
+    queries += 1;
+    *query_count = queries;
+    return disagreements;
+}
+
 // The SPMD prerequisite, made checkable rather than asserted in a comment.
 // Every per-form and per-coverage cache in this module fills on the first
 // *serial* touch of its row, so a caller about to hand the tables to a worker

@@ -2148,10 +2148,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
-        if (invocation.intern_block_constants)
+        if (!invocation.disable_block_constant_interning)
         {
             CIRConstantInternStatistics interned = compile.constant_interning;
             string_print(S8("C_CONSTANT_INTERN lookups={u64} hits={u64} stale={u64}\n"), interned.lookups, interned.hits, interned.stale);
+        }
+        if (invocation.construction_fold)
+        {
+            CIRConstructionFoldStatistics folds = compile.construction_folds;
+            string_print(S8("C_CONSTRUCTION_FOLD casts={u64} truths={u64}\n"), folds.casts, folds.truths);
         }
         CTypeLayoutStatistics layout = compile.type_layout;
         string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "

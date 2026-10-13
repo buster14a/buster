@@ -5059,7 +5059,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     String8 names[] = {S8("divide_live"), S8("divide_pressure")};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-    IrProgram* program = machine_test_compile_c(temporary.arena, S8("division-clobber.c"),
+    IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("division-clobber.c"),
         S8("typedef unsigned long u64;\n"
            "u64 divide_live(u64 a, u64 d, u64 c) { u64 q = a / d; return q + c * 3; }\n"
            "u64 divide_pressure(u64 const* p, u64 d)\n"
@@ -5068,7 +5068,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
            "    u64 q = a / d; u64 r = b % d;\n"
            "    return q * 3 + r * 5 + a + b * 7 + c * 11 + e * 13 + g * 17;\n"
            "}\n"),
-        target);
+        // The pressure counts assume each constant row stays separate; a shared
+        // element-size constant would stay live across both divisions.
+        target, (CIRLowerOptions){.disable_block_constant_interning = true});
     if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
     {
         IrModule* module = program->modules;
@@ -10403,8 +10405,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitT
         for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
         {
             ByteSlice source = file_read(arguments->arena, sources[source_index], (FileReadOptions){0});
-            IrProgram* program = source.pointer ? machine_test_compile_c(arguments->arena, sources[source_index],
-                (String8){.pointer = (char8*)source.pointer, .length = source.length}, target) : 0;
+            // The corpus must reach a gate-rejected candidate; with constants interned it no longer does.
+            IrProgram* program = source.pointer ? machine_test_compile_c_with_options(arguments->arena, sources[source_index],
+                (String8){.pointer = (char8*)source.pointer, .length = source.length}, target,
+                (CIRLowerOptions){.disable_block_constant_interning = true}) : 0;
             BUSTER_TEST(arguments, program && program->module_count);
             for (u32 module_index = 0; program && module_index < program->module_count; module_index += 1)
             {

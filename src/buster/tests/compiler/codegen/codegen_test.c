@@ -4315,7 +4315,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     CPreprocessResult exact_encoder_stats_tokens = c_preprocess(arguments->arena, exact_encoder_stats_source, (CPreprocessOptions){0});
     CParseResult exact_encoder_stats_parse = c_parse(arguments->arena, exact_encoder_stats_tokens);
     CIRLowerResult exact_encoder_stats_ir =
-        c_lower_to_ir(arguments->arena, S8("exact-encoder-stats.c"), exact_encoder_stats_tokens, exact_encoder_stats_parse, exact_encoder_stats_target);
+        // The count includes per-row constant rematerializations; keep each constant row.
+        c_lower_to_ir_with_options(arguments->arena, S8("exact-encoder-stats.c"), exact_encoder_stats_tokens, exact_encoder_stats_parse,
+                                   exact_encoder_stats_target, (CIRLowerOptions){.disable_block_constant_interning = true});
     BUSTER_TEST(arguments, exact_encoder_stats_tokens.error_count == 0);
     BUSTER_TEST(arguments, exact_encoder_stats_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, exact_encoder_stats_ir.diagnostic_count == 0);
@@ -4451,8 +4453,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "}\n");
     CPreprocessResult canonical_windows_tokens = c_preprocess(arguments->arena, canonical_windows_c_source, (CPreprocessOptions){0});
     CParseResult canonical_windows_parse = c_parse(arguments->arena, canonical_windows_tokens);
-    CIRLowerResult canonical_windows_ir = c_lower_to_ir(arguments->arena, S8("canonical-windows-call-layout.c"), canonical_windows_tokens,
-                                                         canonical_windows_parse, canonical_windows_target);
+    // codegen_test_x64_scan_body accepts only an `add rsp; pop rbp; ret` epilogue. An interned constant
+    // live across a call takes a callee-saved register and adds its own pop, so keep each constant row.
+    CIRLowerResult canonical_windows_ir = c_lower_to_ir_with_options(arguments->arena, S8("canonical-windows-call-layout.c"), canonical_windows_tokens,
+        canonical_windows_parse, canonical_windows_target, (CIRLowerOptions){.disable_block_constant_interning = true});
     BUSTER_TEST(arguments, canonical_windows_tokens.error_count == 0);
     BUSTER_TEST(arguments, canonical_windows_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, canonical_windows_ir.diagnostic_count == 0);

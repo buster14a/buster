@@ -19,7 +19,9 @@
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
 // records the refusal); c_ir_ssa_finish_loops, which lets reads pass loop
 // headers from the loops c_ir_ssa_loop_record noted, drops its shortcut
-// rather than refusing. The remaining phase/state graph is in
+// rather than refusing. c_ir_ssa_finish_loop_exits lazily builds the read
+// index and forward-link forest once the general walk overspends its linear
+// budget. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // By default lowering has no syntax tree: it re-walks token ranges directly,
 // resolving identifiers through the parse result's scopes and answering
@@ -35,7 +37,9 @@
 // replay).
 // Without a tree, c_ir_root_conditional refuses a body range that holds no
 // `?` through the per-body token prefix table c_ir_token_prefix_build, before
-// its scan. The same table lets c_ir_lower_expression_core_step skip a control
+// its scan; with one, c_ir_tree_root_conditional refuses a non-empty such
+// range before its records (c_ir_tree_root_conditional_records, #3924). The
+// same table lets c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_range_may_prepare_control), a call prepass
 // (c_ir_range_may_prepare_calls) or a postfix probe
 // (c_ir_range_may_hold_update) that cannot find anything.
@@ -53,9 +57,12 @@
 // is the one way back into a closed block, retraction and SSA memory
 // restoration use the checked ir_block_* primitives, and
 // c_ir_finish_construction rejects a function with a refused row or an open
-// block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
+// block. Unless -fno-canonical-intern-constants, c_ir_emit_integer_value_at
 // reuses a constant built earlier in the current block (CIrConstantIntern),
 // re-proving the cached row against retraction and truncation on every hit.
+// Under the opt-in -fcanonical-construction-fold (#3010), c_ir_emit_cast and
+// c_ir_truth_value build the constant FAST's rule gives a constant operand
+// (c_ir_construction_fold) instead of its CAST or BINARY row.
 // In BUSTER_BENCH_ALLOCATIONS builds c_ir_fold_census_body takes the #3010
 // end-of-body fold census between body lowering and SSA finish.
 // c_ir_string_object shares typed static storage between literal operands and
@@ -1082,7 +1089,7 @@ struct CIrArrayTypeSlot
     bool used;
 };
 
-// Opt-in construction-time constant interning (#3011, c_ir_emit_integer_value_at).
+// Construction-time constant interning (#3011, c_ir_emit_integer_value_at), on by default.
 // One direct-mapped table serves a whole lowering; each function builder takes
 // a fresh generation, so no entry crosses a function and none is cleared.
 // An entry is only a hint: a lookup re-proves that its value is still defined
@@ -1250,49 +1257,48 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerTyp
 
 BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId unqualified, bool is_atomic, bool is_volatile)
 {
+    IrTypeId result = IR_TYPE_ID_INVALID;
     IrType* base = ir_type_from_id(&program->types, unqualified);
-    if (!base || base->is_atomic || base->is_volatile || base->kind == IR_TYPE_FUNCTION ||
-        (is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY)))
+    bool valid = base && !base->is_atomic && !base->is_volatile && base->kind != IR_TYPE_FUNCTION &&
+                 !(is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY));
+    // A recursive record needs the identity of its volatile pointee before
+    // its own pointer fields can be laid out. Reserve that view now; the
+    // existing qualified-type mapping retry completes its layout in place.
+    // Atomic construction still requires the complete promoted layout.
+    bool pending_record = valid && !is_atomic && is_volatile &&
+                          (base->kind == IR_TYPE_STRUCT || base->kind == IR_TYPE_UNION);
+    if (valid && (base->layout.resolved || pending_record))
     {
-        return IR_TYPE_ID_INVALID;
-    }
-    // The qualified type is a copy of the base, layout included, and an
-    // aggregate's mapping exists before its fields are laid out.  Copying then
-    // would freeze an unresolved layout into a type nothing revisits, which
-    // codegen rejects as invalid IR -- SQLite reaches one through
-    // `volatile WalCkptInfo *`.  The mapping pass keeps a qualified type
-    // pending, so refusing here is a retry, not a failure.
-    if (!base->layout.resolved)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
-    {
-        IrType* type = program->types.types + type_index;
-        if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
+        for (u32 type_index = 0; type_index < program->types.count && result.value == IR_ID_UNDERLYING_INVALID; type_index += 1)
         {
-            return type->id;
+            IrType* type = program->types.types + type_index;
+            if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
+            {
+                if (!type->layout.resolved && base->layout.resolved)
+                {
+                    type->layout = base->layout;
+                }
+                result = type->id;
+            }
+        }
+        if (result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            IrType qualified = *base;
+            qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
+            qualified.id = IR_TYPE_ID_INVALID;
+            qualified.unqualified_type = unqualified;
+            qualified.is_atomic = is_atomic;
+            qualified.is_volatile = is_volatile;
+            // Atomic construction promotes size and alignment, while plain
+            // volatile preserves the base record's eventual layout exactly.
+            if (is_atomic)
+            {
+                c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
+            }
+            result = ir_program_add_type(program, qualified);
         }
     }
-    IrType qualified = *base;
-    qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
-    qualified.id = IR_TYPE_ID_INVALID;
-    qualified.unqualified_type = unqualified;
-    qualified.is_atomic = is_atomic;
-    qualified.is_volatile = is_volatile;
-    // `_Atomic` is the one qualifier that does not copy the layout: Clang
-    // constructs a type from the operand rather than qualifying it, padding it
-    // up to the next power of two and aligning it there so the `__atomic`
-    // builtins can reach it lock-free.  This is the lowering half of that rule
-    // and c_parse_type_layout folds `sizeof` through the other half; the two
-    // read the same ceiling out of the preprocess target's data layout, which
-    // is what `program->data_layout` holds.  `volatile` alone changes nothing,
-    // which is why the test is on the atomic flag rather than on the copy.
-    if (is_atomic)
-    {
-        c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
-    }
-    return ir_program_add_type(program, qualified);
+    return result;
 }
 
 // GNU `__atomic_*` accepts an ordinary pointer, so qualifying its pointee for
@@ -3667,10 +3673,12 @@ struct CIntegerIrBuilder
     // (c_ir_initializer_slot_table); shared by the constant builder and
     // every function builder of one lowering, null in the test hooks.
     CIrInitializerSlotCache* slot_cache;
-    // Opt-in constant interning shared by every function builder of one
+    // Constant interning shared by every function builder of one
     // lowering, and this function's generation in it; null when off.
     CIrConstantIntern* constant_intern;
     u32 constant_intern_generation;
+    // -fcanonical-construction-fold counters of one lowering; null when off.
+    CIRConstructionFoldStatistics* construction_folds;
     // The interned symbol of every IrField name a member access has compared
     // (c_ir_field_symbols); shared like slot_cache, null in the test hooks.
     CIrFieldSymbolCache* field_symbols;
@@ -4876,12 +4884,21 @@ BUSTER_C_INTERNAL const u8 c_ir_token_prefix_classes[C_PUNCTUATOR_COUNT] = {
 
 BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
 
+// Kept out of line where inlining measurably changed a hot caller's code
+// (#3924): the prefix build, inlined into whichever caller reaches it first,
+// and the tree's records path behind c_ir_tree_root_conditional's refusal.
+#if BUSTER_COMPILER_MSVC
+#define C_IR_NOINLINE __declspec(noinline)
+#else
+#define C_IR_NOINLINE __attribute__((noinline))
+#endif
+
 // Fill the body's token prefix table in one pass. A close returns to the group
 // its open sat in, which is the group recorded at the open's own gap, so the
 // table is its own group stack. On a body whose delimiters do not nest
 // properly the groups are meaningless, and c_ir_range_balanced never reads
 // them there.
-BUSTER_C_INTERNAL void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
+BUSTER_C_INTERNAL C_IR_NOINLINE void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
 {
     CIrTokenPrefix* prefix = builder->token_prefix;
     CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
@@ -6462,6 +6479,10 @@ BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u
         {
             result = first.punctuator == C_PUNCTUATOR_LEFT_BRACKET;
         }
+        else if (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SIZEOF))
+        {
+            result = false;
+        }
         else if (first.symbol && !c_parse_type_name_start_word_token(builder->preprocess, first))
         {
             CEntityId entity = c_ir_identifier_entity(builder, open + 1);
@@ -6799,9 +6820,9 @@ struct CIrDirectSsa
     u32* loop_headers;
     u32* local_definition_offsets;
     u32* local_definition_blocks;
-    // Also from c_ir_ssa_finish_loops: per local, the blocks that read it,
-    // ascending, like the writes; per block, its innermost recorded loop or
-    // UINT32_MAX; and the preorder interval [forward_enter, forward_leave) of
+    // The loop pass retains each block's innermost recorded loop or UINT32_MAX.
+    // c_ir_ssa_finish_loop_exits lazily adds per-local read blocks, ascending
+    // like the writes, and the preorder interval [forward_enter, forward_leave) of
     // each block in the forest of forward links, UINT32_MAX when no root
     // reaches it (c_ir_ssa_forward_block).
     u32* local_read_offsets;
@@ -6809,6 +6830,9 @@ struct CIrDirectSsa
     u32* loop_innermost;
     u32* forward_enter;
     u32* forward_leave;
+    // General read-walk steps already spent before optional exit preparation.
+    u64 forward_steps;
+    bool loop_exits_attempted;
     // Set by c_ir_ssa_refuse once a scratch carve was refused. Finish stops
     // its walks on it and keeps the refusal's own diagnostic.
     bool scratch_exhausted;
@@ -7229,7 +7253,7 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_forward_block(CIrDirectSsa* ssa, u32 block, u32 l
     if (ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1)
     {
         result = ssa->predecessors[ssa->predecessor_offsets[block]];
-        u32 loop_index = ssa->loop_innermost ? ssa->loop_innermost[result] : UINT32_MAX;
+        u32 loop_index = ssa->forward_enter ? ssa->loop_innermost[result] : UINT32_MAX;
         CIrSsaLoop* loop = loop_index != UINT32_MAX ? ssa->loops + loop_index : 0;
         if (loop && ssa->loop_headers[loop->header] == loop_index + 1 && !c_ir_ssa_loop_contains(loop, block))
         {
@@ -7265,10 +7289,20 @@ u64 c_test_ir_ssa_forward_steps(void)
 {
     return c_ir_ssa_forward_step_total;
 }
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_ssa_loop_exit_block_total;
+
+u64 c_test_ir_ssa_loop_exit_blocks(void)
+{
+    return c_ir_ssa_loop_exit_block_total;
+}
+#define C_IR_SSA_LOOP_EXIT_BLOCKS(count) (c_ir_ssa_loop_exit_block_total += (count))
 #define C_IR_SSA_FORWARD_STEP() (c_ir_ssa_forward_step_total += 1)
 #else
+#define C_IR_SSA_LOOP_EXIT_BLOCKS(count) ((void)0)
 #define C_IR_SSA_FORWARD_STEP() ((void)0)
 #endif
+
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loop_exits(CIntegerIrBuilder* builder);
 
 // Once predecessor discovery is complete, forward through single-predecessor
 // blocks instead of allocating a parameter at every intervening block. The walk
@@ -7286,6 +7320,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
     IrValueId value = slot ? slot->value : IR_VALUE_ID_INVALID;
     if (walk && value.value == IR_ID_UNDERLYING_INVALID)
     {
+        // Check between reads: one walk visits at most block_count blocks,
+        // so work before activation is bounded by events + 2 * blocks.
+        if (ssa->loop_headers && !ssa->loop_exits_attempted &&
+            ssa->forward_steps > (u64)ssa->event_count + builder->function->block_count)
+        {
+            c_ir_ssa_finish_loop_exits(builder);
+        }
         ssa->read_stamp += 1;
         if (!ssa->read_stamp)
         {
@@ -7305,6 +7346,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             forward = value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
         }
     }
+    ssa->forward_steps += path_count;
     bool refused = false;
     if (value.value == IR_ID_UNDERLYING_INVALID)
     {
@@ -7966,49 +8008,29 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
     {
         definition_count += ssa->events[index].opcode != IR_OPCODE_LOAD;
     }
-    u32 read_count = ssa->event_count - definition_count;
-    u32 event_rows = BUSTER_MAX(BUSTER_MAX(definition_count, read_count), 1);
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
     bool fits = loop_count != 0 &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), read_count ? read_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), event_rows, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32));
     if (fits)
     {
         u32* headers = arena_allocate(builder->scratch_arena, u32, block_count);
         u32* definition_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
         u32* definition_blocks = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
-        u32* read_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
-        u32* read_blocks = arena_allocate(builder->scratch_arena, u32, read_count ? read_count : 1);
         u32* innermost = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* enter = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* leave = arena_allocate(builder->scratch_arena, u32, block_count);
         TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
         u32* stack = arena_allocate(builder->scratch_arena, u32, loop_count);
         u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
-        u32* by_block = arena_allocate(builder->scratch_arena, u32, event_rows);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
         u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
-        u32* parents = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* child_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
-        u32* children = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* child_cursor = arena_allocate(builder->scratch_arena, u32, block_count);
-        u32* path = arena_allocate(builder->scratch_arena, u32, block_count);
         u32* skip = arena_allocate(builder->scratch_arena, u32, loop_count);
         memset(headers, 0, sizeof(*headers) * block_count);
         // A usable record has both window ends and its blocks; windows open in
@@ -8114,52 +8136,141 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
                 headers[loop->header] = index + 1;
             }
         }
-        // Writes, then reads, per local in block order: bucket by block, then
-        // deal the buckets out to the locals in ascending block order.
-        for (u32 pass = 0; pass < 2 && consistent; pass += 1)
+        // Writes per local in block order: bucket by block, then deal the
+        // buckets out to the locals in ascending block order.
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(definition_offsets, 0, sizeof(*definition_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
         {
-            bool reads = pass == 1;
-            u32* offsets = reads ? read_offsets : definition_offsets;
-            u32* blocks = reads ? read_blocks : definition_blocks;
-            memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
-            memset(offsets, 0, sizeof(*offsets) * ((u64)local_count + 1));
-            for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode != IR_OPCODE_LOAD)
             {
-                CIrSsaEvent* event = ssa->events + index;
-                consistent = event->block.value < block_count && event->local < local_count;
-                if (consistent && (event->opcode == IR_OPCODE_LOAD) == reads)
-                {
-                    block_offsets[event->block.value + 1] += 1;
-                    offsets[event->local + 1] += 1;
-                }
+                block_offsets[event->block.value + 1] += 1;
+                definition_offsets[event->local + 1] += 1;
             }
-            for (u32 block = 0; block < block_count; block += 1)
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            definition_offsets[local + 1] += definition_offsets[local];
+            cursor[local] = definition_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode != IR_OPCODE_LOAD)
             {
-                block_offsets[block + 1] += block_offsets[block];
+                by_block[block_offsets[event->block.value]++] = index;
             }
-            for (u32 local = 0; local < local_count; local += 1)
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
             {
-                offsets[local + 1] += offsets[local];
-                cursor[local] = offsets[local];
+                definition_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
             }
-            for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+            begin = block_offsets[block];
+        }
+        scratch_end(temporary);
+        if (consistent)
+        {
+            ssa->loop_headers = headers;
+            ssa->loop_innermost = innermost;
+            ssa->local_definition_offsets = definition_offsets;
+            ssa->local_definition_blocks = definition_blocks;
+        }
+    }
+}
+
+// The loop-exit shortcut needs per-local read blocks and a forward-link
+// forest. Build them only after the ordinary read walk spends a linear
+// budget; the loop-header shortcut remains available from the first read.
+// A refused optional carve is attempted once and leaves the general walk.
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loop_exits(CIntegerIrBuilder* builder)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 block_count = builder->function->block_count;
+    u32 local_count = ssa->local_count;
+    u32 read_count = 0;
+    for (u32 index = 0; index < ssa->event_count; index += 1)
+    {
+        read_count += ssa->events[index].opcode == IR_OPCODE_LOAD;
+    }
+    ssa->loop_exits_attempted = true;
+    u64 position = builder->scratch_arena->position;
+    u64 reserved_size = builder->scratch_arena->reserved_size;
+    bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), read_count ? read_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), read_count ? read_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32));
+    if (fits)
+    {
+        u32* read_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
+        u32* read_blocks = arena_allocate(builder->scratch_arena, u32, read_count ? read_count : 1);
+        u32* enter = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* leave = arena_allocate(builder->scratch_arena, u32, block_count);
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, read_count ? read_count : 1);
+        u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
+        u32* parents = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* child_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* children = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* child_cursor = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* path = arena_allocate(builder->scratch_arena, u32, block_count);
+        bool consistent = true;
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(read_offsets, 0, sizeof(*read_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode == IR_OPCODE_LOAD)
             {
-                CIrSsaEvent* event = ssa->events + index;
-                if ((event->opcode == IR_OPCODE_LOAD) == reads)
-                {
-                    by_block[block_offsets[event->block.value]++] = index;
-                }
+                block_offsets[event->block.value + 1] += 1;
+                read_offsets[event->local + 1] += 1;
             }
-            // The fill advanced each bucket's start to the next bucket's.
-            u32 begin = 0;
-            for (u32 block = 0; block < block_count && consistent; block += 1)
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            read_offsets[local + 1] += read_offsets[local];
+            cursor[local] = read_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode == IR_OPCODE_LOAD)
             {
-                for (u32 row = begin; row < block_offsets[block]; row += 1)
-                {
-                    blocks[cursor[ssa->events[by_block[row]].local]++] = block;
-                }
-                begin = block_offsets[block];
+                by_block[block_offsets[event->block.value]++] = index;
             }
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
+            {
+                read_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
+            }
+            begin = block_offsets[block];
         }
         // The forest of variable-independent forward links: the only
         // predecessor, or the entry of a closed loop at its header. A read
@@ -8175,9 +8286,9 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
             {
                 parent = ssa->predecessors[ssa->predecessor_offsets[block]];
             }
-            else if (headers[block])
+            else if (ssa->loop_headers[block])
             {
-                parent = ssa->loops[headers[block] - 1].entry;
+                parent = ssa->loops[ssa->loop_headers[block] - 1].entry;
             }
             parents[block] = parent;
             if (parent != UINT32_MAX)
@@ -8231,14 +8342,11 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
         scratch_end(temporary);
         if (consistent)
         {
-            ssa->loop_headers = headers;
-            ssa->local_definition_offsets = definition_offsets;
-            ssa->local_definition_blocks = definition_blocks;
             ssa->local_read_offsets = read_offsets;
             ssa->local_read_blocks = read_blocks;
-            ssa->loop_innermost = innermost;
             ssa->forward_enter = enter;
             ssa->forward_leave = leave;
+            C_IR_SSA_LOOP_EXIT_BLOCKS(block_count);
         }
     }
 }
@@ -10814,6 +10922,32 @@ BUSTER_C_INTERNAL bool c_ir_type_is_binary128_aggregate(CIntegerIrBuilder* build
            c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, type_id);
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
+                                                       IrTypeId type);
+
+// -fcanonical-construction-fold (#3010): the constant FAST would fold
+// `candidate` to, built instead of the row, or invalid when the experiment is
+// off or FAST's rule (ir_fast_fold_candidate) leaves the row. The candidate's
+// result would be a fresh value whose only inherited metadata is the operand's
+// points_to_read_only and label provenance; an operand carrying either keeps
+// the row, so the constant's value matches the one the late fold keeps.
+BUSTER_C_INTERNAL IrValueId c_ir_construction_fold(CIntegerIrBuilder* builder, IrInstruction const* candidate, u64 const* right_bits,
+                                                   IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId operand = candidate->operands[0];
+    u64 bits = 0;
+    if (builder->construction_folds && operand.value < builder->function->value_count &&
+        !builder->function->values[operand.value].points_to_read_only && !c_ir_value_contains_label_provenance(builder, operand) &&
+        ir_fast_fold_candidate(builder->program, builder->function, candidate, right_bits, &bits))
+    {
+        result = c_ir_emit_integer_value_at(builder, bits, false, source, candidate->canonical_type);
+        builder->construction_folds->casts += result.value != IR_ID_UNDERLYING_INVALID && candidate->opcode == IR_OPCODE_CAST;
+        builder->construction_folds->truths += result.value != IR_ID_UNDERLYING_INVALID && candidate->opcode == IR_OPCODE_BINARY;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
 {
     if (value.value >= builder->function->value_count)
@@ -11169,7 +11303,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
                           c_ir_diagnostic_type_name(builder->arena, target_value));
         return IR_VALUE_ID_INVALID;
     }
-    return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
+    IrValueId folded = IR_VALUE_ID_INVALID;
+    if (operation == IR_CONVERSION_INTEGER_SIGN_EXTEND || operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+        operation == IR_CONVERSION_INTEGER_TRUNCATE || operation == IR_CONVERSION_INTEGER_REINTERPRET)
+    {
+        IrInstruction candidate = c_ir_instruction_initialize(IR_OPCODE_CAST, target_type);
+        candidate.operands = &value;
+        candidate.operand_count = 1;
+        candidate.conversion_operation = (u8)operation;
+        folded = c_ir_construction_fold(builder, &candidate, 0, source);
+    }
+    return folded.value != IR_ID_UNDERLYING_INVALID ? folded : c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
 }
 
 // The initializer lowering below is intentionally defined much earlier than
@@ -18723,6 +18867,8 @@ struct CIrLowerAutomaticDeclarationListState
     u32 parentheses;
     u32 brackets;
     u32 braces;
+    // The `?:` nesting outside every group (c_token_conditional_depth_step).
+    u32 conditionals;
     u64 temporary_mark;
 };
 
@@ -38740,7 +38886,7 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
 #include "c_vendor_x86_query.c"
 #include "c_vendor_generic.c"
 
-BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+BUSTER_C_INTERNAL IrValueId c_ir_truth_value_rows(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
 {
     IrTypeId type_id = builder->function->values[value.value].canonical_type;
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
@@ -38866,6 +39012,29 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     comparison.result = result;
     c_ir_append_instruction(builder, comparison, comparison_source);
     return result;
+}
+
+// An integer constant's truth is `value != (type)0`, which FAST folds once
+// c_ir_truth_value_rows has built the zero, its conversion and the comparison.
+// -fcanonical-construction-fold asks the same rule with that zero supplied
+// as bits, which share the operand's type as the converted zero would.
+BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    IrValueId folded = IR_VALUE_ID_INVALID;
+    IrType* type = builder->construction_folds && value.value < builder->function->value_count
+                       ? ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type)
+                       : 0;
+    if (type && type->kind == IR_TYPE_INTEGER)
+    {
+        u64 zero_bits = 0;
+        IrValueId operands[] = {value, value};
+        IrInstruction candidate = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->bool_type);
+        candidate.operands = operands;
+        candidate.operand_count = 2;
+        candidate.binary_operation = (u8)IR_BINARY_INTEGER_NOT_EQUAL;
+        folded = c_ir_construction_fold(builder, &candidate, &zero_bits, source);
+    }
+    return folded.value != IR_ID_UNDERLYING_INVALID ? folded : c_ir_truth_value_rows(builder, value, source);
 }
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
@@ -41462,8 +41631,11 @@ BUSTER_C_INTERNAL CIrTreeConditionals const* c_ir_tree_conditionals_find(CIrTree
     return low < index->body_count && index->braces[low] == brace ? index->bodies + low : 0;
 }
 
-BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                                    u32* expression_end)
+// The records' answer for any range, with its statistics: the unit's `?`
+// tokens decide a range holding none, and a record starting at the stripped
+// range's first token decides one that is a conditional.
+BUSTER_C_INTERNAL C_IR_NOINLINE bool c_ir_tree_root_conditional_records(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start,
+                                                                        u32* question, u32* colon, u32* expression_end)
 {
     CIrTreeConditionals const* tree = builder->tree_conditionals;
     CIrTreeRootVerdict verdict = C_IR_TREE_ROOT_UNKNOWN;
@@ -41542,6 +41714,33 @@ BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u3
         builder->ast_lower_statistics->answers += verdict == C_IR_TREE_ROOT_TRUE;
         builder->ast_lower_statistics->negatives += verdict == C_IR_TREE_ROOT_FALSE;
         builder->ast_lower_statistics->fallbacks += verdict == C_IR_TREE_ROOT_UNKNOWN;
+    }
+    return result;
+}
+
+// The body's `?` count refuses a non-empty body range with no `?` in O(1)
+// (#3924). That is the records' negative: every tree `?` is a `?` token, so the
+// records' search finds none there, and the statistics count it as one. Only
+// a range that may hold a `?` pays for the records' frame and search, which
+// cost about 86 Ir a call on the self-host.
+BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
+{
+    bool result = false;
+    if (start < end && !c_ir_range_may_hold_question(builder, start, end))
+    {
+        if (builder->ast_lower_statistics)
+        {
+            builder->ast_lower_statistics->negatives += 1;
+        }
+#if BUSTER_REFERENCE_CHECKS
+        u32 reference[4];
+        BUSTER_CHECK(!c_ir_root_conditional_scan(builder, start, end, &reference[0], &reference[1], &reference[2], &reference[3]));
+#endif
+    }
+    else
+    {
+        result = c_ir_tree_root_conditional_records(builder, start, end, expression_start, question, colon, expression_end);
     }
     return result;
 }
@@ -46346,7 +46545,9 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
         {
             state->braces -= 1;
         }
-        bool separator = at_end || (!state->parentheses && !state->brackets && !state->braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
+        bool outside_groups = !state->parentheses && !state->brackets && !state->braces;
+        bool separator = at_end || (outside_groups && !state->conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
+        state->conditionals = outside_groups && !separator ? c_token_conditional_depth_step(&token, state->conditionals) : state->conditionals;
         if (!separator)
         {
             state->scan += 1;
@@ -47032,6 +47233,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
 
 BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
 {
+    // GCC and Clang accept one optional leading '%' on an x86 register clobber
+    // ("%rax" is "rax"); "memory" is not a register and keeps its bare spelling.
+    if (cpu_arch_is_x86(target.cpu_arch) && clobber.length > 1 && clobber.pointer[0] == '%')
+    {
+        String8 bare = string_slice(clobber, 1, clobber.length);
+        // Callers normalize an already-normalized name, so a second '%' must stay refused.
+        if (bare.pointer[0] != '%' && !string_equal(bare, S8("memory"))) clobber = bare;
+    }
     // GNU x86 register number zero denotes AX, independently of operand ties.
     String8 result = cpu_arch_is_x86(target.cpu_arch) && string_equal(clobber, S8("0"))
                          ? target.cpu_arch == CPU_ARCH_X86_64 ? S8("rax") : S8("eax")
@@ -50298,6 +50507,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 declaration_parentheses = 0;
                 u32 declaration_brackets = 0;
                 u32 declaration_braces = 0;
+                u32 declaration_conditionals = 0;
                 bool multiple_declarators = false;
                 for (u32 scan = index; scan < end; scan += 1)
                 {
@@ -50326,10 +50536,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         declaration_braces -= 1;
                     }
-                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && !declaration_conditionals &&
+                             c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
                     {
                         multiple_declarators = true;
                         break;
+                    }
+                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces)
+                    {
+                        declaration_conditionals = c_token_conditional_depth_step(&token, declaration_conditionals);
                     }
                 }
                 if (multiple_declarators)
@@ -61256,7 +61471,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 IrTypeId cast_type = IR_TYPE_ID_INVALID;
                 if (close < end)
                 {
-                    c_ir_query_type_name(builder, index + 1, close, true, &cast_type);
+                    c_ir_query_group_type_name(builder, index, close, &cast_type);
                     if (builder->queries->has_request)
                     {
                         return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
@@ -66245,8 +66460,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
-            .constant_intern = options.intern_block_constants ? &constant_intern : 0,
-            .constant_intern_generation = options.intern_block_constants ? ++constant_intern.generation : 0,
+            .constant_intern = options.disable_block_constant_interning ? 0 : &constant_intern,
+            .constant_intern_generation = options.disable_block_constant_interning ? 0 : ++constant_intern.generation,
+            .construction_folds = options.construction_fold ? &result.construction_folds : 0,
             .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,
@@ -66923,6 +67139,26 @@ CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 sour
                                                      CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
 {
     return c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+}
+
+bool c_test_ir_ssa_loop_exits_refusal(void)
+{
+    bool result = false;
+    Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64),
+                                                 .granularity = BUSTER_KB(64), .flags = {.no_pool = true}});
+    if (scratch)
+    {
+        arena_allocate_bytes(scratch, scratch->reserved_size - scratch->position, 1);
+        u64 position = scratch->position;
+        CIrDirectSsa ssa = {0};
+        IrFunction function = {.block_count = 1};
+        CIntegerIrBuilder builder = {.scratch_arena = scratch, .function = &function, .direct_ssa = &ssa};
+        c_ir_ssa_finish_loop_exits(&builder);
+        result = ssa.loop_exits_attempted && !ssa.forward_enter && !ssa.local_read_offsets &&
+                 !ssa.scratch_exhausted && !builder.lower_machine.failed && scratch->position == position;
+        arena_destroy(scratch, 1);
+    }
+    return result;
 }
 
 bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out)

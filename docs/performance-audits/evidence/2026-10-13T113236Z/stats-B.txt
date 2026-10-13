@@ -1,0 +1,10 @@
+C_AST nodes=2927544 tokens=4382685 build_ns=74704930 retained_bytes=38058072 transient_high_water=63488 column_copy_bytes=0 finalize_child_entries=0 layout=implicit
+C_AST_WALK walk_ns=20351363 walk_steps=7226838 scan_ns=660110 children_ns=24513898 child_entries=2927543 scan_calls=55259
+C_AST_TYPES bodies=7058 initializers=2696 nodes_typed=1347866 nodes_accepted=1215748 answers=831771 declines=13063 misses=5391 gated=0 lookups_settled=133340 lookups_walked=181
+C_AST_SPLIT units=1 records=16426 assertions=78 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=7058 segments=104536 segment_tokens=1672230 uses=362110 bails=0 declaration_hints=39160 loop_hints=5215 declines=829 declarator_hints=39281 initializer_hints=38308 auto_skips=39160 declarator_declines=0 braced=10175 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=158887 indexed=155110 index_reads=177827 primitive_answers=14525 typedef_answers=70036 fallbacks=2279 input=2257 specifiers=22 storage=0 primitive=0 typedef=0 reason=input fallback_token=4381705
+C_AST_EXTENTS bodies=0 entries=0 entry_declines=0 answers=0 walked_input=0 walked_anchor=0 walked_shape=0 refused_input=0 refused_anchor=0 reason=none fallback_token=4294967295
+C_AST_TYPE_NAMES skips=46762 retries=0 primitive_answers=156 typedef_answers=28847 fallbacks=29 input=29 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=1263 typedef_answers=8590 fallbacks=121 input=121 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER bodies=0 conditionals=0 steps=0 answers=0 negatives=0 fallbacks=0

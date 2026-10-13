@@ -1,0 +1,43 @@
+{
+  "baseline_revision": "8a2b73f1ea9691ce0fe4a09626c05b5c4d2c4f02",
+  "candidate_source_revision": "6153afa31236d4c6ee7028ee9db69f901b6bc1d2",
+  "frozen_src_tree": "889b9594a1adc670e09b400e93c76601b8d8bf12",
+  "compiler": "clang version 23.1.1",
+  "valgrind": "valgrind-3.25.1",
+  "GLIBC_TUNABLES": "glibc.cpu.hwcaps=-AVX512F,-AVX512VL",
+  "glibc_package_sha256": "e8e4d50d45cb2bd21c9f7eabacc6a01bd5eb93dbd476f3f44d44038fc1eba417",
+  "c_gen_sha256": {
+    "base": "f49ba92760b00d123f83157899fee0516ee0db6fcfe9c975e125d6cc8f259f69",
+    "gate": "7bfe148a044e2648ac872d4d4ea9be6c18da77989bb41033dd2322405f0b71b4",
+    "final": "1cd1f2384cb57ec476c37e4a40b74d94a9d0e9b9fa622f92bf6e78ff96a2edc6"
+  },
+  "subjects": {
+    "base": {
+      "original_sha256": "327dcc9a391244d8a19c0f5083761a229919077113fda925e948fe1ae46c17f4",
+      "profile_sha256": "0ebc27f8e964aef27b30c53587216d80a445731ed981a28a671bbe0fdb0815fe",
+      "text_sha256": "4e56994ceeef52b653ce1f6732589c625fa5b6da70fcc553d8e2c08693bb5056",
+      "text_sha256-profile": "4e56994ceeef52b653ce1f6732589c625fa5b6da70fcc553d8e2c08693bb5056"
+    },
+    "gate": {
+      "original_sha256": "8802487879ab84c2810a7c2449fa48eaa0d92f9c74aa1f077738acd2b744c2d7",
+      "profile_sha256": "3c93775315f6d5c0ec55275cf5f0eaae1bb8df3fa8d12ed5992853e0766bd9a5",
+      "text_sha256": "44001781c8ebfa46f9e6398f36ae39995417ca92d0d7e3021b667942939ede97",
+      "text_sha256-profile": "44001781c8ebfa46f9e6398f36ae39995417ca92d0d7e3021b667942939ede97"
+    },
+    "final": {
+      "original_sha256": "55dbd29b3202e11ff23c55a68973e7587e3500581827632c6858893fec13dedd",
+      "profile_sha256": "d8c08a4b1016bc88613cd63f10d6d371697c5567ed8dd6d5ebb6eb43b5c88528",
+      "text_sha256": "a139cfa701b9a7f533c77a9acc381eeca7e5748af46ec8b894310efee37a1ea4",
+      "text_sha256-profile": "a139cfa701b9a7f533c77a9acc381eeca7e5748af46ec8b894310efee37a1ea4"
+    }
+  },
+  "generated_headers": {
+    "buster/lib/shaders/paths.h": "7d596a350e785c4494d210af12ab57c8a336d08a99e81d240c4561f6efa2db5c"
+  },
+  "ide_release_compile_command": {
+    "directory": "/home/david/Documents/Codex/2026-10-12/s/work/buster/build/diag",
+    "command": "/usr/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/usr/bin/clang\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/usr/lib/clang/23/include\\\" -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/home/david/Documents/Codex/2026-10-12/s/work/buster/build/diag/generated -I/home/david/Documents/Codex/2026-10-12/s/work/buster/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wno-unused-function -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Whigher-precision-for-complex-division -Wimplicit-void-ptr-cast -Wshift-bool -Wthread-safety -Wunique-object-duplication -ferror-limit=1 -g -fno-omit-frame-pointer -march=x86-64-v3 -o CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o -c /home/david/Documents/Codex/2026-10-12/s/work/buster/src/buster/apps/ide/ide.c",
+    "file": "/home/david/Documents/Codex/2026-10-12/s/work/buster/src/buster/apps/ide/ide.c",
+    "output": "/home/david/Documents/Codex/2026-10-12/s/work/buster/build/diag/CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o"
+  }
+}

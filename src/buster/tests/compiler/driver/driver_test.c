@@ -31,6 +31,7 @@
 // compiler_driver_test_lane_first_fills owns concurrent first fills of the x86 caches.
 // compiler_driver_test_cold_x86_source_selection pins source-assembly selection
 // and its diagnostics on first-touch form normalization.
+// compiler_driver_test_wide_vector_place_address checks pointer identity and rvalue snapshots.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
@@ -5666,6 +5667,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         String8 expected_diagnostic;
         String8 dialect;
     } cases[] = {
+        {S8("enum E : int { N = sizeof(enum E[2]) }; enum E a[2];"), true, false, {0}, S8("-std=c23")},
+        {S8("typedef int F(void); F a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); typedef F A[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { F a[2]; }"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { (void)sizeof(F[2]); }"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; extern struct S a[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S (*p)[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; void f(struct S a[2]); struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int A[]; A a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); F *a[2]; struct S; struct S *b[2];"), true},
         // Function designators are never assignment places, even under sizeof (#3746).
         {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
         {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
@@ -21408,6 +21420,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_joins(UnitTe
     return result;
 }
 
+// Pointer identity, scalar writes and captured rvalues distinguish places
+// from vector snapshots in every x86 profile and both allocator/frontend forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_place_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    CodegenRegisterAllocatorMode allocators[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 cpus[] = {S8("-march=baseline"), S8("-march=haswell"), S8("-march=znver5")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    String8 source = S8("src/buster/tests/compiler/driver/fixtures/basic_c_wide_vector_place_address.c");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 profile = 0; profile < BUSTER_ARRAY_LENGTH(cpus); profile += 1)
+                {
+                    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-place-address"), S8(".o"));
+                        String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], optimizations[optimization],
+                            modes[mode], frontends[frontend], cpus[profile], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        BUSTER_TEST(arguments, invocation.register_allocator_explicit && invocation.register_allocator == allocators[mode]);
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        String8 description = string_format(temporary.arena, S8("wide_vector_place_address {S8} {S8} {S8} {S8} {S8}: {S8}"),
+                            targets[target], modes[mode], frontends[frontend], cpus[profile], optimizations[optimization], compiled.diagnostic);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 9 &&
+                            compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+                        bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+                        bool executable_cpu = profile == 0 || (profile == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                            : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
+                        if (native_target && executable_cpu && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-place-address-run"), S8(".exe"));
+                            String8 native_command[] = {S8("-g0"), S8("-nostdinc"), optimizations[optimization], modes[mode], frontends[frontend],
+                                cpus[profile], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), executable, source};
+                            CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                            CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                            BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                            if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                            }
+                        }
+#endif
+                        c_test_scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // The two AArch64 fixtures are target-independent integer references for
 // f32/f64.  Reuse them on x86-64 and add the x87 image fixture for long
 // double.  Every allocator/frontend combination must at least produce an
@@ -36247,6 +36321,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aggregate_comma);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_joins);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_place_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_transport);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_compiler_runtime);
@@ -48600,6 +48675,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_typeof_conditional.c"),
         S8("tests/basic_c_typeof_expression_frames.c"),
         S8("tests/basic_c_qualified_aggregate_call.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/volatile_recursive_record.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/git_array_size.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
     };
@@ -48621,6 +48698,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-typeof-conditional"),
         S8("buster-c-typeof-expression-frames"),
         S8("buster-c-qualified-aggregate-call"),
+        S8("buster-c-volatile-recursive-record"),
+        S8("buster-c-git-array-size"),
         S8("buster-c-qualified-compound"),
         S8("buster-c-fresh-binding-publication"),
     };
@@ -48873,6 +48952,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-target"),
         S8("x86_64-pc-windows-msvc"),
         S8("-fregister-allocator=quality"),
+        // The prolog decoder below expects `push rbp; mov rbp, rsp; sub rsp, N` with no
+        // callee-saved pushes, which an interned constant live across a call would add.
+        S8("-fno-canonical-intern-constants"),
         S8("-o"),
         c_float_abi_windows_path,
         S8("tests/basic_c_float_abi.c"),
