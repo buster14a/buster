@@ -787,6 +787,88 @@ class SamplingTransportTest(unittest.TestCase):
                     old["conclusion"] = result
                     self.assertEqual(history()[0][6:8], [expected, "-"])
 
+    def test_sampling_history_retains_closed_unmerged_request(self):
+        # #3955: GitHub drops a closed-unmerged pull from commits/{sha}/pulls
+        # and from the request run snapshot; the head ref still owns it.
+        revision, campaign = BASE, "c" * 64
+        marker = f"profile: compiler-main-sampling-acquire-v1 packet: 0 freeze: {revision}\n"
+        branch = "claude/3212-acquire"
+        old = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z",
+                   head_branch=branch, pull_requests=[], conclusion="success")
+        closed = dict(pull_request(), number=42, state="closed", merged_at=None,
+                      head={"sha": HEAD, "ref": branch, "repo": {"full_name": REPOSITORY}})
+        delta = {"status": "ahead", "base_commit": {"sha": BASE}, "merge_base_commit": {"sha": BASE},
+                 "files": [{"filename": authorize.COMPARE_REQUEST, "status": "modified",
+                            "patch": "@@ -0,0 +1 @@\n+" + marker.rstrip("\n")}]}
+        closed_list = [closed]
+        commits = [{"sha": BASE}, {"sha": HEAD}]
+        paths = []
+
+        def read(path, token):
+            paths.append(path)
+            if "/workflows/9700x-direct-bench.yml/" in path:
+                return {"total_count": 0, "workflow_runs": []}
+            if "/workflows/" in path:
+                return {"total_count": 1, "workflow_runs": [old]}
+            if path.endswith("/commits/" + HEAD):
+                return {"sha": HEAD, "parents": [{"sha": BASE}]}
+            if "/compare/" in path:
+                return delta
+            if path.endswith(f"/commits/{HEAD}/pulls?per_page=100"):
+                return []
+            if "/pulls?state=closed&" in path:
+                return closed_list
+            if "/pulls/42/commits?" in path:
+                return commits
+            if "/check-runs?" in path:
+                return {"check_runs": []}
+            self.fail(path)
+
+        def history():
+            return authorize.sampling_attempt_history(REPOSITORY, "token", "999", "2026-10-09T00:00:00Z",
+                                                       revision, campaign, "-", "-")
+
+        with mock.patch.object(authorize, "fetch", side_effect=read), \
+                mock.patch.object(authorize, "sampling_content", return_value=marker):
+            row = history()[0]
+            self.assertEqual(row[:8], ["acquire", "0", "91", "1", "-", "-", "hostless", "-"])
+            self.assertEqual(row[14:16], [OWNER["login"], str(OWNER["id"])])
+            closed_path = [path for path in paths if "/pulls?state=closed&" in path]
+            self.assertEqual(closed_path, [f"/repos/{REPOSITORY}/pulls?state=closed&head=buster14a%3A"
+                                           "claude%2F3212-acquire&per_page=100"])
+            # Provenance stays as strict as for an associated pull.
+            for field, wrong in (("user", dict(OTHER)), ("merged_at", "2026-10-12T23:00:00Z"),
+                                 ("state", "open"), ("head", {"sha": HEAD, "ref": "other",
+                                                              "repo": {"full_name": REPOSITORY}}),
+                                 ("head", {"sha": HEAD, "ref": branch, "repo": {"full_name": "fork/buster"}})):
+                with self.subTest(field=field, wrong=wrong):
+                    saved = closed[field]
+                    closed[field] = wrong
+                    with self.assertRaises(ValueError):
+                        history()
+                    closed[field] = saved
+            # The pull must still contain the exact request commit.
+            commits[1] = {"sha": "d" * 40}
+            with self.assertRaises(ValueError):
+                history()
+            commits[1] = {"sha": HEAD}
+            # Two closed-unmerged owners on one ref are ambiguous.
+            closed_list.append(dict(closed, number=43))
+            with mock.patch.object(authorize, "fetch",
+                                   side_effect=lambda path, token: commits if "/pulls/43/commits?" in path else read(path, token)):
+                with self.assertRaises(ValueError):
+                    history()
+            closed_list.pop()
+            # A snapshot number still selects only that pull.
+            old["pull_requests"] = [{"number": 43}]
+            with self.assertRaises(ValueError):
+                history()
+            old["pull_requests"] = [{"number": 42}]
+            self.assertEqual(history()[0][6], "hostless")
+            old["head_branch"] = None
+            with self.assertRaises(ValueError):
+                history()
+
     def test_utility_selector_requires_one_exact_every_parent_fresh_line(self):
         line = "profile: compiler-baseline-closure-utility-v1 packet: 0 freeze: " + BASE
         added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")

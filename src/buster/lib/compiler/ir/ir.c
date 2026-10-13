@@ -264,7 +264,9 @@ String8 ir_diagnostic_census_counter_name(IrDiagnosticCensusCounter counter)
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
     IrType* result;
-    if (!table || id.value >= table->count)
+    // A populated table always has rows; testing them lets the analyzer see
+    // that too (#3952).
+    if (!table || !table->types || id.value >= table->count)
     {
         result = 0;
     }
