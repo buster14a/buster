@@ -598,7 +598,9 @@ embedders start with the conservative interposition policy.
 Mandatory candidates can contain
 multiple blocks, local storage, ordinary calls and aggregate returns.
 The iterative mandatory-call graph processes callees before callers and
-rejects cycles. Dynamic stack lifetime operations, computed labels,
+rejects cycles. Caller-owned computed-goto label values and destinations retain
+their IDs across a splice; computed labels inside the callee remain refused
+until their provenance has a cloning contract (#3995). Dynamic stack lifetime operations, callee-owned computed labels,
 variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
 Unsupported candidates remain calls when optional and diagnose when mandatory.
 Arguments are evaluated once before the splice. Expansion remaps canonical
@@ -663,7 +665,14 @@ work totals let the first few large callers starve every later one. Optional
 expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
-rescanning every instruction to build reverse edges. Planning storage includes
+rescanning every instruction to build reverse edges. That scan skips a
+function whose producer opcode summary records no `CALL`
+(`IR_OPCODE_SUMMARY_TRACKED`) and streams the dense rows of the rest. Planning
+classifies every call row with one byte of per-symbol callee facts
+(`ir_inline_plan_facts`: required, `noinline`, linkage-allowed, tiny leaf),
+filled once per pass, instead of re-deriving the symbol and callee predicates
+at every site. The table adds one byte per symbol to the planning scratch
+charge; work charges and statistics are unchanged. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
 chains directly, so no full caller compaction is required. Each caller has one

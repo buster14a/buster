@@ -12513,9 +12513,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_call_crossing_callee_sav
 // file holds, so the allocators must spill and reload them around the calls
 // and the back edge. `wide_calls` keeps eight 32-byte and six 64-byte vectors
 // live across two calls in straight-line code, wider than the baseline
-// 128-bit vector registers. Wider vectors stay out of the loop: a 32- or
-// 64-byte vector reaching any join or loop header is refused by selection
-// today (#3886).
+// 128-bit vector registers. `compiler_driver_test_wide_vector_joins` separately
+// checks 32/64-byte vectors through joins, loop backedges and calls (#3886).
 // `tests/basic_c_vector_register_pressure.c` covers the same shape only on an
 // AVX-512 VBMI/VBMI2 target, so the default-CPU mode matrix compiles it to an
 // empty `main`. Every target must select without fallback under both
@@ -21151,6 +21150,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_i128_block_parameters(Un
                 }
 #endif
                 c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// All six native targets select the join fixture; each native host executes it.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_joins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
+                         S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 cpus[] = {S8("-march=baseline"), S8("-march=haswell"), S8("-march=znver5")};
+    for (u32 profile = 0; profile < BUSTER_ARRAY_LENGTH(cpus); profile += 1)
+    {
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            if (target < 3 && profile != 0) { continue; }
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-joins"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], cpus[profile],
+                                         S8("-fverify-codegen"), S8("-o"), output, S8("src/buster/tests/compiler/driver/fixtures/basic_c_wide_vector_joins.c")};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("wide_vector_joins {S8} {S8} {S8} {S8}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], cpus[profile], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 22 &&
+                        compiled.codegen_statistics.fallback_function_count == 0, description);
+#if (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && !BUSTER_ANDROID && !BUSTER_IOS
+                    bool native_arch = (target < 3 && BUSTER_CPU_ARCH_AARCH64) || (target >= 3 && BUSTER_CPU_ARCH_X86_64);
+                    bool native_target = native_arch && ((target % 3 == 0 && BUSTER_LINUX) ||
+                        (target % 3 == 1 && BUSTER_MACOS) || (target % 3 == 2 && BUSTER_WINDOWS));
+                    bool executable_cpu = profile == 0 || (profile == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
+                    if (native_target && executable_cpu && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-joins-run"), S8(".exe"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], cpus[profile], S8("-fverify-codegen"), S8("-o"), executable,
+                                                    S8("src/buster/tests/compiler/driver/fixtures/basic_c_wide_vector_joins.c")};
+                        CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        native_invocation.reject_machine_fallback = true;
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+                    }
+#endif
+                    c_test_scratch_end(temporary);
+                }
             }
         }
     }
@@ -34818,9 +34877,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
         "    if (value == 0) return 0;\n"
         "    return mutual_even(value - 1);\n"
         "}\n"
+        "static volatile int label_effects;\n"
+        "static inline __attribute__((always_inline)) int label_leaf(int value)\n"
+        "{ label_effects += 1; if (value < 0) return -value; return value * 3 + 1; }\n"
+        "static int label_caller(int index)\n"
+        "{ void *targets[] = {&&zero, &&one}; int value = label_leaf(index); goto *targets[index & 1];\n"
+        "  zero: value += label_leaf(4); goto done; one: value += label_leaf(5); done: return value; }\n"
         "static int (*volatile escaped_helper)(int) = tiny_helper;\n"
         "int main(void)\n"
         "{\n"
+        "    int label_first = label_caller(0), label_second = label_caller(1);\n"
         "    int first = tiny_helper(argument(2));\n"
         "    int second = tiny_helper(argument(3));\n"
         "    int forced = forced_helper(argument(4));\n"
@@ -34834,6 +34900,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
         "    InlinePair pair = forced_aggregate(argument(5));\n"
         "    return first != 13 || second != 16 || forced != 9 || blocked != 10 || escaped != 25 ||\n"
         "           cfg != 10 || pair.first != 8 || pair.second != 9 ||\n"
+        "           label_first != 14 || label_second != 20 || label_effects != 4 ||\n"
         "           argument_evaluations != 5 || effects != 11 || discarded_effects != 13 || recursive != 2 || mutual != 1;\n"
         "}\n");
     bool wrote_source = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
@@ -35013,16 +35080,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
 #else
                                                              S8(""));
 #endif
-        String8 run_command[] = {
-            S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
-            source_path, S8("-o"), executable_path,
-        };
-        CompilerDriverResult executable = compiler_driver_execute_invocation(
-            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
-        BUSTER_TEST_RAW(arguments, executable.error == COMPILER_DRIVER_ERROR_NONE, executable.diagnostic);
-        if (executable.error == COMPILER_DRIVER_ERROR_NONE)
+        String8 run_allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 run_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(run_allocators); allocator_index += 1)
         {
-            BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable_path));
+            for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(run_frontends); frontend_index += 1)
+            {
+                String8 run_command[] = {
+                    S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                    run_allocators[allocator_index], run_frontends[frontend_index],
+                    source_path, S8("-o"), executable_path,
+                };
+                CompilerDriverResult executable = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
+                BUSTER_TEST_RAW(arguments, executable.error == COMPILER_DRIVER_ERROR_NONE, executable.diagnostic);
+                if (executable.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable_path));
+                }
+            }
         }
 #endif
 
@@ -35977,6 +36053,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_i128_divide);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aggregate_comma);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_joins);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_transport);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_compiler_runtime);
