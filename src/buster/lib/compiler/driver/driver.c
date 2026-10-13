@@ -10657,7 +10657,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     if (invocation.query == COMPILER_DRIVER_QUERY_NONE)
     {
-        if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && !invocation.output_path.length && invocation.input_count > 1)
+        if ((invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.emit_llvm_bitcode) &&
+            !invocation.output_path.length && invocation.input_count > 1)
         {
             u64 identity_capacity = 0;
             CompilerDriverInputIdentitySlot* input_identities =

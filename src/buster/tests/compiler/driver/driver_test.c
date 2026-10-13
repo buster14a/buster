@@ -1116,6 +1116,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     }
     String8 multi_stem = {.pointer = multi_input.pointer + multi_name, .length = multi_extension - multi_name};
     String8 multi_output = string_format_z(arena, S8("{S8}.o"), multi_stem);
+    String8 multi_bitcode_output = string_format_z(arena, S8("{S8}.bc"), multi_stem);
     String8 assembly_directory = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8("")), false);
     String8 assembly_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8(".S")), false);
     String8 assembly_c_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly-main"), S8(".c")), false);
@@ -1257,6 +1258,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         BUSTER_TEST(arguments, string_first_sequence(multipositional_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
         BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, multi_output, (FileReadOptions){0})),
                            invalid_positional_object);
+
+        // A multi-input -emit-llvm link publishes one .bc per C input. The
+        // second derived output aliases the final positional source, so the
+        // whole list must be checked before the first bitcode file is written.
+        FileStats first_bitcode_output_stats = os_file_replacement_target_stats(llvm_default_output);
+        FileStats later_bitcode_input_stats = os_file_replacement_target_stats(multi_bitcode_output);
+        String8 later_bitcode_source = S8("int later_bitcode_input;\n");
+        if (BUSTER_REQUIRE(arguments, first_bitcode_output_stats.valid &&
+                                          first_bitcode_output_stats.kind == OS_FILE_KIND_MISSING &&
+                                          later_bitcode_input_stats.valid &&
+                                          later_bitcode_input_stats.kind == OS_FILE_KIND_MISSING))
+        {
+            llvm_default_output_cleanup = true;
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)) &&
+                                              file_write(multi_input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)) &&
+                                              file_write(multi_bitcode_output, BUSTER_SLICE_TO_BYTE_SLICE(later_bitcode_source))))
+            {
+                String8 multi_bitcode_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-emit-llvm"),
+                                                   S8("-x"), S8("c"), input, multi_input, multi_bitcode_output};
+                CompilerDriverResult multi_bitcode_refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(multi_bitcode_command)));
+                BUSTER_TEST_RAW(arguments, multi_bitcode_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                                multi_bitcode_refused.diagnostic);
+                BUSTER_TEST(arguments, string_first_sequence(multi_bitcode_refused.diagnostic,
+                                                            S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_STRING_TEST(arguments,
+                                   BYTE_SLICE_TO_STRING(8, file_read(arena, multi_bitcode_output, (FileReadOptions){0})),
+                                   later_bitcode_source);
+                FileStats first_bitcode_output_after = os_file_replacement_target_stats(llvm_default_output);
+                BUSTER_TEST(arguments, first_bitcode_output_after.valid &&
+                                          first_bitcode_output_after.kind == OS_FILE_KIND_MISSING);
+            }
+        }
 
         String8 assembly_text =
             S8("#include \"victim.h\"\n.text\n.globl collision_assembly\ncollision_assembly:\nret\n");
@@ -1456,7 +1490,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
 #endif
     }
     String8 cleanup_paths[] = {input, forced_include, object, hard_link, symlink_path, forced_search_header,
-                                forced_search_input, multi_input, multi_output, assembly_input, assembly_c_input,
+                                forced_search_input, multi_input, multi_output, multi_bitcode_output, assembly_input, assembly_c_input,
                                 assembly_header, wasm_default_output, spirv_default_output, ebpf_default_output};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cleanup_paths); index += 1)
     {
