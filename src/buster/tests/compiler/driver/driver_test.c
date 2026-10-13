@@ -1116,9 +1116,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     }
     String8 multi_stem = {.pointer = multi_input.pointer + multi_name, .length = multi_extension - multi_name};
     String8 multi_output = string_format_z(arena, S8("{S8}.o"), multi_stem);
-    String8 assembly_directory = os_path_absolute(buster_test_temporary_path(arena, S8("output-input-assembly"), S8("")), false);
-    String8 assembly_input = os_path_absolute(buster_test_temporary_path(arena, S8("output-input-assembly"), S8(".S")), false);
-    String8 assembly_c_input = os_path_absolute(buster_test_temporary_path(arena, S8("output-input-assembly-main"), S8(".c")), false);
+    String8 assembly_directory = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8("")), false);
+    String8 assembly_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8(".S")), false);
+    String8 assembly_c_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly-main"), S8(".c")), false);
     String8 assembly_header = string_format_z(arena, S8("{S8}/victim.h"), assembly_directory);
     String8 wasm_default_output = {0};
     if (input.length >= 2)
@@ -1148,6 +1148,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
                                      : (String8){0};
     String8 ebpf_default_output =
         target_output_stem.length ? string_format_z(arena, S8("{S8}.o"), target_output_stem) : (String8){0};
+    String8 extension_input = S8("a.out");
+    bool extension_input_cleanup = false;
     String8 source = S8("int main(void) { return 0; }\n");
     String8 source_bytes = source;
     String8 target = S8("x86_64-unknown-linux-gnu");
@@ -1328,6 +1330,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
                                output_header_bytes);
         }
 
+        // Reserve the fixed native-default spelling only when it is absent. Force C
+        // input and stop at preprocessing so the Wasm link cannot publish a file.
+        String8 forced_extension_source = S8("#error output selector reached preprocessing\n");
+        FileStats extension_input_stats = os_file_replacement_target_stats(extension_input);
+        if (extension_input_stats.valid && extension_input_stats.kind == OS_FILE_KIND_MISSING)
+        {
+            extension_input_cleanup = true;
+            if (BUSTER_REQUIRE(arguments, file_write(extension_input, BUSTER_SLICE_TO_BYTE_SLICE(forced_extension_source))))
+            {
+                String8 forced_extension_command[] = {S8("-target"), S8("wasm32-wasip1"), S8("-nostdinc"), S8("-x"), S8("c"),
+                                                      extension_input};
+                CompilerDriverResult forced_extension_result = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(forced_extension_command)));
+                BUSTER_TEST_RAW(arguments, forced_extension_result.error == COMPILER_DRIVER_ERROR_TOKENIZE,
+                                forced_extension_result.diagnostic);
+                BUSTER_TEST(arguments, string_first_sequence(forced_extension_result.diagnostic,
+                                                            S8("output selector reached preprocessing")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_STRING_TEST(arguments,
+                                   BYTE_SLICE_TO_STRING(8, file_read(arena, extension_input, (FileReadOptions){0})),
+                                   forced_extension_source);
+            }
+        }
+
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
         String8 case_alias = {.pointer = arena_allocate(arena, char8, input.length), .length = input.length};
         if (BUSTER_REQUIRE(arguments, case_alias.pointer != 0))
@@ -1401,6 +1426,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         if (stats.valid && stats.kind != OS_FILE_KIND_MISSING)
         {
             BUSTER_TEST(arguments, os_file_delete(cleanup_paths[index]));
+        }
+    }
+    if (extension_input_cleanup)
+    {
+        FileStats extension_cleanup_stats = os_file_replacement_target_stats(extension_input);
+        if (extension_cleanup_stats.valid && extension_cleanup_stats.kind != OS_FILE_KIND_MISSING)
+        {
+            BUSTER_TEST(arguments, os_file_delete(extension_input));
         }
     }
     FileStats forced_search_directory_stats = os_path_followed_stats(forced_search_directory);

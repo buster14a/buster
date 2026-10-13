@@ -10695,8 +10695,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         if (invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.retain_linked_object && !invocation.retain_object)
         {
-            String8 output_path = invocation.output_path.length ? invocation.output_path
-                                                                 : compiler_driver_default_executable_path(invocation.target);
+            bool target_specific_default_output =
+                invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE ||
+                (!invocation.emit_llvm_bitcode &&
+                 (compiler_driver_target_is_wasm(invocation.target) || invocation.target.cpu_arch == CPU_ARCH_BPFEL));
+            String8 output_path = invocation.output_path;
+            if (!output_path.length)
+            {
+                output_path = target_specific_default_output
+                                  ? compiler_driver_target_artifact_output_path(arena, invocation)
+                                  : compiler_driver_default_executable_path(invocation.target);
+            }
             String8 input_alias = compiler_driver_output_input_alias(invocation, output_path);
             if (input_alias.length)
             {
