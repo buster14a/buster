@@ -31,8 +31,8 @@ position index. Such a query uses scalar delimiter matching as well.
 
 Lowering's assignment continuation retains the comma-free suffix range that
 its parent scanned. Moving into a group changes the endpoint and requires a
-new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
-later conditional belongs to its right operand. Assignment completions keep
+new scan. `c_ir_root_conditional` refuses a range whose root assignment comes before
+its first root `?`: that conditional belongs to the assignment's right operand. Assignment completions keep
 their original order, conversions and stores. Counted chain regressions cover
 simple, distinct-local and compound assignments through both frontend SSA
 forms. The native runtime fixture also compiles the three 20,000-link object
