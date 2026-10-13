@@ -48600,7 +48600,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_typeof_conditional.c"),
         S8("tests/basic_c_typeof_expression_frames.c"),
         S8("tests/basic_c_qualified_aggregate_call.c"),
-        S8("src/buster/tests/compiler/frontend/c/fixtures/volatile_recursive_record.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/volatile_recursive_record.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
     };
