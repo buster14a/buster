@@ -22,6 +22,7 @@ if (BUSTER_COMPILER_SDK)
         compiler_aarch64_semantics
         compiler_aarch64_system_semantics
         compiler_aarch64_semantic_vm
+        compiler_aarch64_simd_semantics
         compiler_aarch64_direct_simd
         compiler_aarch64_complex_simd
         compiler_aarch64_memory_semantics

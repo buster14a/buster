@@ -19,6 +19,7 @@ typedef enum JitError
     JIT_ERROR_BINDING_KIND,
     JIT_ERROR_INVALID_BINDING,
     JIT_ERROR_INIT_FINI_UNSUPPORTED,
+    JIT_ERROR_EXECUTABLE_STACK,
     JIT_ERROR_COUNT,
 } JitError;
 
@@ -92,6 +93,8 @@ struct JitProgram
 // Nonempty initializer/finalizer arrays are refused before image allocation:
 // this API has no initialization/finalization execution protocol. Empty arrays
 // without relocations are inert placeholders and remain admitted.
+// An object that requires an executable stack is refused before image
+// allocation: the JIT cannot change the protection of the caller's stack.
 // The host process must permit JIT executable memory. Apple Silicon macOS code
 // starts in a nominal RWX MAP_JIT mapping and uses
 // pthread_jit_write_protect_np around construction; the call assumes write

@@ -251,6 +251,13 @@ the ordinary comparison: the candidate binary without and with the flag on
 `-fsyntax-only` and `-c` cells. Its method, budget and evidence are in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: constant-reuse-acceptance-v1` line, added once
+against every parent, adds issue #3011's fixed constant-reuse profile. It
+times the candidate binary on the `-g0` unity `-c` compile, without and with
+`-fcanonical-intern-constants` and without and with `-fcanonical-fast-cse`.
+Its method and evidence are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 A fresh exact `profile: throughput-real-source-v1` line, added once against
 every parent, adds the real-source throughput leg (#2761) after the corpus
 leg. The merge base's `./build.sh bench_throughput run --real-source` times
