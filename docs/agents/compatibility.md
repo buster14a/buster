@@ -23,6 +23,7 @@ directory and removes the compiler and in-progress outputs.
 | sbase | [sbase](compatibility/sbase.md) |
 | DoomGeneric | [DoomGeneric](compatibility/doom.md) |
 | QuickJS and Test262 | [QuickJS](compatibility/quickjs.md) |
+| Linux kernel (minimal reference and blocker frontier) | [Linux kernel](compatibility/linux-kernel.md) |
 | Git (Linux x86-64 opt-in build census) | [Git](compatibility/git.md) |
 | musl | [musl](compatibility/musl.md) |
 | musl + BusyBox (Linux diagnostic userspace) | [musl + BusyBox](compatibility/busybox.md) |
