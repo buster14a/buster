@@ -1391,8 +1391,8 @@ struct CDeclaration
     bool is_variadic;
     bool is_constexpr;
     bool is_identifier_list_definition;
-    // A GNU `extern inline` function definition: its body is only for
-    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    // An externally linked GNU `extern inline` definition: its body is only
+    // for inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
