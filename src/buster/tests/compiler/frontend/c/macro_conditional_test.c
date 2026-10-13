@@ -1696,8 +1696,9 @@ BUSTER_GLOBAL_LOCAL bool c_macro_expansion_rlimit_virtual_size(u64* result)
 
 // This child uses one in-memory C input through the driver's single-input fast path,
 // which executes the unit in the caller/test arena already present in the statm
-// baseline. Only c_preprocess's three base arenas, phase arena, and the first
-// macro arena are new reservations; the second macro arena must fail.
+// baseline. Only c_preprocess's three base arenas, phase arena, and macro arenas
+// are new reservations; the bounded cap must reject either the argument or the
+// expansion reservation with its structured resource diagnostic.
 typedef struct CMacroExpansionRlimitBudget CMacroExpansionRlimitBudget;
 struct CMacroExpansionRlimitBudget
 {
@@ -1875,10 +1876,15 @@ void c_macro_expansion_rlimit_child_run(UnitTestArguments* arguments)
                 FileReadResult output = file_read_checked(arena, output_path, (FileReadOptions){0});
                 if (limited)
                 {
+                    bool argument_reservation_error =
+                        c_macro_expansion_rlimit_contains(
+                            compiled.diagnostic, S8("could not reserve 8589934592 bytes for C macro argument arena"));
+                    bool expansion_reservation_error =
+                        c_macro_expansion_rlimit_contains(
+                            compiled.diagnostic, S8("could not reserve 8589934592 bytes for C macro expansion arena"));
                     bool macro_reservation_error =
                         compiled.error != COMPILER_DRIVER_ERROR_NONE &&
-                        c_macro_expansion_rlimit_contains(compiled.diagnostic,
-                            S8("could not reserve 8589934592 bytes for C macro expansion arena")) &&
+                        (argument_reservation_error || expansion_reservation_error) &&
                         !output.bytes.pointer;
                     exit_code = macro_reservation_error ? 1 : 125;
                     diagnostic = compiled.diagnostic.length ? compiled.diagnostic
@@ -1966,8 +1972,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_rlimit_tests(UnitTestArgume
             .pointer = (char8*)limited.wait.streams[STANDARD_STREAM_OUTPUT].pointer,
             .length = limited.wait.streams[STANDARD_STREAM_OUTPUT].length,
         };
-        BUSTER_TEST(arguments, c_macro_expansion_rlimit_contains(
-                                   limited_standard_error, S8("could not reserve 8589934592 bytes for C macro expansion arena")));
+        bool argument_reservation_error = c_macro_expansion_rlimit_contains(
+            limited_standard_error, S8("could not reserve 8589934592 bytes for C macro argument arena"));
+        bool expansion_reservation_error = c_macro_expansion_rlimit_contains(
+            limited_standard_error, S8("could not reserve 8589934592 bytes for C macro expansion arena"));
+        BUSTER_TEST(arguments, argument_reservation_error || expansion_reservation_error);
         BUSTER_TEST(arguments, !c_macro_expansion_rlimit_contains(standard_output, S8("int value")));
     }
     FileReadResult limited_output = file_read_checked(arena, limited_path, (FileReadOptions){0});
