@@ -256,6 +256,10 @@ struct CParsePrimitiveSpelling
 BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
+// Size and alignment of an unevaluated sizeof/_Alignof operand whose type is
+// storage-only __fp16 or built from it, which has no canonical IR type.
+BUSTER_C_EXTERN bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                           u32 start, u32 end, bool type_name, u64* size_out, u32* alignment_out);
 // Whether a call through this function type ends control flow because the
 // declarator that derived it spelled `noreturn`. The set behind it is empty
 // in almost every translation unit; see CParseResult.noreturn_function_types.
