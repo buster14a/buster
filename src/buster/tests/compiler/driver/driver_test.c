@@ -37067,6 +37067,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                              target_char_policy.target.cpu_arch == CPU_ARCH_AARCH64 &&
                              target_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED &&
                              target_data_layout(target_char_policy.target).plain_char_is_signed);
+    // #4052: -fshort-wchar reaches the target; -mcmodel=small is the x86-64
+    // default and the other models are refused by name.
+    String8 short_wchar_arguments[] = {S8("--target=x86_64-linux"), S8("-fshort-wchar"), S8("-mcmodel=small"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation short_wchar_invocation = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(short_wchar_arguments));
+    BUSTER_TEST(arguments, short_wchar_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                             short_wchar_invocation.target.short_wchar &&
+                             target_uses_16_bit_wchar(short_wchar_invocation.target) &&
+                             target_uses_unsigned_wchar(short_wchar_invocation.target));
+    String8 default_wchar_arguments[] = {S8("--target=x86_64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation default_wchar_invocation = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_wchar_arguments));
+    BUSTER_TEST(arguments, default_wchar_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                             !default_wchar_invocation.target.short_wchar &&
+                             !target_uses_16_bit_wchar(default_wchar_invocation.target));
+    String8 code_models[] = {S8("kernel"), S8("medium"), S8("large")};
+    for (u32 model = 0; model < BUSTER_ARRAY_LENGTH(code_models); model += 1)
+    {
+        String8 model_option = string_format(arguments->arena, S8("-mcmodel={S8}"), code_models[model]);
+        String8 model_arguments[] = {S8("--target=x86_64-linux"), model_option, S8("-c"), S8("source.c")};
+        CompilerDriverInvocation refused_model = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(model_arguments));
+        BUSTER_TEST(arguments, refused_model.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, refused_model.diagnostic,
+                           string_format(arguments->arena,
+                                         S8("unsupported option: -mcmodel={S8} (the x86-64 backend implements only the small code model)"),
+                                         code_models[model]));
+    }
+    String8 invalid_model_arguments[] = {S8("--target=x86_64-linux"), S8("-mcmodel=tiny"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation invalid_model = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_model_arguments));
+    BUSTER_STRING_TEST(arguments, invalid_model.diagnostic, S8("invalid value for -mcmodel: tiny"));
+    String8 aarch64_model_arguments[] = {S8("--target=aarch64-linux"), S8("-mcmodel=small"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation aarch64_model = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_model_arguments));
+    BUSTER_STRING_TEST(arguments, aarch64_model.diagnostic, S8("unsupported option: -mcmodel=small for this target"));
     String8 census_command[] = {S8("-fcodegen-fallback-census"), S8("source.c")};
     CompilerDriverInvocation census_enabled = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command));
     BUSTER_TEST(arguments, census_enabled.error == COMPILER_DRIVER_ERROR_NONE && census_enabled.record_codegen_fallbacks);

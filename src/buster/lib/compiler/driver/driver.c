@@ -2196,6 +2196,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     bool x86_execution_mode_seen = false;
     bool x86_regparm_seen = false;
     bool x86_preferred_stack_boundary_seen = false;
+    String8 code_model_value = {0};
+    bool code_model_seen = false;
+    bool short_wchar_requested = false;
     bool options_ended = false;
     bool action_seen = false;
     // Whether the code model in force came from -fPIE/-fpie, which is what
@@ -3180,6 +3183,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             x86_regparm_seen = true;
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-mcmodel=")))
+        {
+            code_model_value = string_slice(argument, S8("-mcmodel=").length, argument.length);
+            code_model_seen = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fshort-wchar")))
+        {
+            short_wchar_requested = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-mpreferred-stack-boundary=")))
         {
             x86_preferred_stack_boundary_value =
@@ -3595,6 +3609,41 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     invocation.target.x86_preferred_stack_boundary = (u8)parsed.value;
                 }
             }
+        }
+    }
+    // The x86-64 backend emits only the small code model: every symbol
+    // reference is rip-relative or GOT-relative, and the object writer has no
+    // large-code-model (movabs/GOTOFF64) or kernel-model (sign-extended
+    // 32-bit absolute, top 2 GiB) addressing. small is the default, so it is
+    // a no-op; the rest are named and refused rather than aliased to small.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && code_model_seen)
+    {
+        bool known_model = string_equal(code_model_value, S8("small")) || string_equal(code_model_value, S8("kernel")) ||
+                           string_equal(code_model_value, S8("medium")) || string_equal(code_model_value, S8("large"));
+        if (invocation.has_gpu_target || invocation.target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mcmodel={S8} for this target"), code_model_value);
+        }
+        else if (!known_model)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mcmodel: {S8}"), code_model_value);
+        }
+        else if (!string_equal(code_model_value, S8("small")))
+        {
+            compiler_driver_argument_error(arena, &invocation,
+                                           S8("unsupported option: -mcmodel={S8} (the x86-64 backend implements only the small code model)"),
+                                           code_model_value);
+        }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && short_wchar_requested)
+    {
+        if (invocation.has_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-fshort-wchar"));
+        }
+        else
+        {
+            invocation.target.short_wchar = true;
         }
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.no_asynchronous_unwind_tables &&
@@ -8930,10 +8979,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         investigation_digest(bytes, investigation->input_sha256);
         compiler_driver_investigation_tokens(investigation, preprocess);
         TargetCpuFeatures features = target_cpu_features_effective(invocation.target);
-        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32}"),
+        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32} wchar={u32}"),
                                               (u32)invocation.target.cpu_arch, (u32)invocation.target.cpu_model, (u32)invocation.target.os,
                                               invocation.target.os_version_major, invocation.target.os_version_minor, invocation.target.os_version_patch,
-                                              (u32)invocation.target.plain_char_policy);
+                                              (u32)invocation.target.plain_char_policy, (u32)invocation.target.short_wchar);
         for (u32 word = 0; word < TARGET_CPU_FEATURE_WORD_COUNT; word += 1)
         {
             investigation->target = string_format(arena, S8("{S8} features{u32}={u64:x}"), investigation->target, word, features.words[word]);
