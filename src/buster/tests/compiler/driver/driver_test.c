@@ -4826,16 +4826,19 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, Compi
 // #1561 deliberately replaces alignment_redeclaration's frozen syntax-only
 // success with the later-declaration conflict shared by all three modes.
 // #3743: an unevaluated operand retains the bit-field address constraint.
-// #3758: selected Generic entities must retain their C value category through
-// update and address checks. Check diagnostic parity and no object on refusal.
+// #3758: selected Generic entities retain their C value category through
+// update/address checks, including register and C23 constant rules.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    u8 c17_dialect_mask = (u8)((1u << 0) | (1u << 1));
+    u8 c23_dialect_mask = (u8)((1u << 2) | (1u << 3));
     struct
     {
         String8 source;
         bool valid;
         String8 expected_message;
+        u8 dialect_mask;
     } cases[] = {
         {S8("struct S{int b:2;}; long f(struct S s){return (long)&s.b;}"), false},
         {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof &s.b;}"), false},
@@ -4880,6 +4883,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
         {S8("int f(void){int x=0; return _Generic(0,int:x)++;}"), true},
         {S8("int f(void){register int x=0; return _Generic(0,int:x)++;}"), true},
         {S8("int function(void); int (*f(void))(void){return &_Generic(0,int:function);}"), true},
+        {S8("int *f(void){register int x=0; return &(_Generic(0,int:x));}"), false,
+         S8("address of register variable 'x' requested")},
+        {S8("int *f(void){register int x=0; return &((_Generic(0,int:x)));}"), false,
+         S8("address of register variable 'x' requested")},
+        {S8("int f(void){register int x=0; (void)&_Generic(0,int:x); return 0;}"), false,
+         S8("address of register variable 'x' requested")},
+        {S8("int f(register int x,int y){return y & x;}"), true},
+        {S8("int *f(register int *p){return &*p;}"), true},
+        {S8("_Bool *f(void){return &_Generic(0,int:true);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("_Bool *f(void){return &_Generic(0,int:false);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){return sizeof(&_Generic(0,int:nullptr));}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){return _Generic(0,int:true)++;}"), false,
+         S8("increment or decrement operand is not a modifiable place"), c23_dialect_mask},
+        {S8("int f(void){return _Generic(0,int:false)++;}"), false,
+         S8("increment or decrement operand is not a modifiable place"), c23_dialect_mask},
+        {S8("int f(void){return _Generic(0,int:nullptr)++;}"), false,
+         S8("increment or decrement operand is not a modifiable place"), c23_dialect_mask},
+        {S8("int *f(void){int true=1; return &_Generic(0,int:true);}"), true, {}, c17_dialect_mask},
+        {S8("int *f(void){int false=0; return &_Generic(0,int:false);}"), true, {}, c17_dialect_mask},
         {S8("struct S{int b:2;}; int f(int x,struct S s){return x & s.b;}"), true},
         {S8("struct S{int b:2;}; int f(int x,struct S s){return (x) & s.b;}"), true},
         {S8("struct S{int b:2;}; int f(struct S s){return sizeof(int) & s.b;}"), true},
@@ -4894,6 +4919,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
     {
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
+            if (cases[row].dialect_mask && !(cases[row].dialect_mask & (1u << dialect)))
+            {
+                continue;
+            }
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
             {
                 for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)

@@ -40,10 +40,15 @@ retained selected-expression range for `_Generic`; it never infers a place
 from the controller or discarded associations. Place shape, modifiable-update
 checks, address eligibility and register-address validation consume that same
 selected range. Selected ordinary objects and members remain addressable, and
-selected function designators remain valid address operands. A selected
-enumerator remains a non-place, and a selected register object still cannot be
-addressed. The bit-field validator
-continues to reject selected bit-fields before lowering (#3758).
+selected function designators remain valid address operands. Enumerators and
+C23's `true`, `false`, and `nullptr` scalar constants remain non-places;
+before C23, `true` and `false` may still name ordinary objects. The bit-field
+validator continues to reject selected bit-fields before lowering (#3758).
+Register-address validation uses the shared unary-address classification and
+full prefix-operand extent, then normalizes through the retained selected
+range. This keeps parenthesized selections and a surrounding `(void)` cast
+under the register-address constraint without misclassifying binary `&` or
+following member, postfix, or dereference expressions to different objects.
 `c_parse_validate_bit_field_addresses` checks unary address operands against
 semantic member widths before constant folding, including parenthesized,
 indirect and promoted anonymous members. GNU `__extension__` prefixes before
@@ -51,10 +56,12 @@ indirect and promoted anonymous members. GNU `__extension__` prefixes before
 unselected operands retain this constraint; binary `&` remains a value
 operation. The registered `compiler_driver_test_bit_field_addresses` matrix
 covers selected ordinary object/member positives beside selected-bit-field
-negatives, selected-enumerator update/address refusals, selected-register
-address refusal, and selected update/function-address positives. It checks
-syntax-only/object diagnostic parity and no object on refusal across four C
-dialects, three frontend routes and three target layouts (#3743, #3758).
+negatives, selected-enumerator and C23 keyword-constant address/update
+refusals, direct/parenthesized/cast selected-register address refusals,
+C17 objects named `true`/`false`, and selected update/function-address plus
+binary/pointee controls. It checks syntax-only/object diagnostic parity and no
+object on refusal across four C dialects, three frontend routes and three
+target layouts (#3743, #3758).
 
 ## Declaration constraints
 
