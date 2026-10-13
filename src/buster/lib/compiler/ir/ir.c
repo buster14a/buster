@@ -6440,6 +6440,9 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* callee_type = callee ? ir_type_from_id(&program->types, callee->canonical_type) : 0;
         bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
         IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
+        // A direct callee must be its FUNCTION row. An indirect callee is an
+        // ordinary pointer value and may be a block parameter, which has no
+        // defining row (inlining turns a call result into one, #3988).
         IrInstruction* reference =
             callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
         IrType* return_type = signature_type ? ir_type_from_id(&program->types, signature_type->return_type) : 0;
@@ -6450,8 +6453,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             (signature_type->parameter_count && !signature_type->parameter_types) ||
             (!signature_type->is_variadic && argument_count != signature_type->parameter_count) ||
             (signature_type->is_variadic && argument_count < signature_type->parameter_count) ||
-            signature_type->return_type.value != instruction->canonical_type.value || !reference ||
-            (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
+            signature_type->return_type.value != instruction->canonical_type.value ||
+            (!indirect && (!reference || reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
             (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
             ((return_type->kind == IR_TYPE_VOID) != (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
         {

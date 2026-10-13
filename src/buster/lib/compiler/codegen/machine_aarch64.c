@@ -3582,17 +3582,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     if (planned)
     {
         IrValue* callee = function->values + instruction->operands[0].value;
-        planned = callee->definition.value < function->instruction_count;
-        if (planned)
+        // An indirect callee may be a block parameter with no defining row.
+        plan->direct_call = callee->definition.value < function->instruction_count &&
+                            function->instructions[callee->definition.value].opcode == IR_OPCODE_FUNCTION &&
+                            instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+        planned = plan->direct_call || machine_a64_operand_register(selector, instruction->operands[0], &plan->callee_register);
+        callee_type = ir_type_from_id(&program->types, callee->canonical_type);
+        if (callee_type && callee_type->kind == IR_TYPE_POINTER)
         {
-            plan->direct_call = function->instructions[callee->definition.value].opcode == IR_OPCODE_FUNCTION &&
-                                instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
-            planned = plan->direct_call || machine_a64_operand_register(selector, instruction->operands[0], &plan->callee_register);
-            callee_type = ir_type_from_id(&program->types, callee->canonical_type);
-            if (callee_type && callee_type->kind == IR_TYPE_POINTER)
-            {
-                callee_type = ir_type_from_id(&program->types, callee_type->element_type);
-            }
+            callee_type = ir_type_from_id(&program->types, callee_type->element_type);
         }
     }
     if (planned)

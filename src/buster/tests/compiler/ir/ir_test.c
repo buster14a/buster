@@ -1989,6 +1989,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         }
         c_test_scratch_end(defaults_temporary);
     }
+    // Inlining a call whose result is a function pointer leaves the indirect
+    // call's callee as a continuation-block parameter with no defining row.
+    // That is an ordinary pointer value and must still validate (#3988).
+    {
+        TemporalArena pointer_temporary = scratch_begin(&arguments->arena, 1);
+        String8 pointer_source = S8(
+            "typedef int (*fp)(int);\n"
+            "int id(int x) { return x + 1; }\n"
+            "static fp get(void) { return id; }\n"
+            "int use(int v) { return get()(v); }\n");
+        CPreprocessResult pointer_preprocess = c_preprocess(pointer_temporary.arena, pointer_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult pointer_analysis = c_parse(pointer_temporary.arena, pointer_preprocess);
+        CIRLowerResult pointer_lowered = {0};
+        if (!pointer_preprocess.error_count && !pointer_analysis.diagnostic_count)
+        {
+            pointer_lowered = c_lower_to_ir(pointer_temporary.arena, S8("canonical-inline-pointer.c"),
+                pointer_preprocess, pointer_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, pointer_preprocess.error_count == 0 && pointer_analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, pointer_lowered.diagnostic_count == 0 && pointer_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, pointer_lowered.program && pointer_lowered.program->module_count == 1))
+        {
+            IrProgram* pointer_program = pointer_lowered.program;
+            IrModule* pointer_module = pointer_program->modules;
+            pointer_program->fast_passes = 0;
+            pointer_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrValidationResult pointer_prepared = ir_prepare_canonical_module(pointer_program, pointer_module, false);
+            BUSTER_TEST(arguments, pointer_prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, pointer_module->inlining.inlined >= 1);
+            IrFunction* pointer_caller = ir_test_inline_find_function(pointer_module, S8("use"));
+            BUSTER_TEST(arguments, pointer_caller != 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(pointer_program, pointer_caller, S8("get")) == 0);
+            u32 parameter_callees = 0;
+            for (u32 index = 0; pointer_caller && index < pointer_caller->instruction_count; index += 1)
+            {
+                IrInstruction* call = pointer_caller->instructions + index;
+                if (call->opcode == IR_OPCODE_CALL && call->operand_count &&
+                    pointer_caller->values[call->operands[0].value].definition.value >= pointer_caller->instruction_count)
+                {
+                    parameter_callees += 1;
+                }
+            }
+            BUSTER_TEST(arguments, parameter_callees == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(pointer_program, pointer_module).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(pointer_temporary);
+    }
 
     // With FAST selected, a caller whose splices were all optional defers its
     // strict output check to the FAST input guard's module scan (#48). The
