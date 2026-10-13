@@ -7982,7 +7982,15 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         if (cast.value < result->type_count)
                         {
                             cast = c_parse_pointer_chain(result, preprocess, cast, &type_index, close);
-                            if (cast.value < result->type_count && type_index == close) cast_prefix_close = close;
+                            // The abstract declarator of a pointer to array or
+                            // function, `T (*)[N]` or `T (*)(int)`, follows the
+                            // pointer chain as a group; it still ends the type
+                            // name, so the cast takes the whole postfix operand.
+                            if (cast.value < result->type_count &&
+                                (type_index == close || (type_index < close && c_token_is_punctuator(&preprocess.tokens[type_index], C_PUNCTUATOR_LEFT_PARENTHESIS))))
+                            {
+                                cast_prefix_close = close;
+                            }
                         }
                         // A type name the machineless reader does not cover --
                         // `(typeof (x))` -- still marks a cast: a parenthesized
