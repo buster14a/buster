@@ -15,6 +15,15 @@
 #define HK_DEADLINE_MS 120000u
 #define HK_TRACE_LIMIT CM_BYTES
 
+typedef struct HkLocation HkLocation;
+struct HkLocation
+{
+    size_t offset;
+    unsigned line, event;
+    int set, offset_known;
+    char event_type[24], sid[64], child_id[24];
+};
+
 typedef struct HkSession HkSession;
 struct HkSession
 {
@@ -27,6 +36,7 @@ struct HkChild
 {
     const char *id;
     unsigned session, started, exited;
+    HkLocation start_event;
 };
 
 typedef struct HkReport HkReport;
@@ -34,15 +44,104 @@ struct HkReport
 {
     unsigned sessions, events, child_starts, child_exits;
     unsigned automatic, automatic_children, detached;
+    unsigned sessions_complete, sessions_incomplete, children_complete, children_incomplete;
+    unsigned events_seen;
+    unsigned json_tokens, json_arena_bytes;
+    size_t trace_bytes, failure_offset;
+    unsigned failure_line, failure_event;
+    int failure_offset_known, parser_valid, complete, io_error_number;
+    char failure_phase[24], failure_reason[40];
+    char failure_event_type[24], failure_sid[64], failure_child_id[24];
+    HkLocation first_automatic, first_detached;
 };
 
 typedef struct HkRun HkRun;
 struct HkRun
 {
-    int code, timed_out, group_gone;
+    int code, timed_out, group_gone, spawned, reaped;
+    int signal_number, error_number;
+};
+
+typedef struct HkDirectoryReport HkDirectoryReport;
+struct HkDirectoryReport
+{
+    unsigned entries;
+    int error_number, close_error_number;
 };
 
 enum { HK_ACTIVE, HK_GUARDED };
+
+BUSTER_GLOBAL_LOCAL void hk_copy_safe_identifier(char *destination,
+    size_t capacity, const char *source)
+{
+    size_t length = 0;
+    int valid = source != NULL;
+    while (valid && source[length] && length + 1 < capacity)
+    {
+        unsigned char c = (unsigned char)source[length];
+        valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (valid) destination[length++] = (char)c;
+    }
+    if (capacity)
+    {
+        if (valid && source[length] == 0) destination[length] = 0;
+        else cm_copy(destination, capacity, "invalid");
+    }
+}
+
+BUSTER_GLOBAL_LOCAL const char *hk_event_label(const char *name)
+{
+    const char *result = "other";
+    if (cm_equal(name, "version")) result = "version";
+    else if (cm_equal(name, "start")) result = "start";
+    else if (cm_equal(name, "exit")) result = "exit";
+    else if (cm_equal(name, "atexit")) result = "atexit";
+    else if (cm_equal(name, "child_start")) result = "child_start";
+    else if (cm_equal(name, "child_exit")) result = "child_exit";
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void hk_location_set(HkLocation *location, size_t offset,
+    unsigned line, unsigned event, const char *event_type, const char *sid,
+    const char *child_id)
+{
+    if (!location->set)
+    {
+        location->set = 1;
+        location->offset_known = 1;
+        location->offset = offset;
+        location->line = line;
+        location->event = event;
+        hk_copy_safe_identifier(location->event_type, sizeof(location->event_type),
+            event_type ? event_type : "");
+        hk_copy_safe_identifier(location->sid, sizeof(location->sid), sid ? sid : "");
+        hk_copy_safe_identifier(location->child_id, sizeof(location->child_id),
+            child_id ? child_id : "");
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void hk_report_failure(HkReport *report,
+    const char *phase, const char *reason, const HkLocation *location)
+{
+    if (report && !report->failure_reason[0])
+    {
+        cm_copy(report->failure_phase, sizeof(report->failure_phase), phase);
+        cm_copy(report->failure_reason, sizeof(report->failure_reason), reason);
+        if (location && location->set)
+        {
+            report->failure_offset = location->offset;
+            report->failure_offset_known = location->offset_known;
+            report->failure_line = location->line;
+            report->failure_event = location->event;
+            cm_copy(report->failure_event_type, sizeof(report->failure_event_type),
+                location->event_type);
+            cm_copy(report->failure_sid, sizeof(report->failure_sid), location->sid);
+            cm_copy(report->failure_child_id, sizeof(report->failure_child_id),
+                location->child_id);
+        }
+    }
+}
 
 BUSTER_GLOBAL_LOCAL const char *hk_guard_keys[] = {
     "maintenance.auto", "maintenance.autoDetach",
@@ -137,6 +236,10 @@ BUSTER_GLOBAL_LOCAL int hk_run(char *const arguments[], const char *directory,
     out->code = -1;
     out->timed_out = 0;
     out->group_gone = 0;
+    out->spawned = child > 0;
+    out->reaped = 0;
+    out->signal_number = 0;
+    out->error_number = child < 0 ? errno : 0;
     if (child == 0)
     {
         if (setpgid(0, 0) != 0 || chdir(directory) != 0 ||
@@ -149,15 +252,21 @@ BUSTER_GLOBAL_LOCAL int hk_run(char *const arguments[], const char *directory,
         setpgid(child, child);
         started = hk_now_ms(&clock_ok);
         valid = clock_ok;
+        if (!clock_ok) out->error_number = errno;
         while (valid && !reaped && !timed_out)
         {
             pid_t waited = waitpid(child, &status, WNOHANG);
             if (waited == child) reaped = 1;
-            else if (waited < 0 && errno != EINTR) valid = 0;
+            else if (waited < 0 && errno != EINTR)
+            {
+                valid = 0;
+                out->error_number = errno;
+            }
             else
             {
                 uint64_t now = hk_now_ms(&clock_ok);
                 valid = clock_ok;
+                if (!clock_ok) out->error_number = errno;
                 if (valid && now - started >= deadline_ms) timed_out = 1;
                 else if (valid) hk_pause();
             }
@@ -169,13 +278,20 @@ BUSTER_GLOBAL_LOCAL int hk_run(char *const arguments[], const char *directory,
             {
                 pid_t waited = waitpid(child, &status, WNOHANG);
                 if (waited == child) reaped = 1;
-                else if (waited < 0 && errno != EINTR) valid = 0;
+                else if (waited < 0 && errno != EINTR)
+                {
+                    valid = 0;
+                    out->error_number = errno;
+                }
                 if (!reaped) hk_pause();
             }
             if (!reaped) valid = 0;
         }
+        out->reaped = reaped;
         if (reaped && WIFEXITED(status)) out->code = WEXITSTATUS(status);
-        else if (!(reaped && timed_out && WIFSIGNALED(status))) valid = 0;
+        else if (reaped && WIFSIGNALED(status)) out->signal_number = WTERMSIG(status);
+        if (!(reaped && WIFEXITED(status)) &&
+            !(reaped && timed_out && WIFSIGNALED(status))) valid = 0;
         out->group_gone = hk_wait_group(child, 1);
         if (!out->group_gone) valid = 0;
         out->timed_out = timed_out;
@@ -185,7 +301,7 @@ BUSTER_GLOBAL_LOCAL int hk_run(char *const arguments[], const char *directory,
 }
 
 BUSTER_GLOBAL_LOCAL int hk_auto_argv(const CmJson *json, unsigned node,
-    HkReport *report)
+    HkReport *report, const HkLocation *location)
 {
     int valid = node && node <= json->count && json->tokens[node].kind == 'a';
     unsigned words = 0;
@@ -219,6 +335,12 @@ BUSTER_GLOBAL_LOCAL int hk_auto_argv(const CmJson *json, unsigned node,
     {
         report->automatic += automatic != 0;
         report->detached += detached != 0;
+        if (automatic && location)
+            hk_location_set(&report->first_automatic, location->offset, location->line,
+                location->event, location->event_type, location->sid, location->child_id);
+        if (detached && location)
+            hk_location_set(&report->first_detached, location->offset, location->line,
+                location->event, location->event_type, location->sid, location->child_id);
     }
     return valid;
 }
@@ -279,103 +401,189 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
     HkChild *children = NULL;
     CmJson json = {0};
     HkReport report = {0};
-    size_t used = 0, line_start = 0;
-    unsigned session_count = 0;
-    int valid = bytes && length > 0 && length <= HK_TRACE_LIMIT &&
-        bytes[length - 1] == '\n';
+    size_t used = 0, line_start = 0, source_offset = 0;
+    unsigned session_count = 0, event_index = 0, source_line = 1;
+    int valid = bytes != NULL && length > 0 && length <= HK_TRACE_LIMIT;
+    report.trace_bytes = length;
+    if (!bytes) hk_report_failure(&report, "input", "missing_bytes", NULL);
+    else if (!length) hk_report_failure(&report, "input", "empty_trace", NULL);
+    else if (length > HK_TRACE_LIMIT)
+    {
+        HkLocation location = {0};
+        hk_location_set(&location, HK_TRACE_LIMIT, 1, 0, "", "", "");
+        hk_report_failure(&report, "input", "trace_limit_exceeded", &location);
+    }
+    else if (bytes[length - 1] != '\n')
+    {
+        unsigned line = 1;
+        for (size_t i = 0; i < length; ++i) if (bytes[i] == '\n') ++line;
+        HkLocation location = {0};
+        hk_location_set(&location, length, line, 0, "end_of_trace", "", "");
+        hk_report_failure(&report, "input", "missing_final_newline", &location);
+    }
+    valid = valid && bytes[length - 1] == '\n';
     if (valid)
     {
         array = malloc(HK_TRACE_LIMIT + 1u);
         sessions = calloc(HK_SESSION_SLOTS, sizeof(*sessions));
         children = calloc(HK_CHILD_SLOTS, sizeof(*children));
         valid = array && sessions && children;
+        if (!valid) hk_report_failure(&report, "memory", "allocation_failed", NULL);
     }
     if (valid)
     {
         array[used++] = '[';
         for (size_t i = 0; valid && i < length; ++i)
         {
-            if (bytes[i] == '\0' || bytes[i] == '\r') valid = 0;
+            if (bytes[i] == '\0' || bytes[i] == '\r')
+            {
+                HkLocation location = {0};
+                hk_location_set(&location, i, source_line, 0, "", "", "");
+                hk_report_failure(&report, "record", "forbidden_byte", &location);
+                valid = 0;
+            }
             else if (bytes[i] == '\n')
             {
-                valid = i > line_start && used + 2 < HK_TRACE_LIMIT;
-                if (valid)
+                if (i <= line_start)
+                {
+                    HkLocation location = {0};
+                    hk_location_set(&location, i, source_line, 0, "", "", "");
+                    hk_report_failure(&report, "record", "empty_line", &location);
+                    valid = 0;
+                }
+                else if (used + 2 >= HK_TRACE_LIMIT)
+                {
+                    HkLocation location = {0};
+                    hk_location_set(&location, i, source_line, 0, "", "", "");
+                    hk_report_failure(&report, "record", "array_limit", &location);
+                    valid = 0;
+                }
+                else
                 {
                     if (i + 1 < length) array[used++] = ',';
                     line_start = i + 1;
+                    ++source_line;
                 }
             }
-            else
+            else if (used + 2 >= HK_TRACE_LIMIT)
             {
-                valid = used + 2 < HK_TRACE_LIMIT;
-                if (valid) array[used++] = bytes[i];
+                HkLocation location = {0};
+                hk_location_set(&location, i, source_line, 0, "", "", "");
+                hk_report_failure(&report, "record", "array_limit", &location);
+                valid = 0;
             }
+            else array[used++] = bytes[i];
         }
-        valid = valid && line_start == length;
+        if (valid && line_start != length)
+        {
+            HkLocation location = {0};
+            hk_location_set(&location, length, source_line, 0, "end_of_trace", "", "");
+            hk_report_failure(&report, "record", "incomplete_record", &location);
+            valid = 0;
+        }
         if (valid) array[used++] = ']';
     }
     if (valid)
     {
         json = cm_json_parse(array, used);
+        report.json_tokens = json.count;
+        report.json_arena_bytes = json.used;
         valid = json.valid && json.tokens[1].kind == 'a';
+        if (!valid)
+        {
+            // The shared JSON parser exposes no byte offset; keep bounded counts, never dump trace data.
+            if (!json.valid) hk_report_failure(&report, "json", "parse_failed", NULL);
+            else hk_report_failure(&report, "json", "root_not_array", NULL);
+        }
     }
     if (valid)
     {
         for (unsigned event = json.tokens[1].child; valid && event;
              event = json.tokens[event].next)
         {
+            size_t event_offset = source_offset;
+            while (source_offset < length && bytes[source_offset] != '\n') ++source_offset;
+            if (source_offset < length) ++source_offset;
+            ++event_index;
             unsigned event_field = cm_member(&json, event, "event");
             unsigned sid_field = cm_member(&json, event, "sid");
             const char *name = cm_get(&json, event, "event");
             const char *sid = cm_get(&json, event, "sid");
+            const char *child_id = "";
+            unsigned child_field = cm_member(&json, event, "child_id");
+            uint64_t child_number = 0;
+            int child_id_valid = child_field && json.tokens[child_field].kind == 'v' &&
+                cm_unsigned(cm_value(&json, child_field), &child_number);
+            if (child_id_valid) child_id = cm_value(&json, child_field);
+            HkLocation event_location = {0};
+            hk_location_set(&event_location, event_offset, event_index, event_index,
+                hk_event_label(name), sid_field && json.tokens[sid_field].kind == 's' ? sid : "",
+                child_id);
+            report.events_seen = event_index;
             int slot = -1;
             valid = json.tokens[event].kind == 'o' && event_field && sid_field &&
                 json.tokens[event_field].kind == 's' && json.tokens[sid_field].kind == 's' &&
                 sid[0] != 0;
+            if (!valid) hk_report_failure(&report, "event", "event_shape", &event_location);
             if (valid)
             {
                 slot = hk_session_slot(sessions, sid, 1, &session_count);
+                report.sessions = session_count;
                 valid = slot >= 0;
+                if (!valid) hk_report_failure(&report, "session", "session_capacity", &event_location);
             }
             if (valid)
             {
                 HkSession *session = &sessions[(unsigned)slot];
                 valid = session->atexit == 0;
+                if (!valid) hk_report_failure(&report, "event", "after_atexit", &event_location);
                 if (valid)
                 {
                     ++report.events;
                     if (cm_equal(name, "version"))
                     {
                         unsigned exe = cm_member(&json, event, "exe");
-                        valid = session->version == 0 && session->start == 0 &&
-                            exe && json.tokens[exe].kind == 's' && cm_get(&json, event, "exe")[0] != 0;
+                        int sequence_ok = session->version == 0 && session->start == 0;
+                        valid = sequence_ok && exe && json.tokens[exe].kind == 's' &&
+                            cm_get(&json, event, "exe")[0] != 0;
                         if (valid) ++session->version;
+                        else hk_report_failure(&report, "event",
+                            sequence_ok ? "version_shape" : "version_sequence", &event_location);
                     }
                     else if (cm_equal(name, "start"))
                     {
                         unsigned argv = cm_member(&json, event, "argv");
-                        valid = session->version == 1 && session->start == 0 &&
-                            hk_auto_argv(&json, argv, &report);
+                        int sequence_ok = session->version == 1 && session->start == 0;
+                        valid = sequence_ok && hk_auto_argv(&json, argv, &report, &event_location);
                         if (valid) ++session->start;
+                        else hk_report_failure(&report, "event",
+                            sequence_ok ? "invalid_argv" : "start_sequence", &event_location);
                     }
                     else if (cm_equal(name, "exit"))
                     {
                         valid = session->start == 1 && session->exit == 0;
                         if (valid) ++session->exit;
+                        else hk_report_failure(&report, "event", "exit_sequence", &event_location);
                     }
                     else if (cm_equal(name, "atexit"))
                     {
                         valid = session->exit == 1 && session->atexit == 0;
                         if (valid) ++session->atexit;
+                        else hk_report_failure(&report, "event", "atexit_sequence", &event_location);
                     }
                     else if (cm_equal(name, "child_start"))
                     {
-                        unsigned field = cm_member(&json, event, "child_id");
-                        uint64_t child_number = 0;
+                        int order_ok = session->start == 1 && session->exit == 0;
                         unsigned auto_before = report.automatic;
-                        valid = session->start == 1 && session->exit == 0 && field && json.tokens[field].kind == 'v' &&
-                            cm_unsigned(cm_value(&json, field), &child_number) &&
-                            hk_auto_argv(&json, cm_member(&json, event, "argv"), &report);
+                        valid = order_ok && child_id_valid &&
+                            hk_auto_argv(&json, cm_member(&json, event, "argv"),
+                                &report, &event_location);
+                        if (!valid)
+                        {
+                            const char *reason = !order_ok ? "child_start_sequence" :
+                                !child_id_valid ? "child_id_invalid" : "invalid_argv";
+                            hk_report_failure(&report, "event", reason, &event_location);
+                        }
                         if (valid && report.automatic > auto_before) ++report.automatic_children;
                         if (valid)
                         {
@@ -386,16 +594,21 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
                             if (valid)
                             {
                                 children[(unsigned)child_slot].started = 1;
+                                children[(unsigned)child_slot].start_event = event_location;
                                 ++report.child_starts;
                             }
+                            else hk_report_failure(&report, "child",
+                                child_slot < 0 ? "child_capacity" : "duplicate_child_start",
+                                &event_location);
                         }
                     }
                     else if (cm_equal(name, "child_exit"))
                     {
                         unsigned field = cm_member(&json, event, "child_id");
-                        uint64_t child_number = 0;
-                        valid = session->start == 1 && session->exit == 0 && field && json.tokens[field].kind == 'v' &&
-                            cm_unsigned(cm_value(&json, field), &child_number);
+                        int order_ok = session->start == 1 && session->exit == 0;
+                        valid = order_ok && child_id_valid;
+                        if (!valid) hk_report_failure(&report, "event",
+                            order_ok ? "child_id_invalid" : "child_exit_sequence", &event_location);
                         if (valid)
                         {
                             int child_slot = hk_child_slot(children, (unsigned)slot,
@@ -407,6 +620,11 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
                                 children[(unsigned)child_slot].exited = 1;
                                 ++report.child_exits;
                             }
+                            else hk_report_failure(&report, "child",
+                                child_slot < 0 ? "child_exit_unmatched" :
+                                    children[(unsigned)child_slot].exited ?
+                                    "duplicate_child_exit" : "child_exit_before_start",
+                                &event_location);
                         }
                     }
                 }
@@ -417,18 +635,68 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
     {
         report.sessions = session_count;
         valid = session_count > 0;
+        if (!valid)
+        {
+            HkLocation location = {0};
+            hk_location_set(&location, length, event_index + 1, event_index + 1,
+                "end_of_trace", "", "");
+            hk_report_failure(&report, "lifecycle", "no_sessions", &location);
+        }
         for (unsigned i = 0; valid && i < HK_SESSION_SLOTS; ++i)
         {
             if (sessions[i].sid)
-                valid = sessions[i].version == 1 && sessions[i].start == 1 &&
+            {
+                int complete = sessions[i].version == 1 && sessions[i].start == 1 &&
                     sessions[i].exit == 1 && sessions[i].atexit == 1;
+                if (!complete)
+                {
+                    HkLocation location = {0};
+                    hk_location_set(&location, length, event_index + 1, event_index + 1,
+                        "end_of_trace", sessions[i].sid, "");
+                    hk_report_failure(&report, "lifecycle", "incomplete_session", &location);
+                }
+                valid = valid && complete;
+            }
         }
         for (unsigned i = 0; valid && i < HK_CHILD_SLOTS; ++i)
         {
-            if (children[i].id) valid = children[i].started == 1 && children[i].exited == 1;
+            if (children[i].id)
+            {
+                int complete = children[i].started == 1 && children[i].exited == 1;
+                if (!complete)
+                    hk_report_failure(&report, "lifecycle", "incomplete_child",
+                        &children[i].start_event);
+                valid = valid && complete;
+            }
         }
-        valid = valid && report.child_starts == report.child_exits;
+        if (valid && report.child_starts != report.child_exits)
+        {
+            hk_report_failure(&report, "lifecycle", "child_count_mismatch", NULL);
+            valid = 0;
+        }
     }
+    report.sessions = session_count;
+    for (unsigned i = 0; i < HK_SESSION_SLOTS; ++i)
+    {
+        if (sessions && sessions[i].sid)
+        {
+            int complete = sessions[i].version == 1 && sessions[i].start == 1 &&
+                sessions[i].exit == 1 && sessions[i].atexit == 1;
+            if (complete) ++report.sessions_complete;
+            else ++report.sessions_incomplete;
+        }
+    }
+    for (unsigned i = 0; i < HK_CHILD_SLOTS; ++i)
+    {
+        if (children && children[i].id)
+        {
+            if (children[i].started == 1 && children[i].exited == 1)
+                ++report.children_complete;
+            else ++report.children_incomplete;
+        }
+    }
+    report.parser_valid = valid;
+    report.complete = valid;
     if (out) *out = report;
     cm_json_free(&json);
     free(children);
@@ -439,18 +707,64 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
 
 BUSTER_GLOBAL_LOCAL int hk_parse_trace_file(const char *path, HkReport *report)
 {
-    FILE *file = fopen(path, "rb");
-    char *bytes = malloc(HK_TRACE_LIMIT + 1u);
+    FILE *file = NULL;
+    char *bytes = NULL;
     size_t length = 0;
-    int valid = file && bytes;
+    int valid = 1, read_error = 0, reached_eof = 0;
+    HkReport parsed = {0};
+    errno = 0;
+    file = fopen(path, "rb");
+    if (!file)
+    {
+        int error_number = errno;
+        hk_report_failure(&parsed, "file", "open_failed", NULL);
+        parsed.failure_event = 0;
+        valid = 0;
+        parsed.io_error_number = error_number;
+    }
     if (valid)
     {
-        length = fread(bytes, 1, HK_TRACE_LIMIT, file);
-        valid = !ferror(file) && feof(file) && length > 0;
+        errno = 0;
+        bytes = malloc(HK_TRACE_LIMIT + 1u);
+        if (!bytes)
+        {
+            hk_report_failure(&parsed, "file", "allocation_failed", NULL);
+            parsed.io_error_number = errno;
+            valid = 0;
+        }
     }
-    if (file && fclose(file) != 0) valid = 0;
-    if (valid) valid = hk_parse_trace_data(bytes, length, report);
+    if (valid)
+    {
+        errno = 0;
+        length = fread(bytes, 1, HK_TRACE_LIMIT, file);
+        parsed.trace_bytes = length;
+        read_error = ferror(file);
+        reached_eof = feof(file);
+        valid = !read_error && reached_eof && length > 0;
+        if (!valid)
+        {
+            if (read_error)
+            {
+                hk_report_failure(&parsed, "file", "read_failed", NULL);
+                parsed.io_error_number = errno;
+            }
+            else if (!reached_eof) hk_report_failure(&parsed, "file", "trace_limit_reached", NULL);
+            else hk_report_failure(&parsed, "file", "empty_trace", NULL);
+        }
+    }
+    if (file)
+    {
+        errno = 0;
+        if (fclose(file) != 0)
+        {
+            if (valid) hk_report_failure(&parsed, "file", "close_failed", NULL);
+            parsed.io_error_number = errno;
+            valid = 0;
+        }
+    }
+    if (valid) valid = hk_parse_trace_data(bytes, length, &parsed);
     free(bytes);
+    if (report) *report = parsed;
     return valid;
 }
 
@@ -489,14 +803,35 @@ BUSTER_GLOBAL_LOCAL int hk_trace_parser_controls(void)
     const char *malformed = "{\"event\":\n";
     HkReport report = {0};
     int valid = hk_parse_trace_data(complete, strlen(complete), &report) &&
-        report.sessions == 1 && report.events == 4;
+        report.sessions == 1 && report.events == 4 && report.sessions_complete == 1 &&
+        report.sessions_incomplete == 0 && report.complete;
     valid = valid && !hk_parse_trace_data(missing_end, strlen(missing_end), &report);
+    valid = valid && cm_equal(report.failure_phase, "lifecycle") &&
+        cm_equal(report.failure_reason, "incomplete_session") &&
+        report.sessions == 1 && report.events_seen == 3 &&
+        report.sessions_incomplete == 1 && !report.complete &&
+        cm_equal(report.failure_event_type, "end_of_trace") &&
+        cm_equal(report.failure_sid, "s2");
     valid = valid && !hk_parse_trace_data(incomplete_child, strlen(incomplete_child), &report);
+    valid = valid && cm_equal(report.failure_phase, "lifecycle") &&
+        cm_equal(report.failure_reason, "incomplete_child") &&
+        report.children_incomplete == 1 &&
+        cm_equal(report.failure_event_type, "child_start") &&
+        cm_equal(report.failure_sid, "s3") &&
+        cm_equal(report.failure_child_id, "1");
     valid = valid && !hk_parse_trace_data(wrong_argv_type, strlen(wrong_argv_type), &report);
+    valid = valid && cm_equal(report.failure_phase, "event") &&
+        cm_equal(report.failure_reason, "invalid_argv") &&
+        report.failure_line == 2 && report.failure_event == 2 &&
+        cm_equal(report.failure_event_type, "start") &&
+        cm_equal(report.failure_sid, "s4");
     valid = valid && !hk_parse_trace_data(empty_argv, strlen(empty_argv), &report);
     valid = valid && !hk_parse_trace_data(empty_argv0, strlen(empty_argv0), &report);
     valid = valid && !hk_parse_trace_data(complete, strlen(complete) - 1, &report);
     valid = valid && !hk_parse_trace_data(malformed, strlen(malformed), &report);
+    valid = valid && cm_equal(report.failure_phase, "json") &&
+        cm_equal(report.failure_reason, "parse_failed") &&
+        !report.failure_offset_known && report.json_tokens > 0;
     return valid;
 }
 
@@ -516,7 +851,7 @@ BUSTER_GLOBAL_LOCAL int hk_successful_run(char *const arguments[],
     const char *directory, int mode, const char *trace, const char *temporary,
     const char *home, unsigned deadline_ms)
 {
-    HkRun run = {-1, 0, 0};
+    HkRun run = {0};
     int valid = hk_run(arguments, directory, mode, trace, temporary, home,
         deadline_ms, &run);
     valid = valid && !run.timed_out && run.code == 0;
@@ -547,17 +882,42 @@ BUSTER_GLOBAL_LOCAL int hk_prepare_active_control(const char *root,
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL int hk_directory_empty(const char *path)
+BUSTER_GLOBAL_LOCAL int hk_directory_empty(const char *path,
+    HkDirectoryReport *out)
 {
-    DIR *directory = opendir(path);
+    DIR *directory = NULL;
     struct dirent *entry = NULL;
-    int valid = directory != NULL;
+    HkDirectoryReport report = {0};
+    int valid = 1;
     errno = 0;
+    directory = opendir(path);
+    if (!directory)
+    {
+        report.error_number = errno;
+        valid = 0;
+    }
     while (valid && (entry = readdir(directory)) != NULL)
-        valid = cm_equal(entry->d_name, ".") || cm_equal(entry->d_name, "..");
-    if (errno != 0) valid = 0;
-    if (directory && closedir(directory) != 0) valid = 0;
-    return valid;
+    {
+        if (cm_equal(entry->d_name, ".") || cm_equal(entry->d_name, "..")) continue;
+        report.entries = 1;
+        valid = 0;
+    }
+    if (directory && errno != 0)
+    {
+        report.error_number = errno;
+        valid = 0;
+    }
+    if (directory)
+    {
+        errno = 0;
+        if (closedir(directory) != 0)
+        {
+            report.close_error_number = errno;
+            valid = 0;
+        }
+    }
+    if (out) *out = report;
+    return valid && report.entries == 0;
 }
 
 BUSTER_GLOBAL_LOCAL int hk_safe_root(const char *root)
@@ -573,7 +933,7 @@ BUSTER_GLOBAL_LOCAL int hk_safe_root(const char *root)
 BUSTER_GLOBAL_LOCAL int hk_cleanup_root(const char *root, const char *temporary)
 {
     char *remove[] = {"rm", "-rf", "--", (char *)root, NULL};
-    HkRun run = {-1, 0, 0};
+    HkRun run = {0};
     struct stat info;
     int valid = hk_safe_root(root);
     if (valid)
@@ -586,6 +946,43 @@ BUSTER_GLOBAL_LOCAL int hk_cleanup_root(const char *root, const char *temporary)
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL void hk_print_protected_diagnostic(int run_attempted,
+    int runner_valid, const HkRun *run, int scratch_checked, int scratch_empty,
+    const HkDirectoryReport *scratch, int trace_checked, int proof_checked,
+    int proof_valid, const HkReport *report)
+{
+    const char *scratch_state = !scratch_checked ? "not_run" :
+        scratch->error_number || scratch->close_error_number ? "error" :
+        scratch_empty ? "empty" : "nonempty";
+    const char *trace_state = !trace_checked ? "not_run" :
+        report->parser_valid ? "complete" : "failed";
+    const char *proof_state = !proof_checked ? "not_run" : proof_valid ? "pass" : "fail";
+    fprintf(stderr,
+        "Protected diagnostics: run=%s runner_ok=%d spawned=%d reaped=%d timeout=%d exit=%d signal=%d group_gone=%d run_errno=%d; scratch=%s entries_at_least=%u errno=%d close_errno=%d; trace=%s proof=%s bytes=%zu tokens=%u/%u arena_bytes=%u events=%u/%u sessions=%u complete=%u incomplete=%u children=%u complete=%u incomplete=%u starts=%u exits=%u automatic=%u automatic_children=%u detached=%u; first=%s/%s line=%u offset="
+        !run_attempted ? "not_run" : runner_valid && !run->timed_out && run->code == 0 ? "passed" : "failed",
+        runner_valid, run->spawned, run->reaped, run->timed_out, run->code,
+        run->signal_number, run->group_gone, run->error_number, scratch_state,
+        scratch->entries, scratch->error_number, scratch->close_error_number,
+        trace_state, proof_state, report->trace_bytes, report->json_tokens, CM_TOKENS,
+        report->json_arena_bytes, report->events, report->events_seen, report->sessions,
+        report->sessions_complete, report->sessions_incomplete,
+        report->children_complete + report->children_incomplete,
+        report->children_complete, report->children_incomplete,
+        report->child_starts, report->child_exits, report->automatic,
+        report->automatic_children, report->detached,
+        report->failure_phase[0] ? report->failure_phase : "none",
+        report->failure_reason[0] ? report->failure_reason : "none",
+        report->failure_line);
+    if (report->failure_offset_known) fprintf(stderr, "%zu", report->failure_offset);
+    else fputs("unknown", stderr);
+    fprintf(stderr, " event=%u type=%s sid=%s child_id=%s io_errno=%d\n",
+        report->failure_event,
+        report->failure_event_type[0] ? report->failure_event_type : "none",
+        report->failure_sid[0] ? report->failure_sid : "none",
+        report->failure_child_id[0] ? report->failure_child_id : "none",
+        report->io_error_number);
+}
+
 int main(void)
 {
     char root[] = "/tmp/buster-native-retirement-fixture.XXXXXX";
@@ -595,10 +992,14 @@ int main(void)
     char *python[] = {"python3", "-B", "tools/native_retirement_merge_gate_test.py",
         "-v", NULL};
     HkReport active = {0}, guarded = {0};
-    HkRun timeout = {-1, 0, 0};
+    HkRun timeout = {0}, protected_run = {0};
+    HkDirectoryReport scratch_report = {0};
     char *sleeping[] = {"sleep", "2", NULL};
     int valid = hk_trace_parser_controls();
     int have_root = 0;
+    int protected_run_attempted = 0, protected_runner_valid = 0;
+    int scratch_checked = 0, scratch_empty = 0, trace_checked = 0;
+    int proof_checked = 0, proof_valid = 0;
     if (!valid) fprintf(stderr, "Trace2 parser controls failed closed incorrectly.\n");
     if (valid)
     {
@@ -647,13 +1048,61 @@ int main(void)
     if (valid)
     {
         printf("Running protected merge-gate Git fixture suite:\n");
-        valid = hk_successful_run(python, ".", HK_GUARDED, protected_trace,
-            temporary, root, 300000u);
-        valid = valid && hk_directory_empty(temporary);
-        valid = valid && hk_parse_trace_file(protected_trace, &guarded);
-        valid = valid && guarded.sessions > 0 && guarded.automatic == 0 &&
-            guarded.detached == 0 && guarded.child_starts == guarded.child_exits;
-        if (!valid) fprintf(stderr, "Protected suite did not produce a complete, housekeeping-free Trace2 record.\n");
+        protected_run_attempted = 1;
+        protected_runner_valid = hk_run(python, ".", HK_GUARDED, protected_trace,
+            temporary, root, 300000u, &protected_run);
+        int protected_valid = protected_runner_valid;
+        protected_valid = protected_valid && !protected_run.timed_out &&
+            protected_run.code == 0;
+        if (!protected_valid)
+        {
+            const char *reason = !protected_runner_valid ? "runner_failure" :
+                protected_run.timed_out ? "timed_out" : "nonzero_exit";
+            hk_report_failure(&guarded, "process", reason, NULL);
+        }
+        if (protected_valid)
+        {
+            scratch_checked = 1;
+            scratch_empty = hk_directory_empty(temporary, &scratch_report);
+            protected_valid = protected_valid && scratch_empty;
+            if (!protected_valid)
+                hk_report_failure(&guarded, "scratch",
+                    scratch_report.error_number || scratch_report.close_error_number ?
+                    "directory_check_failed" : "directory_not_empty", NULL);
+        }
+        if (protected_valid)
+        {
+            trace_checked = 1;
+            protected_valid = hk_parse_trace_file(protected_trace, &guarded);
+        }
+        if (protected_valid)
+        {
+            proof_checked = 1;
+            proof_valid = guarded.sessions > 0 && guarded.automatic == 0 &&
+                guarded.detached == 0 && guarded.child_starts == guarded.child_exits;
+            protected_valid = protected_valid && proof_valid;
+            if (!proof_valid)
+            {
+                if (guarded.automatic > 0)
+                    hk_report_failure(&guarded, "proof", "automatic_housekeeping",
+                        &guarded.first_automatic);
+                else if (guarded.detached > 0)
+                    hk_report_failure(&guarded, "proof", "detached_housekeeping",
+                        &guarded.first_detached);
+                else if (guarded.child_starts != guarded.child_exits)
+                    hk_report_failure(&guarded, "proof", "child_count_mismatch", NULL);
+                else
+                    hk_report_failure(&guarded, "proof", "empty_session_set", NULL);
+            }
+        }
+        if (!protected_valid)
+        {
+            hk_print_protected_diagnostic(protected_run_attempted,
+                protected_runner_valid, &protected_run, scratch_checked, scratch_empty,
+                &scratch_report, trace_checked, proof_checked, proof_valid, &guarded);
+            fprintf(stderr, "Protected suite did not produce a complete, housekeeping-free Trace2 record.\n");
+        }
+        valid = valid && protected_valid;
     }
     if (valid)
     {
@@ -682,3 +1131,4 @@ int main(void)
         fputs("Native-retirement fixture housekeeping qualification failed.\n", stderr);
     return valid ? 0 : 1;
 }
+
