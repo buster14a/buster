@@ -2406,11 +2406,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_runtime(UnitTestArgum
                 ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
                 u64 elapsed_ns = timestamp_ns_between(start, timestamp_take());
                 bool success = !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS;
-                BUSTER_TEST_RAW(arguments, success, string_format(temporary.arena, S8("assignment object shape={S8} exit={u32}"),
-                    shapes[shape], execution.platform_status));
+                BUSTER_TEST_RAW(arguments, success, string_format(temporary.arena,
+                    S8("assignment object shape={S8} exit={u32} result={u32} platform_status={u32} timed_out={u32} capture_failed={u32} "
+                       "process_tree_cleanup_failed={u32}"),
+                    shapes[shape], execution.platform_status, (u32)execution.result, execution.platform_status, (u32)execution.timed_out,
+                    (u32)execution.capture_failed, (u32)execution.process_tree_cleanup_failed));
                 arguments->show(arguments, S8("ASSIGNMENT_CHAIN_COMPILE_V1 shape={S8} links=20000 elapsed_ns={u64} status={S8} "
+                    "exit={u32} result={u32} platform_status={u32} timed_out={u32} capture_failed={u32} process_tree_cleanup_failed={u32} "
                     "optimize={u32} sanitize={u32} allocator=fast frontend_ssa=1 measurement=process-wall diagnostic=1\n"),
-                    shapes[shape], elapsed_ns, success ? S8("pass") : S8("fail"), (u32)BUSTER_OPTIMIZE, (u32)BUSTER_SANITIZE);
+                    shapes[shape], elapsed_ns, success ? S8("pass") : S8("fail"), execution.platform_status, (u32)execution.result,
+                    execution.platform_status, (u32)execution.timed_out, (u32)execution.capture_failed,
+                    (u32)execution.process_tree_cleanup_failed, (u32)BUSTER_OPTIMIZE, (u32)BUSTER_SANITIZE);
             }
         }
         c_test_scratch_end(temporary);
