@@ -40784,6 +40784,16 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* m
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]),
                                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("cannot take address of bit-field"));
             }
+            else if (operand_start < operand_end && operand_end - operand_start == 1 &&
+                     preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER &&
+                     !c_parse_expression_place_shape(result, preprocess, operand_start, operand_end))
+            {
+                // Expression typing can skip unevaluated operands such as
+                // sizeof; keep the address constraint after selection resolves.
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("cannot take the address of an operand that is not an lvalue"));
+            }
             arena_set_position(machine->scratch_arena, mark);
         }
     }
