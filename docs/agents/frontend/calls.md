@@ -156,13 +156,19 @@ in both frontend forms.
   once folded 4. The earlier declaration check traverses the type graph rooted
   at declarations, validates every reachable edge, and ignores unrelated
   provisional expression rows because function-body sizeof operands are
-  typed afterward. Only unevaluated operands are answered; an evaluated
-  `__fp16` value keeps its canonical-lowering refusal.
+  typed afterward. The token-only exception admits a grouped pointer-to-array
+  form such as `sizeof(__fp16 (*)[5])`; its layout probe uses the full
+  abstract-declarator reader outside binding and rolls back the speculative
+  model. Late type-name bounds receive the same syntax check as declaration
+  bounds. Only unevaluated operands are answered; an evaluated `__fp16` value
+  keeps its canonical-lowering refusal.
   `c_test_untyped_operand_diagnostics` runs the leaves and sizes natively,
-  checks pointer, array, qualified abstract declarator, call, initializer and
-  cast contexts through syntax-only and object modes in both frontend forms,
-  and requires the evaluated and malformed-type-name refusals (GitHub #3900,
-  #3918).
+  checks pointer, array, qualified and grouped pointer-to-array declarators,
+  call, initializer and cast contexts through syntax-only and object modes in
+  both frontend forms, and rejects malformed/undeclared bounds as well as
+  malformed type names (GitHub #3900, #3918). Function abstract
+  declarators remain outside this exception: target Clang behavior for a
+  storage-only `__fp16` function return type has not been verified.
 - **The parser's expression typer gives builtins the same results.**
   `c_parse_expression_leaf_without_cast` answers `__builtin_expect` as `long`,
   `object_size`, `strlen` and `__builtin_offsetof` as `size_t`,
