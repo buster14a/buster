@@ -19202,6 +19202,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_constrai
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_width_modifier(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_width_modifier.c");
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-asm-width-modifier"), S8(""));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"),
+                                     modes[mode], frontends[frontend], optimizations[optimization], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("Buster {S8} {S8} {S8}: {S8}"),
+                    modes[mode], frontends[frontend], optimizations[optimization], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, output), description);
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+
+    String8 compilers[] = {executable_resolve_in_path(arguments->arena, S8("gcc")),
+                           executable_resolve_in_path(arguments->arena, S8("clang"))};
+    String8 compiler_names[] = {S8("GCC"), S8("Clang")};
+    BUSTER_TEST(arguments, compilers[0].length != 0 && compilers[1].length != 0);
+    for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+    {
+        if (!compilers[compiler].length) continue;
+        for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("host-asm-width-modifier"), S8(""));
+            String8 command[] = {compilers[compiler], S8("-std=gnu17"), optimizations[optimization], path, S8("-o"), output};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0},
+                (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool compiled = spawned.handle &&
+                os_process_wait_deadline(temporary.arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
+            String8 description = string_format(temporary.arena, S8("{S8} {S8}: independent inline-asm width oracle"),
+                compiler_names[compiler], optimizations[optimization]);
+            BUSTER_TEST_RAW(arguments, compiled, description);
+            if (compiled)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, output), description);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // Keep the complete conversion fixture strict on all desktop AArch64 targets.
 // Foreign object success is not execution evidence; native hosts run it too.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(UnitTestArguments* arguments)
@@ -36356,6 +36422,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_location_counter);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_inline_assembly_constraint_unions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_inline_assembly_width_modifier);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_machine_fallback);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_many_native_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scalar_argument_boundaries);
