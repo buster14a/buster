@@ -1,6 +1,37 @@
 #include <buster/apps/disk_builder_verification.h>
 #include <string.h>
 
+// MBR fields are bytes on disk, so read and write their little-endian values
+// without relying on host alignment, endianness, bitfield order, or packing.
+u32 disk_builder_mbr_read_u24_le(u8 const bytes[3])
+{
+    u32 result = (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16);
+    return result;
+}
+
+u32 disk_builder_mbr_read_u32_le(u8 const bytes[4])
+{
+    u32 result = (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16) | ((u32)bytes[3] << 24);
+    return result;
+}
+
+void disk_builder_mbr_write_u24_le(u8 bytes[3], u32 value)
+{
+    bytes[0] = (u8)value;
+    bytes[1] = (u8)(value >> 8);
+    bytes[2] = (u8)(value >> 16);
+    return;
+}
+
+void disk_builder_mbr_write_u32_le(u8 bytes[4], u32 value)
+{
+    bytes[0] = (u8)value;
+    bytes[1] = (u8)(value >> 8);
+    bytes[2] = (u8)(value >> 16);
+    bytes[3] = (u8)(value >> 24);
+    return;
+}
+
 // The MBR length counts sectors after LBA 0. Keep the builder's u32
 // saturation rule in one place; the separate CHS end field remains 0xffffff.
 u32 disk_builder_protective_mbr_size_in_lba(u64 disk_size)
@@ -47,11 +78,11 @@ VerificationError verify_disk(u8* disk, u64 disk_size)
         ProtectiveMBR* mbr = (ProtectiveMBR*)disk;
         MBRPartitionRecord* gpt_partition_record = &mbr->partition_records[0];
 
-        if (mbr->unique_mbr_disk_signature != 0)
+        if (disk_builder_mbr_read_u32_le(mbr->unique_mbr_disk_signature) != 0)
         {
             result = VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO;
         }
-        else if (mbr->unknown != 0)
+        else if (mbr->unknown[0] != 0 || mbr->unknown[1] != 0)
         {
             result = VERIFICATION_ERROR_UNKNOWN_NOT_ZERO;
         }
@@ -67,7 +98,7 @@ VerificationError verify_disk(u8* disk, u64 disk_size)
         {
             result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO;
         }
-        else if (gpt_partition_record->starting_chs != 0x200)
+        else if (disk_builder_mbr_read_u24_le(gpt_partition_record->starting_chs) != 0x200)
         {
             result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512;
         }
@@ -75,15 +106,15 @@ VerificationError verify_disk(u8* disk, u64 disk_size)
         {
             result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE;
         }
-        else if (gpt_partition_record->ending_chs != 0xffffff)
+        else if (disk_builder_mbr_read_u24_le(gpt_partition_record->ending_chs) != 0xffffff)
         {
             result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS;
         }
-        else if (gpt_partition_record->starting_lba != 1)
+        else if (disk_builder_mbr_read_u32_le(gpt_partition_record->starting_lba) != 1)
         {
             result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA;
         }
-        else if (gpt_partition_record->size_in_lba != disk_builder_protective_mbr_size_in_lba(disk_size))
+        else if (disk_builder_mbr_read_u32_le(gpt_partition_record->size_in_lba) != disk_builder_protective_mbr_size_in_lba(disk_size))
         {
             result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA;
         }

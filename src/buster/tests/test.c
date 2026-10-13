@@ -161,7 +161,6 @@
 #include <buster/tests/target_test.c>
 #include <buster/tests/truetype_test.c>
 #include <buster/tests/image_test.c>
-#include <buster/apps/disk_builder_verification.c>
 #include <buster/tests/disk_builder_test.c>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>

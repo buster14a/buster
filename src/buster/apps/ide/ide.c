@@ -84,10 +84,11 @@
 // region. The `#pragma clang attribute` form it replaces marked every
 // function a test source merely *declared* there too, so the production
 // functions that test headers redeclare ran at -O0 in the trusted Release
-// `ide` (#1376). A production header that defines functions must still be
-// included before the region, as simd.h's fallbacks are here;
+// `ide` (#1376). A production header or source that defines functions must
+// still be included before the region, as simd.h's fallbacks are here;
 // `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
+#include <buster/apps/disk_builder_verification.c>
 #if BUSTER_COMPILER_CLANG
 #pragma clang optimize off
 #endif

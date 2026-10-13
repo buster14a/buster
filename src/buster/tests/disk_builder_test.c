@@ -8,13 +8,11 @@ BUSTER_GLOBAL_LOCAL void disk_builder_test_make_mbr(u8* disk, u32 size_in_lba)
 {
     memset(disk, 0, DISK_BUILDER_SECTOR_SIZE);
     ProtectiveMBR* mbr = (ProtectiveMBR*)disk;
-    mbr->partition_records[0] = (MBRPartitionRecord){
-        .starting_chs = DISK_BUILDER_SECTOR_SIZE & 0xffffffu,
-        .os_type = 0xee,
-        .ending_chs = 0xffffff,
-        .starting_lba = 1,
-        .size_in_lba = size_in_lba,
-    };
+    disk_builder_mbr_write_u24_le(mbr->partition_records[0].starting_chs, DISK_BUILDER_SECTOR_SIZE);
+    mbr->partition_records[0].os_type = 0xee;
+    disk_builder_mbr_write_u24_le(mbr->partition_records[0].ending_chs, 0xffffff);
+    disk_builder_mbr_write_u32_le(mbr->partition_records[0].starting_lba, 1);
+    disk_builder_mbr_write_u32_le(mbr->partition_records[0].size_in_lba, size_in_lba);
     mbr->signature[0] = 0x55;
     mbr->signature[1] = 0xaa;
 }
@@ -47,15 +45,20 @@ UnitTestResult disk_builder_tests(UnitTestArguments* arguments)
 
         // Test the real 64 MiB allocation and builder-derived MBR length.
         disk_builder_test_make_mbr(disk, 0x1ffff);
+        u8 const expected_first_record[16] = {
+            0, 0, 2, 0, 0xee, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0xff, 0xff, 1, 0,
+        };
+        BUSTER_TEST(arguments, memcmp(disk + offsetof(ProtectiveMBR, partition_records), expected_first_record,
+                                      sizeof(expected_first_record)) == 0);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_DISK_SUCCESS);
 
         // The old constant is too long for this extent, and either adjacent
         // sector count is inconsistent with the supplied capacity.
-        mbr->partition_records[0].size_in_lba = 0xffffff;
+        disk_builder_mbr_write_u32_le(mbr->partition_records[0].size_in_lba, 0xffffff);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA);
-        mbr->partition_records[0].size_in_lba = 0x1fffe;
+        disk_builder_mbr_write_u32_le(mbr->partition_records[0].size_in_lba, 0x1fffe);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA);
-        mbr->partition_records[0].size_in_lba = 0x20000;
+        disk_builder_mbr_write_u32_le(mbr->partition_records[0].size_in_lba, 0x20000);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA);
 
         // A second supported geometry prevents a hard-coded 64 MiB exception.
@@ -67,11 +70,11 @@ UnitTestResult disk_builder_tests(UnitTestArguments* arguments)
 
         // Earlier MBR checks keep their order and their specific diagnoses.
         disk_builder_test_make_mbr(disk, 0x1ffff);
-        mbr->unique_mbr_disk_signature = 1;
+        disk_builder_mbr_write_u32_le(mbr->unique_mbr_disk_signature, 1);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO);
 
         disk_builder_test_make_mbr(disk, 0x1ffff);
-        mbr->unknown = 1;
+        mbr->unknown[0] = 1;
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_UNKNOWN_NOT_ZERO);
 
         disk_builder_test_make_mbr(disk, 0x1ffff);
@@ -87,7 +90,7 @@ UnitTestResult disk_builder_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO);
 
         disk_builder_test_make_mbr(disk, 0x1ffff);
-        mbr->partition_records[0].starting_chs = 0x201;
+        disk_builder_mbr_write_u24_le(mbr->partition_records[0].starting_chs, 0x201);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512);
 
         disk_builder_test_make_mbr(disk, 0x1ffff);
@@ -95,11 +98,11 @@ UnitTestResult disk_builder_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE);
 
         disk_builder_test_make_mbr(disk, 0x1ffff);
-        mbr->partition_records[0].ending_chs = 0xfffffe;
+        disk_builder_mbr_write_u24_le(mbr->partition_records[0].ending_chs, 0xfffffe);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS);
 
         disk_builder_test_make_mbr(disk, 0x1ffff);
-        mbr->partition_records[0].starting_lba = 2;
+        disk_builder_mbr_write_u32_le(mbr->partition_records[0].starting_lba, 2);
         BUSTER_TEST(arguments, verify_disk(disk, sixty_four_mib) == VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA);
     }
     return result;

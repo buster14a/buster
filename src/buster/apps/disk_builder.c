@@ -192,15 +192,15 @@ ProcessResult entry_point(void)
     u64 partition_record_count = 4;
     file_pad(writer, sector_size - (partition_record_count * sizeof(MBRPartitionRecord) + 2));
     MBRPartitionRecord* mbr_partition_records = file_allocate(writer, MBRPartitionRecord, partition_record_count);
+    memset(mbr_partition_records, 0, partition_record_count * sizeof(*mbr_partition_records));
     u64 size_in_lba_u64_minus_1 = expected_size / sector_size - 1;
-    mbr_partition_records[0] = (MBRPartitionRecord){
-        .boot_indicator = 0,
-        .starting_chs = (u32)sector_size & 0xffffffu,
-        .os_type = 0xee,
-        .ending_chs = 0xffffff,
-        .starting_lba = 1,
-        .size_in_lba = disk_builder_protective_mbr_size_in_lba(expected_size),
-    };
+    disk_builder_mbr_write_u24_le(mbr_partition_records[0].starting_chs, (u32)sector_size);
+    mbr_partition_records[0].os_type = 0xee;
+    disk_builder_mbr_write_u24_le(mbr_partition_records[0].ending_chs, 0xffffff);
+    disk_builder_mbr_write_u32_le(mbr_partition_records[0].starting_lba, 1);
+    disk_builder_mbr_write_u32_le(
+        mbr_partition_records[0].size_in_lba,
+        disk_builder_protective_mbr_size_in_lba(expected_size));
     file_write_byte(writer, 0x55);
     file_write_byte(writer, 0xaa);
 
