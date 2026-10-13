@@ -1852,6 +1852,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_modifier_rejection(String8 source, 
     return result;
 }
 
+// GOT type relaxation can be lost when the printer has to use a raw data
+// directive. The family may differ, but every field and symbol property stays
+// exact in the comparison below.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(Arena* arena, String8 expected_path, String8 actual_path)
 {
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
@@ -1922,9 +1925,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
         for (u32 candidate = 0; candidate < actual.relocation_count && !found; candidate += 1)
         {
             ObjectRelocation right = actual.relocations[candidate];
+            bool same_got_family = object_relocation_kind_is_x86_got(left.kind) && object_relocation_kind_is_x86_got(right.kind);
+            bool kind_matches = left.kind == right.kind || same_got_family;
             bool match = !matched_relocations[candidate] && left.offset == right.offset && left.addend == right.addend &&
-                         left.kind == right.kind &&
-                         string_equal(left_section, actual.sections[right.section].name) &&
+                         kind_matches && string_equal(left_section, actual.sections[right.section].name) &&
                          string_equal(left_symbol, actual.symbols[right.symbol].name);
             if (match)
             {
@@ -1935,6 +1939,25 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
         valid = found;
     }
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_object_undefined_symbol_is(ObjectFile object, String8 name, ObjectSymbolKind kind,
+                                                                              u8 thread_local_state)
+{
+    bool found = false;
+    bool matches = false;
+    bool valid = object.error == OBJECT_ERROR_NONE && (!object.symbol_count || object.symbols);
+    for (u32 index = 0; index < object.symbol_count && !found && valid; index += 1)
+    {
+        ObjectSymbol symbol = object.symbols[index];
+        if (string_equal(symbol.name, name))
+        {
+            found = true;
+            matches = symbol.section == OBJECT_SECTION_UNDEFINED && symbol.kind == kind &&
+                      symbol.thread_local_state == thread_local_state && !symbol.untyped && !symbol.undefined_untyped;
+        }
+    }
+    return valid && found && matches;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_object_has_relocation(ObjectFile object, ObjectRelocationKind kind)
@@ -2009,10 +2032,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
             {
                 BUSTER_TEST(arguments, compiler_driver_elf_assembly_relocation_objects_match(arena, direct_object, buster_object));
                 ObjectFile direct = object_read(arena, file_read(arena, direct_object, (FileReadOptions){0}), target);
+                ObjectFile buster = object_read(arena, file_read(arena, buster_object, (FileReadOptions){0}), target);
                 BUSTER_TEST(arguments, direct.error == OBJECT_ERROR_NONE &&
                                       compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_REX_GOTPCRELX) &&
                                       compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_TLSGD) &&
                                       compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_PLT32));
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(buster, S8("roundtrip_data"), OBJECT_SYMBOL_DATA,
+                                                                                      OBJECT_SYMBOL_THREAD_LOCAL_NO));
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(buster, S8("roundtrip_tls"), OBJECT_SYMBOL_DATA,
+                                                                                      OBJECT_SYMBOL_THREAD_LOCAL_YES));
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(buster, S8("__tls_get_addr"), OBJECT_SYMBOL_FUNCTION,
+                                                                                      OBJECT_SYMBOL_THREAD_LOCAL_NO));
             }
             if (host_ready)
             {
@@ -2098,19 +2128,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
                                       compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_DTPOFF32) &&
                                       compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_DTPOFF64));
             }
+            String8 boundary_source = string_format_z(arena, S8("{S8}/got-boundary.s"), root);
+            String8 boundary_object = string_format_z(arena, S8("{S8}/got-boundary.o"), root);
+            String8 boundary_text = S8(".text\n"
+                                       ".extern boundary_target\n"
+                                       ".byte 0x41, 0x8b, 0x05\n"
+                                       ".long boundary_target@GOTPCREL - .\n"
+                                       ".Lboundary_local:\n"
+                                       ".byte 0x90\n"
+                                       ".long .Lboundary_local@GOTPCREL - .\n");
+            String8 boundary_args[] = {S8("-g0"), S8("-c"), boundary_source, S8("-o"), boundary_object};
+            bool boundary_ready = file_write(boundary_source, BUSTER_SLICE_TO_BYTE_SLICE(boundary_text)) &&
+                                  compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_args)) ==
+                                      COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST(arguments, boundary_ready);
+            if (boundary_ready)
+            {
+                ObjectFile boundary = object_read(arena, file_read(arena, boundary_object, (FileReadOptions){0}), target);
+                bool external_generic = false;
+                bool local_generic = false;
+                for (u32 index = 0; index < boundary.relocation_count && boundary.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = boundary.relocations[index];
+                    if (relocation.section < boundary.section_count && relocation.symbol < boundary.symbol_count &&
+                        relocation.kind == OBJECT_RELOCATION_X86_64_GOTPCREL && relocation.addend == 0 &&
+                        string_equal(boundary.sections[relocation.section].name, S8(".text")))
+                    {
+                        String8 symbol = boundary.symbols[relocation.symbol].name;
+                        external_generic = external_generic ||
+                                           (relocation.offset == 3 && string_equal(symbol, S8("boundary_target")));
+                        local_generic = local_generic ||
+                                        (relocation.offset == 8 && string_equal(symbol, S8(".Lboundary_local")));
+                    }
+                }
+                BUSTER_TEST(arguments, boundary.error == OBJECT_ERROR_NONE && boundary.relocation_count == 2 &&
+                                      external_generic && local_generic);
+            }
+
+            String8 raw_got_source = string_format_z(arena, S8("{S8}/generic-got.s"), root);
+            String8 raw_got_object = string_format_z(arena, S8("{S8}/generic-got.o"), root);
+            String8 raw_got_main = string_format_z(arena, S8("{S8}/generic-got-main.c"), root);
+            String8 raw_got_provider = string_format_z(arena, S8("{S8}/generic-got-provider.c"), root);
+            String8 raw_got_image = string_format_z(arena, S8("{S8}/generic-got-image"), root);
+            String8 raw_got_assembly = S8(".extern raw_got_target\n"
+                                          ".data\n"
+                                          ".byte 0x41, 0x8b, 0x05\n"
+                                          ".globl raw_got_slot\n"
+                                          ".type raw_got_slot,@object\n"
+                                          "raw_got_slot:\n"
+                                          ".long raw_got_target@GOTPCREL - .\n"
+                                          ".size raw_got_slot,4\n");
+            String8 raw_got_main_text = S8("extern int raw_got_slot;\n"
+                                           "int main(void) {\n"
+                                           "    long slot_address = (long)&raw_got_slot + (long)raw_got_slot;\n"
+                                           "    long target_address = *(long *)slot_address;\n"
+                                           "    return *(int *)target_address != 42;\n"
+                                           "}\n");
+            String8 raw_got_provider_text = S8("int raw_got_target = 42;\n");
+            String8 raw_got_args[] = {S8("-g0"), S8("-c"), raw_got_source, S8("-o"), raw_got_object};
+            bool raw_got_ready = file_write(raw_got_source, BUSTER_SLICE_TO_BYTE_SLICE(raw_got_assembly)) &&
+                                 compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_got_args)) ==
+                                     COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST(arguments, raw_got_ready);
+            if (raw_got_ready)
+            {
+                ObjectFile raw_got = object_read(arena, file_read(arena, raw_got_object, (FileReadOptions){0}), target);
+                bool generic_data_relocation = false;
+                for (u32 index = 0; index < raw_got.relocation_count && raw_got.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = raw_got.relocations[index];
+                    if (relocation.section < raw_got.section_count && relocation.symbol < raw_got.symbol_count)
+                    {
+                        generic_data_relocation = generic_data_relocation ||
+                            (relocation.kind == OBJECT_RELOCATION_X86_64_GOTPCREL && relocation.addend == 0 &&
+                             string_equal(raw_got.sections[relocation.section].name, S8(".data")) &&
+                             string_equal(raw_got.symbols[relocation.symbol].name, S8("raw_got_target")));
+                    }
+                }
+                BUSTER_TEST(arguments, raw_got.error == OBJECT_ERROR_NONE && raw_got.relocation_count == 1 &&
+                                      generic_data_relocation);
+                bool sources_ready = file_write(raw_got_main, BUSTER_SLICE_TO_BYTE_SLICE(raw_got_main_text)) &&
+                                     file_write(raw_got_provider, BUSTER_SLICE_TO_BYTE_SLICE(raw_got_provider_text));
+                String8 raw_got_link_args[] = {S8("-no-pie"), raw_got_main, raw_got_provider, raw_got_object, S8("-o"), raw_got_image};
+                bool linked = sources_ready &&
+                              compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_got_link_args));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, raw_got_image));
+            }
+
+            String8 replay_source = string_format_z(arena, S8("{S8}/modifier-replay.s"), root);
+            String8 replay_object = string_format_z(arena, S8("{S8}/modifier-replay.o"), root);
+            String8 replay_text = S8(".extern replay_got\n"
+                                     ".extern replay_tls\n"
+                                     ".type replay_tls,@tls_object\n"
+                                     ".text\n"
+                                     ".globl modifier_replay\n"
+                                     ".type modifier_replay,@function\n"
+                                     "modifier_replay:\n"
+                                     "jmp .Lmodifier_replay_done\n"
+                                     "mov rax, qword ptr [rip + replay_got@GOTPCREL]\n"
+                                     "add rax, replay_tls@TPOFF\n"
+                                     "mov eax, replay_tls@TPOFF\n"
+                                     "add rax, replay_tls@DTPOFF\n"
+                                     "mov eax, replay_tls@DTPOFF\n"
+                                     ".Lmodifier_replay_done:\n"
+                                     "ret\n");
+            String8 replay_args[] = {S8("-g0"), S8("-c"), replay_source, S8("-o"), replay_object};
+            bool replay_ready = file_write(replay_source, BUSTER_SLICE_TO_BYTE_SLICE(replay_text)) &&
+                                compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(replay_args)) ==
+                                    COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST(arguments, replay_ready);
+            if (replay_ready)
+            {
+                ObjectFile replay = object_read(arena, file_read(arena, replay_object, (FileReadOptions){0}), target);
+                bool short_jump = false;
+                for (u32 index = 0; index < replay.section_count && replay.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    if (string_equal(replay.sections[index].name, S8(".text")))
+                    {
+                        ByteSlice text = replay.sections[index].data;
+                        short_jump = text.length && text.pointer[0] == 0xeb;
+                    }
+                }
+                u32 got_count = 0;
+                u32 tpoff_count = 0;
+                u32 dtpoff_count = 0;
+                bool got_addend = false;
+                for (u32 index = 0; index < replay.relocation_count && replay.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = replay.relocations[index];
+                    if (relocation.kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX)
+                    {
+                        got_count += 1;
+                        got_addend = got_addend || relocation.addend == -4;
+                    }
+                    tpoff_count += relocation.kind == OBJECT_RELOCATION_X86_64_TPOFF32;
+                    dtpoff_count += relocation.kind == OBJECT_RELOCATION_X86_64_DTPOFF32;
+                }
+                BUSTER_TEST(arguments, replay.error == OBJECT_ERROR_NONE && short_jump && got_count == 1 && got_addend &&
+                                      tpoff_count == 2 && dtpoff_count == 2);
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(replay, S8("replay_tls"), OBJECT_SYMBOL_DATA,
+                                                                                       OBJECT_SYMBOL_THREAD_LOCAL_YES));
+            }
+
             String8 invalid_source = string_format_z(arena, S8("{S8}/modifier-multisymbol.s"), root);
             String8 invalid_output = string_format_z(arena, S8("{S8}/modifier-invalid.o"), root);
             BUSTER_TEST(arguments, compiler_driver_elf_modifier_rejection(
                 invalid_source, invalid_output,
-                S8(".text\\n.extern modifier_target\\n.extern unrelated_target\\n.long modifier_target@TLSGD - unrelated_target\\n"),
+                S8(".text\n.extern modifier_target\n.extern unrelated_target\n.long modifier_target@TLSGD - unrelated_target\n"),
                 S8("unsupported symbol modifier '@TLSGD' in integer expression")));
             BUSTER_TEST(arguments, compiler_driver_elf_modifier_rejection(
                 invalid_source, invalid_output,
-                S8(".text\\n.extern modifier_target\\n.long modifier_target@TLSGD@DTPOFF\\n"),
+                S8(".text\n.extern modifier_target\n.long modifier_target@TLSGD@DTPOFF\n"),
                 S8("unsupported symbol modifier '@DTPOFF' in integer directive")));
             BUSTER_TEST(arguments, compiler_driver_elf_modifier_rejection(
                 invalid_source, invalid_output,
-                S8(".text\\n.extern modifier_target\\n.quad modifier_target@TLSGD - .\\n"),
+                S8(".text\n.extern modifier_target\n.quad modifier_target@TLSGD - .\n"),
                 S8("unsupported symbol modifier '@TLSGD' for this integer field")));
             BUSTER_TEST(arguments, os_directory_delete(root));
         }

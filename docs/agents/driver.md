@@ -998,16 +998,22 @@ a 32-bit PC-relative field; TPOFF requires a 32-bit absolute field, and
 DTPOFF accepts 32- or 64-bit absolute fields. The modifier must name the
 field's sole relocation symbol; repeated modifiers, multiple-symbol integer
 expressions and wrong-width fields are refused with a named diagnostic.
-This support is for x86-64 ELF only. An independent assembler sees the
-printed `.long` field without its instruction boundary, so it may retain
-generic GOTPCREL instead of a relaxable GOTPCRELX form. The registered
-`compiler_driver_x86_elf_modifier_roundtrip` fixture accepts that GOT family
-only for the system-assembler object and proves equivalent behavior by
-linking and running it. Buster reassembly is compared with the direct object
-and retains the exact MOV-derived relaxation kind. The listing is
-always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
-is not supported with -S"), while `-masm=att` with `-c` or with an assembly
-input (where it names the dialect the input is read in) is unchanged.
+This support is for x86-64 ELF only. For `@GOTPCREL` instruction operands,
+Buster examines bytes inside the encoded instruction and assigns a relaxable
+kind only to a supported RIP-relative MOV form. An integer directive such as
+`.long symbol@GOTPCREL - .` has no instruction boundary, so Buster keeps the
+plain nonrelaxable `R_X86_64_GOTPCREL` kind and the expression's addend; it
+never infers a relaxation promise from preceding data bytes. The registered
+`compiler_driver_x86_elf_modifier_roundtrip` fixture checks this zero-addend
+data form and links and runs a program that reads the resulting GOT slot. Its
+object comparison keeps symbol, section, offset and addend exact and permits
+only a different spelling within the GOT relocation family. Undefined ELF
+function, object and TLS-object types are emitted and parsed, preserving
+function/data/TLS identity through reassembly. The listing is always Intel
+syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att is not supported
+with -S"), while `-masm=att` with `-c` or with an assembly input (where it names
+the dialect the input is read in) is unchanged.
+
 `compiler_driver_test_assembly_x86_64_object_semantics`,
 `compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding` and
 `object_test_x86_64_elf_listing_metadata` cover this.

@@ -8211,6 +8211,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(Target target,
     switch (kind)
     {
     case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; break;
+    case ASSEMBLY_RELOCATION_X86_64_GOTPCREL: *object_kind = OBJECT_RELOCATION_X86_64_GOTPCREL; valid = x86_elf; break;
     case ASSEMBLY_RELOCATION_X86_64_GOTPCRELX: *object_kind = OBJECT_RELOCATION_X86_64_GOTPCRELX; valid = x86_elf; break;
     case ASSEMBLY_RELOCATION_X86_64_REX_GOTPCRELX: *object_kind = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX; valid = x86_elf; break;
     case ASSEMBLY_RELOCATION_X86_64_TLSGD: *object_kind = OBJECT_RELOCATION_X86_64_TLSGD; valid = x86_elf; break;
@@ -8371,7 +8372,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             .hidden = symbol.hidden,
             .untyped = symbol.untyped,
             .undefined_untyped = !symbol.defined && !symbol.typed,
-            .thread_local_state = symbol.typed ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
+            .thread_local_state = symbol.is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES :
+                                  symbol.typed ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
         };
     }
     for (u32 index = 0; index < unit.relocation_count; index += 1)
