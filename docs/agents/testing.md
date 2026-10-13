@@ -637,6 +637,18 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   build is not run. `bash android/runtime_order_test.sh` (run by
   `android/run_tests_test.sh`) covers the script with fake tools; the frozen
   shared mobile suite keeps the check disabled.
+  The required job also enables AArch64 package coverage. `android/test_ci.sh`
+  then hands both ABIs to the same driver's `android_packages` command, which
+  runs the x86-64 and arm64-v8a `--package-only` batches concurrently and
+  replays their output in ABI order (#3912; see the
+  [ABI policy](../android-ci-abi-policy.md)). The x86-64 batch leaves the
+  runtime APKs in `build/android-ci-x86_64/<config>/buster.apk`. A driver
+  failure or a missing APK is reported as
+  `ANDROID_BATCH_RESULT phase=build config=none`, and both configurations then
+  report `not-run`. `test_android_aarch64_packages` in
+  `android/run_tests_test.sh` checks that hand-off with a fake driver. The
+  job's bootstrap step runs `android_packages --self-test`, which covers the
+  concurrency, environment, failure and capture limits.
   Android CI selects a 240-second Debug / 60-second Release whole-suite monitor
   watchdog; the standalone `android/run_tests.sh` default remains 180 seconds.
   These are independent of adb command/install/boot deadlines. #3258 measured

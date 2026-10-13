@@ -43,6 +43,7 @@
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   tools/android_packages.c                    concurrent Android package batches
 //   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
 //   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
@@ -176,6 +177,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_BINARY_COVERAGE_INVENTORY,
     BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_TEST_UNITS_PARTITIONED,
+    BUILD_COMMAND_ANDROID_PACKAGES,
     BUILD_COMMAND_COUNT,
 } BuildCommand;
 
@@ -25647,6 +25649,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_ANDROID_PACKAGES:
         case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
@@ -25704,6 +25707,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_BINARY_COVERAGE_INVENTORY, .owns_arguments = true},
+        {.command = BUILD_COMMAND_ANDROID_PACKAGES, .owns_arguments = true},
         {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
         {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
@@ -39795,6 +39799,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/ci_no_code.c"
 #include "tools/external_projects.c"
 #include "tools/ci_unit_tests.c"
+#include "tools/android_packages.c"
 #include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
@@ -39881,6 +39886,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BINARY_COVERAGE_INVENTORY] = S8_INITIALIZER("binary_coverage_inventory"),
         [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
         [BUILD_COMMAND_TEST_UNITS_PARTITIONED] = S8_INITIALIZER("test_units_partitioned"),
+        [BUILD_COMMAND_ANDROID_PACKAGES] = S8_INITIALIZER("android_packages"),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_command_names) == BUILD_COMMAND_COUNT);
@@ -39973,6 +39979,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
                 result = bootstrap_process_owner_main(arena, owned_arguments, command == BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST); break;
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_ANDROID_PACKAGES: result = android_packages_main(arena, owned_arguments); break;
             case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
             case BUILD_COMMAND_COMPILER_EVIDENCE: result = compiler_evidence_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
@@ -41236,6 +41243,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_ANDROID_PACKAGES:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
