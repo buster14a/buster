@@ -286,6 +286,19 @@
       }
     },
     {
+      "id": "uarch_lab:compare@self-host-inline-compare",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "#58 fixed self-host-inline-compare-v1 on an owner request line: each side's Clang Release ide builds its own revision's stage-1 compiler with -fcanonical-inline, then the trusted selfhost_inline_compare.py times the two stage-1 compilers compiling the frozen merge-base tree with -fcanonical-inline, byte-identical outputs required, 30 ABBA pairs on CPU 2 with wall time, PMU counters, executable-section code bytes, topdown metric groups and sampling; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "self-host-inline-compare-v1",
+        "request": "one exact fresh line, profile: self-host-inline-compare-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
       "id": "tool:branch_miss_survey.py",
       "kind": "tool",
       "validation": "diagnostic",

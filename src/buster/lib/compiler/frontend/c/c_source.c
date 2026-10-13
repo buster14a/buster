@@ -4327,6 +4327,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
     { S8_INITIALIZER("__builtin_complex"), C_SYMBOL_BUILTIN_COMPLEX },
+    // Clang's source-location builtins: the expansion point's presumed line
+    // (an int constant), file name and enclosing function name.
+    { S8_INITIALIZER("__builtin_LINE"), C_SYMBOL_BUILTIN_SOURCE_LINE },
+    { S8_INITIALIZER("__builtin_FILE"), C_SYMBOL_BUILTIN_SOURCE_FILE },
+    { S8_INITIALIZER("__builtin_FUNCTION"), C_SYMBOL_BUILTIN_SOURCE_FUNCTION },
     { S8_INITIALIZER("__builtin_strlen"), C_SYMBOL_BUILTIN_STRLEN },
     { S8_INITIALIZER("__builtin___clear_cache"), C_SYMBOL_BUILTIN_CLEAR_CACHE },
     { S8_INITIALIZER("__builtin_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
@@ -4617,6 +4622,15 @@ BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
                   builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
                   builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
                   builtin == C_SYMBOL_BUILTIN_VA_END;
+    return result;
+}
+
+// Clang's __builtin_LINE, __builtin_FILE and __builtin_FUNCTION: argument-free
+// queries of the call's expansion point, typed and lowered without an entity.
+BUSTER_C_SHARED bool c_semantic_source_location_builtin(CSymbolBuiltin builtin)
+{
+    bool result = builtin == C_SYMBOL_BUILTIN_SOURCE_LINE || builtin == C_SYMBOL_BUILTIN_SOURCE_FILE ||
+                  builtin == C_SYMBOL_BUILTIN_SOURCE_FUNCTION;
     return result;
 }
 
@@ -8300,6 +8314,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
         "__builtin_ia32_psrlqi128",
         "__builtin_types_compatible_p", "__builtin_classify_type", "__builtin_offsetof",
+        "__builtin_LINE",          "__builtin_FILE", "__builtin_FUNCTION",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",

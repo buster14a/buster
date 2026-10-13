@@ -1,0 +1,52 @@
+== census
+    155988 calls    474,004,164 Ir  c_ir_lower_dispatch_run -> c_ir_lower_body_advance
+    103554 calls     18,738,932 Ir  c_ir_lower_body_advance -> census_type_word
+    156929 calls     10,012,453 Ir  c_ir_lower_body_advance -> census_label
+    103554 calls      8,045,547 Ir  census_type_word -> c_parse_type_word_for_dialect
+     48392 calls      4,977,622 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+     29094 calls      3,376,080 Ir  c_parse_validate_lowering_constraints -> c_ir_named_label_proven_at
+     18882 calls      2,190,062 Ir  c_ir_lower_body_advance -> c_ir_named_label_proven_at
+      7534 calls        879,408 Ir  c_parse_bind_block_statements -> c_ir_named_label_proven_at
+    156929 calls        627,716 Ir  census_label -> census_label_call
+     98569 calls        394,276 Ir  census_type_word -> census_tw2_call
+     86724 calls        346,896 Ir  census_type_word -> census_tw2_bound
+      6990 calls         27,960 Ir  census_type_word -> census_tw2_predefined
+      6876 calls         27,504 Ir  census_type_word -> census_tw2_true
+      4985 calls         19,940 Ir  census_type_word -> census_tw1_call
+      4985 calls         19,940 Ir  census_type_word -> census_tw1_bound
+         9 calls          1,393 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
+        12 calls            812 Ir  census_label -> c_ir_named_label_proven_at
+        43 calls            172 Ir  census_type_word -> census_tw1_predefined
+        12 calls             48 Ir  census_label -> census_label_shape
+        12 calls             48 Ir  census_label -> census_label_proven
+        12 calls             48 Ir  census_label -> census_label_true
+== A
+    155988 calls    455,835,261 Ir  c_ir_lower_dispatch_run -> c_ir_lower_body_advance
+    103554 calls      8,045,351 Ir  c_ir_lower_body_advance -> c_parse_type_word_for_dialect
+     48392 calls      4,977,363 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+     29094 calls      3,376,080 Ir  c_parse_validate_lowering_constraints -> c_ir_named_label_proven_at
+     18894 calls      2,190,874 Ir  c_ir_lower_body_advance -> c_ir_named_label_proven_at
+      7534 calls        879,408 Ir  c_parse_bind_block_statements -> c_ir_named_label_proven_at
+         9 calls          1,393 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
+== B
+    155988 calls    468,231,713 Ir  c_ir_lower_dispatch_run -> c_ir_lower_body_advance
+    103554 calls      8,045,351 Ir  c_ir_lower_body_advance -> c_parse_type_word_for_dialect
+     48392 calls      4,977,363 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+     29094 calls      3,376,080 Ir  c_parse_validate_lowering_constraints -> c_ir_named_label_proven_at
+     18894 calls      2,190,874 Ir  c_ir_lower_body_advance -> c_ir_named_label_proven_at
+      7534 calls        879,408 Ir  c_parse_bind_planned_block_statements -> c_ir_named_label_proven_at
+         9 calls          1,393 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
+== C
+    155988 calls    459,255,821 Ir  c_ir_lower_dispatch_run -> c_ir_lower_body_advance
+     48392 calls      4,977,363 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+     29094 calls      3,376,080 Ir  c_parse_validate_lowering_constraints -> c_ir_named_label_proven_at
+     18894 calls      2,190,874 Ir  c_ir_lower_body_advance -> c_ir_named_label_proven_at
+      7534 calls        879,408 Ir  c_parse_bind_planned_block_statements -> c_ir_named_label_proven_at
+         9 calls          1,393 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
+== D
+    155988 calls    446,859,369 Ir  c_ir_lower_dispatch_run -> c_ir_lower_body_advance
+     48392 calls      4,977,363 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+     29094 calls      3,376,080 Ir  c_parse_validate_lowering_constraints -> c_ir_named_label_proven_at
+     18894 calls      2,190,874 Ir  c_ir_lower_body_advance -> c_ir_named_label_proven_at
+      7534 calls        879,408 Ir  c_parse_bind_block_statements -> c_ir_named_label_proven_at
+         9 calls          1,393 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
