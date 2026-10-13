@@ -170,6 +170,8 @@
 //                                                 with the scalar reference
 //                                                 kept as the differential gate
 //   c_parse_typed_constant                       target-typed scalar constant evaluation
+//   c_parse_sizeof_handoff_record,               test-only sizeof operand rows and their
+//   c_sizeof_handoff_compare                     comparison with lowering (GitHub #2531)
 //   c_parse_type_integer_constant               isolated type-embedded constant queries
 //   c_parse_validate_integer_transform_calls    builtin signatures in every expression context
 //   c_switch_prefix_overlaps,                    switch label overlap: radix sort plus
@@ -9147,6 +9149,191 @@ BUSTER_C_INTERNAL bool c_parse_type_identity_record(CParseResult* result, CTypeI
     }
     return valid;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, GitHub #2531).
+// Semantic analysis records rows; lowering compares its sizes with them. A
+// row is keyed by its `sizeof` keyword token, which names one expression of
+// the final token stream, and keeps the scope its producer typed the operand
+// in. The comparison counts a row whose scope is not the keyword's innermost
+// scope, so an answer read under the wrong bindings is visible.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_sizeof_handoff_on;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestSizeofHandoff c_sizeof_handoff_state;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_sizeof_handoff_perturbed_producers;
+
+void c_test_sizeof_handoff_set(bool enabled)
+{
+    c_sizeof_handoff_on = enabled;
+}
+
+void c_test_sizeof_handoff_perturb_set(u32 producer_mask)
+{
+    c_sizeof_handoff_perturbed_producers = producer_mask;
+}
+
+CTestSizeofHandoff c_test_sizeof_handoff_take(void)
+{
+    CTestSizeofHandoff taken = c_sizeof_handoff_state;
+    c_sizeof_handoff_state = (CTestSizeofHandoff){0};
+    return taken;
+}
+
+BUSTER_C_SHARED bool c_sizeof_handoff_enabled(void)
+{
+    return c_sizeof_handoff_on;
+}
+
+// The kind a scalar-integer operand answers with: qualifiers dropped and an
+// enum read as its underlying integer kind. Atomic and every non-integer
+// type are outside the population (C_TYPE_INVALID).
+BUSTER_GLOBAL_LOCAL CTypeKind c_parse_sizeof_handoff_kind(CParseResult const* result, CTypeId type)
+{
+    CTypeKind kind = C_TYPE_INVALID;
+    if (type.value < result->type_count)
+    {
+        CType const* row = result->types + type.value;
+        CTypeKind candidate = row->kind;
+        if (candidate == C_TYPE_ENUM)
+        {
+            candidate = row->element_type.value < result->type_count ? result->types[row->element_type.value].kind : C_TYPE_INVALID;
+        }
+        bool integer = candidate >= C_TYPE_BOOL && candidate <= C_TYPE_UNSIGNED_INT128;
+        kind = integer && !row->is_atomic ? candidate : C_TYPE_INVALID;
+    }
+    return kind;
+}
+
+// The same-width integer kind of the other signedness, for the negative
+// control (c_test_sizeof_handoff_perturb_set). Plain char becomes unsigned
+// char, which differs from it on targets whose plain char is signed.
+BUSTER_GLOBAL_LOCAL CTypeKind c_parse_sizeof_handoff_flipped_kind(CTypeKind kind)
+{
+    CTypeKind flipped;
+    switch (kind)
+    {
+    case C_TYPE_CHAR: case C_TYPE_SIGNED_CHAR: flipped = C_TYPE_UNSIGNED_CHAR; break;
+    case C_TYPE_UNSIGNED_CHAR: flipped = C_TYPE_SIGNED_CHAR; break;
+    case C_TYPE_SHORT: flipped = C_TYPE_UNSIGNED_SHORT; break;
+    case C_TYPE_UNSIGNED_SHORT: flipped = C_TYPE_SHORT; break;
+    case C_TYPE_INT: flipped = C_TYPE_UNSIGNED_INT; break;
+    case C_TYPE_UNSIGNED_INT: flipped = C_TYPE_INT; break;
+    case C_TYPE_LONG: flipped = C_TYPE_UNSIGNED_LONG; break;
+    case C_TYPE_UNSIGNED_LONG: flipped = C_TYPE_LONG; break;
+    case C_TYPE_LONG_LONG: flipped = C_TYPE_UNSIGNED_LONG_LONG; break;
+    case C_TYPE_UNSIGNED_LONG_LONG: flipped = C_TYPE_LONG_LONG; break;
+    case C_TYPE_INT128: flipped = C_TYPE_UNSIGNED_INT128; break;
+    case C_TYPE_UNSIGNED_INT128: flipped = C_TYPE_INT128; break;
+    default: flipped = kind; break;
+    }
+    return flipped;
+}
+
+// Keeps one producer's answer for the operand of the `sizeof` at `keyword`.
+// A key its producer already kept counts as a repeat, or as a conflict when
+// the answer differs, and is never overwritten. A row of another producer
+// for the same keyword is compared too: a different kind or size is a
+// conflict, while each producer keeps its own row and counts.
+BUSTER_GLOBAL_LOCAL void c_parse_sizeof_handoff_record(CParseResult* result, CScopeId scope, u32 keyword, u32 operand_end, CTypeId type, u64 size,
+                                                       CSizeofOperandProducer producer)
+{
+    CTestSizeofHandoff* state = &c_sizeof_handoff_state;
+    CTypeKind kind = c_parse_sizeof_handoff_kind(result, type);
+    if ((c_sizeof_handoff_perturbed_producers >> producer) & 1u)
+    {
+        kind = c_parse_sizeof_handoff_flipped_kind(kind);
+    }
+    bool fresh = kind != C_TYPE_INVALID && size && size <= UINT8_MAX;
+    state->outside_population += !fresh;
+    bool other_conflict = false;
+    for (u32 index = result->sizeof_operand_type_count; fresh && index;)
+    {
+        CSizeofOperandType const* row = result->sizeof_operand_types + --index;
+        if (row->keyword == keyword && row->producer == producer && row->scope.value == scope.value)
+        {
+            fresh = false;
+            bool same = row->kind == kind && row->size == size && row->operand_end == operand_end;
+            state->repeats += same;
+            state->conflicts += !same;
+        }
+        else if (row->keyword == keyword && row->producer != producer)
+        {
+            other_conflict |= row->kind != kind || row->size != size;
+        }
+    }
+    state->conflicts += fresh && other_conflict;
+    if (fresh && result->sizeof_operand_type_count == result->sizeof_operand_type_capacity)
+    {
+        u32 capacity = result->sizeof_operand_type_capacity ? result->sizeof_operand_type_capacity * 2 : 64;
+        CSizeofOperandType* rows = capacity > result->sizeof_operand_type_capacity
+                                       ? C_PARSE_BODY_SCRATCH_ARRAY(result->arena, CSizeofOperandType, capacity) : 0;
+        fresh = rows != 0;
+        if (fresh)
+        {
+            if (result->sizeof_operand_type_count)
+                memcpy(rows, result->sizeof_operand_types, result->sizeof_operand_type_count * sizeof(*rows));
+            result->sizeof_operand_types = rows;
+            result->sizeof_operand_type_capacity = capacity;
+        }
+    }
+    if (fresh)
+    {
+        result->sizeof_operand_types[result->sizeof_operand_type_count++] = (CSizeofOperandType){
+            .keyword = keyword,
+            .operand_end = operand_end,
+            .scope = scope,
+            .kind = (u8)kind,
+            .producer = (u8)producer,
+            .size = (u8)size,
+        };
+        state->rows[producer] += 1;
+        state->row_bytes += sizeof(CSizeofOperandType);
+    }
+}
+
+BUSTER_C_SHARED void c_sizeof_handoff_compare(CParseResult* result, CPreprocessResult const* preprocess, u32 keyword, bool answered, u64 size,
+                                              bool typed, bool lowering_signed, u32 path)
+{
+    CTestSizeofHandoff* state = &c_sizeof_handoff_state;
+    bool sizeof_keyword = keyword < preprocess->token_count &&
+                          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[keyword], C_SYMBOL_WELL_KNOWN_SIZEOF);
+    CScopeId innermost = sizeof_keyword && result->scope_count ? c_parse_scope_for_token(result, (CScopeId){0}, keyword) : C_SCOPE_ID_INVALID;
+    u32 matched = 0;
+    for (u32 index = 0; sizeof_keyword && index < result->sizeof_operand_type_count; index += 1)
+    {
+        CSizeofOperandType const* row = result->sizeof_operand_types + index;
+        if (row->keyword == keyword)
+        {
+            matched += 1;
+            state->scope_differs += row->scope.value != innermost.value;
+            CTypeKind kind = (CTypeKind)row->kind;
+            bool semantic_signed = kind == C_TYPE_CHAR ? target_data_layout(preprocess->target).plain_char_is_signed : c_parse_expression_signed_kind(kind);
+            bool sized = answered && size == row->size;
+            u32 outcome = !answered        ? C_TEST_SIZEOF_HANDOFF_DECLINED
+                        : !sized           ? C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH
+                        : typed && semantic_signed != lowering_signed ? C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH
+                                                                      : C_TEST_SIZEOF_HANDOFF_AGREE;
+            state->outcomes[path][outcome] += 1;
+            state->signedness_compared += sized && typed;
+            if ((outcome == C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH || outcome == C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH) &&
+                state->first_count < C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT)
+            {
+                state->first[state->first_count++] = (CTestSizeofHandoffMismatch){
+                    .keyword = keyword,
+                    .operand_end = row->operand_end,
+                    .lowering_size = size,
+                    .semantic_size = row->size,
+                    .kind = row->kind,
+                    .producer = row->producer,
+                    .path = (u8)path,
+                    .semantic_signed = semantic_signed,
+                    .lowering_signed = lowering_signed,
+                };
+            }
+        }
+    }
+    state->outcomes[path][C_TEST_SIZEOF_HANDOFF_UNMATCHED] += sizeof_keyword && answered && !matched;
+}
+#endif
 
 // Read the full abstract declarator, including pointer-to-array and function
 // pointer associations. Scalar and declarator parsing keep their existing
@@ -34174,9 +34361,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             }
             refused = machine->enum_sizeof_expression_query && type.value < result->type_count;
         }
+        bool expression_typed = false;
         if (!refused && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && type.value >= result->type_count)
         {
-            c_parse_expression_type_query(machine, arena, preprocess, result, scope, operand_start, operand_end, &type);
+            expression_typed = c_parse_expression_type_query(machine, arena, preprocess, result, scope, operand_start, operand_end, &type);
         }
         refused |= machine->enum_sizeof_expression_query && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION;
         u64 size = 0;
@@ -34218,6 +34406,15 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
         }
         value.integer = c_parse_alignof_word(spelling) ? alignment : size;
+#if BUSTER_INCLUDE_TESTS
+        if (c_sizeof_handoff_on && expression_typed && value.valid && !is_alignof && !member_answer &&
+            machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL)
+        {
+            c_parse_sizeof_handoff_record(result, scope, start, operand_end, type, size, C_SIZEOF_OPERAND_PRODUCER_CONSTANT);
+        }
+#else
+        BUSTER_UNUSED(expression_typed);
+#endif
         CTypeKind size_type = preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT :
                               target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
         value.type = c_parse_expression_scalar_type(result, size_type);
@@ -34967,6 +35164,10 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             // rather than appending to the caller's shared spare capacity.
             query.type_identity_query_count = 0;
             query.type_identity_query_capacity = 0;
+#if BUSTER_INCLUDE_TESTS
+            // Handoff rows (c_test_sizeof_handoff_set) copy on first append too.
+            query.sizeof_operand_type_capacity = query.sizeof_operand_type_count;
+#endif
             // Existing append-buffer rows remain readable, but even their
             // unused slots must belong to this query.
             query.parameter_capacity = parameter_capacity;
@@ -35197,6 +35398,7 @@ BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena
         {result->type_alignments, 0, (u64)result->type_alignment_capacity * sizeof(CTypeAlignment)},
         {result->noreturn_function_types, 0, (u64)result->noreturn_function_type_capacity * sizeof(CTypeId)},
         {result->type_identity_queries, 0, (u64)result->type_identity_query_capacity * sizeof(CTypeIdentityQuery)},
+        {result->sizeof_operand_types, 0, (u64)result->sizeof_operand_type_capacity * sizeof(CSizeofOperandType)},
         {result->members, 0, (u64)result->member_capacity * sizeof(CMember)},
         {result->enum_members, 0, (u64)result->enum_member_capacity * sizeof(CEnumMember)},
         {result->parameters, 0, (u64)result->parameter_capacity * sizeof(CParameter)},
@@ -37605,6 +37807,35 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 }
             }
         }
+#if BUSTER_INCLUDE_TESTS
+        // Ordinary validation types nothing inside a sizeof; the handoff
+        // comparison asks for the operand's type here for itself alone. A
+        // grouped operand followed by a postfix (`sizeof (p)->x`) is longer
+        // than this walk bounds it, so it is not recorded, nor is a statement
+        // expression.
+        u64 postfix = C_PUNCTUATOR_BIT(C_PUNCTUATOR_DOT) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_ARROW) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) |
+                      C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS_PLUS) |
+                      C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS_MINUS);
+        bool postfix_follows = grouped && close + 1 < end && preprocess.tokens[close + 1].kind == C_TOKEN_PUNCTUATOR &&
+                               (postfix & C_PUNCTUATOR_BIT(preprocess.tokens[close + 1].punctuator)) != 0;
+        if (c_sizeof_handoff_on && sizeof_word && !type_operand && !diagnostic.message.length && operand_start < operand_end && !postfix_follows &&
+            !c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
+            CTypeId type = C_TYPE_ID_INVALID;
+            u64 size = 0;
+            u32 alignment = 0;
+            c_sizeof_handoff_state.extra_queries += 1;
+            if (c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, operand_scope, operand_start, operand_end, &type))
+            {
+                if (c_parse_sizeof_handoff_kind(result, type) != C_TYPE_INVALID)
+                {
+                    c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
+                }
+                c_parse_sizeof_handoff_record(result, operand_scope, index, operand_end, type, size, C_SIZEOF_OPERAND_PRODUCER_VALIDATION);
+            }
+        }
+#endif
         if (sizeof_word && !type_operand && !diagnostic.message.length && operand_start < operand_end)
         {
             // `sizeof a` on an unsized array, or `sizeof *p` through a pointer to

@@ -1,0 +1,7 @@
+# callgrind --tool=callgrind (no cache/branch sim), x86-64-v3 -O2 Release, tests off; Ir totals
+# base  subject-base/ide-plain sha256 e16db4722b81085f6c20e21b1bd4510732a9ad5e992deeb419baa7c6f91a175d
+# cand3 ide-cand3-v3 (x86 commit) sha256 b1348089c0b58222bea51bbde14d7ac36dd1a2f4332c4534a2b11aa44527eda7
+# cand4 ide-cand4-v3 (x86 + symbol prototype) sha256 33df25939ca327e7adc22db291282f73115267525cffc98cdfbffc00514558e3
+subject-base/ide-plain empty_x86_64_c=11,491,743 observables_compile_link=28,919,372 four_input_c=76,966,864
+ide-cand3-v3 empty_x86_64_c=10,709,527 observables_compile_link=28,374,587 four_input_c=76,411,361
+ide-cand4-v3 empty_x86_64_c=10,710,122 observables_compile_link=28,375,184 four_input_c=75,950,634
