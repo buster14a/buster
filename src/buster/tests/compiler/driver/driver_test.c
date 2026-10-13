@@ -7760,7 +7760,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
     UnitTestResult result = {0};
     // These tiny fixtures exercise the lane kernel itself, below the
     // minimum-work gate (compiler_driver_test_unit_lane_gate covers it).
-    compiler_driver_test_set_lane_work(0, 0);
+    compiler_driver_test_set_lane_work(0, 0, 0);
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
     String8 input = buster_test_temporary_path(arena, S8("buster-unit-batch-empty"), S8(".c"));
@@ -7948,7 +7948,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_ownership(Uni
     // bound below does not depend on earlier tests.
     arena_pool_release_thread();
     // Tiny inputs below the minimum-work gate still take the lane path here.
-    compiler_driver_test_set_lane_work(0, 0);
+    compiler_driver_test_set_lane_work(0, 0, 0);
     for (u32 repetition = 0; repetition < 3; repetition += 1)
     {
         CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
@@ -7962,10 +7962,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_ownership(Uni
     return result;
 }
 
-// The minimum-work gate (#53): a population whose estimated work (file bytes
-// plus a per-input charge) cannot repay compiler_parallel_prewarm keeps the
-// one-worker path, reports it truthfully and links the same image. Each bound
-// is tested one byte either side.
+// The lane gate (#53): a population whose estimated work (file bytes plus a
+// per-input charge) cannot repay the lane entry cost keeps the one-worker path,
+// and one too small for every requested worker runs fewer; either reports the
+// decision truthfully and links the same image. Each bound is tested one byte
+// either side.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_lane_gate(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7974,6 +7975,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_lane_gate(UnitTestA
     String8 main_path = buster_test_temporary_path(arena, S8("buster-lane-gate-main"), S8(".c"));
     String8 helper_path = buster_test_temporary_path(arena, S8("buster-lane-gate-helper"), S8(".c"));
     String8 missing_path = buster_test_temporary_path(arena, S8("buster-lane-gate-missing"), S8(".c"));
+    String8 extra_path = buster_test_temporary_path(arena, S8("buster-lane-gate-extra"), S8(".c"));
     String8 output = buster_test_temporary_path(arena, S8("buster-lane-gate"), S8(".out"));
     String8 main_source = S8("int lane_gate_helper(void);\nint main(void) { return lane_gate_helper() - 7; }\n");
     String8 helper_source = S8("int lane_gate_helper(void) { return 7; }\n");
@@ -8008,7 +8010,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_lane_gate(UnitTestA
         invocation.compile_jobs = workers;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
         {
-            compiler_driver_test_set_lane_work(cases[index].minimum, cases[index].per_input);
+            compiler_driver_test_set_lane_work(cases[index].minimum, cases[index].per_input, 0);
             CompilerDriverResult gated = compiler_driver_execute_invocation(arena, invocation);
             compiler_driver_test_restore_lane_work();
             BUSTER_TEST_RAW(arguments, gated.error == COMPILER_DRIVER_ERROR_NONE, gated.diagnostic);
@@ -8034,7 +8036,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_lane_gate(UnitTestA
         missing.compile_jobs = 1;
         CompilerDriverResult missing_serial = compiler_driver_execute_invocation(arena, missing);
         missing.compile_jobs = workers;
-        compiler_driver_test_set_lane_work(main_source.length + 1, 0);
+        compiler_driver_test_set_lane_work(main_source.length + 1, 0, 0);
         CompilerDriverResult missing_gated = compiler_driver_execute_invocation(arena, missing);
         compiler_driver_test_restore_lane_work();
         BUSTER_TEST(arguments, missing_serial.error != COMPILER_DRIVER_ERROR_NONE && missing_gated.error == missing_serial.error &&
@@ -8047,13 +8049,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_lane_gate(UnitTestA
         CompilerDriverInvocation single = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(single_command));
         single.input_count = 1;
         single.compile_jobs = workers;
-        compiler_driver_test_set_lane_work(UINT64_MAX, 0);
+        compiler_driver_test_set_lane_work(UINT64_MAX, 0, 0);
         CompilerDriverResult lone = compiler_driver_execute_invocation(arena, single);
         compiler_driver_test_restore_lane_work();
         BUSTER_TEST(arguments, lone.lane_gate == COMPILER_DRIVER_LANE_GATE_NONE && lone.compilation_workers == 1);
+
+        // The per-worker floor narrows the cohort but never below two workers,
+        // and the image is unchanged; a floor the population covers keeps the
+        // requested width.
+        String8 extra_source = S8("typedef int lane_gate_unit;\n");
+        u32 wide = (u32)buster_test_worker_count(BUSTER_MIN((u64)4, (u64)BUSTER_MAX(os_get_logical_thread_count(), (u32)1)));
+        if (wide >= 3 && BUSTER_REQUIRE(arguments, file_write(extra_path, BUSTER_SLICE_TO_BYTE_SLICE(extra_source))))
+        {
+            String8 cap_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-o"), output,
+                                     main_path, helper_path, extra_path, extra_path};
+            CompilerDriverInvocation capped = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cap_command));
+            capped.compile_jobs = 1;
+            CompilerDriverResult cap_reference = compiler_driver_execute_invocation(arena, capped);
+            BUSTER_TEST_RAW(arguments, cap_reference.error == COMPILER_DRIVER_ERROR_NONE, cap_reference.diagnostic);
+            ByteSlice cap_image = file_read(arena, output, (FileReadOptions){0});
+            u64 cap_work = population + 2 * extra_source.length;
+            struct
+            {
+                u64 per_worker;
+                CompilerDriverLaneGate gate;
+                u32 workers;
+            } const widths[] = {
+                {cap_work / 2 + 1, COMPILER_DRIVER_LANE_GATE_CAPPED, 2},
+                {1, COMPILER_DRIVER_LANE_GATE_LANES, wide},
+            };
+            capped.compile_jobs = wide;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+            {
+                compiler_driver_test_set_lane_work(0, 0, widths[index].per_worker);
+                CompilerDriverResult narrowed = compiler_driver_execute_invocation(arena, capped);
+                compiler_driver_test_restore_lane_work();
+                BUSTER_TEST_RAW(arguments, narrowed.error == COMPILER_DRIVER_ERROR_NONE, narrowed.diagnostic);
+                BUSTER_TEST(arguments, narrowed.lane_gate == widths[index].gate && narrowed.compilation_workers == widths[index].workers);
+                String8 records = compiler_driver_metrics_format(arena, &capped, &narrowed, (CompilerDriverProcessMetrics){0});
+                BUSTER_TEST(arguments, string_first_sequence(records, widths[index].gate == COMPILER_DRIVER_LANE_GATE_CAPPED ? S8(" lane_gate=capped\n")
+                                                                                                                            : S8(" lane_gate=lanes\n")) !=
+                                           BUSTER_STRING_NO_MATCH);
+                ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, image.length == cap_image.length && image.length &&
+                                           memory_compare(image.pointer, cap_image.pointer, image.length));
+            }
+        }
     }
     (void)os_file_delete(main_path);
     (void)os_file_delete(helper_path);
+    (void)os_file_delete(extra_path);
     (void)os_file_delete(output);
     c_test_scratch_end(temporary);
     return result;
