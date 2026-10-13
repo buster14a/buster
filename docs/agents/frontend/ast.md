@@ -1364,11 +1364,11 @@ statement from the cursor and dispatches on its kind:
   token walker flattened that shape. A first label inside a block is still
   refused, by semantic analysis's lowering-constraint mirror (`c_parse.c`).
 - **Dead code** after a terminator is skipped statement by statement unless
-  the statement holds a label (`c_ir_node_holds_label`). A block opens as
-  usual and its own walk skips up to the label; any other statement with a
-  label inside lowers from a block nothing branches to. The token walker
-  instead jumped into the middle of such a statement, which miscompiled a
-  `goto` into a loop body after dead code.
+  the statement holds a label (`c_ir_node_holds_label`). Such a statement, a
+  block included, lowers whole from a block nothing branches to, as main's
+  token walker came to do (`dc44eeb7`); before that, the token walker jumped
+  into the middle of the statement, which miscompiled a `goto` into a loop
+  body after dead code.
 - The label table, the direct-SSA jump targets, the statement-expression
   enclosures and the address-taken labels come from LABELED, GOTO, SWITCH,
   CASE and LABEL_ADDRESS nodes of the body's span.

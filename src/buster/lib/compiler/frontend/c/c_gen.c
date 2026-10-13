@@ -49011,17 +49011,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 // Dead code matters only where a label makes it reachable
                 // again. A label prefix is entered as usual; a statement with
-                // no label inside is skipped; a block is opened as usual, so
-                // its own walk skips up to the label; any other statement
-                // with a label inside lowers from a block nothing branches
-                // to, and the label's block is reached by its jumps alone.
+                // no label inside is skipped; any other statement with a
+                // label inside, a block included, lowers whole from a block
+                // nothing branches to, so it keeps its else and loop
+                // destinations, and the label's block is reached by its
+                // jumps alone.
                 bool prefix = kind == C_AST_LABELED || kind == C_AST_ATTRIBUTED_STATEMENT ||
                               ((kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT) && c_ir_substatement_case_find(state, node));
                 if (!prefix && !c_ir_node_holds_label(builder, state, node))
                 {
                     continue;
                 }
-                if (!prefix && kind != C_AST_COMPOUND_STATEMENT && !c_ir_switch_block(builder, c_ir_block_create(builder)))
+                if (!prefix && !c_ir_switch_block(builder, c_ir_block_create(builder)))
                 {
                     return false;
                 }
