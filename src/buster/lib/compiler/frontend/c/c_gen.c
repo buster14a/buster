@@ -3522,48 +3522,17 @@ struct CIrErrorAttributeCall
     u32 attribute_token;
 };
 
-// Statement extents from the syntax tree (#3102; docs/agents/frontend/ast.md,
-// "Statement extents in lowering"). Under -fc-ast-pilot each body that asks
-// gets a table of its controlled substatements, in token order of their first
-// token, holding what the token walker would measure. Token indices only, in
-// a private arena; CAstExtentFallback names why the walker answers instead.
-typedef struct CIrExtentEntry CIrExtentEntry;
-struct CIrExtentEntry
+// The unit's index of the bodies lowering enters by brace (GitHub #4060):
+// every FUNCTION_DEFINITION's COMPOUND_STATEMENT and every
+// STATEMENT_EXPRESSION's COMPOUND_STATEMENT, each as a sorted
+// (token << 32 | node) key of its `{` (c_ir_body_nodes_build).
+typedef struct CIrBodyNodes CIrBodyNodes;
+struct CIrBodyNodes
 {
-    u32 first;
-    u32 statement;
-    u32 end;
-    bool compound;
-};
-
-typedef enum CIrExtentState
-{
-    C_IR_EXTENT_UNBUILT,
-    C_IR_EXTENT_BUILT,
-    C_IR_EXTENT_REFUSED,
-} CIrExtentState;
-
-typedef struct CIrStatementExtents CIrStatementExtents;
-struct CIrStatementExtents
-{
-    CAst const* ast;
-    Arena* arena;
-    // Arena position past the unit's body index; each body's table rewinds
-    // to it.
-    u64 body_mark;
-    // The `{` of every top-level function definition, ascending, paired with
-    // its COMPOUND_STATEMENT node.
-    u32* bodies;
-    u32 body_count;
-    // The current body: its tokens between the braces, and its entries.
-    u32 token_start;
-    u32 token_count;
-    CIrExtentEntry* entries;
-    u32 entry_count;
-    CIrExtentState state;
-    CAstExtentFallback refusal;
-    bool delimiters_valid;
-    CAstExtentStatistics statistics;
+    u64* functions;
+    u64* statement_expressions;
+    u32 function_count;
+    u32 statement_expression_count;
 };
 
 // One CONDITIONAL or CONDITIONAL_OMITTED node of a function body, by the three
@@ -3761,19 +3730,11 @@ struct CIntegerIrBuilder
     // pointer (any builder without a body) answers every range by the scan.
     CIrTokenPrefix* token_prefix;
     bool token_prefix_built;
-    // One past each measured body statement, plus one, indexed by the offset
-    // of its first token past its labels; 0 is unmeasured. c_ir_statement_end
-    // owns it: it files every `if` its chain walk completes, with the whole
-    // else-chain, and every loop, `switch` and `do` header a span peeled, and
-    // clears the array the first time it files (statement_ends_cleared), so a
-    // body without a nested statement never touches it. Without it every
-    // `else if`, and every statement of a brace-less nest of `if`s or loops,
-    // re-walked the rest of its chain or nest.
-    u32* statement_ends_plus_one;
-    bool statement_ends_cleared;
-    // The body's extent table from the syntax tree (c_ir_statement_extents),
-    // or null without a tree: c_ir_controlled_body_range then always walks.
-    CIrStatementExtents* statement_extents;
+    // The unit's syntax tree, and its index of the bodies lowering enters by
+    // brace (c_ir_body_nodes_build): the statement walker reads the body's
+    // structure from its statement nodes (GitHub #4060).
+    CAst const* ast;
+    CIrBodyNodes const* body_nodes;
     // The conditional nodes of the body being lowered, read from the syntax
     // tree (c_ir_tree_conditionals_build): c_ir_root_conditional answers from
     // them where they decide the scan's answer. Null without a tree, and for
@@ -4749,69 +4710,6 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
     return scanned;
 }
 
-// Records, for each label of a body in token order, the innermost GNU
-// statement expression that contains it (UINT32_MAX when none does). A goto may
-// not enter a statement expression, so a label is visible to a goto exactly when
-// its recorded range is empty or contains the goto: one sweep here makes every
-// later check O(1). The stack holds the still-open statement expressions.
-BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuilder* builder, CIrLabel* labels, u32 label_count, u32 start, u32 end)
-{
-    bool ok = true;
-    u32 open_count = 0;
-    for (u32 index = c_parse_statement_expression_next(&builder->parse, builder->preprocess, start, end); index < end;
-         index = c_parse_statement_expression_next(&builder->parse, builder->preprocess, index + 1, end))
-    {
-        open_count += 1;
-    }
-    for (u32 label = 0; label < label_count; label += 1)
-    {
-        labels[label].statement_expression_open = UINT32_MAX;
-        labels[label].statement_expression_close = UINT32_MAX;
-    }
-    if (open_count && label_count)
-    {
-        ok = c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 2, BUSTER_ALIGN_OF(u32));
-        if (ok)
-        {
-            u32* opens = arena_allocate(builder->scratch_arena, u32, open_count * 2);
-            u32* closes = opens + open_count;
-            u32 depth = 0;
-            u32 next = c_parse_statement_expression_next(&builder->parse, builder->preprocess, start, end);
-            for (u32 label = 0; label < label_count; label += 1)
-            {
-                u32 position = labels[label].token_index;
-                for (; next < position; next = c_parse_statement_expression_next(&builder->parse, builder->preprocess, next + 1, end))
-                {
-                    if (next > 0 && c_token_is_punctuator(&builder->preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE) &&
-                        c_token_is_punctuator(&builder->preprocess.tokens[next - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        while (depth && closes[depth - 1] < next)
-                        {
-                            depth -= 1;
-                        }
-                        u32 close = c_ir_matching_delimiter_cached(builder, next, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-                        if (close != UINT32_MAX && depth < open_count)
-                        {
-                            opens[depth] = next;
-                            closes[depth] = close;
-                            depth += 1;
-                        }
-                    }
-                }
-                while (depth && closes[depth - 1] < position)
-                {
-                    depth -= 1;
-                }
-                if (depth)
-                {
-                    labels[label].statement_expression_open = opens[depth - 1];
-                    labels[label].statement_expression_close = closes[depth - 1];
-                }
-            }
-        }
-    }
-    return ok;
-}
 
 // The only punctuators the preparation prepasses' deferral scan reacts to,
 // classified once by punctuator id so the scan spends one byte load per token
@@ -18436,7 +18334,7 @@ BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
                                              IrSourceRange source, IrTypeId cast_type);
 
-BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode,
+BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, u32 compound, bool statement_expression_mode,
                                          IrValueId* statement_expression_result);
 
 typedef struct CIrLowerTypedefState CIrLowerTypedefState;
@@ -18705,6 +18603,7 @@ struct CIrLowerVlaLayoutState
 
 typedef struct CIrBodyTask CIrBodyTask;
 typedef struct CIrSwitchCase CIrSwitchCase;
+typedef struct CIrNodeList CIrNodeList;
 // A function containing labels may re-enter its token stream after jumping
 // over one or more declarations. Reserve fixed-size automatic objects in the
 // entry block before any terminator is emitted. The declaration itself still
@@ -18767,6 +18666,13 @@ typedef enum CIrLowerBodyContinuation
 struct CIrLowerBodyState
 {
     CDeclaration declaration;
+    // The body's COMPOUND_STATEMENT, its items, and the first item it lowers:
+    // a statement expression's tail starts past its leading `({ ... });`.
+    CIrNodeList* list;
+    // The case labels' statements of the switch being dispatched.
+    CIrNodeList const* switch_list;
+    u32 compound;
+    u32 first_item;
     CIrBodyTask* tasks;
     CIrBodyTask* current_task;
     CIrSwitchCase* switch_cases;
@@ -18945,9 +18851,9 @@ struct CIrLowerFrame
         } arithmetic_conditional;
         struct
         {
-            u32* tail_starts;
-            u32* tail_ends;
-            u32* tail_opens;
+            // The block of each leading `({ ... });` split: its rest, past
+            // that item, lowers after the nested block.
+            u32* tail_blocks;
             IrValueId value;
             u32 open;
             u32 close;
@@ -20123,11 +20029,16 @@ BUSTER_C_INTERNAL void c_ir_lower_machine_unwind(CIntegerIrBuilder* builder)
 
 BUSTER_C_INTERNAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* builder, CIrLowerFrame root);
 
-BUSTER_C_INTERNAL bool c_ir_lower_body_frame_push(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode)
+// A body walk over the items of the COMPOUND_STATEMENT at `compound` from
+// `first_item`; `declaration` keeps the body's tokens as provenance.
+BUSTER_C_INTERNAL bool c_ir_lower_body_frame_push(CIntegerIrBuilder* builder, CDeclaration declaration, u32 compound, u32 first_item,
+                                                   bool statement_expression_mode)
 {
     CIrLowerBodyState* state = arena_allocate(builder->temporary_arena, CIrLowerBodyState, 1);
     *state = (CIrLowerBodyState){
         .declaration = declaration,
+        .compound = compound,
+        .first_item = first_item,
         .result = IR_VALUE_ID_INVALID,
         .statement_expression_mode = statement_expression_mode,
     };
@@ -20290,12 +20201,539 @@ BUSTER_C_INTERNAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder*
                                           });
 }
 
+BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count);
+
+// ---- statement nodes (GitHub #4060, #3102 step 2) ------------------------------
+//
+// The statement walker (c_ir_lower_body_advance) reads a body's structure from
+// its statement nodes. Tokens are provenance only: an anchor names the source
+// point a diagnostic, a debug location or a scope lookup reports, and nothing
+// here scans tokens for structure.
+//
+// A statement's token extent is still needed at two kinds of boundary, and
+// both are marked as temporary adapters for #3102 step 5 (#4058) to delete:
+// - The expression, declaration, typedef and assembly frames still read token
+//   ranges until steps 3 and 4 (#4059) lower them from nodes.
+// - Cleanup and break/continue targets ask the parse result's scopes about a
+//   task's first and end tokens (c_ir_cleanup_target_for_task), and the label,
+//   switch-prefix and jump-target tables compare token positions.
+// The extents come from the tree: the items of a list tile its tokens, so an
+// item ends where the next one starts, and the last ends at the list's closing
+// brace. c_ir_node_statement_first gives a statement's first token from its
+// anchor, and c_ir_node_expression_range gives an expression's extent.
+
+BUSTER_C_INTERNAL u64 c_ir_body_nodes_size(CAst const* ast, u32* function_count_out, u32* statement_expression_count_out)
+{
+    u32 functions = 0;
+    u32 statement_expressions = 0;
+    for (u32 node = 1; ast && node < ast->node_count; node += 1)
+    {
+        u8 kind = ast->kinds[node];
+        bool body = ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT;
+        functions += kind == C_AST_FUNCTION_DEFINITION && body;
+        statement_expressions += kind == C_AST_STATEMENT_EXPRESSION && body;
+    }
+    *function_count_out = functions;
+    *statement_expression_count_out = statement_expressions;
+    // Two key arrays and one sort scratch, each with a spare element and
+    // alignment slack.
+    return ((u64)functions + statement_expressions + 3) * sizeof(u64) * 2 + 3 * 16;
+}
+
+BUSTER_C_INTERNAL CIrBodyNodes c_ir_body_nodes_build(Arena* arena, CAst const* ast, u32 function_count, u32 statement_expression_count)
+{
+    CIrBodyNodes nodes = {0};
+    nodes.functions = arena_allocate(arena, u64, function_count + 1);
+    nodes.statement_expressions = arena_allocate(arena, u64, statement_expression_count + 1);
+    u64* scratch = arena_allocate(arena, u64, BUSTER_MAX(function_count, statement_expression_count) + 1);
+    for (u32 node = 1; node < ast->node_count; node += 1)
+    {
+        u8 kind = ast->kinds[node];
+        if (ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT)
+        {
+            u64 key = ((u64)ast->tokens[node - 1] << 32) | (node - 1);
+            if (kind == C_AST_FUNCTION_DEFINITION && nodes.function_count < function_count)
+            {
+                nodes.functions[nodes.function_count++] = key;
+            }
+            else if (kind == C_AST_STATEMENT_EXPRESSION && nodes.statement_expression_count < statement_expression_count)
+            {
+                nodes.statement_expressions[nodes.statement_expression_count++] = key;
+            }
+        }
+    }
+    // Postorder lists a nested definition or statement expression before the
+    // one that encloses it, so both are sorted by brace.
+    c_ir_tree_sort_keys(nodes.functions, scratch, nodes.function_count);
+    c_ir_tree_sort_keys(nodes.statement_expressions, scratch, nodes.statement_expression_count);
+    return nodes;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_body_nodes_find(u64 const* keys, u32 count, u32 brace)
+{
+    u32 low = 0;
+    u32 high = count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if ((u32)(keys[middle] >> 32) < brace)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < count && (u32)(keys[low] >> 32) == brace ? (u32)keys[low] : C_AST_NODE_INVALID;
+}
+
+// The closing delimiter of the `(`, `[` or `{` at `open`: the stream's
+// matching-delimiter fact, read at the provenance boundary above (#4058).
+BUSTER_C_INTERNAL u32 c_ir_node_close(CIntegerIrBuilder* builder, u32 open)
+{
+    u32 close = UINT32_MAX;
+    CToken token = open < builder->preprocess.token_count ? builder->preprocess.tokens[open] : (CToken){0};
+    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        close = c_ir_matching_delimiter_cached(builder, open, (u32)builder->preprocess.token_count, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                               C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    }
+    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+    {
+        close = c_ir_matching_delimiter_cached(builder, open, (u32)builder->preprocess.token_count, C_PUNCTUATOR_LEFT_BRACKET,
+                                               C_PUNCTUATOR_RIGHT_BRACKET);
+    }
+    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+    {
+        close = c_ir_matching_delimiter_cached(builder, open, (u32)builder->preprocess.token_count, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+    }
+    return close;
+}
+
+// Statement kinds the walker lowers. Anything else in a statement position is
+// an expression (a `for` header's init or step) or refused.
+BUSTER_C_INTERNAL bool c_ir_node_is_statement(u8 kind)
+{
+    bool statement = false;
+    switch (kind)
+    {
+    case C_AST_COMPOUND_STATEMENT:
+    case C_AST_EXPRESSION_STATEMENT:
+    case C_AST_NULL_STATEMENT:
+    case C_AST_IF:
+    case C_AST_IF_ELSE:
+    case C_AST_SWITCH:
+    case C_AST_WHILE:
+    case C_AST_DO_WHILE:
+    case C_AST_FOR:
+    case C_AST_GOTO:
+    case C_AST_GOTO_COMPUTED:
+    case C_AST_CONTINUE:
+    case C_AST_BREAK:
+    case C_AST_RETURN:
+    case C_AST_LABELED:
+    case C_AST_CASE:
+    case C_AST_CASE_RANGE:
+    case C_AST_DEFAULT:
+    case C_AST_ATTRIBUTE_STATEMENT:
+    case C_AST_ATTRIBUTED_STATEMENT:
+    case C_AST_ASM:
+    case C_AST_DECLARATION:
+    case C_AST_STATIC_ASSERT:
+    case C_AST_PRAGMA:
+        statement = true;
+        break;
+    default:
+        break;
+    }
+    return statement;
+}
+
+// The statement a label prefix carries: LABELED, CASE, CASE_RANGE and DEFAULT
+// keep it as their last child when they have one, ATTRIBUTED_STATEMENT always.
+// C_AST_NODE_INVALID when the prefix stands alone (C23 allows a label at the
+// end of a block) or `node` is no prefix.
+BUSTER_C_INTERNAL u32 c_ir_node_labeled_statement(CAst const* ast, u32 node)
+{
+    u32 statement = C_AST_NODE_INVALID;
+    switch (ast->kinds[node])
+    {
+    case C_AST_LABELED:
+        statement = (ast->data[node] & 2) ? node - 1 : C_AST_NODE_INVALID;
+        break;
+    case C_AST_CASE:
+    case C_AST_CASE_RANGE:
+    case C_AST_DEFAULT:
+    {
+        u32 minimum = ast->kinds[node] == C_AST_CASE ? 1 : ast->kinds[node] == C_AST_CASE_RANGE ? 2 : 0;
+        statement = c_ast_child_count(ast, node) > minimum ? node - 1 : C_AST_NODE_INVALID;
+    }
+    break;
+    case C_AST_ATTRIBUTED_STATEMENT:
+        statement = node - 1;
+        break;
+    default:
+        break;
+    }
+    return statement;
+}
+
+// One step of c_ir_node_expression_range's explicit stack.
+typedef struct CIrNodeRangeFrame CIrNodeRangeFrame;
+struct CIrNodeRangeFrame
+{
+    u32 node;
+    u32 stage;
+    u32 left_first;
+    u32 right_last;
+};
+
+// Temporary adapter (#4058): the first and last token of the expression at
+// `node`, widened over the parentheses that wrap exactly it. The expression
+// frames read token ranges until step 3 (#4059) lowers expressions from their
+// nodes. Parentheses have no nodes, so a subexpression's extent is its kind's
+// own tokens and its outermost children's widened extents: a pair of
+// parentheses belongs to a child exactly when it encloses nothing else. Only
+// the children on the two outer edges are visited, so a statement expression,
+// a call's arguments or a subscript cost nothing here; the walk keeps its own
+// stack. False for a kind this does not measure.
+BUSTER_C_INTERNAL bool c_ir_node_expression_range(CIntegerIrBuilder* builder, u32 root, u32* first_out, u32* last_out)
+{
+    CAst const* ast = builder->ast;
+    CToken const* tokens = builder->preprocess.tokens;
+    u64 token_count = builder->preprocess.token_count;
+    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+    u32 capacity = ast->extents[root];
+    CIrNodeRangeFrame* stack = arena_allocate(temporary.arena, CIrNodeRangeFrame, capacity);
+    u32 count = 1;
+    stack[0] = (CIrNodeRangeFrame){.node = root};
+    bool measured = true;
+    u32 result_first = 0;
+    u32 result_last = 0;
+    while (count && measured)
+    {
+        CIrNodeRangeFrame* frame = stack + count - 1;
+        u32 node = frame->node;
+        u8 kind = ast->kinds[node];
+        u32 anchor = ast->tokens[node];
+        // The child that supplies the first token (left) and the one that
+        // supplies the last (right); C_AST_NODE_INVALID where the kind's own
+        // tokens do.
+        u32 left = C_AST_NODE_INVALID;
+        u32 right = C_AST_NODE_INVALID;
+        u32 first = anchor;
+        u32 last = anchor;
+        switch (kind)
+        {
+        case C_AST_IDENTIFIER:
+        case C_AST_NUMBER:
+        case C_AST_CHARACTER:
+        case C_AST_BOOLEAN_CONSTANT:
+        case C_AST_NULLPTR:
+            break;
+        case C_AST_STRING:
+            last = anchor + (ast->data[node] ? ast->data[node] - 1 : 0);
+            break;
+        case C_AST_LABEL_ADDRESS:
+            first = anchor - 1;
+            break;
+        case C_AST_STATEMENT_EXPRESSION:
+        case C_AST_INITIALIZER_LIST:
+            last = c_ir_node_close(builder, anchor);
+            break;
+        case C_AST_GENERIC_SELECTION:
+        case C_AST_SIZEOF_TYPE:
+        case C_AST_ALIGNOF_TYPE:
+            last = c_ir_node_close(builder, anchor + 1);
+            break;
+        case C_AST_COMPOUND_LITERAL:
+            last = c_ir_node_close(builder, ast->tokens[node - 1]);
+            break;
+        case C_AST_CALL:
+        case C_AST_INDEX:
+            left = c_ast_child_at(ast, node, 0);
+            last = c_ir_node_close(builder, anchor);
+            break;
+        case C_AST_MEMBER:
+        case C_AST_MEMBER_ARROW:
+        case C_AST_POST_INCREMENT:
+        case C_AST_POST_DECREMENT:
+            left = node - 1;
+            break;
+        case C_AST_PRE_INCREMENT:
+        case C_AST_PRE_DECREMENT:
+        case C_AST_ADDRESS:
+        case C_AST_DEREFERENCE:
+        case C_AST_PLUS:
+        case C_AST_NEGATE:
+        case C_AST_BIT_NOT:
+        case C_AST_LOGICAL_NOT:
+        case C_AST_SIZEOF_EXPRESSION:
+        case C_AST_ALIGNOF_EXPRESSION:
+        case C_AST_REAL:
+        case C_AST_IMAG:
+        case C_AST_EXTENSION:
+        case C_AST_CAST:
+            right = node - 1;
+            break;
+        case C_AST_MULTIPLY:
+        case C_AST_DIVIDE:
+        case C_AST_REMAINDER:
+        case C_AST_ADD:
+        case C_AST_SUBTRACT:
+        case C_AST_SHIFT_LEFT:
+        case C_AST_SHIFT_RIGHT:
+        case C_AST_LESS:
+        case C_AST_GREATER:
+        case C_AST_LESS_EQUAL:
+        case C_AST_GREATER_EQUAL:
+        case C_AST_EQUAL:
+        case C_AST_NOT_EQUAL:
+        case C_AST_BIT_AND:
+        case C_AST_BIT_XOR:
+        case C_AST_BIT_OR:
+        case C_AST_LOGICAL_AND:
+        case C_AST_LOGICAL_OR:
+        case C_AST_CONDITIONAL:
+        case C_AST_CONDITIONAL_OMITTED:
+        case C_AST_ASSIGN:
+        case C_AST_MULTIPLY_ASSIGN:
+        case C_AST_DIVIDE_ASSIGN:
+        case C_AST_REMAINDER_ASSIGN:
+        case C_AST_ADD_ASSIGN:
+        case C_AST_SUBTRACT_ASSIGN:
+        case C_AST_SHIFT_LEFT_ASSIGN:
+        case C_AST_SHIFT_RIGHT_ASSIGN:
+        case C_AST_BIT_AND_ASSIGN:
+        case C_AST_BIT_XOR_ASSIGN:
+        case C_AST_BIT_OR_ASSIGN:
+        case C_AST_COMMA:
+            left = c_ast_subtree_begin(ast, node) + ast->extents[c_ast_child_at(ast, node, 0)] - 1;
+            right = node - 1;
+            break;
+        default:
+            measured = false;
+            break;
+        }
+        if (!measured)
+        {
+            break;
+        }
+        if (frame->stage == 0 && left != C_AST_NODE_INVALID)
+        {
+            frame->stage = 1;
+            stack[count++] = (CIrNodeRangeFrame){.node = left};
+            continue;
+        }
+        if (frame->stage <= 1 && right != C_AST_NODE_INVALID)
+        {
+            frame->stage = 2;
+            stack[count++] = (CIrNodeRangeFrame){.node = right};
+            continue;
+        }
+        first = left != C_AST_NODE_INVALID ? frame->left_first : first;
+        last = right != C_AST_NODE_INVALID ? frame->right_last : last;
+        measured = first <= last && last < token_count;
+        while (measured && first && last + 1 < token_count && c_token_is_punctuator(&tokens[first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_token_is_punctuator(&tokens[last + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) && c_ir_node_close(builder, first - 1) == last + 1)
+        {
+            first -= 1;
+            last += 1;
+        }
+        count -= 1;
+        if (count)
+        {
+            CIrNodeRangeFrame* parent = stack + count - 1;
+            if (parent->stage == 1)
+            {
+                parent->left_first = first;
+            }
+            else
+            {
+                parent->right_last = last;
+            }
+        }
+        else
+        {
+            result_first = first;
+            result_last = last;
+        }
+    }
+    scratch_end(temporary);
+    *first_out = result_first;
+    *last_out = result_last;
+    return measured && !count;
+}
+
+// The first token of the statement at `node`: its anchor, except a `goto`'s
+// (the label follows the keyword), an expression statement's (its `;`; the
+// statement starts with its expression) and an attribute statement's (its
+// `;`; it starts with its attributes). UINT32_MAX when an expression cannot be
+// measured.
+BUSTER_C_INTERNAL u32 c_ir_node_statement_first(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->ast;
+    u32 first = ast->tokens[node];
+    switch (ast->kinds[node])
+    {
+    case C_AST_GOTO:
+        first -= 1;
+        break;
+    case C_AST_EXPRESSION_STATEMENT:
+    {
+        u32 last = 0;
+        first = c_ir_node_expression_range(builder, node - 1, &first, &last) ? first : UINT32_MAX;
+    }
+    break;
+    case C_AST_ATTRIBUTE_STATEMENT:
+        first = ast->tokens[node - 1];
+        break;
+    default:
+        if (!c_ir_node_is_statement(ast->kinds[node]))
+        {
+            u32 last = 0;
+            first = c_ir_node_expression_range(builder, node, &first, &last) ? first : UINT32_MAX;
+        }
+        break;
+    }
+    return first;
+}
+
+// The items of a block in source order, with each item's first token filled
+// on demand (UINT32_MAX until asked) and `end`, the token the last item ends
+// at: a block's `}`. A controlled substatement that is not a block is a list
+// of one, ending where its statement ends. Lists live in the scratch arena
+// for the rest of the body.
+struct CIrNodeList
+{
+    u32* items;
+    u32* firsts;
+    u32 count;
+    u32 end;
+};
+
+BUSTER_C_INTERNAL CIrNodeList* c_ir_node_list_make(CIntegerIrBuilder* builder, u32 count)
+{
+    CIrNodeList* list = 0;
+    if (c_ir_lower_scratch_reservation(builder, sizeof(CIrNodeList) + 2 * sizeof(u32) * ((u64)count + 1), 1, 16))
+    {
+        list = arena_allocate(builder->scratch_arena, CIrNodeList, 1);
+        list->items = arena_allocate(builder->scratch_arena, u32, count + 1);
+        list->firsts = arena_allocate(builder->scratch_arena, u32, count + 1);
+        list->count = count;
+        memset(list->firsts, 0xff, sizeof(u32) * ((u64)count + 1));
+    }
+    return list;
+}
+
+BUSTER_C_INTERNAL CIrNodeList* c_ir_node_block_list(CIntegerIrBuilder* builder, u32 block)
+{
+    CAst const* ast = builder->ast;
+    u32 count = c_ast_child_count(ast, block);
+    u32 close = c_ir_node_close(builder, ast->tokens[block]);
+    CIrNodeList* list = close != UINT32_MAX ? c_ir_node_list_make(builder, count) : 0;
+    if (list)
+    {
+        c_ast_children(ast, block, list->items, count);
+        list->end = close;
+    }
+    return list;
+}
+
+BUSTER_C_INTERNAL CIrNodeList* c_ir_node_single_list(CIntegerIrBuilder* builder, u32 statement, u32 end)
+{
+    CIrNodeList* list = c_ir_node_list_make(builder, 1);
+    if (list)
+    {
+        list->items[0] = statement;
+        list->end = end;
+    }
+    return list;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_node_list_first(CIntegerIrBuilder* builder, CIrNodeList const* list, u32 item)
+{
+    u32 first = list->end;
+    if (item < list->count)
+    {
+        first = list->firsts[item];
+        if (first == UINT32_MAX)
+        {
+            first = c_ir_node_statement_first(builder, list->items[item]);
+            list->firsts[item] = first;
+        }
+    }
+    return first;
+}
+
+// One past the last token of item `item`: where the next item starts.
+BUSTER_C_INTERNAL u32 c_ir_node_list_end(CIntegerIrBuilder* builder, CIrNodeList const* list, u32 item)
+{
+    return c_ir_node_list_first(builder, list, item + 1);
+}
+
+// Where a controlled substatement's task starts and ends, as
+// c_ir_lower_body_advance lowers it. A block whose braces nothing precedes
+// hands its items over; anything else, a block under labels or `[[...]]`
+// included, is lowered as one statement, so the labels lower first and the
+// block then opens. `end` is one past the statement's last token.
+typedef struct CIrNodeControlled CIrNodeControlled;
+struct CIrNodeControlled
+{
+    CIrNodeList const* list;
+    u32 head;
+    u32 start;
+    u32 end;
+};
+
+BUSTER_C_INTERNAL bool c_ir_node_controlled(CIntegerIrBuilder* builder, u32 node, u32 end, CIrNodeControlled* out)
+{
+    CAst const* ast = builder->ast;
+    bool result = false;
+    if (ast->kinds[node] == C_AST_COMPOUND_STATEMENT)
+    {
+        CIrNodeList* list = c_ir_node_block_list(builder, node);
+        result = list != 0;
+        if (result)
+        {
+            *out = (CIrNodeControlled){.list = list, .head = C_AST_NODE_INVALID, .start = ast->tokens[node] + 1, .end = list->end};
+        }
+    }
+    else
+    {
+        u32 first = c_ir_node_statement_first(builder, node);
+        result = first < end;
+        if (result)
+        {
+            *out = (CIrNodeControlled){.head = node, .start = first, .end = end};
+        }
+    }
+    return result;
+}
+
+// Whether the block item at `item` is `({ ... });` exactly: an expression
+// statement whose expression is a statement expression with nothing around it.
+// Returns that statement expression's block, else C_AST_NODE_INVALID.
+BUSTER_C_INTERNAL u32 c_ir_node_statement_expression_item(CIntegerIrBuilder* builder, u32 item)
+{
+    CAst const* ast = builder->ast;
+    u32 block = C_AST_NODE_INVALID;
+    if (ast->kinds[item] == C_AST_EXPRESSION_STATEMENT && ast->kinds[item - 1] == C_AST_STATEMENT_EXPRESSION &&
+        c_ir_node_statement_first(builder, item) == ast->tokens[item - 1])
+    {
+        block = item - 2;
+    }
+    return block;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
     CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_STATEMENT_EXPRESSION);
+    CAst const* ast = builder->ast;
     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
         if (!machine->child_result.success)
@@ -20307,15 +20745,17 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         if (frame->as.statement_expression.tail_index)
         {
             frame->as.statement_expression.tail_index -= 1;
-            u32 tail_index = frame->as.statement_expression.tail_index;
+            u32 block = frame->as.statement_expression.tail_blocks[frame->as.statement_expression.tail_index];
+            CIrNodeList* list = c_ir_node_block_list(builder, block);
+            u32 tail_start = list ? c_ir_node_list_first(builder, list, 1) : UINT32_MAX;
             CDeclaration declaration = {
                 .name = S8("statement expression"),
-                .location = c_ir_token_site(builder, builder->preprocess.tokens[frame->as.statement_expression.tail_opens[tail_index]]),
-                .body_start = frame->as.statement_expression.tail_starts[tail_index],
-                .body_token_count = frame->as.statement_expression.tail_ends[tail_index] - frame->as.statement_expression.tail_starts[tail_index],
+                .location = c_ir_token_site(builder, builder->preprocess.tokens[ast->tokens[block]]),
+                .body_start = tail_start,
+                .body_token_count = list ? list->end - tail_start : 0,
                 .kind = C_DECLARATION_FUNCTION,
             };
-            if (!c_ir_lower_body_frame_push(builder, declaration, true))
+            if (!list || tail_start == UINT32_MAX || !c_ir_lower_body_frame_push(builder, declaration, block, 1, true))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -20329,10 +20769,12 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
         return;
     }
-    u32 open = frame->as.statement_expression.open;
-    u32 close = frame->as.statement_expression.close;
-    if (open >= close || !c_token_is_punctuator(&builder->preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE) ||
-        !c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_RIGHT_BRACE))
+    // Temporary adapter (#4058): the expression machine names the statement
+    // expression by its braces until step 3 (#4059) hands over its node.
+    u32 block = builder->body_nodes ? c_ir_body_nodes_find(builder->body_nodes->statement_expressions,
+                                                           builder->body_nodes->statement_expression_count, frame->as.statement_expression.open)
+                                    : C_AST_NODE_INVALID;
+    if (block == C_AST_NODE_INVALID)
     {
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         return;
@@ -20340,74 +20782,37 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
     // Empty statement-expression wrappers do not introduce declarations or
     // control-flow state. Descend through them iteratively so generated GNU C
     // with deeply nested `({ ({ ... }); })` expressions cannot consume the C
-    // call stack merely to re-enter body lowering.
-    while (open + 4 < close)
+    // call stack merely to re-enter body lowering. A wrapper's one item is
+    // `({ ... });`.
+    for (bool descending = true; descending;)
     {
-        u32 nested_start = open + 1;
-        u32 nested_end = close;
-        if (c_token_is_punctuator(&builder->preprocess.tokens[nested_end - 1], C_PUNCTUATOR_SEMICOLON))
-        {
-            nested_end -= 1;
-        }
-        if (nested_start + 3 >= nested_end || !c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[nested_start + 1], C_PUNCTUATOR_LEFT_BRACE) ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[nested_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-            c_ir_matching_delimiter_cached(builder, nested_start, nested_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) != nested_end - 1)
-        {
-            break;
-        }
-        u32 nested_close = c_ir_matching_delimiter_cached(builder, nested_start + 1, nested_end - 1, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-        if (nested_close != nested_end - 2)
-        {
-            break;
-        }
-        open = nested_start + 1;
-        close = nested_close;
+        u32 inner = c_ast_child_count(ast, block) == 1 ? c_ir_node_statement_expression_item(builder, block - 1) : C_AST_NODE_INVALID;
+        descending = inner != C_AST_NODE_INVALID;
+        block = descending ? inner : block;
     }
-    u32 tail_capacity = (close - open) / 4 + 1;
-    frame->as.statement_expression.tail_starts = arena_allocate(builder->scratch_arena, u32, tail_capacity);
-    frame->as.statement_expression.tail_ends = arena_allocate(builder->scratch_arena, u32, tail_capacity);
-    frame->as.statement_expression.tail_opens = arena_allocate(builder->scratch_arena, u32, tail_capacity);
-    frame->as.statement_expression.tail_count = 0;
-    while (open + 4 < close && c_token_is_punctuator(&builder->preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           c_token_is_punctuator(&builder->preprocess.tokens[open + 2], C_PUNCTUATOR_LEFT_BRACE))
+    // A leading `({ ... });` splits the body: its block lowers first and the
+    // rest of the body, the tail, after it, so each nest level is a body of
+    // its own and not a nested walk.
+    u32 tail_capacity = 0;
+    for (u32 cursor = block; cursor != C_AST_NODE_INVALID;)
     {
-        u32 nested_close = c_ir_matching_delimiter_cached(builder, open + 2, close, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-        if (nested_close == UINT32_MAX || nested_close + 1 >= close ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[nested_close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-            c_ir_matching_delimiter_cached(builder, open + 1, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) != nested_close + 1)
-        {
-            break;
-        }
-        // Only a leading `({ ... });` expression statement splits off a tail.
-        // Without the semicolon the nested statement expression is an operand
-        // of the following tokens (`({ ... }) + 2;`), so the whole body must be
-        // lowered as one unit or the operand's value is lost.
-        u32 tail_start = nested_close + 2;
-        if (tail_start >= close || !c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
-        {
-            break;
-        }
-        tail_start += 1;
-        if (tail_start >= close)
-        {
-            break;
-        }
-        if (frame->as.statement_expression.tail_count >= tail_capacity)
-        {
-            builder->failure_message = S8("C statement-expression nesting exceeds the lowering frame capacity");
-            builder->failure_token_index = open;
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 tail_index = frame->as.statement_expression.tail_count++;
-        frame->as.statement_expression.tail_starts[tail_index] = tail_start;
-        frame->as.statement_expression.tail_ends[tail_index] = close;
-        frame->as.statement_expression.tail_opens[tail_index] = open;
-        open += 2;
-        close = nested_close;
+        u32 inner = c_ast_child_count(ast, cursor) >= 2 ? c_ir_node_statement_expression_item(builder, c_ast_child_at(ast, cursor, 0))
+                                                        : C_AST_NODE_INVALID;
+        tail_capacity += inner != C_AST_NODE_INVALID;
+        cursor = inner;
+    }
+    frame->as.statement_expression.tail_blocks = arena_allocate(builder->scratch_arena, u32, tail_capacity + 1);
+    frame->as.statement_expression.tail_count = 0;
+    for (u32 inner = tail_capacity ? c_ir_node_statement_expression_item(builder, c_ast_child_at(ast, block, 0)) : C_AST_NODE_INVALID;
+         inner != C_AST_NODE_INVALID && frame->as.statement_expression.tail_count < tail_capacity;)
+    {
+        frame->as.statement_expression.tail_blocks[frame->as.statement_expression.tail_count++] = block;
+        block = inner;
+        inner = c_ast_child_count(ast, block) >= 2 ? c_ir_node_statement_expression_item(builder, c_ast_child_at(ast, block, 0)) : C_AST_NODE_INVALID;
     }
     frame->as.statement_expression.tail_index = frame->as.statement_expression.tail_count;
+    u32 open = ast->tokens[block];
+    u32 close = c_ir_node_close(builder, open);
     frame->as.statement_expression.leaf_open = open;
     CDeclaration declaration = {
         .name = S8("statement expression"),
@@ -20417,7 +20822,7 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         .kind = C_DECLARATION_FUNCTION,
     };
     frame->stage = (u8)C_IR_LOWER_STAGE_CHILD;
-    if (!c_ir_lower_body_frame_push(builder, declaration, true))
+    if (close == UINT32_MAX || !c_ir_lower_body_frame_push(builder, declaration, block, 0, true))
     {
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
     }
@@ -43744,8 +44149,24 @@ typedef struct CIrBodyTask CIrBodyTask;
 struct CIrBodyTask
 {
     CIrBodyTaskKind kind;
+    // The task's tokens, kept as provenance: cleanup and loop targets ask the
+    // parse result's scopes about them (c_ir_cleanup_target_for_task), and a
+    // condition task's frame still reads its range (#4058).
     u32 start;
     u32 end;
+    // The statements left to lower, in order: the comma operands of a split
+    // expression statement from `operand`, then the statement at head_plus_one
+    // - 1, which ends at head_end, then items [item, item_count) of `list`.
+    // The case label at stop_plus_one - 1 ends the task: the next label of its
+    // switch that owns statements.
+    CIrNodeList const* list;
+    CIrNodeList const* operands;
+    u32 operand;
+    u32 head_plus_one;
+    u32 head_end;
+    u32 item;
+    u32 item_count;
+    u32 stop_plus_one;
     IrBlockId block;
     IrBlockId continuation;
     IrBlockId break_block;
@@ -44349,6 +44770,16 @@ struct CIrSwitchCase
     u32 label_start;
     u32 content_start;
     u32 content_end;
+    // The label's node and the statement it carries (C_AST_NODE_INVALID for
+    // none). A label that owns statements also records the switch body item
+    // it stands in, where its statement ends, and the items and the stop that
+    // bound its task.
+    u32 node;
+    u32 statement;
+    u32 item;
+    u32 item_count;
+    u32 head_end;
+    u32 stop_plus_one;
     CIrConstantValue low_constant;
     CIrConstantValue high_constant;
     u64 value;
@@ -44414,22 +44845,64 @@ BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder
 typedef struct CIrSubstatementCase CIrSubstatementCase;
 struct CIrSubstatementCase
 {
-    u32 label_start;
-    u32 content_start;
+    u32 node;
+    u32 statement;
     IrBlockId block;
 };
 
 typedef struct CIrLabel CIrLabel;
 
-// The registry is keyed by token index, which is unique across the body, so a
-// nested switch's labels can never be mistaken for an outer switch's. Bodies
-// carry a handful of these at most, so a linear scan is the whole lookup.
-BUSTER_C_INTERNAL CIrSubstatementCase* c_ir_substatement_case_find(CIrLowerBodyState* state, u32 label_start)
+BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 index, u32 end, u32* after_out);
+
+// The rest of `task` after the statement just taken from it, as the task that
+// lowers it from `block`: it opens at `after` and keeps the task's end, its
+// continuation and its loop targets. The caller inherits the scope.
+BUSTER_C_INTERNAL CIrBodyTask c_ir_body_task_rest(CIrBodyTask task, u32 after, IrBlockId block)
+{
+    return (CIrBodyTask){
+        .start = after,
+        .end = task.end,
+        .list = task.list,
+        .operands = task.operands,
+        .operand = task.operand,
+        .head_plus_one = task.head_plus_one,
+        .head_end = task.head_end,
+        .item = task.item,
+        .item_count = task.item_count,
+        .stop_plus_one = task.stop_plus_one,
+        .block = block,
+        .continuation = task.continuation,
+        .break_block = task.break_block,
+        .continue_block = task.continue_block,
+    };
+}
+
+// The task that lowers a controlled substatement (c_ir_node_controlled).
+BUSTER_C_INTERNAL CIrBodyTask c_ir_body_task_controlled(CIrNodeControlled body, IrBlockId block, IrBlockId continuation, IrBlockId break_block,
+                                                         IrBlockId continue_block)
+{
+    return (CIrBodyTask){
+        .start = body.start,
+        .end = body.end,
+        .list = body.list,
+        .item_count = body.list ? body.list->count : 0,
+        .head_plus_one = body.list ? 0 : body.head + 1,
+        .head_end = body.end,
+        .block = block,
+        .continuation = continuation,
+        .break_block = break_block,
+        .continue_block = continue_block,
+    };
+}
+
+// The registry is keyed by the label's node. Bodies carry a handful of these
+// at most, so a linear scan is the whole lookup.
+BUSTER_C_INTERNAL CIrSubstatementCase* c_ir_substatement_case_find(CIrLowerBodyState* state, u32 node)
 {
     CIrSubstatementCase* result = 0;
     for (u32 index = 0; index < state->substatement_case_count && !result; index += 1)
     {
-        if (state->substatement_cases[index].label_start == label_start)
+        if (state->substatement_cases[index].node == node)
         {
             result = state->substatement_cases + index;
         }
@@ -44438,214 +44911,252 @@ BUSTER_C_INTERNAL CIrSubstatementCase* c_ir_substatement_case_find(CIrLowerBodyS
     return result;
 }
 
-// A colon only introduces a labeled statement when it is itself a label,
-// case, or default colon; a conditional's colon can directly precede an
-// `identifier :` pair (`b ? b ? c : s : l`), where `s` is not a label. Pair
-// nested `? :` groups backward to the statement boundary: an unmatched `?`
-// claims the colon for a conditional expression.
-BUSTER_C_INTERNAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at(CToken* tokens, u32 body_start, u32 colon_index)
+// Whether the subtree at `node` holds a named label, or a case label the
+// enclosing switch left inside the statement stream: either makes code after
+// a terminator reachable again.
+BUSTER_C_INTERNAL bool c_ir_node_holds_label(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32 node)
 {
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    u32 pending_colons = 0;
-    u32 scan = colon_index;
-    while (scan > body_start)
+    CAst const* ast = builder->ast;
+    bool found = false;
+    for (u32 cursor = c_ast_subtree_begin(ast, node); cursor <= node && !found; cursor += 1)
     {
-        scan -= 1;
-        CToken token = tokens[scan];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            if (!parentheses)
-            {
-                return false;
-            }
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            if (!brackets)
-            {
-                return false;
-            }
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            if (!braces)
-            {
-                break;
-            }
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces)
-        {
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-            {
-                break;
-            }
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-            {
-                pending_colons += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-            {
-                if (!pending_colons)
-                {
-                    return false;
-                }
-                pending_colons -= 1;
-            }
-        }
+        u8 kind = ast->kinds[cursor];
+        found = kind == C_AST_LABELED ||
+                ((kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT) && c_ir_substatement_case_find(state, cursor));
     }
-    return true;
+    return found;
 }
 
-/* True when the statement beginning at `index` stands where a control statement
-   expects its substatement: directly after an `if (...)`, `for (...)`,
-   `while (...)` or `switch (...)` header, or after `do` or `else`. This is the
-   position that makes both `if (c) again: x -= 1;` and the Duff's-device
-   `if (c) case 1: { ... }` legal — the label prefixes the controlled
-   substatement rather than opening a new statement of the enclosing block. */
-BUSTER_C_SHARED bool c_ir_control_substatement_position(CPreprocessResult const* preprocess, u32 body_start, u32 index)
+// Temporary adapter (#4058): where the declaration frames' range for a block
+// declaration starts. A C23 `[[...]]` or GNU `__attribute__((...))` run ahead
+// of the specifiers lowers nothing: the parser read what it says onto the
+// declared entities (#1685).
+BUSTER_C_INTERNAL u32 c_ir_node_declaration_start(CIntegerIrBuilder* builder, u32 first, u32 end)
 {
-    bool result = false;
-    if (index > body_start && index <= preprocess->token_count)
+    u32 start = first;
+    for (bool attribute_run = true; attribute_run;)
     {
-        CToken previous = preprocess->tokens[index - 1];
-        if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        u32 attribute_end = start;
+        attribute_run = c_parse_c23_attribute_at(builder->preprocess, start, end, &attribute_end) ||
+                        c_ir_gnu_attribute_at(builder, start, end, &attribute_end);
+        start = attribute_end;
+    }
+    return start;
+}
+
+// Whether the DECLARATION at `node` carries `typedef` among its specifiers.
+BUSTER_C_INTERNAL bool c_ir_node_declaration_is_typedef(CAst const* ast, u32 node)
+{
+    u32 specifiers = c_ast_child_at(ast, node, 0);
+    bool result = false;
+    if (specifiers != C_AST_NODE_INVALID && ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS)
+    {
+        u32 floor = c_ast_subtree_begin(ast, specifiers);
+        for (u32 cursor = specifiers; cursor > floor && !result; cursor = c_ast_subtree_begin(ast, cursor - 1))
         {
-            u32 depth = 0;
-            u32 open = UINT32_MAX;
-            for (u32 scan = index - 1; scan >= body_start; scan -= 1)
-            {
-                u8 punctuator = preprocess->tokens[scan].punctuator;
-                if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
-                {
-                    if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                    {
-                        depth += 1;
-                    }
-                    else
-                    {
-                        if (!depth)
-                        {
-                            break;
-                        }
-                        depth -= 1;
-                        if (!depth)
-                        {
-                            open = scan;
-                            break;
-                        }
-                    }
-                }
-                if (scan == body_start)
-                {
-                    break;
-                }
-            }
-            if (open != UINT32_MAX && open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                CToken control = preprocess->tokens[open - 1];
-                result = c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_IF) ||
-                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_FOR) ||
-                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_WHILE) ||
-                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_SWITCH);
-            }
-        }
-        else
-        {
-            result = previous.kind == C_TOKEN_IDENTIFIER &&
-                     (c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_DO) ||
-                      c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_ELSE));
+            result = ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD && ast->data[cursor - 1] == C_AST_WORD_TYPEDEF;
         }
     }
-
     return result;
 }
 
-/* The backward twin of c_parse_c23_attribute_at: true when a C23 attribute
-   specifier ends at `index - 1`, with `start_out` receiving its opening '['.
-   Every scan that skips one reads forwards, because a forward skip is a loop
-   step; the label proof below is the one question in the frontend asked from
-   the far side, and `[[maybe_unused]] again:` puts a ']' where it expects a
-   statement boundary. The walk mirrors the forward one -- depth over
-   brackets, closing on the '[[' that is not nested -- because the contents
-   are a balanced token sequence that may carry brackets of its own. */
-BUSTER_C_INTERNAL bool c_ir_c23_attribute_ends_before(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32* start_out)
+// Whether the COMMA at `node`, which a statement starting at `first` is, stands
+// at the statement's top level rather than inside parentheses: its left
+// operand then starts the statement.
+BUSTER_C_INTERNAL bool c_ir_node_comma_unwrapped(CIntegerIrBuilder* builder, u32 node, u32 first)
 {
-    if (index < body_start + 4 || !c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACKET) ||
-        !c_token_is_punctuator(&preprocess->tokens[index - 2], C_PUNCTUATOR_RIGHT_BRACKET))
-    {
-        return false;
-    }
-    u32 depth = 0;
-    for (u32 scan = index - 3; scan > body_start; scan -= 1)
-    {
-        if (c_token_is_punctuator(&preprocess->tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET))
-        {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&preprocess->tokens[scan], C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            if (depth)
-            {
-                depth -= 1;
-            }
-            else if (c_token_is_punctuator(&preprocess->tokens[scan - 1], C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                *start_out = scan - 1;
-                return true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-    }
-    return false;
+    u32 left_first = 0;
+    u32 left_last = 0;
+    return c_ir_node_expression_range(builder, c_ast_child_at(builder->ast, node, 0), &left_first, &left_last) && left_first == first;
 }
 
-BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
+// The operands of the top-level comma expression at `node`, in order, each to
+// lower as a statement: `a, b, c` is COMMA(COMMA(a, b), c), so the left spine
+// is followed while its commas stay at the top level.
+BUSTER_C_INTERNAL CIrNodeList* c_ir_node_comma_operands(CIntegerIrBuilder* builder, u32 node, u32 first)
 {
-    bool result = false;
-    if (!(body_start >= body_end || body_end > preprocess->token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
-          index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
-          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
-          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
-          // `enum : long { ... };` opens an enum with a fixed underlying type; a tag keyword is never a label.
-          c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
-                                    C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)) ||
-          !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
+    CAst const* ast = builder->ast;
+    u32 count = 1;
+    for (u32 cursor = node; ast->kinds[cursor] == C_AST_COMMA && c_ir_node_comma_unwrapped(builder, cursor, first);
+         cursor = c_ast_child_at(ast, cursor, 0))
     {
-        // Peel any attribute sequence prefixing the label, so the three
-        // proofs below see the token that really precedes the statement.
-        // `if (c) [[unlikely]] again:` needs it twice over: the peel is what
-        // leaves the control-substatement test looking at the ')'.
-        u32 candidate = index;
-        for (u32 attribute_start = 0; c_ir_c23_attribute_ends_before(preprocess, body_start, candidate, &attribute_start);)
-        {
-            candidate = attribute_start;
-        }
-        CToken previous = candidate > body_start ? preprocess->tokens[candidate - 1] : (CToken){0};
-        result = candidate == body_start || c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
-                 (previous.punctuator == C_PUNCTUATOR_COLON && c_ir_label_colon_at(preprocess->tokens, body_start, candidate - 1)) ||
-                 c_ir_control_substatement_position(preprocess, body_start, candidate);
+        count += 1;
     }
+    CIrNodeList* operands = c_ir_node_list_make(builder, count);
+    if (operands)
+    {
+        u32 slot = count;
+        u32 cursor = node;
+        while (slot > 1)
+        {
+            slot -= 1;
+            operands->items[slot] = cursor - 1;
+            cursor = c_ast_child_at(ast, cursor, 0);
+        }
+        operands->items[0] = cursor;
+    }
+    return operands;
+}
 
+// Collects the case labels of the switch at `node`, whose body `body` ends at
+// `after`, into the body state's switch rows in source order. A label reached
+// from an item of the body through label prefixes alone owns the statements
+// from it up to the next such label, which a task of its own lowers; any
+// other is a dispatch target inside those statements (`if (c) case 1: ...`,
+// or a label inside a block of the body, as in Duff's device and SQLite's
+// interpreter). A nested switch owns its own labels.
+BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32 node, CIrNodeControlled body, u32 after)
+{
+    CAst const* ast = builder->ast;
+    u32 body_node = node - 1;
+    CIrNodeList const* list = body.list ? body.list : c_ir_node_single_list(builder, body_node, after);
+    bool result = list != 0;
+    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+    u32 floor = c_ast_subtree_begin(ast, body_node);
+    u32 found_count = 0;
+    for (u32 cursor = body_node + 1; result && cursor > floor;)
+    {
+        u32 visited = cursor - 1;
+        u8 kind = ast->kinds[visited];
+        found_count += kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT;
+        cursor = kind == C_AST_SWITCH ? c_ast_subtree_begin(ast, visited) : visited;
+    }
+    u64* keys = arena_allocate(temporary.arena, u64, found_count + 1);
+    u64* scratch = arena_allocate(temporary.arena, u64, found_count + 1);
+    u32* ranged_nodes = arena_allocate(temporary.arena, u32, found_count + 1);
+    u32* ranged_items = arena_allocate(temporary.arena, u32, found_count + 1);
+    u32 key_count = 0;
+    for (u32 cursor = body_node + 1; result && cursor > floor;)
+    {
+        u32 visited = cursor - 1;
+        u8 kind = ast->kinds[visited];
+        if ((kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT) && key_count < found_count)
+        {
+            keys[key_count++] = ((u64)ast->tokens[visited] << 32) | visited;
+        }
+        cursor = kind == C_AST_SWITCH ? c_ast_subtree_begin(ast, visited) : visited;
+    }
+    c_ir_tree_sort_keys(keys, scratch, key_count);
+    // The labels that own statements, in source order: an item's prefixes
+    // come in source order from the outermost in.
+    u32 ranged_count = 0;
+    for (u32 item = 0; result && item < list->count; item += 1)
+    {
+        u32 cursor = list->items[item];
+        while (cursor != C_AST_NODE_INVALID)
+        {
+            u8 kind = ast->kinds[cursor];
+            if ((kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT) && ranged_count < found_count)
+            {
+                ranged_nodes[ranged_count] = cursor;
+                ranged_items[ranged_count] = item;
+                ranged_count += 1;
+            }
+            cursor = kind == C_AST_LABELED || kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT ||
+                             kind == C_AST_ATTRIBUTED_STATEMENT
+                         ? c_ir_node_labeled_statement(ast, cursor)
+                         : C_AST_NODE_INVALID;
+        }
+    }
+    CIrSwitchCase* cases = state->switch_cases;
+    u32 case_count = 0;
+    u32 ranged_cursor = 0;
+    bool has_default = false;
+    u32 last_ranged_case = UINT32_MAX;
+    for (u32 key = 0; result && key < key_count; key += 1)
+    {
+        u32 label = (u32)keys[key];
+        u8 kind = ast->kinds[label];
+        u32 label_start = ast->tokens[label];
+        bool ranged = ranged_cursor < ranged_count && ranged_nodes[ranged_cursor] == label;
+        u32 item = ranged ? ranged_items[ranged_cursor] : UINT32_MAX;
+        ranged_cursor += ranged;
+        bool is_default = kind == C_AST_DEFAULT;
+        result = !(is_default && has_default) && case_count < state->switch_case_capacity;
+        if (result && !ranged && !case_count)
+        {
+            // With no enclosing case there is no statement stream that
+            // reaches it.
+            builder->failure_message = S8("case label inside a block precedes every case of its switch");
+            builder->failure_token_index = label_start;
+            result = false;
+        }
+        if (!result)
+        {
+            break;
+        }
+        u32 statement = c_ir_node_labeled_statement(ast, label);
+        CIrSwitchCase switch_case = {
+            .label_start = label_start,
+            .content_start = statement != C_AST_NODE_INVALID ? c_ir_node_statement_first(builder, statement)
+                             : ranged                         ? c_ir_node_list_end(builder, list, item)
+                                                              : UINT32_MAX,
+            .content_end = list->end,
+            .node = label,
+            .statement = statement,
+            .item = item,
+            .item_count = list->count,
+            .head_end = ranged ? c_ir_node_list_end(builder, list, item) : UINT32_MAX,
+            .is_default = is_default,
+            .in_substatement = !ranged,
+        };
+        if (ranged)
+        {
+            if (last_ranged_case != UINT32_MAX)
+            {
+                cases[last_ranged_case].content_end = label_start;
+                cases[last_ranged_case].item_count = item + 1;
+                cases[last_ranged_case].stop_plus_one = label + 1;
+            }
+            last_ranged_case = case_count;
+        }
+        if (!is_default)
+        {
+            u32 low = c_ast_child_at(ast, label, 0);
+            u32 low_first = 0;
+            u32 low_last = 0;
+            result = c_ir_node_expression_range(builder, low, &low_first, &low_last);
+            if (result && kind == C_AST_CASE)
+            {
+                result = c_ir_constant_evaluate(builder, low_first, low_last + 1, &switch_case.low_constant) &&
+                         switch_case.low_constant.kind == C_IR_CONSTANT_INTEGER;
+                switch_case.value = switch_case.low_constant.integer;
+                switch_case.high_value = switch_case.value;
+                switch_case.high_constant = switch_case.low_constant;
+            }
+            else if (result)
+            {
+                u32 high_first = 0;
+                u32 high_last = 0;
+                result = c_ir_node_expression_range(builder, c_ast_child_at(ast, label, 1), &high_first, &high_last);
+                if (result && (!c_ir_constant_evaluate(builder, low_first, low_last + 1, &switch_case.low_constant) ||
+                               switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER))
+                {
+                    builder->failure_message = S8("case range lower bound is not an integer constant expression");
+                    builder->failure_token_index = label_start;
+                    result = false;
+                }
+                if (result && (!c_ir_constant_evaluate(builder, high_first, high_last + 1, &switch_case.high_constant) ||
+                               switch_case.high_constant.kind != C_IR_CONSTANT_INTEGER))
+                {
+                    builder->failure_message = S8("case range upper bound is not an integer constant expression");
+                    builder->failure_token_index = high_first;
+                    result = false;
+                }
+                switch_case.value = switch_case.low_constant.integer;
+                switch_case.high_value = switch_case.high_constant.integer;
+                switch_case.is_range = true;
+            }
+        }
+        has_default |= is_default;
+        if (result)
+        {
+            cases[case_count++] = switch_case;
+        }
+    }
+    scratch_end(temporary);
+    state->switch_case_count = case_count;
+    state->switch_list = list;
     return result;
 }
 
@@ -44797,1069 +45308,6 @@ BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 ind
     {
         *after_out = close + 1;
     }
-    return result;
-}
-
-/* The prefix a statement may carry before its unlabelled form. `name :`,
-   `default :`, and `case <constant> :` may repeat before the statement they
-   label, and a controlled substatement is allowed to carry them — `if (c)
-   case 1: { ... }` is the Duff's-device fallthrough shape. C23 adds attribute
-   specifiers to the same prefix, both on a label and directly on the
-   statement, so `if (c) [[unlikely]] { ... }` reaches here too. Measuring the
-   statement has to start past all of it, because the extent of
-   `case 1: { ... }` is the closing brace and not the next semicolon after it,
-   and because a leading '[' would otherwise hide the '{' that says this
-   substatement ends with a body rather than at a semicolon. */
-BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u32 start, u32 end)
-{
-    u32 result = start;
-    bool scanning = result < end;
-    while (scanning)
-    {
-        scanning = false;
-        u32 attribute_end = 0;
-        if (c_parse_c23_attribute_at(preprocess, result, end, &attribute_end))
-        {
-            result = attribute_end;
-            scanning = result < end;
-            continue;
-        }
-        CToken token = preprocess.tokens[result];
-        bool is_case = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
-        if (is_case)
-        {
-            // The label constant may itself be a conditional expression, so the
-            // ':' that ends the label is the one c_ir_label_colon_at accepts.
-            u32 nested = 0;
-            u32 colon = result + 1;
-            while (colon < end)
-            {
-                CToken current = preprocess.tokens[colon];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    nested += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    if (!nested)
-                    {
-                        break;
-                    }
-                    nested -= 1;
-                }
-                else if (!nested && c_token_is_punctuator(&current, C_PUNCTUATOR_COLON) &&
-                         c_ir_label_colon_at(preprocess.tokens, result, colon))
-                {
-                    break;
-                }
-                colon += 1;
-            }
-            if (colon < end && c_token_is_punctuator(&preprocess.tokens[colon], C_PUNCTUATOR_COLON))
-            {
-                result = colon + 1;
-                scanning = result < end;
-            }
-        }
-        // `enum :` opens a C23 enum with a fixed underlying type, never a label.
-        else if (token.kind == C_TOKEN_IDENTIFIER && result + 1 < end &&
-                 c_token_is_punctuator(&preprocess.tokens[result + 1], C_PUNCTUATOR_COLON) &&
-                 !c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM))
-        {
-            result += 2;
-            scanning = result < end;
-        }
-    }
-
-    return result;
-}
-
-// The memoized extent of the statement whose first token (past its labels) is
-// `statement`, as filed by c_ir_statement_end_store, or UINT32_MAX when it is
-// unmeasured or does not fit before `end`. A filed extent was measured by a
-// walk that read no token at or past it, so the same walk under any bound at or
-// past it measures the same statement. A shorter bound refuses the entry and
-// walks, which keeps such a query's answer exactly what the walk alone gives.
-BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 statement, u32 end)
-{
-    u32 result = UINT32_MAX;
-    if (builder->statement_ends_cleared && statement >= builder->body_token_start && statement - builder->body_token_start < builder->body_token_count)
-    {
-        u32 stored = builder->statement_ends_plus_one[statement - builder->body_token_start] - 1;
-        result = stored <= end ? stored : UINT32_MAX;
-    }
-
-    return result;
-}
-
-BUSTER_C_INTERNAL void c_ir_statement_end_store(CIntegerIrBuilder* builder, u32 statement, u32 statement_end)
-{
-    if (builder->statement_ends_plus_one && statement >= builder->body_token_start && statement - builder->body_token_start < builder->body_token_count)
-    {
-        if (!builder->statement_ends_cleared)
-        {
-            memset(builder->statement_ends_plus_one, 0, sizeof(u32) * (u64)builder->body_token_count);
-            builder->statement_ends_cleared = true;
-        }
-        builder->statement_ends_plus_one[statement - builder->body_token_start] = statement_end + 1;
-    }
-}
-
-// An `if` is filed only when its chain ended strictly before the bound it was
-// measured against: the walk then saw the token past it and found no `else`.
-// At the bound it never looked, and a longer bound might find one.
-BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 if_start, u32 if_end, u32 end)
-{
-    if (if_end < end)
-    {
-        c_ir_statement_end_store(builder, if_start, if_end);
-    }
-}
-
-// One statement's extent, as far as it can be measured without looking at the
-// statement's own substatements. `if` is the one form whose extent depends on
-// a chain of them -- an `else` picks up where the then-substatement ended --
-// so it is reported back rather than measured here, and `c_ir_statement_end`
-// is what walks that chain. Everything else either ends at a brace group, ends
-// at a semicolon, or hands the question straight to the statement it controls:
-// the extent of `for (...) while (...) x;` is the extent of `x;`, so the
-// headers are peeled and the walk continues past them. `do` is the exception
-// in the other direction, because its extent runs past the `while (...) ;`
-// that follows its body rather than ending with it; `pending_do` counts the
-// tails the caller still owes, which `c_ir_statement_do_tail_end` consumes.
-//
-// A brace group only ends a statement when it is the controlled body, never
-// when it sits inside an expression: glibc's assert() expands to a GNU
-// statement expression, so `if (p) for (i = 0; i < n; i++) assert(p[i] == 0);`
-// -- SQLite's debug builds are full of that shape -- must be measured as
-// ending at the assert's semicolon and not at its closing brace. Peeling stops
-// at the first token that is not a header keyword, which is the '(' of that
-// expansion, so the semicolon scan below is what measures it.
-typedef struct CIrStatementSpan CIrStatementSpan;
-struct CIrStatementSpan
-{
-    // One past the statement, when it did not reduce to an `if`.
-    u32 end;
-    // The `if` whose extent is this statement's, or UINT32_MAX.
-    u32 if_start;
-    // `do` headers whose `while (...) ;` tails follow the extent above.
-    u32 pending_do;
-    bool valid;
-};
-
-// The headers c_ir_statement_span peeled on its way to the statement it
-// measured: each one's keyword token and the `do` headers peeled before it.
-// Each peeled header is a statement of its own. It ends where the measured
-// statement does, plus the tails of the `do` headers at or after it, so once
-// that end is known c_ir_statement_peels_file files all of them, and a
-// brace-less nest `while (c) while (c) ... x;` is peeled once in total instead
-// of once per enclosing loop (#2676). `starts` and `do_before` are allocated
-// from `arena` at the first peel, with one entry per token of the measured
-// range (`capacity`), since every peel takes at least one: a statement that
-// peels nothing, which is most of them, allocates nothing.
-typedef struct CIrStatementPeels CIrStatementPeels;
-struct CIrStatementPeels
-{
-    Arena* arena;
-    u32* starts;
-    u32* do_before;
-    u32 count;
-    u32 capacity;
-};
-
-BUSTER_C_INTERNAL void c_ir_statement_peels_push(CIrStatementPeels* peels, u32 start, u32 do_before)
-{
-    IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_PEELS, 1);
-    if (!peels->starts)
-    {
-        peels->starts = arena_allocate(peels->arena, u32, peels->capacity);
-        peels->do_before = arena_allocate(peels->arena, u32, peels->capacity);
-    }
-    peels->starts[peels->count] = start;
-    peels->do_before[peels->count] = do_before;
-    peels->count += 1;
-}
-
-BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end, CIrStatementPeels* peels)
-{
-    CPreprocessResult preprocess = builder->preprocess;
-    IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_SPANS, 1);
-    CIrStatementSpan span = {
-        .end = UINT32_MAX,
-        .if_start = UINT32_MAX,
-    };
-    peels->count = 0;
-    u32 cursor = start;
-    bool measured = false;
-    while (!measured && cursor < end)
-    {
-        // A controlled substatement may carry label prefixes, so its extent is
-        // measured from the statement they label.
-        cursor = c_ir_statement_labels_end(preprocess, cursor, end);
-        if (cursor >= end)
-        {
-            measured = true;
-            continue;
-        }
-        // A statement already measured ends where it was filed, whatever it
-        // holds; the `do` headers peeled before it still owe their tails.
-        u32 known = c_ir_statement_end_find(builder, cursor, end);
-        if (known != UINT32_MAX)
-        {
-            span.end = known;
-            span.valid = true;
-            measured = true;
-            continue;
-        }
-        CToken token = preprocess.tokens[cursor];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-            span.end = close == UINT32_MAX ? UINT32_MAX : close + 1;
-            span.valid = close != UINT32_MAX;
-            measured = true;
-            continue;
-        }
-        if (token.kind != C_TOKEN_IDENTIFIER)
-        {
-            break;
-        }
-        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_IF))
-        {
-            span.if_start = cursor;
-            span.valid = true;
-            measured = true;
-            continue;
-        }
-        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DO))
-        {
-            c_ir_statement_peels_push(peels, cursor, span.pending_do);
-            span.pending_do += 1;
-            cursor += 1;
-            continue;
-        }
-        if (!c_token_in_well_known_set(preprocess.spelling_base, token,
-                                       C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH)))
-        {
-            break;
-        }
-        if (cursor + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            measured = true;
-            continue;
-        }
-        u32 header_close =
-            c_ir_matching_delimiter_cached(builder, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (header_close == UINT32_MAX)
-        {
-            measured = true;
-            continue;
-        }
-        c_ir_statement_peels_push(peels, cursor, span.pending_do);
-        cursor = header_close + 1;
-    }
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    for (u32 index = cursor; !measured && index < end; index += 1)
-    {
-        CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            if (!braces)
-            {
-                measured = true;
-                continue;
-            }
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-        {
-            span.end = index + 1;
-            span.valid = true;
-            measured = true;
-        }
-    }
-
-    return span;
-}
-
-// The `while (...) ;` tails owed by the `do` headers a span peeled, consumed
-// in the order the statement writes them: `do do x; while (a); while (b);`
-// closes the inner loop first.
-BUSTER_C_INTERNAL u32 c_ir_statement_do_tail_end(CPreprocessResult preprocess, u32 start, u32 end, u32 pending)
-{
-    u32 result = start;
-    while (pending && result != UINT32_MAX)
-    {
-        if (result >= end || preprocess.tokens[result].kind != C_TOKEN_IDENTIFIER ||
-            !c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[result], C_SYMBOL_WELL_KNOWN_WHILE) || result + 1 >= end ||
-            !c_token_is_punctuator(&preprocess.tokens[result + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            result = UINT32_MAX;
-            continue;
-        }
-        u32 close = c_ir_matching_delimiter(preprocess, result + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close == UINT32_MAX || close + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_SEMICOLON))
-        {
-            result = UINT32_MAX;
-            continue;
-        }
-        result = close + 2;
-        pending -= 1;
-    }
-
-    return result;
-}
-
-// Files every header a span peeled, given where the statement it measured
-// ends. The header that peeled k `do` headers before it ends past the tails of
-// the `pending_do - k` innermost ones, which the statement writes innermost
-// first, so the walk out from the innermost header consumes them in order.
-// The caller only passes an end no token at or past which was read: a span that
-// ended on its own, or an `if` chain that ended strictly before its bound.
-BUSTER_C_INTERNAL void c_ir_statement_peels_file(CIntegerIrBuilder* builder, CIrStatementPeels const* peels, u32 inner_end, u32 pending_do,
-                                                 u32 end)
-{
-    u32 statement_end = inner_end;
-    u32 tails = 0;
-    for (u32 index = peels->count; index > 0 && statement_end != UINT32_MAX; index -= 1)
-    {
-        u32 peel = index - 1;
-        u32 owed = pending_do - peels->do_before[peel];
-        statement_end = c_ir_statement_do_tail_end(builder->preprocess, statement_end, end, owed - tails);
-        tails = owed;
-        if (statement_end != UINT32_MAX)
-        {
-            c_ir_statement_end_store(builder, peels->starts[peel], statement_end);
-        }
-    }
-}
-
-// One past the whole statement at `start`. Only `if` needs a stack: its extent
-// is its else-chain's, and each arm is a statement in its own right, so the
-// arms are walked with explicit frames rather than by recursing. Every `if`
-// the walk completes is filed (c_ir_statement_end_file), and so is every loop,
-// `switch` and `do` header a span peeled (c_ir_statement_peels_file). A
-// statement already filed is not walked again, so lowering an `else if` chain
-// or a brace-less nest of `if`s or loops, which asks for each link's extent in
-// turn, walks each link once in total instead of once per enclosing link.
-BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    typedef struct CIfEndFrame CIfEndFrame;
-    struct CIfEndFrame
-    {
-        u32 start;
-        u32 child_end;
-        u32 pending_do;
-        u8 phase;
-    };
-    CPreprocessResult preprocess = builder->preprocess;
-    u32 completed = UINT32_MAX;
-    // The arm spans of the walk below share the second set of peels.
-    u32 peel_capacity = start < end ? end - start : 1;
-    CIrStatementPeels peels = {
-        .arena = arena,
-        .capacity = peel_capacity,
-    };
-    CIrStatementPeels arm_peels = {
-        .arena = arena,
-        .capacity = peel_capacity,
-    };
-    CIrStatementSpan span =
-        start < end ? c_ir_statement_span(builder, start, end, &peels) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
-    u32 known_if_end = span.valid && span.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, span.if_start, end) : UINT32_MAX;
-    if (span.valid && span.if_start == UINT32_MAX)
-    {
-        completed = c_ir_statement_do_tail_end(preprocess, span.end, end, span.pending_do);
-        c_ir_statement_peels_file(builder, &peels, span.end, span.pending_do, end);
-    }
-    else if (known_if_end != UINT32_MAX)
-    {
-        completed = c_ir_statement_do_tail_end(preprocess, known_if_end, end, span.pending_do);
-        c_ir_statement_peels_file(builder, &peels, known_if_end, span.pending_do, end);
-    }
-    else if (span.valid)
-    {
-        u32 outer_if_end = UINT32_MAX;
-        CIfEndFrame* frames = arena_allocate(arena, CIfEndFrame, end - start + 1);
-        u32 frame_count = 1;
-        bool failed = false;
-        frames[0] = (CIfEndFrame){
-            .start = span.if_start,
-            .pending_do = span.pending_do,
-        };
-        while (frame_count && !failed)
-        {
-            CIfEndFrame* frame = &frames[frame_count - 1];
-            u32 child_start = UINT32_MAX;
-            u32 if_end = UINT32_MAX;
-            if (frame->phase == 0)
-            {
-                u32 condition_close =
-                    frame->start + 1 < end && c_token_is_punctuator(&preprocess.tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-                        ? c_ir_matching_delimiter_cached(builder, frame->start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                        : UINT32_MAX;
-                failed = condition_close == UINT32_MAX;
-                child_start = failed ? UINT32_MAX : condition_close + 1;
-                frame->phase = 1;
-            }
-            else if (frame->phase == 1)
-            {
-                u32 after = frame->child_end;
-                bool has_else = after < end && preprocess.tokens[after].kind == C_TOKEN_IDENTIFIER &&
-                                c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[after], C_SYMBOL_WELL_KNOWN_ELSE);
-                if (has_else)
-                {
-                    child_start = after + 1;
-                    frame->phase = 2;
-                }
-                else
-                {
-                    if_end = after;
-                }
-            }
-            else
-            {
-                if_end = frame->child_end;
-            }
-            if (if_end != UINT32_MAX)
-            {
-                c_ir_statement_end_file(builder, frame->start, if_end, end);
-                completed = c_ir_statement_do_tail_end(preprocess, if_end, end, frame->pending_do);
-                failed = completed == UINT32_MAX;
-                outer_if_end = frame_count == 1 ? if_end : outer_if_end;
-                frame_count -= 1;
-                if (frame_count && !failed)
-                {
-                    frames[frame_count - 1].child_end = completed;
-                }
-            }
-            if (failed || child_start == UINT32_MAX)
-            {
-                continue;
-            }
-            CIrStatementSpan child = c_ir_statement_span(builder, child_start, end, &arm_peels);
-            u32 child_if_end = child.valid && child.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, child.if_start, end) : UINT32_MAX;
-            if (!child.valid)
-            {
-                failed = true;
-            }
-            else if (child.if_start != UINT32_MAX && child_if_end == UINT32_MAX)
-            {
-                frames[frame_count++] = (CIfEndFrame){
-                    .start = child.if_start,
-                    .pending_do = child.pending_do,
-                };
-            }
-            else
-            {
-                u32 child_inner_end = child.if_start != UINT32_MAX ? child_if_end : child.end;
-                u32 child_end = c_ir_statement_do_tail_end(preprocess, child_inner_end, end, child.pending_do);
-                failed = child_end == UINT32_MAX || child_end <= child_start;
-                frame->child_end = child_end;
-                c_ir_statement_peels_file(builder, &arm_peels, child_inner_end, child.pending_do, end);
-            }
-        }
-        completed = failed ? UINT32_MAX : completed;
-        // The headers peeled before the outermost `if` end with its chain, on
-        // the same condition as the `if` itself is filed.
-        if (!failed && outer_if_end < end)
-        {
-            c_ir_statement_peels_file(builder, &peels, outer_if_end, span.pending_do, end);
-        }
-    }
-
-    return completed;
-}
-
-// ---- statement extents from the syntax tree (CIrStatementExtents) ------------------
-
-#if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ir_extent_verify_enabled;
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestIrExtentVerify c_ir_extent_verify_state;
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestIrExtentMutation c_ir_extent_mutation;
-
-void c_test_ir_extent_verify_set(bool enabled)
-{
-    c_ir_extent_verify_enabled = enabled;
-}
-
-CTestIrExtentVerify c_test_ir_extent_verify_take(void)
-{
-    CTestIrExtentVerify taken = c_ir_extent_verify_state;
-    c_ir_extent_verify_state = (CTestIrExtentVerify){0};
-    return taken;
-}
-
-void c_test_ir_extent_mutation_set(CTestIrExtentMutation mutation)
-{
-    c_ir_extent_mutation = mutation;
-}
-#endif
-
-String8 c_ast_extent_fallback_name(CAstExtentFallback reason)
-{
-    String8 name;
-    switch (reason)
-    {
-    case C_AST_EXTENT_FALLBACK_NONE:
-        name = S8("none");
-        break;
-    case C_AST_EXTENT_FALLBACK_INPUT:
-        name = S8("input");
-        break;
-    case C_AST_EXTENT_FALLBACK_ANCHOR:
-        name = S8("anchor");
-        break;
-    case C_AST_EXTENT_FALLBACK_SHAPE:
-        name = S8("shape");
-        break;
-    default:
-        name = S8("?");
-        break;
-    }
-    return name;
-}
-
-// The unit's body index, in a private arena: null when there is no tree, or
-// the arena cannot be reserved or cannot hold the index, and lowering then
-// walks every body.
-BUSTER_C_INTERNAL CIrStatementExtents* c_ir_statement_extents_create(CAst const* ast)
-{
-    CIrStatementExtents* extents = 0;
-    Arena* arena = ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT
-                       ? c_frontend_arena_create((ArenaCreation){0}, C_FRONTEND_RESERVATION_LOWERING)
-                       : 0;
-    u32 floor = arena ? c_ast_subtree_begin(ast, ast->root) : 0;
-    u32 count = 0;
-    for (u32 cursor = arena ? ast->root : 0; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
-    {
-        count += ast->kinds[cursor - 1] == C_AST_FUNCTION_DEFINITION && cursor >= 2 && ast->kinds[cursor - 2] == C_AST_COMPOUND_STATEMENT;
-    }
-    u64 position = arena ? arena->position : 0;
-    bool fits = arena &&
-                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrStatementExtents), 1, BUSTER_ALIGN_OF(CIrStatementExtents)) &&
-                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(u32), 2 * (u64)count + 2, BUSTER_ALIGN_OF(u32));
-    if (arena && !fits)
-    {
-        arena_destroy(arena, 1);
-    }
-    if (fits)
-    {
-        extents = arena_allocate(arena, CIrStatementExtents, 1);
-        *extents = (CIrStatementExtents){.ast = ast, .arena = arena};
-        u32* bodies = arena_allocate(arena, u32, 2 * (u64)count + 2);
-        u32 slot = count;
-        for (u32 cursor = ast->root; cursor > floor && slot; cursor = c_ast_subtree_begin(ast, cursor - 1))
-        {
-            if (ast->kinds[cursor - 1] == C_AST_FUNCTION_DEFINITION && cursor >= 2 && ast->kinds[cursor - 2] == C_AST_COMPOUND_STATEMENT)
-            {
-                slot -= 1;
-                bodies[2 * slot] = ast->tokens[cursor - 2];
-                bodies[2 * slot + 1] = cursor - 2;
-            }
-        }
-        extents->bodies = bodies;
-        extents->body_count = count;
-        extents->body_mark = arena->position;
-    }
-    return extents;
-}
-
-// Opens the next function body, [token_start, token_start + token_count)
-// between its braces. Its table is built only if lowering asks.
-BUSTER_C_INTERNAL void c_ir_statement_extents_open(CIrStatementExtents* extents, u32 token_start, u32 token_count, bool delimiters_valid)
-{
-    extents->token_start = token_start;
-    extents->token_count = token_count;
-    extents->delimiters_valid = delimiters_valid;
-    extents->state = C_IR_EXTENT_UNBUILT;
-}
-
-BUSTER_C_INTERNAL u32 c_ir_statement_extents_body_node(CIrStatementExtents const* extents, u32 brace)
-{
-    u32 low = 0;
-    u32 high = extents->body_count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (extents->bodies[2 * middle] < brace)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low < extents->body_count && extents->bodies[2 * low] == brace ? extents->bodies[2 * low + 1] : C_AST_NODE_INVALID;
-}
-
-// The first token of the statement at `node`, or UINT32_MAX for a kind the
-// table does not measure. Every statement's anchor is its first token except
-// a `goto`'s (its label) and an expression statement's (its `;`): that one
-// starts at the least anchor of its expression, widened over the wrapping
-// parentheses, which have no nodes. The token before a statement ends the
-// previous construct and is never `(`.
-BUSTER_C_INTERNAL u32 c_ir_statement_extents_first(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 floor)
-{
-    u32 first = UINT32_MAX;
-    u32 anchor = ast->tokens[node];
-    switch (ast->kinds[node])
-    {
-    case C_AST_COMPOUND_STATEMENT:
-    case C_AST_NULL_STATEMENT:
-    case C_AST_IF:
-    case C_AST_IF_ELSE:
-    case C_AST_SWITCH:
-    case C_AST_WHILE:
-    case C_AST_DO_WHILE:
-    case C_AST_FOR:
-    case C_AST_GOTO_COMPUTED:
-    case C_AST_CONTINUE:
-    case C_AST_BREAK:
-    case C_AST_RETURN:
-    case C_AST_LABELED:
-    case C_AST_CASE:
-    case C_AST_CASE_RANGE:
-    case C_AST_DEFAULT:
-    case C_AST_ATTRIBUTED_STATEMENT:
-        first = anchor;
-        break;
-    case C_AST_GOTO:
-        first = anchor > floor && preprocess->tokens[anchor - 1].kind == C_TOKEN_IDENTIFIER &&
-                        c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[anchor - 1], C_SYMBOL_WELL_KNOWN_GOTO)
-                    ? anchor - 1
-                    : UINT32_MAX;
-        break;
-    case C_AST_EXPRESSION_STATEMENT:
-    {
-        u32 least = anchor;
-        for (u32 cursor = c_ast_subtree_begin(ast, node); cursor < node; cursor += 1)
-        {
-            least = ast->tokens[cursor] < least ? ast->tokens[cursor] : least;
-        }
-        while (least > floor && c_token_is_punctuator(&preprocess->tokens[least - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            least -= 1;
-        }
-        first = least;
-    }
-    break;
-    default:
-        break;
-    }
-    return first;
-}
-
-// Whether every attribute group of the ATTRIBUTED_STATEMENT at `node` is a
-// standard `[[ ... ]]` group, the only prefix c_ir_statement_labels_end skips.
-BUSTER_C_INTERNAL bool c_ir_statement_extents_standard_attributes(CAst const* ast, u32 node)
-{
-    u32 list = c_ast_subtree_begin(ast, node - 1) - 1;
-    bool standard = ast->kinds[list] == C_AST_ATTRIBUTE_LIST;
-    u32 floor = c_ast_subtree_begin(ast, list);
-    for (u32 cursor = list; standard && cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
-    {
-        standard = ast->kinds[cursor - 1] == C_AST_ATTRIBUTE_STANDARD;
-    }
-    return standard;
-}
-
-// What the grammar puts just before a controlled substatement.
-typedef enum CIrExtentOpener
-{
-    C_IR_EXTENT_OPENER_HEADER,
-    C_IR_EXTENT_OPENER_ELSE,
-    C_IR_EXTENT_OPENER_DO,
-    C_IR_EXTENT_OPENER_COUNT,
-} CIrExtentOpener;
-
-// Files the controlled substatement `child`, whose first token must follow
-// what `opener` names: the `)` closing a header, the `else` keyword, or the
-// `do` at `do_anchor`. False when the opener is
-// not that token, which refuses the whole body. A child whose label prefix
-// the walker would read differently, or whose end no rule states, gets no
-// entry (`entry_declines`) and its queries are walked.
-BUSTER_C_INTERNAL bool c_ir_statement_extents_file(CIrStatementExtents* extents, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 child,
-                                                    CIrExtentOpener opener, u32 do_anchor)
-{
-    CAst const* ast = extents->ast;
-    u32 floor = extents->token_start;
-    u32 limit = extents->token_start + extents->token_count;
-    u32 first = c_ir_statement_extents_first(ast, preprocess, child, floor);
-    bool anchored = true;
-    if (first != UINT32_MAX)
-    {
-        CToken before = preprocess->tokens[first - 1];
-        anchored = first > floor && first < limit &&
-                   (opener == C_IR_EXTENT_OPENER_HEADER ? c_token_is_punctuator(&before, C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                    : opener == C_IR_EXTENT_OPENER_DO
-                        ? first == do_anchor + 1
-                        : before.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess->spelling_base, before, C_SYMBOL_WELL_KNOWN_ELSE));
-        // Entries come in token order (c_ir_statement_extents_build).
-        anchored = anchored && (!extents->entry_count || extents->entries[extents->entry_count - 1].first < first);
-    }
-    // Peel the label and attribute prefix the walker skips.
-    u32 inner = child;
-    bool peelable = first != UINT32_MAX && anchored;
-    bool peeling = peelable;
-    while (peeling)
-    {
-        u32 kind = ast->kinds[inner];
-        u32 anchor = ast->tokens[inner];
-        if (kind == C_AST_LABELED)
-        {
-            peelable = (ast->data[inner] & 3) == 2 && anchor + 1 < limit && c_token_is_punctuator(&preprocess->tokens[anchor + 1], C_PUNCTUATOR_COLON);
-        }
-        else if (kind == C_AST_CASE)
-        {
-            peelable = ast->extents[inner] > 1 && c_ast_subtree_begin(ast, inner - 1) != c_ast_subtree_begin(ast, inner);
-        }
-        else if (kind == C_AST_CASE_RANGE)
-        {
-            peelable = c_ast_child_count(ast, inner) == 3;
-        }
-        else if (kind == C_AST_DEFAULT)
-        {
-            peelable = ast->extents[inner] > 1;
-        }
-        else if (kind == C_AST_ATTRIBUTED_STATEMENT)
-        {
-            peelable = c_ir_statement_extents_standard_attributes(ast, inner);
-        }
-        else
-        {
-            peeling = false;
-            continue;
-        }
-        peeling = peelable;
-        inner -= peelable;
-    }
-    u32 statement = peelable ? c_ir_statement_extents_first(ast, preprocess, inner, floor) : UINT32_MAX;
-    u32 last = statement != UINT32_MAX ? c_parse_plan_statement_last(ast, preprocess, lasts, begin, child, limit) : UINT32_MAX;
-#if BUSTER_INCLUDE_TESTS
-    if (last != UINT32_MAX && c_ir_extent_mutation == C_TEST_IR_EXTENT_MUTATION_DO_TAIL && ast->kinds[inner] == C_AST_DO_WHILE)
-    {
-        last -= 1;
-    }
-    else if (last != UINT32_MAX && c_ir_extent_mutation == C_TEST_IR_EXTENT_MUTATION_DROPPED_ELSE && ast->kinds[inner] == C_AST_IF_ELSE)
-    {
-        u32 then_branch = c_ast_subtree_begin(ast, inner - 1) - 1;
-        last = c_parse_plan_statement_last(ast, preprocess, lasts, begin, then_branch, limit);
-    }
-#endif
-    if (anchored && last != UINT32_MAX)
-    {
-        extents->entries[extents->entry_count++] = (CIrExtentEntry){
-            .first = first,
-            .statement = statement,
-            .end = last + 1,
-            .compound = ast->kinds[inner] == C_AST_COMPOUND_STATEMENT,
-        };
-        extents->statistics.entries += 1;
-    }
-    else if (anchored)
-    {
-        extents->statistics.entry_declines += 1;
-    }
-    return anchored;
-}
-
-// How the table's walk treats a statement kind: a compound statement's items,
-// the statements whose children are controlled substatements, and the
-// labels whose statement may hold some. Every other kind holds none outside
-// an expression and is not visited.
-typedef enum CIrExtentClass
-{
-    C_IR_EXTENT_CLASS_NONE,
-    C_IR_EXTENT_CLASS_COMPOUND,
-    C_IR_EXTENT_CLASS_HEADER,
-    C_IR_EXTENT_CLASS_IF_ELSE,
-    C_IR_EXTENT_CLASS_DO,
-    C_IR_EXTENT_CLASS_LABEL,
-} CIrExtentClass;
-
-BUSTER_GLOBAL_LOCAL u8 const c_ir_extent_kind_class[C_AST_KIND_COUNT] = {
-    [C_AST_COMPOUND_STATEMENT] = C_IR_EXTENT_CLASS_COMPOUND,
-    [C_AST_IF] = C_IR_EXTENT_CLASS_HEADER,
-    [C_AST_WHILE] = C_IR_EXTENT_CLASS_HEADER,
-    [C_AST_SWITCH] = C_IR_EXTENT_CLASS_HEADER,
-    [C_AST_FOR] = C_IR_EXTENT_CLASS_HEADER,
-    [C_AST_IF_ELSE] = C_IR_EXTENT_CLASS_IF_ELSE,
-    [C_AST_DO_WHILE] = C_IR_EXTENT_CLASS_DO,
-    [C_AST_LABELED] = C_IR_EXTENT_CLASS_LABEL,
-    [C_AST_CASE] = C_IR_EXTENT_CLASS_LABEL,
-    [C_AST_CASE_RANGE] = C_IR_EXTENT_CLASS_LABEL,
-    [C_AST_DEFAULT] = C_IR_EXTENT_CLASS_LABEL,
-    [C_AST_ATTRIBUTED_STATEMENT] = C_IR_EXTENT_CLASS_LABEL,
-};
-
-// A statement the walk visits, and how it is controlled: `opener` names what
-// precedes it (C_IR_EXTENT_OPENER_COUNT when it is not a controlled
-// substatement), and `do_anchor` is its `do`.
-typedef struct CIrExtentVisit CIrExtentVisit;
-struct CIrExtentVisit
-{
-    u32 node;
-    u32 do_anchor;
-    u8 opener;
-};
-
-// The current body's table, by one preorder walk over its statements on an
-// explicit stack. Children are pushed last first, so statements are visited
-// and filed in token order. Expressions are not entered, so a statement
-// expression's substatements get no entries.
-BUSTER_C_INTERNAL void c_ir_statement_extents_build(CIrStatementExtents* extents, CPreprocessResult const* preprocess)
-{
-    CAst const* ast = extents->ast;
-    arena_set_position(extents->arena, extents->body_mark);
-    extents->entry_count = 0;
-    u32 limit = extents->token_start + extents->token_count;
-    u32 body = extents->token_start ? c_ir_statement_extents_body_node(extents, extents->token_start - 1) : C_AST_NODE_INVALID;
-    u32 nodes = body != C_AST_NODE_INVALID ? ast->extents[body] : 0;
-    // The table's arrays must fit the private arena; a body whose table does
-    // not is walked, like a body without a tree.
-    u64 position = extents->body_mark;
-    bool fits = c_ir_arena_reservation_advance(extents->arena->reserved_size, &position, sizeof(u32), nodes, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(extents->arena->reserved_size, &position, sizeof(CIrExtentVisit), nodes, BUSTER_ALIGN_OF(CIrExtentVisit)) &&
-                c_ir_arena_reservation_advance(extents->arena->reserved_size, &position, sizeof(CIrExtentEntry), nodes, BUSTER_ALIGN_OF(CIrExtentEntry));
-    CAstExtentFallback refusal = !extents->delimiters_valid || body == C_AST_NODE_INVALID || !fits || limit >= preprocess->token_count ||
-                                         !c_token_is_punctuator(&preprocess->tokens[limit], C_PUNCTUATOR_RIGHT_BRACE)
-                                     ? C_AST_EXTENT_FALLBACK_INPUT
-                                     : C_AST_EXTENT_FALLBACK_NONE;
-    if (!refusal)
-    {
-        u32 begin = c_ast_subtree_begin(ast, body);
-        u32* lasts = arena_allocate(extents->arena, u32, nodes);
-        CIrExtentVisit* stack = arena_allocate(extents->arena, CIrExtentVisit, nodes);
-        extents->entries = arena_allocate(extents->arena, CIrExtentEntry, nodes);
-        memset(lasts, 0, sizeof(u32) * (u64)nodes);
-        u32 depth = 0;
-        stack[depth++] = (CIrExtentVisit){.node = body, .opener = C_IR_EXTENT_OPENER_COUNT};
-        bool anchored = true;
-        while (depth && anchored)
-        {
-            CIrExtentVisit visit = stack[--depth];
-            u32 node = visit.node;
-            u32 anchor = ast->tokens[node];
-            u8 class = c_ir_extent_kind_class[ast->kinds[node]];
-            if (visit.opener != C_IR_EXTENT_OPENER_COUNT)
-            {
-                anchored = c_ir_statement_extents_file(extents, preprocess, lasts, begin, node, (CIrExtentOpener)visit.opener, visit.do_anchor);
-            }
-            if (class == C_IR_EXTENT_CLASS_HEADER || class == C_IR_EXTENT_CLASS_IF_ELSE)
-            {
-                anchored = anchored && anchor + 1 < limit && c_token_is_punctuator(&preprocess->tokens[anchor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            }
-            if (!anchored)
-            {
-                continue;
-            }
-            switch (class)
-            {
-            case C_IR_EXTENT_CLASS_COMPOUND:
-            {
-                u32 floor = c_ast_subtree_begin(ast, node);
-                for (u32 cursor = node; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
-                {
-                    if (c_ir_extent_kind_class[ast->kinds[cursor - 1]])
-                    {
-                        stack[depth++] = (CIrExtentVisit){.node = cursor - 1, .opener = C_IR_EXTENT_OPENER_COUNT};
-                    }
-                }
-            }
-            break;
-            case C_IR_EXTENT_CLASS_HEADER:
-                stack[depth++] = (CIrExtentVisit){.node = node - 1, .opener = C_IR_EXTENT_OPENER_HEADER};
-                break;
-            case C_IR_EXTENT_CLASS_IF_ELSE:
-            {
-                u32 else_branch = node - 1;
-                stack[depth++] = (CIrExtentVisit){.node = else_branch, .opener = C_IR_EXTENT_OPENER_ELSE};
-                stack[depth++] = (CIrExtentVisit){.node = c_ast_subtree_begin(ast, else_branch) - 1, .opener = C_IR_EXTENT_OPENER_HEADER};
-            }
-            break;
-            case C_IR_EXTENT_CLASS_DO:
-                stack[depth++] = (CIrExtentVisit){.node = c_ast_subtree_begin(ast, node - 1) - 1, .do_anchor = anchor, .opener = C_IR_EXTENT_OPENER_DO};
-                break;
-            case C_IR_EXTENT_CLASS_LABEL:
-            {
-                u32 kind = ast->kinds[node];
-                bool labelled = (kind == C_AST_LABELED && (ast->data[node] & 2)) || (kind == C_AST_DEFAULT && ast->extents[node] > 1) ||
-                                (kind == C_AST_CASE && ast->extents[node] > 1 && c_ast_subtree_begin(ast, node - 1) != c_ast_subtree_begin(ast, node)) ||
-                                (kind == C_AST_CASE_RANGE && c_ast_child_count(ast, node) == 3) || kind == C_AST_ATTRIBUTED_STATEMENT;
-                if (labelled && c_ir_extent_kind_class[ast->kinds[node - 1]])
-                {
-                    stack[depth++] = (CIrExtentVisit){.node = node - 1, .opener = C_IR_EXTENT_OPENER_COUNT};
-                }
-            }
-            break;
-            default:
-                break;
-            }
-        }
-        refusal = anchored ? C_AST_EXTENT_FALLBACK_NONE : C_AST_EXTENT_FALLBACK_ANCHOR;
-    }
-    extents->state = refusal ? C_IR_EXTENT_REFUSED : C_IR_EXTENT_BUILT;
-    extents->refusal = refusal;
-    extents->statistics.bodies += 1;
-    extents->statistics.body_fallbacks[refusal] += refusal != C_AST_EXTENT_FALLBACK_NONE;
-    if (refusal)
-    {
-        extents->statistics.reason = refusal;
-        extents->statistics.fallback_token = extents->token_start ? extents->token_start - 1 : 0;
-    }
-}
-
-// The table's answer to c_ir_controlled_body_range(start, end): NONE with the
-// outputs written, or why the walker must answer. An entry answers only when
-// the statement ends within `end`; the walker measures a shorter bound
-// differently (an `else` at the bound is not seen).
-BUSTER_C_INTERNAL CAstExtentFallback c_ir_statement_extents_answer(CIrStatementExtents* extents, CPreprocessResult const* preprocess, u32 start, u32 end,
-                                                                  u32* content_start, u32* content_end, u32* after)
-{
-    if (extents->state == C_IR_EXTENT_UNBUILT)
-    {
-        c_ir_statement_extents_build(extents, preprocess);
-    }
-    CAstExtentFallback walked = extents->refusal;
-    if (extents->state == C_IR_EXTENT_BUILT)
-    {
-        u32 low = 0;
-        u32 high = extents->entry_count;
-        while (low < high)
-        {
-            u32 middle = low + (high - low) / 2;
-            if (extents->entries[middle].first < start)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-        CIrExtentEntry entry = low < extents->entry_count && extents->entries[low].first == start ? extents->entries[low] : (CIrExtentEntry){.end = UINT32_MAX};
-        walked = entry.end <= end ? C_AST_EXTENT_FALLBACK_NONE : C_AST_EXTENT_FALLBACK_SHAPE;
-        if (!walked)
-        {
-            // As c_ir_controlled_body_range: an unlabelled compound statement
-            // hands over its interior, a labelled one keeps its braces.
-            bool interior = entry.compound && entry.statement == start;
-            *content_start = interior ? start + 1 : start;
-            *content_end = interior ? entry.end - 1 : entry.end;
-            *after = entry.end;
-        }
-    }
-    extents->statistics.answers += walked == C_AST_EXTENT_FALLBACK_NONE;
-    extents->statistics.walked[walked] += walked != C_AST_EXTENT_FALLBACK_NONE;
-    return walked;
-}
-
-BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u32* content_start, u32* content_end,
-                                                    u32* after)
-{
-    CPreprocessResult preprocess = builder->preprocess;
-    bool result = false;
-    // Under -fc-ast-pilot the body's extent table answers first; the walk
-    // below answers whatever it does not hold.
-    CAstExtentFallback walked = builder->statement_extents ? c_ir_statement_extents_answer(builder->statement_extents, &preprocess, start, end,
-                                                                                           content_start, content_end, after)
-                                                           : C_AST_EXTENT_FALLBACK_INPUT;
-    result = walked == C_AST_EXTENT_FALLBACK_NONE;
-#if BUSTER_INCLUDE_TESTS
-    // Verify mode: the walk answers every query too, and its answer is the
-    // one lowering gets.
-    bool table_result = result;
-    u32 table_answer[3] = {table_result ? *content_start : 0, table_result ? *content_end : 0, table_result ? *after : 0};
-    bool verifying = c_ir_extent_verify_enabled && builder->statement_extents;
-    if (verifying)
-    {
-        walked = C_AST_EXTENT_FALLBACK_SHAPE;
-        result = false;
-    }
-#endif
-    if (walked)
-    {
-        // Labels prefixing the substatement are part of it, so the extent is
-        // measured from the statement they label while the range still opens
-        // at the first label — that is what lowering has to walk.
-        u32 statement = start < end ? c_ir_statement_labels_end(preprocess, start, end) : end;
-        if (statement < end && c_token_is_punctuator(&preprocess.tokens[statement], C_PUNCTUATOR_LEFT_BRACE))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, statement, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-            if (close != UINT32_MAX)
-            {
-                // An unlabelled compound statement hands its interior straight to
-                // the caller; a labelled one keeps its braces so the stream lowers
-                // the labels first and then the block.
-                *content_start = statement == start ? start + 1 : start;
-                *content_end = statement == start ? close : close + 1;
-                *after = close + 1;
-                result = true;
-            }
-        }
-        else if (statement < end)
-        {
-            u32 statement_end = c_ir_statement_end(arena, builder, statement, end);
-            if (statement_end != UINT32_MAX)
-            {
-                *content_start = start;
-                *content_end = statement_end;
-                *after = statement_end;
-                result = true;
-            }
-        }
-    }
-#if BUSTER_INCLUDE_TESTS
-    if (verifying && table_result)
-    {
-        CTestIrExtentVerify* verify = &c_ir_extent_verify_state;
-        verify->compared += 1;
-        bool agree = result && table_answer[0] == *content_start && table_answer[1] == *content_end && table_answer[2] == *after;
-        if (!agree && verify->first_count < C_TEST_IR_EXTENT_MISMATCH_KEPT)
-        {
-            verify->first[verify->first_count++] = (CTestIrExtentMismatch){
-                .start = start,
-                .end = end,
-                .walker_result = result,
-                .table = {table_answer[0], table_answer[1], table_answer[2]},
-                .walker = {result ? *content_start : 0, result ? *content_end : 0, result ? *after : 0},
-            };
-        }
-        verify->mismatches += !agree;
-    }
-#endif
-
-    return result;
-}
-
-BUSTER_C_INTERNAL bool c_ir_builder_controlled_body_range(CIntegerIrBuilder* builder, u32 start, u32 end, u32* content_start, u32* content_end, u32* after)
-{
-    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    bool result = c_ir_controlled_body_range(temporary.arena, builder, start, end, content_start, content_end, after);
-    scratch_end(temporary);
     return result;
 }
 
@@ -48481,7 +47929,7 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
             // The label constant may itself be a conditional expression, so a
             // ':' claimed by an unmatched '?' does not end the label.
             else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_COLON) &&
-                     c_ir_label_colon_at(preprocess.tokens, index, scan))
+                     c_parse_label_colon_at(preprocess.tokens, index, scan))
             {
                 break;
             }
@@ -48491,46 +47939,36 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
     return (String8){0};
 }
 
-// First index into the builder's label-candidate positions whose token
-// position is >= position; label_candidate_count when none is.
-BUSTER_C_INTERNAL u32 c_ir_label_candidate_lower_bound(CIntegerIrBuilder* builder, u32 position)
+// The nodes a body's tables are built from: the subtrees of its items from
+// the first it lowers, which tile [*begin_out, *end_out). A GNU statement
+// expression nested in the body is part of it; labels have function scope.
+BUSTER_C_INTERNAL void c_ir_lower_body_node_span(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32* begin_out, u32* end_out)
 {
-    u32 low = 0;
-    u32 high = builder->label_candidate_count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (builder->label_candidate_positions[middle] < position)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low;
+    CIrNodeList const* list = state->list;
+    bool any = list && state->first_item < list->count;
+    *begin_out = any ? c_ast_subtree_begin(builder->ast, list->items[state->first_item]) : 0;
+    *end_out = any ? list->items[list->count - 1] + 1 : 0;
 }
-
-BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state,
-                                                              u32 label_capacity, u32 candidate_cursor);
 
 // The conservative jump-target set of a label offset: every label whose
 // address the body names with `&&label`, which is also every label a label
 // difference or static offset table can have been derived from. Offsets move
 // only addresses the body took, so no other label can be the destination.
+// LABEL_ADDRESS is a leaf, so node order is source order.
 BUSTER_C_INTERNAL IrBlockId* c_ir_address_taken_label_blocks(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32* count_out)
 {
-    CDeclaration declaration = state->declaration;
-    u32 body_end = declaration.body_start + declaration.body_token_count;
+    CAst const* ast = builder->ast;
     IrBlockId* blocks = arena_allocate(builder->arena, IrBlockId, state->label_count ? state->label_count : 1);
     u32 count = 0;
-    for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
+    u32 begin = 0;
+    u32 end = 0;
+    c_ir_lower_body_node_span(builder, state, &begin, &end);
+    for (u32 node = begin; node < end; node += 1)
     {
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-            builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER && c_ir_label_address_prefix(builder, declaration.body_start, index))
+        if (ast->kinds[node] == C_AST_LABEL_ADDRESS)
         {
-            CIrLabel* label = c_ir_label_find(state->labels, state->label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+            CIrLabel* label = c_ir_label_find(state->labels, state->label_count, &state->label_index,
+                                              c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[node]]));
             bool known = label == 0;
             for (u32 previous = 0; !known && previous < count; previous += 1)
             {
@@ -48548,14 +47986,16 @@ BUSTER_C_INTERNAL IrBlockId* c_ir_address_taken_label_blocks(CIntegerIrBuilder* 
 
 // Record the function body's jump targets for direct SSA: every named label
 // with the extent of its gotos, and every case/default with its enclosing
-// switch. The function body's walk covers nested statement expressions, so it
-// runs once. A refused carve or a switch without a braced body (whose cases
-// cannot be attributed) disables the declaration shortcut for the function
-// instead of failing the lowering.
+// switch, keyed and sorted by token position. The function body's span covers
+// nested statement expressions, so it runs once. A refused carve, a switch
+// without a braced body (whose cases cannot be attributed) or a switch nest
+// deeper than the body's case count disables the declaration shortcut for the
+// function instead of failing the lowering. A walk from the span's end visits
+// a node before everything inside it, so the switches enclosing a node are a
+// stack.
 BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32 case_count)
 {
-    CDeclaration declaration = state->declaration;
-    u32 body_end = declaration.body_start + declaration.body_token_count;
+    CAst const* ast = builder->ast;
     u32 label_count = state->label_count;
     u64 capacity = (u64)label_count + case_count;
     u64 label_rows = label_count ? label_count : 1;
@@ -48564,97 +48004,95 @@ BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, 
     u64 position = builder->scratch_arena->position;
     bool fits = capacity <= UINT32_MAX &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), capacity * 3, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), label_rows * 3, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u64), (capacity + 1) * 2, BUSTER_ALIGN_OF(u64)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), label_rows * 2, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), switch_rows * 2, BUSTER_ALIGN_OF(u32));
     if (fits)
     {
         u32* targets = arena_allocate(builder->scratch_arena, u32, capacity * 3);
         u32* lowest = targets + capacity;
         u32* highest = lowest + capacity;
-        u32* label_targets = arena_allocate(builder->scratch_arena, u32, label_rows * 3);
-        u32* label_lowest = label_targets + label_rows;
+        u64* keys = arena_allocate(builder->scratch_arena, u64, (capacity + 1) * 2);
+        u64* scratch = keys + capacity + 1;
+        u32* label_lowest = arena_allocate(builder->scratch_arena, u32, label_rows * 2);
         u32* label_highest = label_lowest + label_rows;
-        // Switches whose body the walk is inside, innermost last. Only a
-        // switch that contains a case can matter, so a nest deeper than the
-        // case count is refused like any other unattributable switch.
-        u32* switch_tokens = arena_allocate(builder->scratch_arena, u32, switch_rows * 2);
-        u32* switch_ends = switch_tokens + switch_rows;
+        u32* switch_begins = arena_allocate(builder->scratch_arena, u32, switch_rows * 2);
+        u32* switch_tokens = switch_begins + switch_rows;
         u32 switch_count = 0;
         for (u32 label = 0; label < label_count; label += 1)
         {
-            label_targets[label] = UINT32_MAX;
             label_lowest[label] = UINT32_MAX;
             label_highest[label] = 0;
         }
-        u32 count = 0;
-        u32 next_label = 0;
-        for (u32 index = declaration.body_start; index < body_end && fits; index += 1)
+        // Case rows carry the switch keyword, kept in its own pair of rows
+        // while the walk runs; label rows are filled last.
+        u32 case_rows = 0;
+        u32 begin = 0;
+        u32 end = 0;
+        c_ir_lower_body_node_span(builder, state, &begin, &end);
+        for (u32 node = end; node > begin && fits; node -= 1)
         {
-            while (switch_count && switch_ends[switch_count - 1] < index)
+            u32 visited = node - 1;
+            while (switch_count && switch_begins[switch_count - 1] > visited)
             {
                 switch_count -= 1;
             }
-            CToken token = builder->preprocess.tokens[index];
-            if (next_label < label_count && state->labels[next_label].token_index == index)
+            u8 kind = ast->kinds[visited];
+            if (kind == C_AST_GOTO)
             {
-                label_targets[next_label] = count;
-                targets[count] = index;
-                count += 1;
-                next_label += 1;
-            }
-            if (token.kind != C_TOKEN_IDENTIFIER)
-            {
-                continue;
-            }
-            if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(GOTO)))
-            {
-                CIrLabel* label = index + 1 < body_end && builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER
-                                      ? c_ir_label_find(state->labels, label_count, &state->label_index,
-                                                        c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]))
-                                      : 0;
+                CIrLabel* label = c_ir_label_find(state->labels, label_count, &state->label_index,
+                                                  c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[visited]]));
                 if (label)
                 {
                     u32 label_index = (u32)(label - state->labels);
-                    label_lowest[label_index] = BUSTER_MIN(label_lowest[label_index], index);
-                    label_highest[label_index] = BUSTER_MAX(label_highest[label_index], index);
+                    u32 keyword = ast->tokens[visited] - 1;
+                    label_lowest[label_index] = BUSTER_MIN(label_lowest[label_index], keyword);
+                    label_highest[label_index] = BUSTER_MAX(label_highest[label_index], keyword);
                 }
             }
-            else if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(SWITCH)))
+            else if (kind == C_AST_SWITCH)
             {
-                u32 close = index + 1 < body_end
-                                ? c_ir_matching_delimiter_cached(builder, index + 1, body_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                                : UINT32_MAX;
-                u32 body_close = close < body_end && close + 1 < body_end
-                                     ? c_ir_matching_delimiter_cached(builder, close + 1, body_end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE)
-                                     : UINT32_MAX;
-                fits = body_close < body_end && switch_count < switch_rows;
+                fits = ast->kinds[visited - 1] == C_AST_COMPOUND_STATEMENT && switch_count < switch_rows;
                 if (fits)
                 {
-                    switch_tokens[switch_count] = index;
-                    switch_ends[switch_count] = body_close;
+                    switch_begins[switch_count] = c_ast_subtree_begin(ast, visited - 1);
+                    switch_tokens[switch_count] = ast->tokens[visited];
                     switch_count += 1;
                 }
             }
-            else if (switch_count && c_token_in_well_known_set(builder->preprocess.spelling_base, token,
-                                                               C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT)))
+            else if (switch_count && (kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT))
             {
-                fits = count < capacity;
+                fits = case_rows < case_count;
                 if (fits)
                 {
-                    targets[count] = index;
-                    lowest[count] = switch_tokens[switch_count - 1];
-                    highest[count] = switch_tokens[switch_count - 1];
-                    count += 1;
+                    lowest[case_rows] = switch_tokens[switch_count - 1];
+                    keys[case_rows] = ((u64)ast->tokens[visited] << 32) | case_rows;
+                    case_rows += 1;
                 }
             }
         }
+        u32 count = case_rows;
         for (u32 label = 0; label < label_count && fits; label += 1)
         {
-            fits = label_targets[label] < count;
-            if (fits)
+            keys[count] = ((u64)state->labels[label].token_index << 32) | (u64)(case_rows + label);
+            count += 1;
+        }
+        if (fits)
+        {
+            c_ir_tree_sort_keys(keys, scratch, count);
+            // Rows by source position; a case row keeps its switch in both
+            // bounds, a label row its gotos' extent.
+            u32* case_switches = highest;
+            memcpy(scratch, lowest, sizeof(u32) * case_rows);
+            u32 const* switch_of_case = (u32 const*)scratch;
+            for (u32 row = 0; row < count; row += 1)
             {
-                lowest[label_targets[label]] = label_lowest[label];
-                highest[label_targets[label]] = label_highest[label];
+                u32 source = (u32)keys[row];
+                targets[row] = (u32)(keys[row] >> 32);
+                u32 low = source < case_rows ? switch_of_case[source] : label_lowest[source - case_rows];
+                u32 high = source < case_rows ? switch_of_case[source] : label_highest[source - case_rows];
+                lowest[row] = low;
+                case_switches[row] = high;
             }
         }
         builder->ssa_jump_targets = targets;
@@ -48665,190 +48103,234 @@ BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, 
     builder->ssa_declaration_shortcut_disabled |= !fits;
 }
 
+// Records, for each label of a body, the innermost GNU statement expression
+// that contains it (UINT32_MAX when none does), by the tokens of its braces. A
+// goto may not enter a statement expression, so a label is visible to a goto
+// exactly when its recorded range is empty or contains the goto. A walk from
+// the span's end visits a node before everything inside it, so the statement
+// expressions open around a node are a stack.
+BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
+{
+    CAst const* ast = builder->ast;
+    CIrLabel* labels = state->labels;
+    u32 label_count = state->label_count;
+    u32 begin = 0;
+    u32 end = 0;
+    c_ir_lower_body_node_span(builder, state, &begin, &end);
+    u32 open_count = 0;
+    for (u32 label = 0; label < label_count; label += 1)
+    {
+        labels[label].statement_expression_open = UINT32_MAX;
+        labels[label].statement_expression_close = UINT32_MAX;
+    }
+    for (u32 node = begin; label_count && node < end; node += 1)
+    {
+        open_count += ast->kinds[node] == C_AST_STATEMENT_EXPRESSION;
+    }
+    bool ok = !open_count || c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 3, BUSTER_ALIGN_OF(u32));
+    if (ok && open_count)
+    {
+        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+        u32* begins = arena_allocate(temporary.arena, u32, open_count * 3);
+        u32* opens = begins + open_count;
+        u32* closes = opens + open_count;
+        u32 depth = 0;
+        for (u32 node = end; node > begin; node -= 1)
+        {
+            u32 visited = node - 1;
+            while (depth && begins[depth - 1] > visited)
+            {
+                depth -= 1;
+            }
+            u8 kind = ast->kinds[visited];
+            if (kind == C_AST_STATEMENT_EXPRESSION && depth < open_count)
+            {
+                u32 open = ast->tokens[visited - 1];
+                begins[depth] = c_ast_subtree_begin(ast, visited - 1);
+                opens[depth] = open;
+                closes[depth] = c_ir_node_close(builder, open);
+                depth += 1;
+            }
+            else if (kind == C_AST_LABELED && depth)
+            {
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index,
+                                                  c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[visited]]));
+                if (label && label->token_index == ast->tokens[visited])
+                {
+                    label->statement_expression_open = opens[depth - 1];
+                    label->statement_expression_close = closes[depth - 1];
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return ok;
+}
+
+BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32 label_capacity);
+
+// The body's labels, case labels and statements, counted over its node span
+// to size the label table, the switch rows and the task stack.
 BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
+    CAst const* ast = builder->ast;
     CDeclaration declaration = state->declaration;
-    u32 body_end = declaration.body_start + declaration.body_token_count;
-    u32 label_capacity = 0;
-    // Sizing and filling the label table ask c_ir_named_label_at's question;
-    // the position index already recorded every token that can answer yes,
-    // so both runs enumerate those candidates instead of every body token.
-    u32 candidate_cursor = builder->label_candidates_valid ? c_ir_label_candidate_lower_bound(builder, declaration.body_start) : 0;
-    if (builder->label_candidates_valid)
-    {
-        for (u32 candidate = candidate_cursor; candidate < builder->label_candidate_count; candidate += 1)
-        {
-            u32 index = builder->label_candidate_positions[candidate];
-            if (index >= body_end)
-            {
-                break;
-            }
-            label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
-        }
-    }
-    else
-    {
-        for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
-        {
-            label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end) &&
-                              c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index);
-        }
-    }
-    bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel)) &&
-                       c_ir_lower_scratch_reservation(builder, sizeof(u32), c_ir_label_slot_count(label_capacity), BUSTER_ALIGN_OF(u32));
+    state->list = state->compound != C_AST_NODE_INVALID ? c_ir_node_block_list(builder, state->compound) : 0;
+    bool initialized = state->list != 0;
+    u32 begin = 0;
+    u32 end = 0;
     if (initialized)
     {
-        initialized = c_ir_lower_body_initialize_labels_run(builder, state, label_capacity, candidate_cursor);
+        c_ir_lower_body_node_span(builder, state, &begin, &end);
     }
+    u32 label_capacity = 0;
+    for (u32 node = begin; node < end; node += 1)
+    {
+        label_capacity += ast->kinds[node] == C_AST_LABELED;
+    }
+    BUSTER_UNUSED(declaration);
+    initialized = initialized &&
+                  c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel)) &&
+                  c_ir_lower_scratch_reservation(builder, sizeof(u32), c_ir_label_slot_count(label_capacity), BUSTER_ALIGN_OF(u32)) &&
+                  c_ir_lower_body_initialize_labels_run(builder, state, label_capacity);
     return initialized;
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state,
-                                                              u32 label_capacity, u32 candidate_cursor)
+BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32 label_capacity)
 {
+    CAst const* ast = builder->ast;
     CDeclaration declaration = state->declaration;
     u32 body_end = declaration.body_start + declaration.body_token_count;
+    u32 begin = 0;
+    u32 end = 0;
+    c_ir_lower_body_node_span(builder, state, &begin, &end);
     state->labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
     state->label_count = 0;
     u32 label_slot_count = c_ir_label_slot_count(label_capacity);
     state->label_index.slot_mask = label_slot_count - 1;
     state->label_index.slots = arena_allocate(builder->scratch_arena, u32, label_slot_count);
     memset(state->label_index.slots, 0xff, sizeof(u32) * label_slot_count);
-    for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
+    bool ok = true;
+    // Labels in source order: a prefix chain (`a: b: x;`) puts the inner
+    // label first in node order, so the labels are sorted by token.
     {
-        if (builder->label_candidates_valid)
+        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+        u64* keys = arena_allocate(temporary.arena, u64, label_capacity + 1);
+        u64* scratch = arena_allocate(temporary.arena, u64, label_capacity + 1);
+        u32 key_count = 0;
+        for (u32 node = begin; node < end && key_count < label_capacity; node += 1)
         {
-            if (candidate_cursor >= builder->label_candidate_count)
+            if (ast->kinds[node] == C_AST_LABELED)
             {
-                break;
-            }
-            u32 candidate_position = builder->label_candidate_positions[candidate_cursor];
-            if (candidate_position >= body_end)
-            {
-                break;
-            }
-            candidate_cursor += 1;
-            index = candidate_position;
-            if (index + 1 >= body_end)
-            {
-                break;
+                keys[key_count++] = ((u64)ast->tokens[node] << 32) | node;
             }
         }
-        CToken token = builder->preprocess.tokens[index];
-        bool named_label = c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end) &&
-                           (builder->label_candidates_valid ||
-                            c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index));
-        if (!named_label)
+        c_ir_tree_sort_keys(keys, scratch, key_count);
+        for (u32 key = 0; ok && key < key_count; key += 1)
         {
-            continue;
+            u32 index = (u32)(keys[key] >> 32);
+            String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]);
+            if (c_ir_label_find(state->labels, state->label_count, &state->label_index, name))
+            {
+                builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), name);
+                builder->failure_token_index = index;
+                ok = false;
+                break;
+            }
+            // Labels have function scope, including labels inside a GNU
+            // statement expression. Its nested body walk must reuse the block
+            // already published by the outer walk at this exact source token.
+            CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, name);
+            IrBlockId block = existing_label && existing_label->token_index == index ? existing_label->block : c_ir_block_create(builder);
+            ok = block.value != IR_ID_UNDERLYING_INVALID;
+            if (ok)
+            {
+                state->labels[state->label_count] = (CIrLabel){
+                    .name = name,
+                    .token_index = index,
+                    .block = block,
+                };
+                c_ir_label_index_insert(state->labels, &state->label_index, state->label_count);
+                state->label_count += 1;
+            }
         }
-        if (c_ir_label_find(state->labels, state->label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, token)))
-        {
-            builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, token));
-            builder->failure_token_index = index;
-            return false;
-        }
-        // Labels have function scope, including labels inside a GNU
-        // statement expression. Its nested body walk must reuse the block
-        // already published by the outer walk at this exact source token.
-        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, token));
-        IrBlockId block = existing_label && existing_label->token_index == index ? existing_label->block : c_ir_block_create(builder);
-        if (block.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        state->labels[state->label_count] = (CIrLabel){
-            .name = c_token_spelling(builder->preprocess.spelling_base, token),
-            .token_index = index,
-            .block = block,
-        };
-        c_ir_label_index_insert(state->labels, &state->label_index, state->label_count);
-        state->label_count += 1;
+        scratch_end(temporary);
     }
-    if (!c_ir_label_statement_expression_enclosures(builder, state->labels, state->label_count, declaration.body_start, body_end))
-    {
-        return false;
-    }
-    if (!builder->labels)
+    ok = ok && c_ir_label_statement_expression_enclosures(builder, state);
+    if (ok && !builder->labels)
     {
         builder->labels = state->labels;
         builder->label_index = state->label_index;
         builder->label_count = state->label_count;
     }
-    if (state->label_count && !c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end))
-    {
-        return false;
-    }
-    u64 task_capacity = (u64)declaration.body_token_count + 4;
+    ok = ok && (!state->label_count || c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end));
+    u64 statement_count = 0;
     u32 switch_case_capacity = 0;
-    for (u32 index = declaration.body_start; index < body_end; index += 1)
+    for (u32 node = begin; ok && node < end; node += 1)
     {
-        CToken token = builder->preprocess.tokens[index];
+        u8 kind = ast->kinds[node];
         // Address-of-label is the only body construct that creates label
         // metadata, so its presence decides up front whether the tracking
-        // apparatus runs for this function. A variable sharing a label's
-        // name after a logical && only costs a spurious enable.
-        if (!builder->label_metadata_enabled && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) && index + 1 < body_end &&
-            builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+        // apparatus runs for this function.
+        if (!builder->label_metadata_enabled && kind == C_AST_LABEL_ADDRESS)
         {
-            String8 label_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+            String8 label_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[node]]);
             if (c_ir_label_find(state->labels, state->label_count, &state->label_index, label_name) ||
                 c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, label_name))
             {
                 builder->label_metadata_enabled = true;
             }
         }
-        if (token.kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        bool control = c_token_in_well_known_set(builder->preprocess.spelling_base, token,
-                                                 C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |
-                                                     C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
-        task_capacity += control ? 4 : 0;
-        bool switch_label = c_token_in_well_known_set(builder->preprocess.spelling_base, token,
-                                                      C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT));
-        task_capacity += switch_label;
-        switch_case_capacity += switch_label;
+        statement_count += c_ir_node_is_statement(kind);
+        switch_case_capacity += kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT;
     }
+    // A statement pushes at most five tasks (a `for`: its rest, step, body,
+    // condition and initializer), and a switch one more per case label.
+    u64 task_capacity = statement_count * 5 + switch_case_capacity + 4;
     u64 position = builder->scratch_arena->position;
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u32 case_capacity = switch_case_capacity ? switch_case_capacity : 1;
-    bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrBodyTask), task_capacity, BUSTER_ALIGN_OF(CIrBodyTask)) &&
+    bool fits = ok && c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrBodyTask), task_capacity, BUSTER_ALIGN_OF(CIrBodyTask)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSwitchCase), case_capacity, BUSTER_ALIGN_OF(CIrSwitchCase)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSubstatementCase), case_capacity, BUSTER_ALIGN_OF(CIrSubstatementCase)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrBodyTask), 1, BUSTER_ALIGN_OF(CIrBodyTask));
-    if (task_capacity > UINT32_MAX || !fits)
+    if (ok && (task_capacity > UINT32_MAX || !fits))
     {
         builder->failure_message = S8("C function body task capacity exceeds the lowering scratch reservation");
         builder->lower_machine.failed = true;
-        return false;
+        ok = false;
     }
-    state->tasks = arena_allocate(builder->scratch_arena, CIrBodyTask, (u32)task_capacity);
-    state->switch_cases = arena_allocate(builder->scratch_arena, CIrSwitchCase, switch_case_capacity ? switch_case_capacity : 1);
-    // At most every case label of the body stands in substatement position.
-    state->substatement_cases = arena_allocate(builder->scratch_arena, CIrSubstatementCase, switch_case_capacity ? switch_case_capacity : 1);
-    state->substatement_case_count = 0;
-    state->task_capacity = (u32)task_capacity;
-    state->switch_case_capacity = switch_case_capacity;
-    if (!state->statement_expression_mode && (state->label_count || switch_case_capacity))
+    if (ok)
     {
-        c_ir_ssa_record_jump_targets(builder, state, switch_case_capacity);
+        state->tasks = arena_allocate(builder->scratch_arena, CIrBodyTask, (u32)task_capacity);
+        state->switch_cases = arena_allocate(builder->scratch_arena, CIrSwitchCase, case_capacity);
+        // At most every case label of the body stands in substatement position.
+        state->substatement_cases = arena_allocate(builder->scratch_arena, CIrSubstatementCase, case_capacity);
+        state->substatement_case_count = 0;
+        state->task_capacity = (u32)task_capacity;
+        state->switch_case_capacity = switch_case_capacity;
+        if (!state->statement_expression_mode && (state->label_count || switch_case_capacity))
+        {
+            c_ir_ssa_record_jump_targets(builder, state, switch_case_capacity);
+        }
+        state->task_count = 1;
+        state->tasks[0] = (CIrBodyTask){
+            .start = declaration.body_start,
+            .end = body_end,
+            .list = state->list,
+            .item = state->first_item,
+            .item_count = state->list->count,
+            .block = builder->current_block,
+            .continuation = IR_BLOCK_ID_INVALID,
+            .break_block = IR_BLOCK_ID_INVALID,
+            .continue_block = IR_BLOCK_ID_INVALID,
+            .allow_trailing_expression = state->statement_expression_mode,
+        };
+        state->current_task = arena_allocate(builder->scratch_arena, CIrBodyTask, 1);
+        state->declaration_source = c_ir_site_source_range(declaration.location, declaration.name.length);
+        state->initialized = true;
     }
-    state->task_count = 1;
-    state->tasks[0] = (CIrBodyTask){
-        .start = declaration.body_start,
-        .end = body_end,
-        .block = builder->current_block,
-        .continuation = IR_BLOCK_ID_INVALID,
-        .break_block = IR_BLOCK_ID_INVALID,
-        .continue_block = IR_BLOCK_ID_INVALID,
-        .allow_trailing_expression = state->statement_expression_mode,
-    };
-    state->current_task = arena_allocate(builder->scratch_arena, CIrBodyTask, 1);
-    state->declaration_source = c_ir_site_source_range(declaration.location, declaration.name.length);
-    state->initialized = true;
-    return true;
+    return ok;
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_body_yield(CIntegerIrBuilder* builder, CIrLowerBodyState* state, CIrBodyTask task, u32 index,
@@ -48972,44 +48454,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder*
                                  state->vla_alignment);
 }
 
-// The keyword groups the statement walker classifies its first token
-// against, as C_SYMBOL_WELL_KNOWN_BIT sets: one shift-and-mask each, in
-// place of the spelling ladders they replaced.
-#define C_IR_ASM_KEYWORD_SET (C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
+// The thread-storage keywords a block declaration's specifiers may carry, as a
+// C_SYMBOL_WELL_KNOWN_BIT set.
 #define C_IR_THREAD_LOCAL_KEYWORD_SET (C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU))
-#define C_IR_TAG_KEYWORD_SET (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
-#define C_IR_DECLARATION_INTRODUCER_SET (C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF) | C_IR_TAG_KEYWORD_SET)
-#define C_IR_STATEMENT_KEYWORD_SET                                                                                                         \
-    (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
-     C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
-     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
-     C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_IR_ASM_KEYWORD_SET)
-#if BUSTER_INCLUDE_TESTS
-// Typedef probes the statement walker has made of first tokens on this
-// thread, for the regression c_test_statement_keyword_typedef_probes.
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_first_token_typedef_probe_total;
-
-u64 c_test_ir_first_token_typedef_probes(void)
-{
-    return c_ir_first_token_typedef_probe_total;
-}
-#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() (c_ir_first_token_typedef_probe_total += 1)
-#else
-#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() ((void)0)
-#endif
-
-// The statement keywords that are keywords in every dialect: never a type
-// word and never an entity's name, so the typedef probe below always answers
-// false for them. STATIC_ASSERT is the reserved `_Static_assert` (C23's
-// `static_assert` is respelled to it; an older dialect's keeps its own
-// symbol), and ASM_GNU and ASM_GNU_ALT are the reserved `__asm` and
-// `__asm__`. Plain `asm` is left out: outside the GNU dialects it is an
-// ordinary identifier, and may name a typedef.
-#define C_IR_STATEMENT_ONLY_KEYWORD_SET                                                                                                    \
-    (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
-     C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
-     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
-     C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
 
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
@@ -49017,12 +48464,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
     {
         return false;
     }
+    CAst const* ast = builder->ast;
     bool statement_expression_mode = state->statement_expression_mode;
     CIrLabel* labels = state->labels;
     u32 label_count = state->label_count;
     CIrBodyTask* tasks = state->tasks;
     CIrSwitchCase* switch_cases = state->switch_cases;
-    u32 switch_case_capacity = state->switch_case_capacity;
     u32 task_count = state->task_count;
     IrSourceRange declaration_source = state->declaration_source;
     state->yielded = false;
@@ -49290,15 +48737,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 return false;
             }
             CIrBodyTask task = *state->current_task;
-            tasks[task_count++] = (CIrBodyTask){
-                .start = state->index,
-                .end = task.end,
-                .block = merge,
-                .continuation = task.continuation,
-                .break_block = task.break_block,
-                .continue_block = task.continue_block,
-            };
-            c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
+            tasks[task_count] = c_ir_body_task_rest(task, state->index, merge);
+            c_ir_body_task_inherit_scope(&tasks[task_count], task);
+            task_count += 1;
             // A switch may have no compound-body scope. Its break target is
             // outside the controlled statement, within the keyword's scope.
             CScopeId switch_break_scope = c_ir_scope_for_token(builder, state->switch_statement_start);
@@ -49320,8 +48761,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     state->substatement_cases[state->substatement_case_count++] = (CIrSubstatementCase){
-                        .label_start = switch_cases[current].label_start,
-                        .content_start = switch_cases[current].content_start,
+                        .node = switch_cases[current].node,
+                        .statement = switch_cases[current].statement,
                         .block = switch_cases[current].block,
                     };
                     continue;
@@ -49341,6 +48782,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 tasks[task_count++] = (CIrBodyTask){
                     .start = switch_cases[current].content_start,
                     .end = switch_cases[current].content_end,
+                    .list = state->switch_list,
+                    .head_plus_one = switch_cases[current].statement + 1,
+                    .head_end = switch_cases[current].head_end,
+                    .item = switch_cases[current].item + 1,
+                    .item_count = switch_cases[current].item_count,
+                    .stop_plus_one = switch_cases[current].stop_plus_one,
                     .block = switch_cases[current].block,
                     .continuation = fallthrough,
                     .break_block = merge,
@@ -49384,11 +48831,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
     while (task_count || state->has_current_task)
     {
         CIrBodyTask task = {0};
-        u32 index = 0;
         if (state->has_current_task)
         {
             task = *state->current_task;
-            index = state->index;
             state->has_current_task = false;
         }
         else
@@ -49419,115 +48864,105 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                });
                 return false;
             }
-            index = task.start;
         }
         bool split = false;
-        while (index < task.end)
+        for (;;)
         {
-            if (builder->function->blocks[builder->current_block.value].terminated)
+            // The next statement of the task and one past its last token.
+            u32 node = C_AST_NODE_INVALID;
+            u32 first = UINT32_MAX;
+            u32 after = task.end;
+            if (task.operands)
             {
-                // Dead code after a terminator matters only if a label makes
-                // it reachable again, so this hop goes candidate to candidate
-                // rather than token to token; the not-found landing spot is
-                // task.end - 1, exactly where the scalar scan stopped.
-                u32 found = task.end;
-                if (builder->label_candidates_valid)
-                {
-                    for (u32 candidate = c_ir_label_candidate_lower_bound(builder, index); candidate < builder->label_candidate_count;
-                         candidate += 1)
-                    {
-                        u32 position = builder->label_candidate_positions[candidate];
-                        if (position + 1 >= task.end)
-                        {
-                            break;
-                        }
-                        if (c_ir_named_label_at(&builder->preprocess, task.start, position, task.end))
-                        {
-                            found = position;
-                            break;
-                        }
-                    }
-                }
-                else
-                {
-                    for (u32 position = index; position + 1 < task.end; position += 1)
-                    {
-                        if (c_ir_named_label_at(&builder->preprocess, task.start, position, task.end) &&
-                            c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, position))
-                        {
-                            found = position;
-                            break;
-                        }
-                    }
-                }
-                // A case label the enclosing switch left inside this range is
-                // a re-entry point as well -- the dispatch branches straight
-                // into it -- so dead code ends there the way it ends at a
-                // named label.  A `case` token is no label candidate: the
-                // index records an identifier followed by a colon, and this
-                // one is followed by its constant.  SQLite's interpreter
-                // reaches OP_Next exactly this way, past the `goto next_tail`
-                // of the case above it.
-                for (u32 case_index = 0; case_index < state->substatement_case_count; case_index += 1)
-                {
-                    u32 position = state->substatement_cases[case_index].label_start;
-                    if (position >= index && position < found && position + 1 < task.end)
-                    {
-                        found = position;
-                    }
-                }
-                index = found < task.end ? found : task.end - 1;
-                if (index + 1 >= task.end)
-                {
-                    break;
-                }
+                node = task.operands->items[task.operand];
+                task.operand += 1;
+                task.operands = task.operand < task.operands->count ? task.operands : 0;
             }
-            while (index < task.end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+            else if (task.head_plus_one)
             {
-                index += 1;
+                node = task.head_plus_one - 1;
+                after = task.head_end;
+                task.head_plus_one = 0;
+                first = c_ir_node_statement_first(builder, node);
             }
-            // A C23 attribute specifier sequence may precede a statement, a
-            // label, or a block-scope declaration. None of them is lowered
-            // from the attribute's own tokens, so the walker steps over the
-            // sequence and classifies the statement from the token past it;
-            // `[[fallthrough]];` reduces to the null statement below. A GNU
-            // `__attribute__((...))` list in the same place is stepped over
-            // the same way: the parser already read what it says onto the
-            // declared entities (#1685). The skip is narrower than
-            // c_parse_skip_attributes, whose `__extension__` and asm-label
-            // cases may begin an expression or asm statement instead.
-            for (bool attribute_run = true; attribute_run;)
+            else if (task.list && task.item < task.item_count)
             {
-                u32 attribute_end = index;
-                attribute_run = c_parse_c23_attribute_at(builder->preprocess, index, task.end, &attribute_end) ||
-                                c_ir_gnu_attribute_at(builder, index, task.end, &attribute_end);
-                index = attribute_end;
+                node = task.list->items[task.item];
+                first = c_ir_node_list_first(builder, task.list, task.item);
+                after = c_ir_node_list_end(builder, task.list, task.item);
+                task.item += 1;
             }
-            if (index >= task.end)
+            else
             {
                 break;
             }
-            CToken first = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_BRACE))
+            // The next case of the switch that owns statements ends this
+            // case's statements; its own task lowers it.
+            if (task.stop_plus_one == node + 1)
             {
-                u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-                IrBlockId after_block = c_ir_block_create(builder);
-                if (close == UINT32_MAX || after_block.value == IR_ID_UNDERLYING_INVALID)
+                task.list = 0;
+                break;
+            }
+            u8 kind = ast->kinds[node];
+            if (builder->function->blocks[builder->current_block.value].terminated)
+            {
+                // Dead code matters only where a label makes it reachable
+                // again. A label prefix is entered as usual; a statement with
+                // no label inside is skipped; a block is opened as usual, so
+                // its own walk skips up to the label; any other statement
+                // with a label inside lowers from a block nothing branches
+                // to, and the label's block is reached by its jumps alone.
+                bool prefix = kind == C_AST_LABELED || kind == C_AST_ATTRIBUTED_STATEMENT ||
+                              ((kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT) && c_ir_substatement_case_find(state, node));
+                if (!prefix && !c_ir_node_holds_label(builder, state, node))
+                {
+                    continue;
+                }
+                if (!prefix && kind != C_AST_COMPOUND_STATEMENT && !c_ir_switch_block(builder, c_ir_block_create(builder)))
                 {
                     return false;
                 }
+            }
+            if (!c_ir_node_is_statement(kind))
+            {
+                // An expression standing as a statement: a comma operand of
+                // a split expression statement, or a `for` header's init or
+                // step. It is measured here; its end is the token after it.
+                u32 last = 0;
+                if (!c_ir_node_expression_range(builder, node, &first, &last))
+                {
+                    return false;
+                }
+                after = last + 1;
+            }
+            if (first == UINT32_MAX)
+            {
+                return false;
+            }
+            builder->failure_token_index = first;
+            CToken first_token = builder->preprocess.tokens[first];
+            u32 anchor = ast->tokens[node];
+            // Where the statement's token range ends for the frames that still
+            // read one (#4058): its `;`, or the task's end for a `for` step,
+            // which has none.
+            u32 semicolon = after - 1;
+            u32 next = after;
+            if (kind == C_AST_COMPOUND_STATEMENT)
+            {
+                CIrNodeList* inner = c_ir_node_block_list(builder, node);
+                IrBlockId after_block = c_ir_block_create(builder);
+                if (!inner || after_block.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                tasks[task_count] = c_ir_body_task_rest(task, after, after_block);
+                c_ir_body_task_inherit_scope(&tasks[task_count], task);
+                task_count += 1;
                 tasks[task_count++] = (CIrBodyTask){
-                    .start = close + 1,
-                    .end = task.end,
-                    .block = after_block,
-                    .continuation = task.continuation,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                };
-                c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = index + 1,
-                    .end = close,
+                    .start = anchor + 1,
+                    .end = inner->end,
+                    .list = inner,
+                    .item_count = inner->count,
                     .block = builder->current_block,
                     .continuation = after_block,
                     .break_block = task.break_block,
@@ -49538,69 +48973,33 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 split = true;
                 break;
             }
-            if (c_token_is_punctuator(&first, C_PUNCTUATOR_SEMICOLON))
+            switch (kind)
             {
-                index += 1;
+            case C_AST_NULL_STATEMENT:
+            case C_AST_ATTRIBUTE_STATEMENT:
+            case C_AST_PRAGMA:
+            // Parsing checks immediate assertions; the translation-unit
+            // deferred pass checks the rest before any function is lowered.
+            case C_AST_STATIC_ASSERT:
                 continue;
-            }
-            builder->failure_token_index = index;
-            CEntityId first_entity = first.kind == C_TOKEN_IDENTIFIER ? c_ir_identifier_entity(builder, index) : C_ENTITY_ID_INVALID;
-            bool first_is_typedef_name =
-                first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF;
-            // An unbound prefix reads the token's own lexical scope, but a
-            // declarator is not visible before itself: `for (T T = 0; ...)`
-            // still starts with the outer typedef name. A statement keyword
-            // is never a typedef name, so it skips the lookup; on the
-            // self-host they are four in five of the unbound first tokens
-            // (GitHub #3102).
-            bool first_is_unbound_typedef_name = false;
-            bool first_is_statement_keyword = first.kind == C_TOKEN_IDENTIFIER &&
-                                              c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_ONLY_KEYWORD_SET);
-            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID && !first_is_statement_keyword)
+            case C_AST_ATTRIBUTED_STATEMENT:
+                // Nothing lowers from the attributes: the parser read what
+                // they say onto the declared entities (#1685), and
+                // `[[fallthrough]]` has no effect here.
+                task.head_plus_one = node;
+                task.head_end = after;
+                continue;
+            case C_AST_LABELED:
             {
-                // Without a scope the type test answers from the type keywords
-                // alone. A type keyword names no entity, so its answer stands
-                // without the scope-chain lookup, which climbs every enclosing
-                // block: a declaration at each level of an N-deep nest paid
-                // N^2 levels (#3894).
-                first_is_unbound_typedef_name = c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first);
-                if (!first_is_unbound_typedef_name)
-                {
-                    C_IR_FIRST_TOKEN_TYPEDEF_PROBE();
-                    CScopeId token_scope = c_ir_scope_for_token(builder, index);
-                    CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, token_scope, index);
-                    first_is_unbound_typedef_name =
-                        visible.value < builder->parse.entity_count && builder->parse.entities[visible.value].kind == C_ENTITY_TYPEDEF;
-                }
-            }
-#if BUSTER_REFERENCE_CHECKS
-            // The lookup the gate skips, kept as the reference: a Debug or
-            // sanitized build checks that it answers false for every gated keyword.
-            if (first_is_statement_keyword && first_entity.value == C_ID_UNDERLYING_INVALID)
-            {
-                CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, c_ir_scope_for_token(builder, index), index);
-                BUSTER_CHECK(visible.value >= builder->parse.entity_count &&
-                             !c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first));
-            }
-            // The type-word tests below read the symbol's word bits; the
-            // spelling ladder they replace is the reference.
-            if (first.kind == C_TOKEN_IDENTIFIER)
-            {
-                BUSTER_CHECK(c_parse_type_word_for_dialect_token(builder->preprocess, first) ==
-                             c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect));
-            }
-#endif
-            if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
-                c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
-            {
-                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, first));
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base,
+                                                                                                                builder->preprocess.tokens[anchor]));
                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
                 if (!label)
                 {
                     return false;
                 }
                 if (!current->terminated && !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1,
-                                                            c_ir_token_source_range(builder, first)))
+                                                            c_ir_token_source_range(builder, first_token)))
                 {
                     return false;
                 }
@@ -49608,18 +49007,27 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                index += 2;
+                u32 statement = c_ir_node_labeled_statement(ast, node);
+                task.head_plus_one = statement + 1;
+                task.head_end = after;
                 continue;
             }
-            // A case label the enclosing switch left inside this range: enter
-            // its dispatch block exactly the way a named label is entered, so
-            // the fallthrough edge and the switch edge meet in the same block.
-            CIrSubstatementCase* substatement_case = c_ir_substatement_case_find(state, index);
-            if (substatement_case)
+            case C_AST_CASE:
+            case C_AST_CASE_RANGE:
+            case C_AST_DEFAULT:
             {
+                // A case label the enclosing switch left inside this task:
+                // enter its dispatch block exactly the way a named label is
+                // entered, so the fallthrough edge and the switch edge meet
+                // in the same block.
+                CIrSubstatementCase* substatement_case = c_ir_substatement_case_find(state, node);
+                if (!substatement_case)
+                {
+                    return false;
+                }
                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
                 if (!current->terminated && !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &substatement_case->block, 1,
-                                                            c_ir_token_source_range(builder, first)))
+                                                            c_ir_token_source_range(builder, first_token)))
                 {
                     return false;
                 }
@@ -49627,305 +49035,51 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                index = substatement_case->content_start;
+                u32 statement = c_ir_node_labeled_statement(ast, node);
+                task.head_plus_one = statement + 1;
+                task.head_end = after;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_STATIC_ASSERT))
+            case C_AST_SWITCH:
             {
-                u32 assertion_end = index + 1;
-                u32 assertion_depth = 0;
-                while (assertion_end < task.end)
-                {
-                    CToken assertion_token = builder->preprocess.tokens[assertion_end];
-                    if (c_token_is_punctuator(&assertion_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        assertion_depth += 1;
-                    }
-                    else if (c_token_is_punctuator(&assertion_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                    {
-                        if (!assertion_depth)
-                        {
-                            return false;
-                        }
-                        assertion_depth -= 1;
-                    }
-                    else if (!assertion_depth && c_token_is_punctuator(&assertion_token, C_PUNCTUATOR_SEMICOLON))
-                    {
-                        break;
-                    }
-                    assertion_end += 1;
-                }
-                if (assertion_end >= task.end)
+                u32 condition_close = c_ir_node_close(builder, anchor + 1);
+                CIrNodeControlled body = {0};
+                if (condition_close == UINT32_MAX || !c_ir_node_controlled(builder, node - 1, after, &body) ||
+                    !c_ir_lower_switch_cases(builder, state, node, body, after))
                 {
                     return false;
                 }
-                // Parsing checks immediate assertions; the translation-unit
-                // deferred pass checks the rest before any function is lowered.
-                // Consume the declaration without evaluating or diagnosing it twice.
-                index = assertion_end + 1;
-                continue;
-            }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))
-            {
-                if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    return false;
-                }
-                u32 expression_close =
-                    c_ir_matching_delimiter_cached(builder, index + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (expression_close == UINT32_MAX || expression_close == index + 2 || expression_close + 1 >= task.end)
-                {
-                    return false;
-                }
-                u32 body_start = 0;
-                u32 body_close = 0;
-                u32 body_after = 0;
-                if (!c_ir_builder_controlled_body_range(builder, expression_close + 1, task.end, &body_start, &body_close, &body_after))
-                {
-                    return false;
-                }
-                CIrSwitchCase* cases = switch_cases;
-                u32 case_count = 0;
-                u32 brace_depth = 0;
-                bool has_default = false;
-                // The last case that owns a token range. A label standing as a
-                // control statement's substatement owns none, so it neither
-                // closes the previous case's range nor opens one of its own.
-                u32 last_ranged_case = UINT32_MAX;
-                for (u32 scan = body_start; scan < body_close; scan += 1)
-                {
-                    CToken token = builder->preprocess.tokens[scan];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        brace_depth += 1;
-                        continue;
-                    }
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                    {
-                        if (!brace_depth)
-                        {
-                            return false;
-                        }
-                        brace_depth -= 1;
-                        continue;
-                    }
-                    // A nested switch owns every label in its own controlled
-                    // statement, whether or not that statement is a block, so
-                    // step over the whole of it rather than relying on brace
-                    // depth to tell the two switches apart.
-                    if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SWITCH) &&
-                        scan + 1 < body_close && c_token_is_punctuator(&builder->preprocess.tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        u32 nested_condition_close =
-                            c_ir_matching_delimiter_cached(builder, scan + 1, body_close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                        u32 nested_open = 0;
-                        u32 nested_close = 0;
-                        u32 nested_after = 0;
-                        if (nested_condition_close == UINT32_MAX ||
-                            !c_ir_builder_controlled_body_range(builder, nested_condition_close + 1, body_close, &nested_open, &nested_close, &nested_after))
-                        {
-                            return false;
-                        }
-                        scan = nested_after - 1;
-                        continue;
-                    }
-                    bool is_case = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
-                    bool is_default = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DEFAULT);
-                    if (!is_case && !is_default)
-                    {
-                        continue;
-                    }
-                    u32 colon = scan + 1;
-                    u32 range_operator = UINT32_MAX;
-                    u32 nested = 0;
-                    while (colon < body_close)
-                    {
-                        CToken colon_token = builder->preprocess.tokens[colon];
-                        if (c_token_is_punctuator(&colon_token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-                            c_token_is_punctuator(&colon_token, C_PUNCTUATOR_LEFT_BRACKET))
-                        {
-                            nested += 1;
-                        }
-                        else if (c_token_is_punctuator(&colon_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-                                 c_token_is_punctuator(&colon_token, C_PUNCTUATOR_RIGHT_BRACKET))
-                        {
-                            if (!nested)
-                            {
-                                return false;
-                            }
-                            nested -= 1;
-                        }
-                        // The label constant may itself be a conditional
-                        // expression, so a ':' claimed by an unmatched '?'
-                        // does not end the label.
-                        else if (!nested && c_token_is_punctuator(&colon_token, C_PUNCTUATOR_COLON) &&
-                                 c_ir_label_colon_at(builder->preprocess.tokens, scan, colon))
-                        {
-                            break;
-                        }
-                        else if (!nested && c_token_is_punctuator(&colon_token, C_PUNCTUATOR_ELLIPSIS))
-                        {
-                            if (range_operator != UINT32_MAX)
-                            {
-                                builder->failure_message = S8("malformed GNU case range");
-                                builder->failure_token_index = colon;
-                                return false;
-                            }
-                            range_operator = colon;
-                        }
-                        colon += 1;
-                    }
-                    if (colon >= body_close)
-                    {
-                        if (range_operator != UINT32_MAX)
-                        {
-                            builder->failure_message = S8("malformed GNU case range");
-                            builder->failure_token_index = range_operator;
-                        }
-                        return false;
-                    }
-                    if ((is_default && colon != scan + 1) || (is_case && colon == scan + 1) || (is_default && has_default))
-                    {
-                        return false;
-                    }
-                    if (case_count >= switch_case_capacity)
-                    {
-                        return false;
-                    }
-                    // A label in substatement position only becomes a dispatch
-                    // target; the enclosing case keeps the tokens, and its
-                    // statement stream branches into the block at the label.
-                    // The very first label of a switch is never treated that
-                    // way: with no enclosing case there would be no stream to
-                    // reach it from.
-                    // A label inside a block of the body is a dispatch target
-                    // the same way a control statement's substatement label is:
-                    // the block's tokens belong to the case that opened it, and
-                    // SQLite's VDBE interpreter falls out of one opcode's block
-                    // into the next opcode's label that way.  With no enclosing
-                    // case there is no stream that reaches it.
-                    if (brace_depth && !case_count)
-                    {
-                        builder->failure_message = S8("case label inside a block precedes every case of its switch");
-                        builder->failure_token_index = scan;
-                        return false;
-                    }
-                    bool in_substatement =
-                        case_count != 0 && (brace_depth != 0 || c_ir_control_substatement_position(&builder->preprocess, body_start, scan));
-                    if (!in_substatement)
-                    {
-                        if (last_ranged_case != UINT32_MAX)
-                        {
-                            cases[last_ranged_case].content_end = scan;
-                        }
-                        last_ranged_case = case_count;
-                    }
-                    CIrSwitchCase switch_case = {
-                        .label_start = scan,
-                        .content_start = colon + 1,
-                        .is_default = is_default,
-                        .in_substatement = in_substatement,
-                    };
-                    if (is_case)
-                    {
-                        if (range_operator == UINT32_MAX)
-                        {
-                            if (!c_ir_constant_evaluate(builder, scan + 1, colon, &switch_case.low_constant) ||
-                                switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER)
-                            {
-                                return false;
-                            }
-                            switch_case.value = switch_case.low_constant.integer;
-                            switch_case.high_value = switch_case.value;
-                            switch_case.high_constant = switch_case.low_constant;
-                        }
-                        else
-                        {
-                            if (range_operator == scan + 1 || range_operator + 1 >= colon)
-                            {
-                                builder->failure_message = S8("malformed GNU case range");
-                                builder->failure_token_index = range_operator;
-                                return false;
-                            }
-                            if (!c_ir_constant_evaluate(builder, scan + 1, range_operator, &switch_case.low_constant) ||
-                                switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER)
-                            {
-                                builder->failure_message = S8("case range lower bound is not an integer constant expression");
-                                builder->failure_token_index = scan;
-                                return false;
-                            }
-                            if (!c_ir_constant_evaluate(builder, range_operator + 1, colon, &switch_case.high_constant) ||
-                                switch_case.high_constant.kind != C_IR_CONSTANT_INTEGER)
-                            {
-                                builder->failure_message = S8("case range upper bound is not an integer constant expression");
-                                builder->failure_token_index = range_operator + 1;
-                                return false;
-                            }
-                            switch_case.value = switch_case.low_constant.integer;
-                            switch_case.high_value = switch_case.high_constant.integer;
-                            switch_case.is_range = true;
-                        }
-                    }
-                    else
-                    {
-                        has_default = true;
-                    }
-                    cases[case_count++] = switch_case;
-                    scan = colon;
-                }
-                if (last_ranged_case != UINT32_MAX)
-                {
-                    cases[last_ranged_case].content_end = body_close;
-                }
-                state->switch_case_count = case_count;
-                state->switch_control_start = index + 2;
-                state->switch_body_start = body_start;
-                state->switch_statement_start = index;
-                state->child_source = c_ir_token_source_range(builder, first);
-                c_ir_lower_body_yield(builder, state, task, body_after, C_IR_LOWER_BODY_CONTINUE_SWITCH,
+                state->switch_control_start = anchor + 2;
+                state->switch_body_start = body.start;
+                state->switch_statement_start = anchor;
+                state->child_source = c_ir_token_source_range(builder, first_token);
+                c_ir_lower_body_yield(builder, state, task, after, C_IR_LOWER_BODY_CONTINUE_SWITCH,
                                       (CIrLowerFrame){
                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                           .as.expression =
                                               {
-                                                  .start = index + 2,
-                                                  .end = expression_close,
+                                                  .start = anchor + 2,
+                                                  .end = condition_close,
                                               },
                                       });
                 state->task_count = task_count;
                 return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_IF))
+            case C_AST_IF:
+            case C_AST_IF_ELSE:
             {
-                if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                bool has_else = kind == C_AST_IF_ELSE;
+                u32 condition_close = c_ir_node_close(builder, anchor + 1);
+                u32 then_node = c_ast_child_at(ast, node, 1);
+                u32 else_node = node - 1;
+                IrSourceRange condition_source = c_ir_token_source_range(builder, first_token);
+                u32 then_end = has_else ? c_ir_node_statement_first(builder, else_node) - 1 : after;
+                CIrNodeControlled then_body = {0};
+                CIrNodeControlled else_body = {0};
+                if (condition_close == UINT32_MAX || then_end == UINT32_MAX - 1 || !c_ir_node_controlled(builder, then_node, then_end, &then_body) ||
+                    (has_else && !c_ir_node_controlled(builder, else_node, after, &else_body)))
                 {
                     return false;
-                }
-                u32 condition_close =
-                    c_ir_matching_delimiter_cached(builder, index + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (condition_close == UINT32_MAX || condition_close == index + 2 || condition_close + 1 >= task.end)
-                {
-                    return false;
-                }
-                IrSourceRange condition_source = c_ir_token_source_range(builder, first);
-                u32 then_start = 0;
-                u32 then_end = 0;
-                u32 after = 0;
-                if (!c_ir_builder_controlled_body_range(builder, condition_close + 1, task.end, &then_start, &then_end, &after))
-                {
-                    return false;
-                }
-                bool has_else = after < task.end && builder->preprocess.tokens[after].kind == C_TOKEN_IDENTIFIER &&
-                                c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[after], C_SYMBOL_WELL_KNOWN_ELSE);
-                u32 else_open = UINT32_MAX;
-                u32 else_close = UINT32_MAX;
-                if (has_else)
-                {
-                    u32 else_after = 0;
-                    if (!c_ir_builder_controlled_body_range(builder, after + 1, task.end, &else_open, &else_close, &else_after))
-                    {
-                        return false;
-                    }
-                    after = else_after;
                 }
                 IrBlockId then_block = c_ir_block_create(builder);
                 IrBlockId else_block = has_else ? c_ir_block_create(builder) : IR_BLOCK_ID_INVALID;
@@ -49935,36 +49089,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = after,
-                    .end = task.end,
-                    .block = merge,
-                    .continuation = task.continuation,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                };
-                c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
+                tasks[task_count] = c_ir_body_task_rest(task, after, merge);
+                c_ir_body_task_inherit_scope(&tasks[task_count], task);
+                task_count += 1;
                 if (has_else)
                 {
-                    tasks[task_count++] = (CIrBodyTask){
-                        .start = else_open,
-                        .end = else_close,
-                        .block = else_block,
-                        .continuation = merge,
-                        .break_block = task.break_block,
-                        .continue_block = task.continue_block,
-                    };
-                    c_ir_body_task_inherit_control(&tasks[task_count - 1], task);
+                    tasks[task_count] = c_ir_body_task_controlled(else_body, else_block, merge, task.break_block, task.continue_block);
+                    c_ir_body_task_inherit_control(&tasks[task_count], task);
+                    task_count += 1;
                 }
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = then_start,
-                    .end = then_end,
-                    .block = then_block,
-                    .continuation = merge,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                };
-                c_ir_body_task_inherit_control(&tasks[task_count - 1], task);
+                tasks[task_count] = c_ir_body_task_controlled(then_body, then_block, merge, task.break_block, task.continue_block);
+                c_ir_body_task_inherit_control(&tasks[task_count], task);
+                task_count += 1;
                 state->task_count = task_count;
                 state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
                 state->temporary_mark = builder->temporary_arena->position;
@@ -49976,28 +49112,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                            .true_block = then_block,
                                                            .false_block = has_else ? else_block : merge,
                                                            .source = condition_source,
-                                                           .start = index + 2,
+                                                           .start = anchor + 2,
                                                            .end = condition_close,
                                                        },
                                                });
                 return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_DO))
+            case C_AST_DO_WHILE:
             {
-                u32 body_start = 0;
-                u32 controlled_body_end = 0;
-                u32 after_body = 0;
-                if (!c_ir_builder_controlled_body_range(builder, index + 1, task.end, &body_start, &controlled_body_end, &after_body) ||
-                    after_body + 2 >= task.end || builder->preprocess.tokens[after_body].kind != C_TOKEN_IDENTIFIER ||
-                    !c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[after_body], C_SYMBOL_WELL_KNOWN_WHILE) ||
-                    !c_token_is_punctuator(&builder->preprocess.tokens[after_body + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    return false;
-                }
-                u32 condition_close =
-                    c_ir_matching_delimiter_cached(builder, after_body + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (condition_close == UINT32_MAX || condition_close == after_body + 2 || condition_close + 1 >= task.end ||
-                    !c_token_is_punctuator(&builder->preprocess.tokens[condition_close + 1], C_PUNCTUATOR_SEMICOLON))
+                // The condition's extent, widened, takes in the parentheses
+                // after `while`; the body ends at the `while`.
+                u32 condition_open = 0;
+                u32 condition_close = 0;
+                CIrNodeControlled body = {0};
+                if (!c_ir_node_expression_range(builder, node - 1, &condition_open, &condition_close) || condition_open < 2 ||
+                    condition_close + 2 != after || !c_ir_node_controlled(builder, c_ast_child_at(ast, node, 0), condition_open - 1, &body))
                 {
                     return false;
                 }
@@ -50006,101 +49135,72 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 IrBlockId exit_block = c_ir_block_create(builder);
                 if (body_block.value == IR_ID_UNDERLYING_INVALID || condition_block.value == IR_ID_UNDERLYING_INVALID ||
                     exit_block.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &body_block, 1, c_ir_token_source_range(builder, first)))
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &body_block, 1, c_ir_token_source_range(builder, first_token)))
                 {
                     return false;
                 }
                 u32 loop = c_ir_ssa_loop_record(builder, body_block, condition_block, condition_block);
                 c_ir_ssa_loop_open(builder, loop);
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = condition_close + 2,
-                    .end = task.end,
-                    .block = exit_block,
-                    .continuation = task.continuation,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                    .ssa_loop_close = loop,
-                };
-                c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
+                tasks[task_count] = c_ir_body_task_rest(task, after, exit_block);
+                tasks[task_count].ssa_loop_close = loop;
+                c_ir_body_task_inherit_scope(&tasks[task_count], task);
+                task_count += 1;
                 tasks[task_count++] = (CIrBodyTask){
                     .kind = C_IR_BODY_TASK_CONDITION,
-                    .start = after_body + 2,
+                    .start = condition_open + 1,
                     .end = condition_close,
                     .block = condition_block,
                     .true_block = body_block,
                     .false_block = exit_block,
                 };
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = body_start,
-                    .end = controlled_body_end,
-                    .block = body_block,
-                    .continuation = condition_block,
-                    .break_block = exit_block,
-                    .continue_block = condition_block,
-                    .checkpoint_is_break = true,
-                    .checkpoint_is_continue = true,
-                };
-                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count - 1], index, index);
+                tasks[task_count] = c_ir_body_task_controlled(body, body_block, condition_block, exit_block, condition_block);
+                tasks[task_count].checkpoint_is_break = true;
+                tasks[task_count].checkpoint_is_continue = true;
+                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count], anchor, anchor);
+                task_count += 1;
                 split = true;
                 break;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_FOR))
+            case C_AST_FOR:
             {
-                if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                // Header parts by presence bit: init, condition, step; the
+                // body is last. The `;`s between them are found from the
+                // parts that are there.
+                u32 parts[4] = {C_AST_NODE_INVALID, C_AST_NODE_INVALID, C_AST_NODE_INVALID, C_AST_NODE_INVALID};
+                u32 presence = ast->data[node] & C_AST_PRESENCE_MASK;
+                u32 children[4] = {0};
+                u32 child_count = c_ast_children(ast, node, children, BUSTER_ARRAY_LENGTH(children));
+                u32 child = 0;
+                for (u32 part = 0; part < 3 && child < child_count; part += 1)
                 {
-                    return false;
+                    if (presence & (1u << part))
+                    {
+                        parts[part] = children[child++];
+                    }
                 }
-                u32 header_close = c_ir_matching_delimiter_cached(builder, index + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (header_close == UINT32_MAX || header_close + 1 >= task.end)
+                u32 header_close = c_ir_node_close(builder, anchor + 1);
+                u32 step_first = 0;
+                u32 condition_first = 0;
+                u32 unused_last = 0;
+                if (header_close == UINT32_MAX || child + 1 != child_count ||
+                    (parts[2] != C_AST_NODE_INVALID && !c_ir_node_expression_range(builder, parts[2], &step_first, &unused_last)) ||
+                    (parts[1] != C_AST_NODE_INVALID && !c_ir_node_expression_range(builder, parts[1], &condition_first, &unused_last)))
                 {
                     return false;
                 }
                 u32 separators[2] = {
                     UINT32_MAX,
-                    UINT32_MAX,
+                    parts[2] != C_AST_NODE_INVALID ? step_first - 1 : header_close - 1,
                 };
-                u32 separator_count = 0;
-                u32 nested = 0;
-                for (u32 header_index = index + 2; header_index < header_close; header_index += 1)
-                {
-                    CToken token = builder->preprocess.tokens[header_index];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                        c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        nested += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                             c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                    {
-                        if (!nested)
-                        {
-                            return false;
-                        }
-                        nested -= 1;
-                    }
-                    else if (!nested && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-                    {
-                        if (separator_count >= 2)
-                        {
-                            return false;
-                        }
-                        separators[separator_count++] = header_index;
-                    }
-                }
-                if (separator_count != 2)
-                {
-                    return false;
-                }
-                u32 body_start = 0;
-                u32 controlled_body_end = 0;
-                u32 after_body = 0;
-                if (!c_ir_builder_controlled_body_range(builder, header_close + 1, task.end, &body_start, &controlled_body_end, &after_body))
+                separators[0] = parts[1] != C_AST_NODE_INVALID ? condition_first - 1 : separators[1] - 1;
+                CIrNodeControlled body = {0};
+                if (separators[0] < anchor + 2 || !c_ir_node_controlled(builder, node - 1, after, &body))
                 {
                     return false;
                 }
                 IrBlockId condition_block = c_ir_block_create(builder);
                 IrBlockId body_block = c_ir_block_create(builder);
-                IrBlockId increment_block = separators[1] + 1 < header_close ? c_ir_block_create(builder) : condition_block;
+                IrBlockId increment_block = parts[2] != C_AST_NODE_INVALID ? c_ir_block_create(builder) : condition_block;
                 IrBlockId exit_block = c_ir_block_create(builder);
                 IrBlockId preheader_block = builder->current_block;
                 if (condition_block.value == IR_ID_UNDERLYING_INVALID || body_block.value == IR_ID_UNDERLYING_INVALID ||
@@ -50111,21 +49211,17 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // The window opens with the condition task, after the
                 // initializer has lowered into the blocks that enter the loop.
                 u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, increment_block);
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = after_body,
-                    .end = task.end,
-                    .block = exit_block,
-                    .continuation = task.continuation,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                    .ssa_loop_close = loop,
-                };
-                c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
+                tasks[task_count] = c_ir_body_task_rest(task, after, exit_block);
+                tasks[task_count].ssa_loop_close = loop;
+                c_ir_body_task_inherit_scope(&tasks[task_count], task);
+                task_count += 1;
                 if (increment_block.value != condition_block.value)
                 {
                     tasks[task_count++] = (CIrBodyTask){
                         .start = separators[1] + 1,
                         .end = header_close,
+                        .head_plus_one = parts[2] + 1,
+                        .head_end = header_close,
                         .block = increment_block,
                         .continuation = condition_block,
                         .break_block = exit_block,
@@ -50133,17 +49229,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .allow_trailing_expression = true,
                     };
                 }
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = body_start,
-                    .end = controlled_body_end,
-                    .block = body_block,
-                    .continuation = increment_block,
-                    .break_block = exit_block,
-                    .continue_block = increment_block,
-                    .checkpoint_is_break = true,
-                    .checkpoint_is_continue = true,
-                };
-                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count - 1], index, separators[1] + 1);
+                tasks[task_count] = c_ir_body_task_controlled(body, body_block, increment_block, exit_block, increment_block);
+                tasks[task_count].checkpoint_is_break = true;
+                tasks[task_count].checkpoint_is_continue = true;
+                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count], anchor, separators[1] + 1);
+                task_count += 1;
                 tasks[task_count++] = (CIrBodyTask){
                     .kind = C_IR_BODY_TASK_CONDITION,
                     .start = separators[0] + 1,
@@ -50153,11 +49243,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .false_block = exit_block,
                     .ssa_loop_open = loop,
                 };
-                if (index + 2 < separators[0])
+                if (parts[0] != C_AST_NODE_INVALID)
                 {
                     tasks[task_count++] = (CIrBodyTask){
-                        .start = index + 2,
+                        .start = anchor + 2,
                         .end = separators[0] + 1,
+                        .head_plus_one = parts[0] + 1,
+                        .head_end = separators[0] + 1,
                         .block = preheader_block,
                         .continuation = condition_block,
                         .break_block = task.break_block,
@@ -50165,30 +49257,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     };
                 }
                 else if (!c_ir_switch_block(builder, preheader_block) ||
-                         !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &condition_block, 1,
-                                         c_ir_token_source_range(builder, first)))
+                         !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &condition_block, 1, c_ir_token_source_range(builder, first_token)))
                 {
                     return false;
                 }
                 split = true;
                 break;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_WHILE))
+            case C_AST_WHILE:
             {
-                if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    return false;
-                }
-                u32 condition_close =
-                    c_ir_matching_delimiter_cached(builder, index + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (condition_close == UINT32_MAX || condition_close == index + 2 || condition_close + 1 >= task.end)
-                {
-                    return false;
-                }
-                u32 body_start = 0;
-                u32 controlled_body_end = 0;
-                u32 after_body = 0;
-                if (!c_ir_builder_controlled_body_range(builder, condition_close + 1, task.end, &body_start, &controlled_body_end, &after_body))
+                u32 condition_close = c_ir_node_close(builder, anchor + 1);
+                CIrNodeControlled body = {0};
+                if (condition_close == UINT32_MAX || !c_ir_node_controlled(builder, node - 1, after, &body))
                 {
                     return false;
                 }
@@ -50197,36 +49277,23 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 IrBlockId exit_block = c_ir_block_create(builder);
                 if (condition_block.value == IR_ID_UNDERLYING_INVALID || body_block.value == IR_ID_UNDERLYING_INVALID ||
                     exit_block.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &condition_block, 1,
-                                    c_ir_token_source_range(builder, first)) ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &condition_block, 1, c_ir_token_source_range(builder, first_token)) ||
                     !c_ir_switch_block(builder, condition_block))
                 {
                     return false;
                 }
                 u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, body_block);
                 c_ir_ssa_loop_open(builder, loop);
-                IrSourceRange condition_source = c_ir_token_source_range(builder, first);
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = after_body,
-                    .end = task.end,
-                    .block = exit_block,
-                    .continuation = task.continuation,
-                    .break_block = task.break_block,
-                    .continue_block = task.continue_block,
-                    .ssa_loop_close = loop,
-                };
-                c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
-                tasks[task_count++] = (CIrBodyTask){
-                    .start = body_start,
-                    .end = controlled_body_end,
-                    .block = body_block,
-                    .continuation = condition_block,
-                    .break_block = exit_block,
-                    .continue_block = condition_block,
-                    .checkpoint_is_break = true,
-                    .checkpoint_is_continue = true,
-                };
-                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count - 1], index, index);
+                IrSourceRange condition_source = c_ir_token_source_range(builder, first_token);
+                tasks[task_count] = c_ir_body_task_rest(task, after, exit_block);
+                tasks[task_count].ssa_loop_close = loop;
+                c_ir_body_task_inherit_scope(&tasks[task_count], task);
+                task_count += 1;
+                tasks[task_count] = c_ir_body_task_controlled(body, body_block, condition_block, exit_block, condition_block);
+                tasks[task_count].checkpoint_is_break = true;
+                tasks[task_count].checkpoint_is_continue = true;
+                c_ir_body_task_set_loop_cleanup_targets(builder, &tasks[task_count], anchor, anchor);
+                task_count += 1;
                 state->task_count = task_count;
                 state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
                 state->temporary_mark = builder->temporary_arena->position;
@@ -50238,114 +49305,20 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                            .true_block = body_block,
                                                            .false_block = exit_block,
                                                            .source = condition_source,
-                                                           .start = index + 2,
+                                                           .start = anchor + 2,
                                                            .end = condition_close,
                                                        },
                                                });
                 return false;
             }
-            u32 end = index;
-            u32 parentheses = 0;
-            u32 brackets = 0;
-            u32 braces = 0;
-            u32 first_top_level_comma = UINT32_MAX;
-            while (end < task.end)
-            {
-                CToken token = builder->preprocess.tokens[end];
-                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    if (!parentheses)
-                    {
-                        return false;
-                    }
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    if (!brackets)
-                    {
-                        return false;
-                    }
-                    brackets -= 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    braces += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                {
-                    if (!braces)
-                    {
-                        return false;
-                    }
-                    braces -= 1;
-                }
-                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-                {
-                    break;
-                }
-                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) && first_top_level_comma == UINT32_MAX)
-                {
-                    first_top_level_comma = end;
-                }
-                end += 1;
-            }
-            if (end >= task.end && task.allow_trailing_expression && index < task.end)
-            {
-                end = task.end;
-            }
-            if (end > task.end || (end == task.end && !task.allow_trailing_expression) || index == end)
-            {
-                return false;
-            }
-            bool declaration_statement = task.allow_trailing_expression &&
-                (first_is_typedef_name || first_is_unbound_typedef_name ||
-                 (first.kind == C_TOKEN_IDENTIFIER &&
-                  (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
-                   c_parse_type_word_for_dialect_token(builder->preprocess, first))));
-            // A declaration's commas separate declarators. Retain its full
-            // range for the automatic-declaration-list frame even when this
-            // task also permits a trailing statement-expression value.
-            if (task.allow_trailing_expression && !declaration_statement && first_top_level_comma != UINT32_MAX)
-            {
-                end = first_top_level_comma;
-            }
-            if (statement_expression_mode && task.allow_trailing_expression && (end == task.end || end + 1 == task.end))
-            {
-                bool control = first.kind == C_TOKEN_IDENTIFIER &&
-                               c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_KEYWORD_SET);
-                if (!control && !declaration_statement)
-                {
-                    c_ir_lower_body_yield(builder, state, task, task.end, C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
-                                          (CIrLowerFrame){
-                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                              .as.expression =
-                                                  {
-                                                      .start = index,
-                                                      .end = end,
-                                                  },
-                                          });
-                    state->task_count = task_count;
-                    return false;
-                }
-            }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_ASM_KEYWORD_SET))
+            case C_AST_ASM:
             {
                 CIrLowerInlineAssemblyState* inline_state = arena_allocate(builder->scratch_arena, CIrLowerInlineAssemblyState, 1);
                 *inline_state = (CIrLowerInlineAssemblyState){
-                    .start = index,
-                    .end = end,
+                    .start = first,
+                    .end = semicolon,
                 };
-                c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
-                                      C_IR_LOWER_BODY_CONTINUE_INLINE_ASSEMBLY,
+                c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_INLINE_ASSEMBLY,
                                       (CIrLowerFrame){
                                           .kind = C_IR_LOWER_FRAME_BODY_INLINE_ASSEMBLY,
                                           .as.inline_assembly = inline_state,
@@ -50353,15 +49326,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 state->task_count = task_count;
                 return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_RETURN))
+            case C_AST_RETURN:
             {
-                bool has_value = index + 1 < end;
+                bool has_value = c_ast_child_count(ast, node) != 0;
                 bool compatible_return = has_value != builder->returns_void;
                 if (!compatible_return && has_value && c_preprocess_dialect_is_gnu(builder->preprocess.dialect))
                 {
                     CIrQueryFrame type_query = {0};
                     bool typed = c_ir_query_execute(builder, (CIrQueryFrame){
-                        .start = index + 1, .end = end, .kind = C_IR_QUERY_FRAME_OPERAND_TYPE}, &type_query) && type_query.success;
+                        .start = anchor + 1, .end = semicolon, .kind = C_IR_QUERY_FRAME_OPERAND_TYPE}, &type_query) && type_query.success;
                     IrType* type = typed ? ir_type_from_id(&builder->program->types, type_query.result_type) : 0;
                     compatible_return = type && type->kind == IR_TYPE_VOID;
                 }
@@ -50371,17 +49344,17 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                          : S8("return statement has no value but the parsed function return type is non-void");
                     return false;
                 }
-                IrSourceRange return_source = c_ir_token_source_range(builder, first);
+                IrSourceRange return_source = c_ir_token_source_range(builder, first_token);
                 if (has_value)
                 {
                     state->child_source = return_source;
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_RETURN,
+                    c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_RETURN,
                                           (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                               .as.expression =
                                                   {
-                                                      .start = index + 1,
-                                                      .end = end,
+                                                      .start = anchor + 1,
+                                                      .end = semicolon,
                                                   },
                                           });
                     state->task_count = task_count;
@@ -50392,37 +49365,26 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_GOTO))
+            case C_AST_GOTO_COMPUTED:
             {
-                if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
-                {
-                    if (index + 2 >= end)
-                    {
-                        builder->failure_message = S8("computed goto requires an expression");
-                        return false;
-                    }
-                    state->child_source = c_ir_token_source_range(builder, first);
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO,
-                                          (CIrLowerFrame){
-                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                              .as.expression =
-                                                  {
-                                                      .start = index + 2,
-                                                      .end = end,
-                                                  },
-                                          });
-                    state->task_count = task_count;
-                    return false;
-                }
-                if (index + 2 != end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
-                {
-                    builder->failure_message = S8("malformed goto statement");
-                    return false;
-                }
-                String8 goto_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+                state->child_source = c_ir_token_source_range(builder, first_token);
+                c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO,
+                                      (CIrLowerFrame){
+                                          .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                          .as.expression =
+                                              {
+                                                  .start = anchor + 2,
+                                                  .end = semicolon,
+                                              },
+                                      });
+                state->task_count = task_count;
+                return false;
+            }
+            case C_AST_GOTO:
+            {
+                String8 goto_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[anchor]);
                 CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, goto_name);
                 // Labels have function scope: a goto inside a GNU statement
                 // expression may leave it for a label of the enclosing function
@@ -50432,10 +49394,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, goto_name);
                 }
                 if (label && label->statement_expression_open != UINT32_MAX &&
-                    (index < label->statement_expression_open || index > label->statement_expression_close))
+                    (first < label->statement_expression_open || first > label->statement_expression_close))
                 {
                     builder->failure_message = string_format(builder->arena, S8("cannot jump into a statement expression: label '{S8}'"), goto_name);
-                    builder->failure_token_index = index + 1;
+                    builder->failure_token_index = anchor;
                     return false;
                 }
                 // From the previous answer rather than the function's scope:
@@ -50443,12 +49405,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // nest with one at each level no longer descends from the
                 // root per goto (#2676). The answer is the same.
                 CScopeId label_scope = c_ir_scope_for_token(builder, label ? label->token_index : UINT32_MAX);
-                IrSourceRange goto_source = c_ir_token_source_range(builder, first);
+                IrSourceRange goto_source = c_ir_token_source_range(builder, first_token);
                 if (!label)
                 {
-                    builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"),
-                                                             c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
-                    builder->failure_token_index = index + 1;
+                    builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"), goto_name);
+                    builder->failure_token_index = anchor;
                     return false;
                 }
                 if (!c_ir_emit_cleanup_calls(builder, tasks, task_count, label_scope, label->token_index, goto_source) ||
@@ -50465,109 +49426,70 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                 }
-                index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_BREAK) || c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_CONTINUE)))
+            case C_AST_BREAK:
+            case C_AST_CONTINUE:
             {
-                bool is_break = c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_BREAK);
+                bool is_break = kind == C_AST_BREAK;
                 IrBlockId target = is_break ? task.break_block : task.continue_block;
                 bool has_checkpoint = is_break ? task.has_break_checkpoint : task.has_continue_checkpoint;
                 IrValueId checkpoint = is_break ? task.break_checkpoint : task.continue_checkpoint;
-                IrSourceRange exit_source = c_ir_token_source_range(builder, first);
+                IrSourceRange exit_source = c_ir_token_source_range(builder, first_token);
                 CScopeId target_scope = C_SCOPE_ID_INVALID;
                 u32 target_token = UINT32_MAX;
                 bool cleanup_target_valid = !c_ir_has_cleanup_state(builder) ||
                                             (c_ir_cleanup_target_for_task(builder, task, tasks, task_count, target, &target_scope, &target_token) &&
                                              c_ir_emit_cleanup_calls(builder, tasks, task_count, target_scope, target_token, exit_source));
-                if (index + 1 != end || target.value == IR_ID_UNDERLYING_INVALID ||
-                    !cleanup_target_valid ||
+                if (target.value == IR_ID_UNDERLYING_INVALID || !cleanup_target_valid ||
                     (has_checkpoint && !c_ir_emit_stack_restore(builder, checkpoint, exit_source)) ||
                     !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, exit_source))
                 {
                     return false;
                 }
-                index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF) ||
-                                                     c_parse_type_word_for_dialect_token(builder->preprocess, first) ||
-                                                      first_is_typedef_name || first_is_unbound_typedef_name))
+            case C_AST_DECLARATION:
             {
-                if (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF))
+                // Temporary adapter (#4058): the declaration frames read the
+                // declaration's tokens past a leading attribute run, up to
+                // its `;`, until step 4 lowers declarations from their nodes.
+                u32 start = c_ir_node_declaration_start(builder, first, semicolon);
+                u32 end = semicolon;
+                if (start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[end], C_PUNCTUATOR_SEMICOLON))
+                {
+                    return false;
+                }
+                builder->failure_token_index = start;
+                if (c_ir_node_declaration_is_typedef(ast, node))
                 {
                     CIrLowerTypedefState* type_declaration = arena_allocate(builder->scratch_arena, CIrLowerTypedefState, 1);
-                    *type_declaration = (CIrLowerTypedefState){.start = index, .end = end};
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
-                        C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
-                        (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_TYPEDEF, .as.type_declaration = type_declaration});
+                    *type_declaration = (CIrLowerTypedefState){.start = start, .end = end};
+                    c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
+                                          (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_TYPEDEF, .as.type_declaration = type_declaration});
                     state->task_count = task_count;
                     return false;
                 }
-                u32 declaration_parentheses = 0;
-                u32 declaration_brackets = 0;
-                u32 declaration_braces = 0;
-                u32 declaration_conditionals = 0;
-                bool multiple_declarators = false;
-                for (u32 scan = index; scan < end; scan += 1)
-                {
-                    CToken token = builder->preprocess.tokens[scan];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        declaration_parentheses += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && declaration_parentheses)
-                    {
-                        declaration_parentheses -= 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                    {
-                        declaration_brackets += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && declaration_brackets)
-                    {
-                        declaration_brackets -= 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        declaration_braces += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && declaration_braces)
-                    {
-                        declaration_braces -= 1;
-                    }
-                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && !declaration_conditionals &&
-                             c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-                    {
-                        multiple_declarators = true;
-                        break;
-                    }
-                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces)
-                    {
-                        declaration_conditionals = c_token_conditional_depth_step(&token, declaration_conditionals);
-                    }
-                }
-                if (multiple_declarators)
+                if (c_ast_list_count(ast, node) > 1)
                 {
                     // A list may declare a variable-length array in any of its
                     // declarators, and each declarator is lowered from its own
                     // frame, which has no task to take the checkpoint on. Take
                     // it here, once, ahead of the whole list.
-                    if (c_ir_declaration_declares_vla(builder, index, end) &&
-                        !c_ir_body_task_take_stack_checkpoint(builder, &task, first))
+                    if (c_ir_declaration_declares_vla(builder, start, end) &&
+                        !c_ir_body_task_take_stack_checkpoint(builder, &task, builder->preprocess.tokens[start]))
                     {
                         return false;
                     }
                     CIrLowerAutomaticDeclarationListState* declaration_state =
                         arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationListState, 1);
                     *declaration_state = (CIrLowerAutomaticDeclarationListState){
-                        .start = index,
+                        .start = start,
                         .end = end,
-                        .scan = index,
-                        .segment_start = index,
+                        .scan = start,
+                        .segment_start = start,
                     };
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
-                                          C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
+                    c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
                                           (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST,
                                               .as.automatic_declaration_list = declaration_state,
@@ -50577,7 +49499,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 u32 name_index = end;
                 CEntityId entity = C_ENTITY_ID_INVALID;
-                u32 candidate_index = c_ir_local_declarator_start(builder->preprocess, index, end);
+                u32 candidate_index = c_ir_local_declarator_start(builder->preprocess, start, end);
                 while (candidate_index < end)
                 {
                     CToken candidate = builder->preprocess.tokens[candidate_index];
@@ -50595,15 +49517,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 if (name_index >= end)
                 {
-                    bool type_only_aggregate =
-                        first.kind == C_TOKEN_IDENTIFIER &&
-                        c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_TAG_KEYWORD_SET);
+                    // A declaration with no declarator declares only a tag
+                    // (`struct s { int a; };`); it lowers nothing.
+                    bool type_only_aggregate = c_ast_list_count(ast, node) == 0;
                     if (!type_only_aggregate)
                     {
                         builder->failure_message = S8("could not resolve the declared local identifier");
                         return false;
                     }
-                    index = end == task.end ? task.end : end + 1;
                     continue;
                 }
                 CToken name = builder->preprocess.tokens[name_index];
@@ -50754,7 +49675,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     static_storage |= token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_STATIC);
                 }
-                for (u32 specifier = index; specifier < name_index; specifier += 1)
+                for (u32 specifier = start; specifier < name_index; specifier += 1)
                 {
                     local_extern |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
                                     c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_SYMBOL_WELL_KNOWN_EXTERN);
@@ -50772,24 +49693,22 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     if (local_c_type->kind == C_TYPE_FUNCTION)
                     {
-                        index = end == task.end ? task.end : end + 1;
                         continue;
                     }
                     u32 initializer_start = 0;
                     u32 initializer_end = 0;
                     if (c_ir_declaration_initializer_range(builder->preprocess,
                                                            (CDeclaration){
-                                                               .token_start = index,
-                                                               .token_count = end - index,
+                                                               .token_start = start,
+                                                               .token_count = end - start,
                                                            },
                                                            &initializer_start, &initializer_end))
                     {
                         builder->failure_message = S8("local extern declarations cannot allocate an initialized automatic object");
                         return false;
                     }
-                    if (!c_ir_body_mentions_name_outside(builder, c_token_spelling(builder->preprocess.spelling_base, name), index, end))
+                    if (!c_ir_body_mentions_name_outside(builder, c_token_spelling(builder->preprocess.spelling_base, name), start, end))
                     {
-                        index = end == task.end ? task.end : end + 1;
                         continue;
                     }
                     IrValueId place = c_ir_emit_global_place(builder, entity, c_ir_token_source_range(builder, name));
@@ -50800,7 +49719,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                        : string_format(builder->arena, S8("could not resolve local extern '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
                         return false;
                     }
-                    index = end == task.end ? task.end : end + 1;
                     continue;
                 }
                 if (variable_length_array)
@@ -50811,8 +49729,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     if (c_ir_declaration_initializer_range(builder->preprocess,
                                                            (CDeclaration){
-                                                               .token_start = index,
-                                                               .token_count = end - index,
+                                                               .token_start = start,
+                                                               .token_count = end - start,
                                                            },
                                                            &(u32){0}, &(u32){0}))
                     {
@@ -50825,7 +49743,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .result = layout,
                         .array_type = local_c_type_id,
                         .token = name,
-                        .declaration_start = index,
+                        .declaration_start = start,
                         .declaration_end = name_index,
                     };
                     state->vla_layout = layout;
@@ -50834,7 +49752,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     state->vla_entity = entity;
                     state->vla_name = name;
                     state->vla_alignment = local_alignment;
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                    c_ir_lower_body_yield(builder, state, task, next,
                                           C_IR_LOWER_BODY_CONTINUE_VLA_DECLARATION,
                                           (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT,
@@ -50856,7 +49774,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     IrSymbolId owner_function = builder->function ? builder->function->symbol : IR_SYMBOL_ID_INVALID;
                     IrSourceRange local_source = c_ir_token_source_range(builder, name);
                     String8 local_section_name = {0};
-                    if (!c_ir_static_local_section_name(builder, name, index, end, local_thread_local, &local_section_name))
+                    if (!c_ir_static_local_section_name(builder, name, start, end, local_thread_local, &local_section_name))
                     {
                         return false;
                     }
@@ -50895,8 +49813,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         c_ir_global_initializer(builder, (CDeclaration){
                                                     .name = c_token_spelling(builder->preprocess.spelling_base, name),
                                                     .location = c_ir_token_site(builder, name),
-                                                    .token_start = index,
-                                                    .token_count = end - index,
+                                                    .token_start = start,
+                                                    .token_count = end - start,
                                                     },
                                                 type_value, &global);
                     if (!initialized || (builder->parse.entities[entity.value].is_constexpr && !c_ir_constexpr_initializer_valid(type_value, &global)) ||
@@ -50937,7 +49855,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 if (pointer_to_variable_array)
                 {
-                    if (!c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name, index, name_index))
+                    if (!c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name, start, name_index))
                     {
                         builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of the array '{S8}' points to"),
                                                                  c_token_spelling(builder->preprocess.spelling_base, name));
@@ -50954,7 +49872,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // well or the first enumerator's `=` is mistaken for this
                 // declarator's initializer.
                 u32 declarator_braces = 0;
-                for (u32 scan = index; scan < end; scan += 1)
+                for (u32 scan = start; scan < end; scan += 1)
                 {
                     CToken token = builder->preprocess.tokens[scan];
                     if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
@@ -51027,8 +49945,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         if (!c_ir_global_initializer(builder, (CDeclaration){
                                                          .name = c_token_spelling(builder->preprocess.spelling_base, name),
                                                          .location = c_ir_token_site(builder, name),
-                                                         .token_start = index,
-                                                         .token_count = end - index,
+                                                         .token_start = start,
+                                                         .token_count = end - start,
                                                          .type = local_c_type_id,
                                                          .kind = C_DECLARATION_OBJECT,
                                                          .is_definition = true,
@@ -51102,7 +50020,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                             state->child_local = local;
                             state->child_name = name;
                             state->child_source = c_ir_token_source_range(builder, assign);
-                            c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                            c_ir_lower_body_yield(builder, state, task, next,
                                                   C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER, child);
                             state->task_count = task_count;
                             return false;
@@ -51123,25 +50041,56 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            else
+            case C_AST_EXPRESSION_STATEMENT:
+            default:
             {
+                u32 expression = kind == C_AST_EXPRESSION_STATEMENT ? node - 1 : node;
+                u32 end = kind == C_AST_EXPRESSION_STATEMENT ? anchor : after;
+                bool comma = ast->kinds[expression] == C_AST_COMMA && c_ir_node_comma_unwrapped(builder, expression, first);
+                if (comma && task.allow_trailing_expression)
+                {
+                    // Where a statement expression's value may stand, each
+                    // operand of a top-level comma is lowered as a statement of
+                    // its own, so the last one alone is the value; a `for`
+                    // step's operands are statements the same way.
+                    CIrNodeList* operands = c_ir_node_comma_operands(builder, expression, first);
+                    if (!operands)
+                    {
+                        return false;
+                    }
+                    task.operands = operands;
+                    task.operand = 0;
+                    continue;
+                }
+                if (statement_expression_mode && task.allow_trailing_expression && (end == task.end || end + 1 == task.end))
+                {
+                    c_ir_lower_body_yield(builder, state, task, task.end, C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                              .as.expression =
+                                                  {
+                                                      .start = first,
+                                                      .end = end,
+                                                  },
+                                          });
+                    state->task_count = task_count;
+                    return false;
+                }
                 // A comma expression is one full expression statement, not
                 // an assignment whose right-hand range includes the comma.
                 // The assignment fast path would otherwise feed the value of
                 // the final comma operand back into the first assignment
                 // (for example `scan += 2, match++`).
-                if (first_top_level_comma != UINT32_MAX)
+                if (comma)
                 {
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
-                                          C_IR_LOWER_BODY_CONTINUE_STATEMENT,
+                    c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_STATEMENT,
                                           (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                               .as.expression =
                                                   {
-                                                      .start = index,
+                                                      .start = first,
                                                       .end = end,
                                                   },
                                           });
@@ -51155,10 +50104,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .place = IR_VALUE_ID_INVALID,
                         .base = IR_VALUE_ID_INVALID,
                         .type = IR_TYPE_ID_INVALID,
-                        .start = index,
+                        .start = first,
                         .end = end,
                     };
-                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_STATEMENT,
+                    c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_STATEMENT,
                                           (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT,
                                               .as.assignment_statement = statement_state,
@@ -51166,6 +50115,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 state->task_count = task_count;
                 return false;
+            }
+            }
+            if (split)
+            {
+                break;
             }
         }
         if (split)
@@ -51301,7 +50255,7 @@ BUSTER_C_INTERNAL void c_ir_lower_body_step(CIntegerIrBuilder* builder)
     }
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode,
+BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, u32 compound, bool statement_expression_mode,
                                          IrValueId* statement_expression_result)
 {
     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
@@ -51317,7 +50271,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration 
         machine->failed = false;
     }
     u32 request_mark = machine->frame_count;
-    bool pushed = c_ir_lower_body_frame_push(builder, declaration, statement_expression_mode);
+    bool pushed = c_ir_lower_body_frame_push(builder, declaration, compound, 0, statement_expression_mode);
     CIrLowerFrameResult lowered = {0};
     if (pushed)
     {
@@ -63701,7 +62655,7 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
                                                              u64 function_reservation_limit, Arena* tree_arena, u32 tree_body_count,
-                                                             u32 tree_conditional_count)
+                                                             u32 tree_conditional_count, u32 body_function_count, u32 body_statement_expression_count)
 {
     CIRLowerResult result = {0};
     u32 type_capacity = plan.type_capacity;
@@ -63720,6 +62674,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
+    // The bodies the statement walker enters by brace (GitHub #4060).
+    CIrBodyNodes body_nodes = tree_arena ? c_ir_body_nodes_build(tree_arena, options.syntax_tree, body_function_count, body_statement_expression_count)
+                                         : (CIrBodyNodes){0};
     CIrTreeConditionalIndex tree_conditionals = {0};
     // The index reads parenthesis matches from the stream's delimiter array,
     // so a stream with mismatched delimiters, which has none, lowers by the
@@ -66170,10 +65127,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         result.program = 0;
         return result;
     }
-    // Under -fc-ast-pilot, the unit's body index for the extent table; null
-    // without a tree or when its arena cannot be reserved, and every body is
-    // then walked.
-    CIrStatementExtents* statement_extents = c_ir_statement_extents_create(options.syntax_tree);
     bool reservation_failed = false;
     CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
     // Counting a definition's locals by scanning every entity per function is
@@ -66374,8 +65327,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
                                           BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrTokenPrefix), body_array_capacity + 1,
-                                          BUSTER_ALIGN_OF(CIrTokenPrefix)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
+                                          BUSTER_ALIGN_OF(CIrTokenPrefix));
 #if BUSTER_REFERENCE_CHECKS
         u64 carve_end = position;
 #endif
@@ -66528,7 +65480,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .prepared_control_token_count = (u32)prepared_control_token_span,
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
-            .statement_extents = statement_extents,
+            .ast = options.syntax_tree,
+            .body_nodes = &body_nodes,
         };
         if (tree_conditionals.body_count && declaration.body_start)
         {
@@ -66560,7 +65513,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
         builder.token_prefix = arena_allocate(lowering_temporary.arena, CIrTokenPrefix, body_array_capacity + 1);
-        builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
 #if BUSTER_REFERENCE_CHECKS
         // The carve above must end exactly where the preflight's carve list
         // said it would, or an explicit budget could approve a body whose
@@ -66599,10 +65551,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             builder.failure_message = S8("function body has mismatched delimiters");
         }
         builder.group_facts_exact = delimiters_valid;
-        if (statement_extents)
-        {
-            c_ir_statement_extents_open(statement_extents, declaration.body_start, declaration.body_token_count, delimiters_valid);
-        }
         CIrSignature signature = signatures[declaration_index];
         bool parameters_lowered = true;
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
@@ -66712,7 +65660,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         // The error-attribute check reads the CFG the body built, before SSA
         // completion and construction rewrite it.
-        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || builder.lower_machine.failed || !c_ir_lower_body(&builder, declaration, false, 0) ||
+        // The body's COMPOUND_STATEMENT, by its `{`.
+        u32 body_compound = c_ir_body_nodes_find(body_nodes.functions, body_nodes.function_count, declaration.body_start - 1);
+        if (body_compound == C_AST_NODE_INVALID && !builder.failure_message.length)
+        {
+            builder.failure_message = S8("function body has no syntax tree node");
+        }
+        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || builder.lower_machine.failed ||
+            body_compound == C_AST_NODE_INVALID || !c_ir_lower_body(&builder, declaration, body_compound, false, 0) ||
             !C_IR_FOLD_CENSUS_BODY(&builder) || !c_ir_check_error_attribute_calls(&builder) || !c_ir_atomic_aggregate_accesses_lowerable(&builder) ||
             !c_ir_ssa_finish(&builder, &result.direct_ssa) || !c_ir_finish_construction(&builder))
         {
@@ -66974,29 +65929,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         };
     }
     arena_destroy(lowering_arena, 1);
-    if (statement_extents)
-    {
-        CAstExtentStatistics* statistics = options.syntax_tree_extent_statistics;
-        CAstExtentStatistics counted = statement_extents->statistics;
-        if (statistics)
-        {
-            statistics->bodies += counted.bodies;
-            statistics->entries += counted.entries;
-            statistics->entry_declines += counted.entry_declines;
-            statistics->answers += counted.answers;
-            for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
-            {
-                statistics->walked[reason] += counted.walked[reason];
-                statistics->body_fallbacks[reason] += counted.body_fallbacks[reason];
-            }
-            if (counted.reason)
-            {
-                statistics->reason = counted.reason;
-                statistics->fallback_token = counted.fallback_token;
-            }
-        }
-        arena_destroy(statement_extents->arena, 1);
-    }
     if (reservation_failed)
     {
         result.program = 0;
@@ -67074,21 +66006,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (fits)
         {
-            // Under -fc-ast-pilot the tree's lowering index
-            // (c_ir_tree_conditionals_build) lives in an arena of its own for
-            // the call. Without a tree, or when that reservation is refused,
-            // lowering runs every scan.
+            // The tree's lowering indexes, its body index
+            // (c_ir_body_nodes_build) and conditional index
+            // (c_ir_tree_conditionals_build), live in an arena of its own for
+            // the call. A unit with no body needs neither; when the
+            // reservation is refused, no body lowers.
             u32 tree_body_count = 0;
             u32 tree_conditional_count = 0;
-            u64 tree_size = options.syntax_tree ? c_ir_tree_conditionals_size(options.syntax_tree, &tree_body_count, &tree_conditional_count) : 0;
+            u32 body_function_count = 0;
+            u32 body_statement_expression_count = 0;
+            u64 tree_size = options.syntax_tree ? c_ir_tree_conditionals_size(options.syntax_tree, &tree_body_count, &tree_conditional_count) +
+                                                      c_ir_body_nodes_size(options.syntax_tree, &body_function_count, &body_statement_expression_count)
+                                                : 0;
             u64 tree_reservation = 0;
-            bool tree_sized = tree_body_count && align_forward_checked(arena_minimum_position + tree_size, BUSTER_KB(64), &tree_reservation);
+            bool tree_sized = (tree_body_count || body_function_count) &&
+                              align_forward_checked(arena_minimum_position + tree_size, BUSTER_KB(64), &tree_reservation);
             Arena* tree_arena = tree_sized ? arena_create((ArenaCreation){.reserved_size = tree_reservation,
                                                                           .initial_size = BUSTER_KB(64),
                                                                           .flags = {.no_pool = true}})
                                            : 0;
             result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit,
-                                                tree_arena, tree_body_count, tree_conditional_count);
+                                                tree_arena, tree_body_count, tree_conditional_count, body_function_count,
+                                                body_statement_expression_count);
             if (tree_arena)
             {
                 arena_destroy(tree_arena, 1);
@@ -67120,11 +66059,41 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     return result;
 }
 
+// STEP 1 PLACEHOLDER (#3102 step 1, "retain the syntax tree and semantic facts
+// through lowering"): the statement walker reads the syntax tree, so a caller
+// that passes none gets one built here and released after lowering. Step 1
+// retains the parse phase's tree through lowering and replaces this; it is
+// not part of the step-2 change (#4060).
+BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse,
+                                                        Target target, CIRLowerOptions options, u64 query_reservation_limit,
+                                                        u64 function_reservation_limit)
+{
+    CAstResult built = {0};
+    if (!options.syntax_tree && arena)
+    {
+        built = c_ast_build(arena, preprocess, (CAstOptions){0});
+        options.syntax_tree = built.complete ? &built.ast : 0;
+    }
+    CIRLowerResult result = {0};
+    if (options.syntax_tree || !arena)
+    {
+        result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+    }
+    else
+    {
+        // The tree's own diagnostics say why it was not built.
+        result.diagnostics = built.diagnostics;
+        result.diagnostic_count = built.diagnostic_count;
+    }
+    c_ast_release(&built.ast);
+    return result;
+}
+
 CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                          CIRLowerOptions options)
 {
     C_CENSUS_PHASE_BEGIN(LOWER);
-    CIRLowerResult result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, 0, 0);
+    CIRLowerResult result = c_lower_to_ir_tree_run(arena, source_path, preprocess, parse, target, options, 0, 0);
     C_CENSUS_PHASE_END();
     return result;
 }
@@ -67138,7 +66107,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
 CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                      CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
 {
-    return c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+    return c_lower_to_ir_tree_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
 }
 
 bool c_test_ir_ssa_loop_exits_refusal(void)

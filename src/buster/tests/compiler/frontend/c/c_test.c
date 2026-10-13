@@ -44456,14 +44456,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArgum
     return result;
 }
 
-// The statement walker asks whether an unbound first token names a typedef,
-// which costs a scope lookup. A statement keyword never does, so it is gated
-// out before the lookup (#3102): a body whose statements all begin with a
-// statement keyword or a bound name must make none. A label still makes one,
-// and a typedef-led block declaration at most one, and both bodies lower.
-BUSTER_GLOBAL_LOCAL u64 c_test_statement_keyword_typedef_probe_count(String8 source)
+// The statement walker reads each statement's kind from its node (#4060):
+// keyword-led statements, a label, block declarations led by type keywords and
+// one led by a typedef name all lower to certified IR.
+BUSTER_GLOBAL_LOCAL bool c_test_statement_nodes_lower(String8 source)
 {
-    u64 probes = UINT64_MAX;
+    bool lowered_cleanly = false;
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = true}});
     if (arena)
     {
@@ -44473,22 +44471,18 @@ BUSTER_GLOBAL_LOCAL u64 c_test_statement_keyword_typedef_probe_count(String8 sou
         CParseResult parse = c_parse(arena, preprocess);
         if (!preprocess.diagnostic_count && !parse.diagnostic_count)
         {
-            u64 before = c_test_ir_first_token_typedef_probes();
-            CIRLowerResult lowered = c_lower_to_ir(arena, S8("statement-keyword-probes.c"), preprocess, parse, target_native);
-            if (!lowered.diagnostic_count && lowered.canonical_ir_certified)
-            {
-                probes = c_test_ir_first_token_typedef_probes() - before;
-            }
+            CIRLowerResult lowered = c_lower_to_ir(arena, S8("statement-nodes.c"), preprocess, parse, target_native);
+            lowered_cleanly = !lowered.diagnostic_count && lowered.canonical_ir_certified;
         }
         arena_destroy(arena, 1);
     }
-    return probes;
+    return lowered_cleanly;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u64 keywords = c_test_statement_keyword_typedef_probe_count(S8(
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "int f(int x)\n"
         "{\n"
         "    if (x) x += 1; else x -= 1;\n"
@@ -44499,39 +44493,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
         "    _Static_assert(sizeof(int) >= 2, \"int\");\n"
         "    __asm__ volatile(\"\" ::: \"memory\");\n"
         "    return x;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, keywords == 0, string_format(arguments->arena, S8("keyword-led statements made {u64} typedef probes"), keywords));
-    // A label is an unbound name that is not a keyword: it is probed, once.
-    u64 labelled = c_test_statement_keyword_typedef_probe_count(S8(
+        "}\n")));
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "int h(int x)\n"
         "{\n"
         "    if (x) goto done;\n"
         "    x += 1;\n"
         "done:\n"
         "    return x;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, labelled == 1, string_format(arguments->arena, S8("a labelled body made {u64} typedef probes"), labelled));
-    // A type keyword names no entity, so a declaration it begins is a type
-    // start without the lookup, which climbed every enclosing block (#3894).
-    u64 declarations = c_test_statement_keyword_typedef_probe_count(S8(
+        "}\n")));
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "int k(int x)\n"
         "{\n"
         "    int y = x;\n"
         "    { unsigned z = (unsigned)y; { const int w = (int)z; x += w; } }\n"
         "    return x;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, declarations == 0,
-                    string_format(arguments->arena, S8("keyword-led declarations made {u64} typedef probes"), declarations));
-    u64 typedefs = c_test_statement_keyword_typedef_probe_count(S8(
+        "}\n")));
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "typedef int T;\n"
         "int g(int x)\n"
         "{\n"
         "    if (x) return 1;\n"
         "    T y = x;\n"
         "    return y;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, typedefs != UINT64_MAX && typedefs <= 1,
-                    string_format(arguments->arena, S8("a typedef-led declaration made {u64} typedef probes"), typedefs));
+        "}\n")));
     return result;
 }
 

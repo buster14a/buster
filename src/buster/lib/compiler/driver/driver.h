@@ -597,10 +597,6 @@ struct CompilerDriverCAstPilotResult
     // answered, and runs left to the type machine and why. Zero when the
     // analysis had no tree to use.
     CAstSpecifierStatistics specifiers;
-    // The extent table lowering read controlled body ranges from
-    // (c_gen.c): bodies, entries and answers, and the queries the token
-    // walker answered and why. Zero when lowering had no tree to use.
-    CAstExtentStatistics extents;
     // What lowering read from the tree (CAstLowerStatistics). Zero for
     // -fsyntax-only and when lowering had no tree.
     CAstLowerStatistics lower;

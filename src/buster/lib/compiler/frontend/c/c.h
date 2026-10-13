@@ -1634,42 +1634,6 @@ struct CAstSpecifierStatistics
     u32 fallback_token;
 };
 
-// Why lowering's token walker, not the tree's extent table
-// (c_ir_statement_extents in c_gen.c, GitHub #3102), answered a controlled
-// body range query.
-typedef enum CAstExtentFallback
-{
-    C_AST_EXTENT_FALLBACK_NONE,
-    // The body has no table: no tree, no function definition whose body is
-    // this one, a body whose delimiters do not nest, or a table that does
-    // not fit its arena.
-    C_AST_EXTENT_FALLBACK_INPUT,
-    // A token the grammar puts next to a statement's anchor (the `(` after a
-    // header keyword, the `else` before an else-branch, the `goto` before a
-    // label) is not that token; the whole body goes to the walker.
-    C_AST_EXTENT_FALLBACK_ANCHOR,
-    // The query is not an entry, or its bound is shorter than the entry.
-    C_AST_EXTENT_FALLBACK_SHAPE,
-    C_AST_EXTENT_FALLBACK_COUNT,
-} CAstExtentFallback;
-
-// What the extent table did over one lowering: tables built (one per body
-// that asks), entries, queries answered, queries the walker answered by
-// reason (`walked`), and bodies whose table was refused (`body_fallbacks`).
-typedef struct CAstExtentStatistics CAstExtentStatistics;
-struct CAstExtentStatistics
-{
-    u64 bodies;
-    u64 entries;
-    u64 entry_declines;
-    u64 answers;
-    u64 walked[C_AST_EXTENT_FALLBACK_COUNT];
-    u64 body_fallbacks[C_AST_EXTENT_FALLBACK_COUNT];
-    // The last body fallback: its reason, and the `{` of the body.
-    CAstExtentFallback reason;
-    u32 fallback_token;
-};
-
 // What lowering read from the tree (GitHub #3102) over one lowering: the
 // top-level function bodies whose conditional nodes it indexed, the nodes, and
 // how each root-conditional query inside an indexed body ended. An answer is
@@ -1837,7 +1801,7 @@ struct CTokenPositionIndex
 #endif
     u32* alignas_positions;
     // Ascending positions of every identifier token directly followed by a
-    // ':' punctuator — the necessary condition c_ir_named_label_at tests
+    // ':' punctuator — the necessary condition c_parse_named_label_at tests
     // before its out-of-line proof. Label-table sizing and dead-code label
     // scans enumerate these instead of re-asking the condition of every
     // body token; the population includes ternary and bit-field colons, so
@@ -2222,8 +2186,6 @@ struct CIRLowerOptions
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;
-    // Optional: receives the extent table's counts, added to what it holds.
-    CAstExtentStatistics* syntax_tree_extent_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -2450,8 +2412,6 @@ BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
 // The CAstSpecifierFallback in lower case without its prefix ("none", "input", ...).
 BUSTER_F_DECL String8 c_ast_specifier_fallback_name(CAstSpecifierFallback reason);
-// The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
-BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

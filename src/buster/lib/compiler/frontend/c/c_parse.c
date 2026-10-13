@@ -595,6 +595,217 @@ BUSTER_C_INTERNAL bool c_parse_aggregate_brace_at(CPreprocessResult const* prepr
 
 BUSTER_C_INTERNAL u32 c_parse_position_lower_bound(u32 const* positions, u32 count, u32 start);
 
+// A colon only introduces a labeled statement when it is itself a label,
+// case, or default colon; a conditional's colon can directly precede an
+// `identifier :` pair (`b ? b ? c : s : l`), where `s` is not a label. Pair
+// nested `? :` groups backward to the statement boundary: an unmatched `?`
+// claims the colon for a conditional expression.
+BUSTER_C_SHARED BUSTER_COLD bool c_parse_label_colon_at(CToken* tokens, u32 body_start, u32 colon_index)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    u32 pending_colons = 0;
+    u32 scan = colon_index;
+    while (scan > body_start)
+    {
+        scan -= 1;
+        CToken token = tokens[scan];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            if (!parentheses)
+            {
+                return false;
+            }
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            if (!brackets)
+            {
+                return false;
+            }
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            if (!braces)
+            {
+                break;
+            }
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces)
+        {
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+            {
+                break;
+            }
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+            {
+                pending_colons += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                if (!pending_colons)
+                {
+                    return false;
+                }
+                pending_colons -= 1;
+            }
+        }
+    }
+    return true;
+}
+
+/* True when the statement beginning at `index` stands where a control statement
+   expects its substatement: directly after an `if (...)`, `for (...)`,
+   `while (...)` or `switch (...)` header, or after `do` or `else`. This is the
+   position that makes both `if (c) again: x -= 1;` and the Duff's-device
+   `if (c) case 1: { ... }` legal — the label prefixes the controlled
+   substatement rather than opening a new statement of the enclosing block. */
+BUSTER_C_INTERNAL bool c_parse_control_substatement_position(CPreprocessResult const* preprocess, u32 body_start, u32 index)
+{
+    bool result = false;
+    if (index > body_start && index <= preprocess->token_count)
+    {
+        CToken previous = preprocess->tokens[index - 1];
+        if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            u32 depth = 0;
+            u32 open = UINT32_MAX;
+            for (u32 scan = index - 1; scan >= body_start; scan -= 1)
+            {
+                u8 punctuator = preprocess->tokens[scan].punctuator;
+                if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
+                {
+                    if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                    {
+                        depth += 1;
+                    }
+                    else
+                    {
+                        if (!depth)
+                        {
+                            break;
+                        }
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            open = scan;
+                            break;
+                        }
+                    }
+                }
+                if (scan == body_start)
+                {
+                    break;
+                }
+            }
+            if (open != UINT32_MAX && open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
+            {
+                CToken control = preprocess->tokens[open - 1];
+                result = c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_IF) ||
+                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_FOR) ||
+                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_WHILE) ||
+                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_SWITCH);
+            }
+        }
+        else
+        {
+            result = previous.kind == C_TOKEN_IDENTIFIER &&
+                     (c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_DO) ||
+                      c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_ELSE));
+        }
+    }
+
+    return result;
+}
+
+/* The backward twin of c_parse_c23_attribute_at: true when a C23 attribute
+   specifier ends at `index - 1`, with `start_out` receiving its opening '['.
+   Every scan that skips one reads forwards, because a forward skip is a loop
+   step; the label proof below is the one question in the frontend asked from
+   the far side, and `[[maybe_unused]] again:` puts a ']' where it expects a
+   statement boundary. The walk mirrors the forward one -- depth over
+   brackets, closing on the '[[' that is not nested -- because the contents
+   are a balanced token sequence that may carry brackets of its own. */
+BUSTER_C_INTERNAL bool c_parse_c23_attribute_ends_before(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32* start_out)
+{
+    if (index < body_start + 4 || !c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACKET) ||
+        !c_token_is_punctuator(&preprocess->tokens[index - 2], C_PUNCTUATOR_RIGHT_BRACKET))
+    {
+        return false;
+    }
+    u32 depth = 0;
+    for (u32 scan = index - 3; scan > body_start; scan -= 1)
+    {
+        if (c_token_is_punctuator(&preprocess->tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess->tokens[scan], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            if (depth)
+            {
+                depth -= 1;
+            }
+            else if (c_token_is_punctuator(&preprocess->tokens[scan - 1], C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                *start_out = scan - 1;
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_C_SHARED bool c_parse_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
+{
+    bool result = false;
+    if (!(body_start >= body_end || body_end > preprocess->token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
+          index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
+          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
+          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
+          // `enum : long { ... };` opens an enum with a fixed underlying type; a tag keyword is never a label.
+          c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
+                                    C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)) ||
+          !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
+    {
+        // Peel any attribute sequence prefixing the label, so the three
+        // proofs below see the token that really precedes the statement.
+        // `if (c) [[unlikely]] again:` needs it twice over: the peel is what
+        // leaves the control-substatement test looking at the ')'.
+        u32 candidate = index;
+        for (u32 attribute_start = 0; c_parse_c23_attribute_ends_before(preprocess, body_start, candidate, &attribute_start);)
+        {
+            candidate = attribute_start;
+        }
+        CToken previous = candidate > body_start ? preprocess->tokens[candidate - 1] : (CToken){0};
+        result = candidate == body_start || c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
+                 (previous.punctuator == C_PUNCTUATOR_COLON && c_parse_label_colon_at(preprocess->tokens, body_start, candidate - 1)) ||
+                 c_parse_control_substatement_position(preprocess, body_start, candidate);
+    }
+
+    return result;
+}
+
 // Only unindexed consumers scan backwards for brace context.
 BUSTER_C_SHARED bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
@@ -27978,7 +28189,7 @@ BUSTER_C_INTERNAL void c_parse_statement_ends_finish(CParseStatementEnds* memo, 
 // The ':' ending the `case` label whose keyword is at `start`, or UINT32_MAX when no such colon
 // precedes a `;`, a brace or an unbalanced closer. The constant may be a conditional expression,
 // so a ':' answering an open '?' at the label's own depth belongs to it, the pairing
-// c_ir_label_colon_at applies when lowering peels the same label.
+// c_parse_label_colon_at applies when lowering peels the same label.
 BUSTER_C_INTERNAL u32 c_parse_statement_case_colon(CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 result = UINT32_MAX;
@@ -29422,7 +29633,7 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_bind_plan_segment(Arena* arena, CParseResult* re
                                index + 1 < body_end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
         if (reading && shape == C_TOKEN_IDENTIFIER)
         {
-            bool label = c_ir_named_label_at(&preprocess, body_start, index, body_end) && c_parse_label_candidate_at(result, &preprocess, body_start, index);
+            bool label = c_parse_named_label_at(&preprocess, body_start, index, body_end) && c_parse_label_candidate_at(result, &preprocess, body_start, index);
             bool member = index > body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                                  c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
             bool previous_keyword = index > body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
@@ -30118,7 +30329,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
         bool label = false;
         if (shape == C_TOKEN_IDENTIFIER)
         {
-            label = c_ir_named_label_at(&preprocess, body_start, index, body_end) &&
+            label = c_parse_named_label_at(&preprocess, body_start, index, body_end) &&
                     c_parse_label_candidate_at(result, &preprocess, body_start, index);
             bool member = index > body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                                  c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
@@ -37125,7 +37336,7 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
     for (u32 index = c_parse_candidates_next(&label_candidates, start, end); index + 1 < end;
          index = c_parse_candidates_next(&label_candidates, index + 1, end))
     {
-        count += c_ir_named_label_at(&preprocess, start, index, end) &&
+        count += c_parse_named_label_at(&preprocess, start, index, end) &&
                  (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index));
     }
     u64 capacity = 1;
@@ -37143,7 +37354,7 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
         for (u32 index = c_parse_candidates_next(&label_candidates, start, end); index + 1 < end;
              index = c_parse_candidates_next(&label_candidates, index + 1, end))
         {
-            if (c_ir_named_label_at(&preprocess, start, index, end) &&
+            if (c_parse_named_label_at(&preprocess, start, index, end) &&
                 (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index)))
             {
                 String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
@@ -41392,7 +41603,7 @@ BUSTER_C_INTERNAL bool c_parse_label_values_needed(CParseResult* result, CPrepro
     {
         if (!skipped || !skipped[index - start])
         {
-            named_label |= c_ir_named_label_at(&preprocess, start, index, end) && c_parse_label_candidate_at(result, &preprocess, start, index);
+            named_label |= c_parse_named_label_at(&preprocess, start, index, end) && c_parse_label_candidate_at(result, &preprocess, start, index);
             conjunction |= c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND);
             needed |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_GOTO) &&
                       c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR);
@@ -41866,7 +42077,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     bool found = false;
                     for (u32 definition = start; !found && definition + 1 < end; definition += 1)
                     {
-                        found = c_ir_named_label_at(&preprocess, start, definition, end) &&
+                        found = c_parse_named_label_at(&preprocess, start, definition, end) &&
                                 c_parse_label_candidate_at(result, &preprocess, start, definition) &&
                                 string_equal(label, c_token_spelling(preprocess.spelling_base, preprocess.tokens[definition]));
                     }

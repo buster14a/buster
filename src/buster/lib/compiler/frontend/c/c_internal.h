@@ -198,14 +198,13 @@ BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
-// Whether the statement at `index` is the substatement a control statement is
-// waiting for. Shared by the named-label proof below and by the switch body
-// scan, which must not split a case range at a label standing there.
-BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const* preprocess, u32 body_start, u32 index);
-// The cold half of c_ir_named_label_at: the full proof, reached only for a
+// Whether the colon at `colon_index` ends a label, case or default rather than
+// a conditional expression's `? :`.
+BUSTER_C_EXTERN bool c_parse_label_colon_at(CToken* tokens, u32 body_start, u32 colon_index);
+// The cold half of c_parse_named_label_at: the full proof, reached only for a
 // token that already looks like `<identifier> :`.
-BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
-// Exclude member colons after c_ir_named_label_at proves a label shape.
+BUSTER_C_EXTERN bool c_parse_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// Exclude member colons after c_parse_named_label_at proves a label shape.
 BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // The first GNU statement-expression candidate in [from, end), or end.
 BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end);
@@ -215,12 +214,12 @@ BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPrep
 // line: the answer is almost always no, and an out-of-line call per body
 // token to reach it is the expensive part. The three range tests come first
 // because they are what makes the two token reads in bounds.
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index,
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index,
                                                                              u32 body_end)
 {
     return body_end <= preprocess->token_count && index < body_end && index + 1 < body_end &&
            preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess->tokens[index + 1].punctuator == C_PUNCTUATOR_COLON &&
-           c_ir_named_label_proven_at(preprocess, body_start, index, body_end);
+           c_parse_named_label_proven_at(preprocess, body_start, index, body_end);
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
@@ -688,7 +687,7 @@ BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* res
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
 // Whether `index` is the `&&` of a GNU label address. c_ir_unsupported_gnu_construct
 // asks this of every token it scans, so the necessary condition is inline for
-// the same reason as c_ir_named_label_at above.
+// the same reason as c_parse_named_label_at above.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start,
                                                                                       u32 index)
 {
