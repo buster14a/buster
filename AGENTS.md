@@ -145,12 +145,19 @@ performance evidence keeps its existing request and acceptance requirements.
 See [request decisions and examples](docs/agents/benchmarking.md#request-decisions-and-examples)
 for correctness, performance-claim and task-acceptance handoffs.
 
-Every performance-validation test requires actual execution of its relevant
-workload on the approved Zen 5 host (Ryzen 7 9700X). Without complete evidence
-matching the candidate, workload and configuration, report performance
-validation as incomplete. Hosted, simulated and static evidence is diagnostic.
+Choose performance evidence by mechanism and claim (#4013). A Zen 5 or
+microarchitecture-sensitive claim (SIMD, branched versus branchless,
+scheduling, alignment/cache/TLB tuning, an explicit Zen 5 speed) requires
+actual execution of its relevant workload on the approved Zen 5 host (Ryzen 7
+9700X); simulated, static and non-target evidence never satisfies it. A
+work-reduction claim may complete with repeatable work counts, and a native
+runtime or resource claim that no CPU mechanism decides may complete with
+paired uninstrumented native-host timing, each only for what it establishes
+([alternative evidence](docs/agents/benchmarking.md#alternative-evidence-routes)).
+Split mixed claims. Without complete evidence of the required class matching
+the candidate, workload and configuration, report that claim as incomplete.
 [docs/performance-validation-v1.json](docs/performance-validation-v1.json)
-lists each entry point's route; a new one needs a row (#2761).
+lists each entry point's route and evidence classes; a new one needs a row (#2761).
 
 For an explicitly requested standalone C experiment, add its workload under
 `benchmarks/9700x/` in an owner pull request, following
