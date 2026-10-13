@@ -62467,6 +62467,17 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             }
         }
     }
+    bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+    if (builder->function && !aggregate_type)
+    {
+        u32 statement_tail_start = start;
+        u32 statement_tail_end = end;
+        if (c_parse_block_static_single_statement_expression_tail(&parse, preprocess, start, end, &statement_tail_start, &statement_tail_end))
+        {
+            start = statement_tail_start;
+            end = statement_tail_end;
+        }
+    }
     if (type->is_complex)
     {
         u8* complex_bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
@@ -62486,7 +62497,6 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             return true;
         }
     }
-    bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
     if (!aggregate_type)
     {
         // `static int v = (int){5};`.  An aggregate destination finds its own

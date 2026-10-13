@@ -38936,11 +38936,17 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
 
 BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index);
 
+// The optional flag is positive evidence only: no diagnostic can also mean this
+// validator deferred a shape to lowering, while the flag requires an actual
+// typed constant (or extended-precision literal) fold and destination conversion.
 BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTypeParseMachine* machine, CParseResult* result,
                                                                               CPreprocessResult preprocess, CScopeId scope,
-                                                                              CTypeId destination, u32 start, u32 end, bool constexpr_value)
+                                                                              CTypeId destination, u32 start, u32 end, bool constexpr_value,
+                                                                              bool* folded_constant_out)
 {
     CParseInitializerDiagnostic diagnostic = {.token = start, .container = destination};
+    if (folded_constant_out) *folded_constant_out = false;
+    bool folded_constant = false;
     CTypeKind kind = destination.value < result->type_count ? result->types[destination.value].kind : C_TYPE_INVALID;
     while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
@@ -39006,8 +39012,8 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     {
         u64 significand = 0;
         u16 exponent_sign = 0;
-        c_semantic_ext80_fold_initializer(result->arena, preprocess, start, end, &significand, &exponent_sign,
-                                          &diagnostic.message, &diagnostic.token);
+        folded_constant = c_semantic_ext80_fold_initializer(result->arena, preprocess, start, end, &significand, &exponent_sign,
+                                                                     &diagnostic.message, &diagnostic.token);
     }
     else if (numeric || unknown)
     {
@@ -39035,7 +39041,12 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
         {
             diagnostic.message = S8("constexpr initializer is not a permitted constant expression");
         }
+        else if (numeric && !unknown && value.valid && converted.valid && !imaginary)
+        {
+            folded_constant = true;
+        }
     }
+    if (folded_constant_out) *folded_constant_out = folded_constant && !diagnostic.message.length;
     arena_set_position(machine->scratch_arena, mark);
     return diagnostic;
 }
@@ -39656,13 +39667,87 @@ BUSTER_C_INTERNAL u32 c_parse_unevaluated_unary_operand_end(CParseResult* result
     return operand_end;
 }
 
+// A whole GNU block-scope static initializer may be a statement expression
+// with exactly one expression statement. Return that statement's expression
+// range so semantic validation and the folder use the same bounded shape.
+BUSTER_C_SHARED bool c_parse_block_static_single_statement_expression_tail(CParseResult* parse, CPreprocessResult preprocess,
+                                                                              u32 start, u32 end, u32* tail_start_out,
+                                                                              u32* tail_end_out)
+{
+    bool result = false;
+    u32 tail_start = start;
+    u32 tail_end = end;
+    u32 range_length = end >= start ? end - start : 0;
+    if (end <= preprocess.token_count && c_preprocess_dialect_is_gnu(preprocess.dialect) && range_length >= 6 &&
+        c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_RIGHT_BRACE) &&
+        c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 group_close = c_parse_matching_delimiter_indexed(parse, preprocess, start);
+        u32 body_close = c_parse_matching_delimiter_indexed(parse, preprocess, start + 1);
+        if (group_close == end - 1 && body_close == end - 2)
+        {
+            u32 body_start = start + 2;
+            u32 semicolon = UINT32_MAX;
+            bool multiple_statements = false;
+            bool balanced = true;
+            for (u32 cursor = body_start; cursor < body_close; cursor += 1)
+            {
+                CToken token = preprocess.tokens[cursor];
+                bool opening = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
+                bool closing = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
+                if (opening)
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(parse, preprocess, cursor);
+                    if (close >= body_close)
+                    {
+                        balanced = false;
+                        cursor = body_close;
+                    }
+                    else
+                    {
+                        cursor = close;
+                    }
+                }
+                else if (closing)
+                {
+                    balanced = false;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+                {
+                    multiple_statements = semicolon != UINT32_MAX;
+                    semicolon = cursor;
+                }
+            }
+            if (balanced && !multiple_statements && semicolon == body_close - 1 && body_start < semicolon)
+            {
+                tail_start = body_start;
+                tail_end = semicolon;
+                while (tail_start < tail_end &&
+                       c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+                {
+                    tail_start += 1;
+                }
+                result = tail_start < tail_end;
+            }
+        }
+    }
+    *tail_start_out = tail_start;
+    *tail_end_out = tail_end;
+    return result;
+}
+
 // The `(` of the first evaluated GNU statement expression in a block-scope
-// static initializer [start, end), or end. Such a static is initialized before
-// the function runs, so GCC and Clang reject the `({` as "initializer element is
-// not constant" (#3415), while a sizeof or _Alignof unary operand, or a typeof
-// operand, stays unevaluated and constant. The position index answers the
-// common case, a static without one; only a hit walks the range to skip those
-// operands.
+// static initializer [start, end), or end. The whole one-expression form is
+// screened and narrowed separately; this walk diagnoses any evaluated form
+// that remains. A sizeof or _Alignof unary operand, or a typeof operand, stays
+// unevaluated. The position index answers the common case, a static without
+// one; only a hit walks the range to skip those operands.
 BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                  u32 start, u32 end)
 {
@@ -39753,7 +39838,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                     shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
                 if (!shape.message.length) shape = c_parse_validate_offsetof_operands(machine, result, preprocess, scope, start, end);
                 if (!shape.message.length)
-                    shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
+                    shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr, 0);
                 if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
                 if (!shape.message.length) shape = c_parse_validate_sizeof_operands(machine, result, preprocess, scope, start, end);
                 for (u32 cursor = start; declaration.is_constexpr && !shape.message.length && cursor < end; cursor += 1)
@@ -40043,7 +40128,32 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 String8 conversion_message = {0};
                 bool braced = initializer_start < initializer_end &&
                               c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
+                CTypeKind destination_kind = entity->type.value < result->type_count ? result->types[entity->type.value].kind : C_TYPE_INVALID;
+                bool aggregate_destination = destination_kind == C_TYPE_ARRAY || destination_kind == C_TYPE_VECTOR ||
+                                             destination_kind == C_TYPE_STRUCT || destination_kind == C_TYPE_UNION;
                 u32 statement_expression = c_parse_block_static_statement_expression(result, preprocess, entity->scope, initializer_start, initializer_end);
+                u32 statement_tail_start = initializer_start;
+                u32 statement_tail_end = initializer_end;
+                CParseInitializerDiagnostic statement_tail_scalar = {0};
+                bool statement_tail_scalar_validated = false;
+                if (statement_expression < initializer_end && !aggregate_destination &&
+                    c_parse_block_static_single_statement_expression_tail(result, preprocess, initializer_start, initializer_end,
+                                                                            &statement_tail_start, &statement_tail_end) &&
+                    c_parse_block_static_statement_expression(result, preprocess, entity->scope, statement_tail_start, statement_tail_end) ==
+                        statement_tail_end)
+                {
+                    bool folded_constant = false;
+                    statement_tail_scalar = c_parse_validate_static_scalar(machine, result, preprocess, entity->scope, entity->type,
+                                                                           statement_tail_start, statement_tail_end, entity->is_constexpr,
+                                                                           &folded_constant);
+                    if (folded_constant && !statement_tail_scalar.message.length)
+                    {
+                        initializer_start = statement_tail_start;
+                        initializer_end = statement_tail_end;
+                        statement_expression = initializer_end;
+                        statement_tail_scalar_validated = true;
+                    }
+                }
                 bool incompatible = statement_expression == initializer_end && !braced &&
                                     c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
                                                                          initializer_start, initializer_end, true, &conversion_message);
@@ -40059,8 +40169,10 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 }
                 else
                 {
-                    CParseInitializerDiagnostic scalar = c_parse_validate_static_scalar(machine, result, preprocess, entity->scope, entity->type,
-                                                                                        initializer_start, initializer_end, entity->is_constexpr);
+                    CParseInitializerDiagnostic scalar = statement_tail_scalar;
+                    if (!statement_tail_scalar_validated)
+                        scalar = c_parse_validate_static_scalar(machine, result, preprocess, entity->scope, entity->type,
+                                                                initializer_start, initializer_end, entity->is_constexpr, 0);
                     if (!scalar.message.length)
                         scalar = c_parse_validate_compound_literals(machine, result, preprocess, entity->scope, initializer_start, initializer_end, true, 0);
                     if (scalar.message.length)
