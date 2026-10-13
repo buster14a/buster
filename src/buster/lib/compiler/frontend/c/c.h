@@ -437,6 +437,13 @@ struct CPhaseBoundaryMetrics
 // Null for hand-built results (the token-space literals the integer-constant
 // evaluator takes); `c_preprocess_detail` reads those as the all-zero block
 // their inline members used to be.
+typedef struct CPreprocessDependency CPreprocessDependency;
+struct CPreprocessDependency
+{
+    String8 path;
+    bool system;
+};
+
 typedef struct CPreprocessDetail CPreprocessDetail;
 enum
 {
@@ -456,6 +463,10 @@ struct CPreprocessDetail
     CSourceMetrics source_lexed;
     CSourceMetrics source_unique;
     CSourceFileMetrics* lexed_files;
+    // Resolved source and include identities in first-inclusion order. These
+    // paths are sealed into the result arena and remain valid after release.
+    CPreprocessDependency* dependencies;
+    u32 dependency_count;
     CPreprocessedMetrics preprocessed;
     CPhaseBoundaryMetrics boundary;
     // Optional text-output boundaries, indexed by final token: 0 uses source
@@ -545,6 +556,15 @@ struct CPreprocessorOperation
     CPreprocessorOperationKind kind;
 };
 
+// Literal, case-sensitive filename prefix substitutions in command-line order.
+// The last matching entry wins once; replacements are not remapped.
+typedef struct CMacroPrefixMap CMacroPrefixMap;
+struct CMacroPrefixMap
+{
+    String8 old_prefix;
+    String8 new_prefix;
+};
+
 typedef enum CPreprocessDialect
 {
     C_PREPROCESS_DIALECT_GNU17,
@@ -584,6 +604,15 @@ BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
 BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
 BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
 
+// Phase-one trigraph replacement: the dialect's default, or an explicit
+// -ftrigraphs/-fno-trigraphs override.
+typedef enum CTrigraphMode
+{
+    C_TRIGRAPH_MODE_DIALECT,
+    C_TRIGRAPH_MODE_ENABLED,
+    C_TRIGRAPH_MODE_DISABLED,
+} CTrigraphMode;
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -591,6 +620,7 @@ struct CPreprocessOptions
     // arrays below remain the compatibility path for existing callers: their
     // definitions are applied first, followed by their undefinitions.
     CPreprocessorOperation* macro_operations;
+    CMacroPrefixMap* macro_prefix_maps;
     CPreprocessorDefinition* definitions;
     String8* undefinitions;
     String8* include_paths;
@@ -601,12 +631,15 @@ struct CPreprocessOptions
     // shifting the primary source's lines or __FILE__.
     String8* forced_includes;
     String8 source_path;
+    // Record resolved source/include paths and whether they are system headers.
+    bool record_dependencies;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
     FileIdentity source_identity;
     Target target;
     TargetDataLayout data_layout;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 include_path_count;
@@ -615,6 +648,7 @@ struct CPreprocessOptions
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
+    CTrigraphMode trigraph_mode;
     bool disable_external_includes;
     // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
     // line whose word is no known directive as a comment instead of an
@@ -633,6 +667,8 @@ struct CPreprocessOptions
     // Preserve expansion boundary whitespace for a subsequent text printer.
     // This does not widen CToken or allocate a sidecar in ordinary compilation.
     bool retain_output_spacing;
+    // The driver accepted -ffreestanding; publishes __STDC_HOSTED__ as zero.
+    bool freestanding;
     // Render the surviving macro table into CPreprocessDetail.macro_dump.
     bool dump_macros;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
@@ -1194,6 +1230,9 @@ typedef enum CEntityKind
     C_ENTITY_COUNT,
 } CEntityKind;
 
+#define C_ENTITY_INLINE_HINT_ALWAYS 1u
+#define C_ENTITY_INLINE_HINT_NOINLINE 2u
+
 typedef struct CEntity CEntity;
 struct CEntity
 {
@@ -1239,6 +1278,8 @@ struct CEntity
     // The file-scope entity's first declaration was written `static`, so it
     // has internal linkage (C17 6.2.2p3) and later declarations must agree.
     bool has_internal_linkage;
+    // Function optimization requests merged from compatible declarations.
+    u8 inline_hints;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1353,6 +1394,22 @@ struct CDeferredStaticAssert
     CSourceSite location;
 };
 
+// The semantic answer for one deferred _Static_assert. Validation stores one
+// per row in CParseResult.deferred_static_assert_verdicts and lowering
+// consumes it instead of evaluating the assertion again (#2531). Unchecked
+// means validation did not run (the model-building entry points); lowering
+// then asks the same semantic evaluator (c_semantic_static_assert_verdict).
+typedef enum CStaticAssertVerdict
+{
+    C_STATIC_ASSERT_UNCHECKED,
+    C_STATIC_ASSERT_HOLDS,
+    C_STATIC_ASSERT_NOT_CONSTANT,
+    C_STATIC_ASSERT_FAILED,
+    // The assertion measured an oversized type; the size diagnostic stands
+    // for it.
+    C_STATIC_ASSERT_SIZE_REPORTED,
+} CStaticAssertVerdict;
+
 typedef enum CParserDeclarationKind
 {
     C_PARSER_DECLARATION_OBJECT,
@@ -1441,6 +1498,11 @@ struct CAstTypeStatistics
     u64 declines;
     u64 misses;
     u64 gated;
+    // Name checks of answered nodes (c_ast_types_lookups_settled): those a
+    // settled region answered without a lookup, and those that walked the
+    // node's subtree.
+    u64 lookups_settled;
+    u64 lookups_walked;
 };
 
 // Why the body binder read a whole function body with its token walker
@@ -1479,9 +1541,149 @@ struct CAstStatementStatistics
     u64 declaration_hints;
     u64 loop_hints;
     u64 declines;
+    // Block declarations: declarators whose `,` or `;` and `=` the plan
+    // states, initializers among them bound without the per-token tests,
+    // declarations whose auto-inference scans were skipped, and declarator
+    // hints a token next to them refused (the rest of that declaration is
+    // then split from tokens).
+    u64 declarator_hints;
+    u64 initializer_hints;
+    u64 auto_skips;
+    u64 declarator_declines;
+    // Statements planned around the braces of their initializer lists
+    // (compound literals), which the token loop still reads itself.
+    u64 braced;
     // The last fallback: its reason, and the `{` of the body.
     CAstStatementFallback reason;
     u32 fallback_token;
+};
+
+// Why a declaration's specifier run went to the type machine instead of being
+// read from its DECL_SPECIFIERS node (c_parse_declaration_specifiers_type,
+// GitHub #3102). The run's first token names a word-only list, one whose
+// children are word and name leaves on consecutive tokens; a reason other
+// than INPUT says what that list holds that the tree read leaves to the
+// machine.
+typedef enum CAstSpecifierFallback
+{
+    C_AST_SPECIFIER_FALLBACK_NONE,
+    // No word-only specifier list begins at the run's first token: the list
+    // there holds a tag, typeof, `_Atomic(T)`, `_Alignas`, `_BitInt` or an
+    // attribute, or there is none.
+    C_AST_SPECIFIER_FALLBACK_INPUT,
+    // The word-only list holds a word outside the plain set (restrict,
+    // `_Atomic`, nullability, auto, constexpr, `__extension__`,
+    // `__auto_type`, `__builtin_va_list`, `_Imaginary`, `__float128`), no
+    // type word or name at all, or both. A word or an attribute right after
+    // the list, which the machine's scans would read on into, counts here
+    // too; the tree puts both in the list.
+    C_AST_SPECIFIER_FALLBACK_SPECIFIERS,
+    // The storage-class words repeat or conflict, which the machine
+    // diagnoses.
+    C_AST_SPECIFIER_FALLBACK_STORAGE,
+    // The machine's primitive scan over the list's words interns no row: an
+    // invalid combination, which it diagnoses. The syntax pass rejects those
+    // first, so only a list whose words the tree classified differently
+    // from the scan reaches this.
+    C_AST_SPECIFIER_FALLBACK_PRIMITIVE,
+    // The name is not a typedef in the run's scope, or its type is
+    // restrict-qualified: the machine's other lookups and checks decide.
+    C_AST_SPECIFIER_FALLBACK_TYPEDEF,
+    C_AST_SPECIFIER_FALLBACK_COUNT,
+} CAstSpecifierFallback;
+
+// What the specifier read did over one analysis: the runs it answered from
+// the tree, by base (primitive words or a typedef name), and the runs it left
+// to the machine and why. `lists` counts the tree's specifier lists,
+// `indexed` the word-only ones the index holds, and `index_reads` the list
+// children the index build read, which is at most the tree's node count.
+typedef struct CAstSpecifierStatistics CAstSpecifierStatistics;
+struct CAstSpecifierStatistics
+{
+    u64 lists;
+    u64 indexed;
+    u64 index_reads;
+    u64 primitive_answers;
+    u64 typedef_answers;
+    u64 fallbacks;
+    u64 fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // Type-name runs (c_parse_type_name_specifiers: `sizeof` and `_Alignof`
+    // operands, compound literals and the other type names the validators
+    // read): the runs skipped because no specifier list begins at their first
+    // token, those of them a `typeof` aggregate definition sent back to the
+    // machine, the runs read from the tree by base, and the runs left to the
+    // machine by reason.
+    u64 type_name_skips;
+    u64 type_name_retries;
+    u64 type_name_primitive_answers;
+    u64 type_name_typedef_answers;
+    u64 type_name_fallbacks;
+    u64 type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // Member specifier runs (c_parse_member_specifiers_type: the run each
+    // aggregate segment frame types, inside a tag definition's body): the
+    // runs read from the tree by base, and the runs left to the machine's
+    // scalar frame by reason.
+    u64 member_primitive_answers;
+    u64 member_typedef_answers;
+    u64 member_fallbacks;
+    u64 member_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // The last fallback: its reason, and the run's first token.
+    CAstSpecifierFallback reason;
+    u32 fallback_token;
+};
+
+// Why lowering's token walker, not the tree's extent table
+// (c_ir_statement_extents in c_gen.c, GitHub #3102), answered a controlled
+// body range query.
+typedef enum CAstExtentFallback
+{
+    C_AST_EXTENT_FALLBACK_NONE,
+    // The body has no table: no tree, no function definition whose body is
+    // this one, a body whose delimiters do not nest, or a table that does
+    // not fit its arena.
+    C_AST_EXTENT_FALLBACK_INPUT,
+    // A token the grammar puts next to a statement's anchor (the `(` after a
+    // header keyword, the `else` before an else-branch, the `goto` before a
+    // label) is not that token; the whole body goes to the walker.
+    C_AST_EXTENT_FALLBACK_ANCHOR,
+    // The query is not an entry, or its bound is shorter than the entry.
+    C_AST_EXTENT_FALLBACK_SHAPE,
+    C_AST_EXTENT_FALLBACK_COUNT,
+} CAstExtentFallback;
+
+// What the extent table did over one lowering: tables built (one per body
+// that asks), entries, queries answered, queries the walker answered by
+// reason (`walked`), and bodies whose table was refused (`body_fallbacks`).
+typedef struct CAstExtentStatistics CAstExtentStatistics;
+struct CAstExtentStatistics
+{
+    u64 bodies;
+    u64 entries;
+    u64 entry_declines;
+    u64 answers;
+    u64 walked[C_AST_EXTENT_FALLBACK_COUNT];
+    u64 body_fallbacks[C_AST_EXTENT_FALLBACK_COUNT];
+    // The last body fallback: its reason, and the `{` of the body.
+    CAstExtentFallback reason;
+    u32 fallback_token;
+};
+
+// What lowering read from the tree (GitHub #3102) over one lowering: the
+// top-level function bodies whose conditional nodes it indexed, the nodes, and
+// how each root-conditional query inside an indexed body ended. An answer is
+// a root `?:` the tree reported; a negative is a range holding no `?`; a
+// fallback went to the token scan. Steps are the nodes and parentheses the
+// index build's walks and widening visited, a work count that must stay linear
+// in the input; it leaves out the memo's binary-search comparisons.
+typedef struct CAstLowerStatistics CAstLowerStatistics;
+struct CAstLowerStatistics
+{
+    u64 bodies;
+    u64 conditionals;
+    u64 steps;
+    u64 answers;
+    u64 negatives;
+    u64 fallbacks;
 };
 
 typedef struct CParserResult CParserResult;
@@ -1508,6 +1710,9 @@ struct CParserResult
     // Optional: receives the body binder's statement-plan counts, added to
     // what it already holds. The plan runs whenever `ast` is set.
     CAstStatementStatistics* ast_statement_statistics;
+    // Optional: receives the declaration specifier read's counts, added to
+    // what it already holds. The read runs whenever `ast` is set.
+    CAstSpecifierStatistics* ast_specifier_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -1518,6 +1723,11 @@ struct CParserResult
     // tree (-fc-ast-pilot); without it every row is appended, as the default
     // path always has.
     bool type_interning;
+    // Nothing will lower this unit (the driver's -fsyntax-only), so no
+    // consumer reads the bytes of a string literal: the literal memo records
+    // a narrow fragment's length alone, counted, not decoded. Without it each
+    // first sight decodes and records the bytes lowering reuses.
+    bool string_literal_lengths_only;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -1612,6 +1822,12 @@ struct CTokenPositionIndex
     // validates the row against the live table, so rollbacks and private query
     // copies that share this index stay correct.
     u32* type_identity_rows_plus_one;
+    // Ascending positions of every typeof, __typeof, __typeof__ and
+    // typeof_unqual word in any dialect: the only places
+    // c_parse_define_typeof_aggregates has anything to define.
+    u32* typeof_positions;
+    u32 typeof_count;
+    u32 typeof_capacity;
 #if BUSTER_INCLUDE_TESTS
     // Diagnostics for tests: lookups, and rows read by the validating scan.
     u64 type_identity_lookups;
@@ -1666,6 +1882,12 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // Natural expression endpoints, built backwards for one validated body.
+    // A query with an earlier bound clamps the endpoint to that bound.
+    CToken const* body_expression_tokens;
+    u32* body_expression_ends;
+    u32 body_expression_start;
+    u32 body_expression_count;
     // c_parse_scope_for_token's answer for every token of one function body
     // under one root scope (c_parse_body_scopes_build), installed while that
     // body's lowering constraints are checked so each query inside it is one
@@ -1729,6 +1951,37 @@ struct CTypeIdentityQuery
     u32 result_end;
 };
 
+#if BUSTER_INCLUDE_TESTS
+// A semantic answer for one scalar-integer `sizeof` expression operand, kept
+// only while the test-only handoff comparison is on (c_test_sizeof_handoff_set,
+// GitHub #2531). The key is the `sizeof` keyword's token; `scope` is the
+// scope the producer typed the operand in. The answer is the unqualified kind
+// (an enum's underlying kind) and its size, never a CTypeId, so no row can
+// name a type a rollback truncated.
+typedef enum CSizeofOperandProducer
+{
+    // c_parse_typed_constant folding a constant context (static assertion,
+    // array bound, case label, static initializer) in the normal mode.
+    C_SIZEOF_OPERAND_PRODUCER_CONSTANT,
+    // c_parse_validate_sizeof_operands, which asks for the operand's type
+    // only for this comparison.
+    C_SIZEOF_OPERAND_PRODUCER_VALIDATION,
+    C_SIZEOF_OPERAND_PRODUCER_COUNT,
+} CSizeofOperandProducer;
+
+typedef struct CSizeofOperandType CSizeofOperandType;
+struct CSizeofOperandType
+{
+    u32 keyword;
+    u32 operand_end;
+    CScopeId scope;
+    u8 kind;
+    u8 producer;
+    u8 size;
+    u8 reserved;
+};
+#endif
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1748,6 +2001,13 @@ struct CParseResult
     CTypeIdentityQuery* type_identity_queries;
     u32 type_identity_query_count;
     u32 type_identity_query_capacity;
+#if BUSTER_INCLUDE_TESTS
+    // Append-only like type_identity_queries, so a rollback drops the rows a
+    // speculative query added. Null unless the handoff comparison is on.
+    CSizeofOperandType* sizeof_operand_types;
+    u32 sizeof_operand_type_count;
+    u32 sizeof_operand_type_capacity;
+#endif
     CParameter* parameters;
     CMember* members;
     CEnumMember* enum_members;
@@ -1758,6 +2018,12 @@ struct CParseResult
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
     CEntityId* binding_by_symbol;
+    // One bit per interned symbol below binding_capacity, set when an entity
+    // with that symbol enters the lookup chains (c_parse_scope_add_entity)
+    // and never cleared. A clear bit proves no chain holds the symbol, so a
+    // lookup of it fails without walking the scopes (#2676); a set bit is
+    // only "maybe", because a rolled-back entity keeps its bit.
+    u64* symbol_bound_words;
     CParseBindingUndo* binding_undo;
     CScopeId binding_scope;
     // Borrowed while the lowering constraints are checked: the block-scope
@@ -1774,7 +2040,9 @@ struct CParseResult
     CNumberFacts const* number_facts;
     // The decoded bytes of narrow string-literal fragments, decoded once per
     // final-stream token: semantic analysis records them, lowering reads them
-    // (CStringLiteralMemo in c_internal.h). Null for hand-built results.
+    // (CStringLiteralMemo in c_internal.h). Only their lengths when the unit
+    // will not be lowered (CParserResult.string_literal_lengths_only). Null
+    // for hand-built results.
     CStringLiteralMemo* string_literals;
     // Outside the checkpointed body, like position_index, so a rollback or a
     // by-value operand copy keeps counting into the same record. Null for
@@ -1816,6 +2084,10 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
+    // One CStaticAssertVerdict per deferred row, written after parsing by
+    // c_parse_validate_deferred_assertions; null when validation did not run
+    // or nothing was deferred.
+    u8* deferred_static_assert_verdicts;
     // Sparse declaration-point widths and owned diagnostics from private type
     // queries. Snapshots roll these rows back with their parsed members.
     CDeferredBitFieldWidthDiagnostic* deferred_bit_field_width_diagnostics;
@@ -1881,6 +2153,8 @@ struct CParseResult
     // The live entries of the interning log (CAggregateLookup.type_interning),
     // checkpointed with type_count so a rollback forgets the rows it removes.
     u32 interned_type_count;
+    // The same for its log of shared qualified member copies.
+    u32 interned_qualified_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases
@@ -1910,6 +2184,10 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    // -fcanonical-intern-constants (#3011): reuse an integer constant already
+    // built earlier in the current block instead of building another row.
+    // Opt-in construction-time arm of the CSE census; off emits as before.
+    bool intern_block_constants;
     // Resolve every pending SSA parameter of a local initialized only at its
     // declaration through the general predecessor walk. The output must not
     // change; tests use it as the differential reference for the shortcut.
@@ -1928,6 +2206,16 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
+    // The unit's syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
+    // from its nodes and runs the token scans for everything else. Null
+    // lowers exactly as before. Read only during the call; the tree and the
+    // preprocessing result must outlive it.
+    CAst const* syntax_tree;
+    // Optional: receives the counts, added to what it already holds.
+    CAstLowerStatistics* ast_lower_statistics;
+    // Optional: receives the extent table's counts, added to what it holds.
+    CAstExtentStatistics* syntax_tree_extent_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -1943,11 +2231,27 @@ struct CIRDirectSsaStatistics
     u64 temporaries;
 };
 
+// Construction-time integer-constant interning (#3011). Lookups are integer
+// constants requested while interning was on; hits reused a constant built
+// earlier in the same block and allocated no row, value or immediate; stale
+// counts key matches whose row was retracted, truncated or rebound.
+typedef struct CIRConstantInternStatistics CIRConstantInternStatistics;
+struct CIRConstantInternStatistics
+{
+    u64 lookups;
+    u64 hits;
+    u64 stale;
+};
+
 typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
     CTypeLayoutStatistics type_layout;
+    // Attempts the lowering's type-mapping passes made, retries included, so
+    // a test can pin them to the unit's size (#3312).
+    u64 type_mapping_attempts;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
@@ -2124,6 +2428,10 @@ BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResul
 BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 // The CAstStatementFallback in lower case without its prefix ("none", "input", "tokens").
 BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
+// The CAstSpecifierFallback in lower case without its prefix ("none", "input", ...).
+BUSTER_F_DECL String8 c_ast_specifier_fallback_name(CAstSpecifierFallback reason);
+// The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
+BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

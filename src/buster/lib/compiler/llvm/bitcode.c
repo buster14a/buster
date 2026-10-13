@@ -14,10 +14,13 @@
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
 // llvm_bc_linkage preserves weak definitions versus optional declarations;
 // llvm_bc_visibility keeps external hidden binding separate from linkage.
+// llvm_bc_add_alias_entity and llvm_bc_resolve_aliases turn IrModule.aliases
+// into MODULE_CODE_ALIAS records numbered after every function.
 //
 // Collection-time lookups stay O(1) expected as the module grows:
 // llvm_bc_add_constant deduplicates through the constant_slots hash index,
 // llvm_bc_name_available checks link names through the name_slots hash index,
+// llvm_bc_section_id interns ordered section names through a content hash index,
 // and llvm_bc_find_integer_count reads the integer_count_functions table. These
 // indexes only locate rows; pool and entity order, and therefore value IDs,
 // remain insertion order.
@@ -29,8 +32,8 @@
 // llvm_bc_prepare_inline_assembly translates GCC inline assembly into an
 // INLINEASM constant during collection; llvm_bc_emit_inline_assembly writes
 // its call or callbr. LLVM_BITCODE.md tabulates the translation.
-// Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
-// normal builds omit that private boundary entirely.
+// Private test seams expose integer operands and section lookup probe counts;
+// normal builds omit those boundaries entirely.
 
 enum
 {
@@ -65,6 +68,7 @@ enum
     LLVM_BC_MODULE_SECTIONNAME = 5,
     LLVM_BC_MODULE_GLOBALVAR = 7,
     LLVM_BC_MODULE_FUNCTION = 8,
+    LLVM_BC_MODULE_ALIAS = 14,
     LLVM_BC_MODULE_SOURCE_FILENAME = 16,
 
     LLVM_BC_TYPE_NUMENTRY = 1,
@@ -185,8 +189,13 @@ enum
 };
 
 #define LLVM_BC_INVALID_ID UINT32_MAX
-// Tags a function index in a name-index slot; untagged indices are globals.
+// Tags a function or alias index in a name-index slot; untagged indices are
+// globals. LLVM_BC_INDEX_MAX_ENTRIES keeps both tag bits clear of the index.
 #define LLVM_BC_NAME_FUNCTION (UINT32_C(1) << 31)
+#define LLVM_BC_NAME_ALIAS (UINT32_C(1) << 30)
+// symbol_seen value of a symbol IrModule.aliases names: its own IrFunction or
+// IrGlobal declaration row, and the import sweep, must not declare it again.
+#define LLVM_BC_SYMBOL_SEEN_ALIAS 2
 // Initial slot count of the open-addressed constant and name indexes. Both
 // stay power-of-two sized and at most half full.
 #define LLVM_BC_INDEX_MIN_CAPACITY 64
@@ -243,7 +252,8 @@ struct LlvmBcConstant
 };
 
 // One open-addressed link-name slot. entity is a global index, or a function
-// index tagged with LLVM_BC_NAME_FUNCTION; LLVM_BC_INVALID_ID marks it empty.
+// or alias index tagged with LLVM_BC_NAME_FUNCTION or LLVM_BC_NAME_ALIAS;
+// LLVM_BC_INVALID_ID marks it empty.
 typedef struct LlvmBcNameSlot LlvmBcNameSlot;
 struct LlvmBcNameSlot
 {
@@ -379,6 +389,23 @@ struct LlvmBcFunction
     bool synthetic;
 };
 
+// One __attribute__((alias)) relation, written as a MODULE_CODE_ALIAS record
+// after every global and function. llvm_bc_resolve_aliases fills the target
+// fields once value ids exist. The value type and thread-local mode are the
+// target's, as the native object writer gives the alias the target's size;
+// llvm_bc_emit_module_entities reads the type from the target record then,
+// because llvm_bc_prepare_global_initializers may still replace a global's.
+typedef struct LlvmBcAlias LlvmBcAlias;
+struct LlvmBcAlias
+{
+    IrSymbol* symbol;
+    IrSymbolId target;
+    String8 name;
+    u32 value_id;
+    u32 target_value_id;
+    bool is_thread_local;
+};
+
 typedef struct LlvmBcString LlvmBcString;
 struct LlvmBcString
 {
@@ -441,6 +468,9 @@ struct LlvmBcContext
     LlvmBcFunction* functions;
     u32 function_count;
     u32 function_capacity;
+    LlvmBcAlias* aliases;
+    u32 alias_count;
+    u32 alias_capacity;
     u32 stack_save_function_index;
     u32 stack_restore_function_index;
     u32 debug_trap_function_index;
@@ -1773,10 +1803,13 @@ static bool llvm_bc_name_available(LlvmBcContext* context, String8 name, IrSymbo
             LlvmBcNameSlot entry = context->name_slots[slot];
             if (entry.hash == hash)
             {
-                u32 index = entry.entity & ~LLVM_BC_NAME_FUNCTION;
+                u32 index = entry.entity & ~(LLVM_BC_NAME_FUNCTION | LLVM_BC_NAME_ALIAS);
                 bool function = (entry.entity & LLVM_BC_NAME_FUNCTION) != 0;
-                String8 other_name = function ? context->functions[index].name : context->globals[index].name;
-                IrSymbol* other_symbol = function ? context->functions[index].symbol : context->globals[index].symbol;
+                bool alias = (entry.entity & LLVM_BC_NAME_ALIAS) != 0;
+                String8 other_name = alias ? context->aliases[index].name : function ? context->functions[index].name : context->globals[index].name;
+                IrSymbol* other_symbol = alias      ? context->aliases[index].symbol
+                                         : function ? context->functions[index].symbol
+                                                    : context->globals[index].symbol;
                 result = !llvm_bc_string_equal(other_name, name) || other_symbol == symbol;
             }
         }
@@ -1892,6 +1925,70 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
     llvm_bc_register_name(context, name, context->function_count | LLVM_BC_NAME_FUNCTION);
     context->function_count += 1;
     return true;
+}
+
+// An alias defines its own link name, so it takes a name slot like a global
+// or function would; llvm_bc_collect_entities has already marked its symbol
+// LLVM_BC_SYMBOL_SEEN_ALIAS so that no declaration of it is collected.
+static bool llvm_bc_add_alias_entity(LlvmBcContext* context, IrSymbolAlias alias)
+{
+    bool result = false;
+    IrSymbol* symbol = llvm_bc_ir_symbol(context, alias.symbol);
+    String8 name = llvm_bc_symbol_name(symbol, (String8){0});
+    if (!symbol || (symbol->kind != IR_SYMBOL_FUNCTION && symbol->kind != IR_SYMBOL_DATA) || !name.length)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_INVALID_ARGUMENT, llvm_bc_s8("LLVM bitcode alias has no named function or data symbol"), 0, 0, 0,
+                     alias.symbol);
+    }
+    else if (!llvm_bc_name_available(context, name, symbol))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("duplicate LLVM bitcode linkage name"), 0, 0, 0, symbol->id);
+    }
+    else
+    {
+        llvm_bc_vec_reserve(context->arena, (void**)&context->aliases, &context->alias_capacity, context->alias_count + 1, sizeof(*context->aliases),
+                            BUSTER_ALIGN_OF(LlvmBcAlias));
+        context->aliases[context->alias_count] = (LlvmBcAlias){.symbol = symbol,
+                                                               .target = alias.target,
+                                                               .name = name,
+                                                               .value_id = LLVM_BC_INVALID_ID,
+                                                               .target_value_id = LLVM_BC_INVALID_ID};
+        llvm_bc_register_name(context, name, context->alias_count | LLVM_BC_NAME_ALIAS);
+        context->alias_count += 1;
+        result = true;
+    }
+
+    return result;
+}
+
+// LLVM resolves an aliasee only after reading the whole module, so a target
+// numbered after its alias is fine; the verifier does require the aliasee to
+// be a definition, which a declaration-only target would not be.
+static bool llvm_bc_resolve_aliases(LlvmBcContext* context)
+{
+    for (u32 index = 0; index < context->alias_count && !llvm_bc_failed(context); index += 1)
+    {
+        LlvmBcAlias* alias = context->aliases + index;
+        u32 target = alias->target.value < context->program->symbols.count ? context->symbol_value_ids[alias->target.value] : LLVM_BC_INVALID_ID;
+        u32 function_index = target - context->global_count;
+        if (target < context->global_count && !context->globals[target].declaration)
+        {
+            alias->is_thread_local = context->globals[target].is_thread_local;
+            alias->target_value_id = target;
+        }
+        else if (target != LLVM_BC_INVALID_ID && target >= context->global_count && function_index < context->function_count &&
+                 !context->functions[function_index].declaration)
+        {
+            alias->target_value_id = target;
+        }
+        else
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNRESOLVED_SYMBOL,
+                         llvm_bc_s8("LLVM bitcode alias target is not a function or global definition"), 0, 0, 0, alias->symbol->id);
+        }
+    }
+
+    return !llvm_bc_failed(context);
 }
 
 static bool llvm_bc_add_stack_intrinsic(LlvmBcContext* context, bool save)
@@ -2172,6 +2269,33 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     }
     llvm_bc_mark_referenced_symbols(context, referenced);
 
+    // Every alias symbol is marked before any module's rows are read: its
+    // declaration row, in its own module or another, and the import sweep
+    // below would otherwise declare the name the alias defines (#1338).
+    // An __attribute__((ifunc)) symbol has no bitcode form here, and
+    // dropping it would leave every call to it unresolved.
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 alias_index = 0; alias_index < module->alias_count; alias_index += 1)
+        {
+            IrSymbolAlias alias = module->aliases[alias_index];
+            if (alias.is_indirect)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNRESOLVED_SYMBOL, llvm_bc_s8("LLVM bitcode does not represent ifunc symbols"), 0, 0, 0,
+                             alias.symbol);
+                return false;
+            }
+            if (alias.symbol.value >= symbol_count || context->symbol_seen[alias.symbol.value])
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("invalid or duplicate LLVM bitcode alias symbol"), 0, 0, 0,
+                             alias.symbol);
+                return false;
+            }
+            context->symbol_seen[alias.symbol.value] = LLVM_BC_SYMBOL_SEEN_ALIAS;
+        }
+    }
+
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
@@ -2184,6 +2308,17 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             IrGlobal* global = module->globals + global_index;
             IrSymbol* symbol = llvm_bc_ir_symbol(context, global->symbol);
             bool declaration = !symbol || !symbol->is_definition || global->initializer_kind == IR_GLOBAL_INITIALIZER_NONE;
+            if (symbol && context->symbol_seen[symbol->id.value] == LLVM_BC_SYMBOL_SEEN_ALIAS)
+            {
+                // The alias record is the definition; a row may only declare it.
+                if (!declaration)
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM bitcode alias symbol also has a definition"), 0, 0, 0,
+                                 symbol->id);
+                    return false;
+                }
+                continue;
+            }
             if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
             {
                 continue;
@@ -2208,11 +2343,33 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             }
             IrSymbol* symbol = llvm_bc_ir_symbol(context, function->symbol);
             bool declaration = function->state == IR_FUNCTION_DECLARATION || !symbol || !symbol->is_definition;
+            if (symbol && context->symbol_seen[symbol->id.value] == LLVM_BC_SYMBOL_SEEN_ALIAS)
+            {
+                if (!declaration)
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM bitcode alias symbol also has a definition"), function, 0,
+                                 0, symbol->id);
+                    return false;
+                }
+                continue;
+            }
             if (declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL && !referenced[symbol->id.value])
             {
                 continue;
             }
             if (!llvm_bc_add_function_entity(context, function, symbol, declaration))
+            {
+                return false;
+            }
+        }
+    }
+
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 alias_index = 0; alias_index < module->alias_count; alias_index += 1)
+        {
+            if (!llvm_bc_add_alias_entity(context, module->aliases[alias_index]))
             {
                 return false;
             }
@@ -2417,7 +2574,18 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             context->symbol_value_ids[context->functions[index].symbol->id.value] = context->functions[index].value_id;
         }
     }
+    // LLVM numbers module values in record order, and the alias records
+    // follow every global and function record.
+    for (u32 index = 0; index < context->alias_count; index += 1)
+    {
+        context->aliases[index].value_id = value_id++;
+        context->symbol_value_ids[context->aliases[index].symbol->id.value] = context->aliases[index].value_id;
+    }
     context->module_value_count = value_id;
+    if (!llvm_bc_resolve_aliases(context))
+    {
+        return false;
+    }
     context->stats.global_count = context->global_count;
     context->stats.function_count = context->function_count;
     for (u32 index = 0; index < context->function_count; index += 1)
@@ -6372,46 +6540,96 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
     }
 }
 
-// The one-based MODULE_CODE_SECTIONNAME index of a definition's requested
-// section (issue 1276), appending the name when it is new; zero, the
-// record's "no section", for a declaration or a definition that names none.
-static u32 llvm_bc_section_id(String8* names, u32* name_count, IrSymbol* symbol, bool declaration)
+// Ordered names own the one-based wire IDs. Slots only locate those IDs;
+// zero is empty. At most one new name per entity keeps occupancy <= 1/2.
+// Allocate the index lazily so modules without named sections pay no hash
+// table allocation or clearing cost.
+typedef struct LlvmBcSections LlvmBcSections;
+struct LlvmBcSections
+{
+    Arena* arena;
+    String8* names;
+    u32* slots;
+    u64 slot_mask;
+    u32 entity_count;
+    u32 name_count;
+#if BUSTER_INCLUDE_TESTS
+    u64 probes;
+#endif
+};
+
+// Declarations and definitions without a requested section retain ID zero.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_section_id(LlvmBcSections* sections, IrSymbol* symbol, bool declaration)
 {
     u32 result = 0;
     String8 name = symbol && !declaration ? symbol->section_name : (String8){0};
-    for (u32 index = 0; index < *name_count && name.length && !result; index += 1)
+    if (name.length)
     {
-        result = string_equal(names[index], name) ? index + 1 : 0;
+        if (!sections->slots)
+        {
+            u64 capacity = 1;
+            while (capacity < (u64)sections->entity_count * 2)
+            {
+                capacity *= 2;
+            }
+            sections->slots = arena_allocate(sections->arena, u32, capacity);
+            memset(sections->slots, 0, capacity * sizeof(*sections->slots));
+            sections->slot_mask = capacity - 1;
+        }
+        u64 hash = buster_hash_64((u8*)name.pointer, name.length);
+        for (u64 slot = hash & sections->slot_mask; !result; slot = (slot + 1) & sections->slot_mask)
+        {
+#if BUSTER_INCLUDE_TESTS
+            sections->probes += 1;
+#endif
+            u32 id = sections->slots[slot];
+            if (!id)
+            {
+                sections->names[sections->name_count++] = name;
+                result = sections->name_count;
+                sections->slots[slot] = result;
+            }
+            else if (string_equal(sections->names[id - 1], name))
+            {
+                result = id;
+            }
+        }
     }
-    if (name.length && !result)
-    {
-        names[*name_count] = name;
-        *name_count += 1;
-        result = *name_count;
-    }
-
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+LlvmBitcodeTestSections llvm_bitcode_test_section_ids(Arena* arena, IrSymbol** symbols, bool const* declarations, u32 count, u32* ids)
+{
+    LlvmBcSections sections = {.arena = arena, .entity_count = count, .names = arena_allocate(arena, String8, (u64)count + 1)};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        ids[index] = llvm_bc_section_id(&sections, symbols[index], declarations[index]);
+    }
+    return (LlvmBitcodeTestSections){.name_count = sections.name_count, .probes = sections.probes};
+}
+#endif
 
 static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 {
     // Every section name is recorded ahead of the entities that refer to it,
     // which is the order a reader resolves them in.
-    String8* section_names = arena_allocate(context->arena, String8, context->global_count + context->function_count + 1);
-    u32* section_ids = arena_allocate(context->arena, u32, context->global_count + context->function_count + 1);
-    u32 section_name_count = 0;
+    u32 entity_count = context->global_count + context->function_count;
+    LlvmBcSections sections = {.arena = context->arena, .entity_count = entity_count,
+                              .names = arena_allocate(context->arena, String8, (u64)entity_count + 1)};
+    u32* section_ids = arena_allocate(context->arena, u32, (u64)entity_count + 1);
     for (u32 index = 0; index < context->global_count; index += 1)
     {
-        section_ids[index] = llvm_bc_section_id(section_names, &section_name_count, context->globals[index].symbol, context->globals[index].declaration);
+        section_ids[index] = llvm_bc_section_id(&sections, context->globals[index].symbol, context->globals[index].declaration);
     }
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         section_ids[context->global_count + index] =
-            llvm_bc_section_id(section_names, &section_name_count, context->functions[index].symbol, context->functions[index].declaration);
+            llvm_bc_section_id(&sections, context->functions[index].symbol, context->functions[index].declaration);
     }
-    for (u32 index = 0; index < section_name_count; index += 1)
+    for (u32 index = 0; index < sections.name_count; index += 1)
     {
-        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, section_names[index]);
+        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, sections.names[index]);
     }
     for (u32 index = 0; index < context->global_count; index += 1)
     {
@@ -6461,6 +6679,22 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             llvm_bc_visibility(function->symbol, function->declaration),
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_FUNCTION, operands, 8);
+    }
+    for (u32 index = 0; index < context->alias_count; index += 1)
+    {
+        LlvmBcAlias* alias = context->aliases + index;
+        u32 target = alias->target_value_id;
+        // Version-1 MODULE_CODE_ALIAS: the name is in the value symbol table.
+        u64 operands[7] = {
+            target < context->global_count ? context->globals[target].storage_type_id : context->functions[target - context->global_count].type_id,
+            0, // address space
+            alias->target_value_id,
+            llvm_bc_linkage(alias->symbol, false),
+            llvm_bc_visibility(alias->symbol, false),
+            0, // DLL storage class
+            alias->is_thread_local ? 1 : 0,
+        };
+        llvm_bc_record(&context->stream, LLVM_BC_MODULE_ALIAS, operands, 7);
     }
     return !context->stream.failed;
 }
@@ -6531,6 +6765,13 @@ static bool llvm_bc_emit_value_symbol_table(LlvmBcContext* context)
     {
         LlvmBcFunction* function = context->functions + index;
         if (!llvm_bc_emit_named_value(context, function->value_id, function->name))
+        {
+            return false;
+        }
+    }
+    for (u32 index = 0; index < context->alias_count; index += 1)
+    {
+        if (!llvm_bc_emit_named_value(context, context->aliases[index].value_id, context->aliases[index].name))
         {
             return false;
         }

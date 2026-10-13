@@ -7,6 +7,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/tests/compiler/codegen/ebpf_test_vm.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 #if BUSTER_INCLUDE_TESTS
 
@@ -182,7 +183,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
             BUSTER_TEST(arguments, !string_equal(name, S8("filtered_type")) && !string_equal(name, S8("bpf_helper#7")));
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -326,7 +327,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_ranges(UnitTestArgum
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -431,7 +432,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_global_symbols(UnitTestArgu
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(address_references); index += 1) BUSTER_TEST(arguments, address_references[index] != 0);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -451,7 +452,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_symbols(UnitTestArguments* 
         // depending on elapsed time, machine load or a generated-code oracle.
         BUSTER_TEST(arguments, probe.lookup_steps <= (u64)counts[index] * 4);
 #endif
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     UnitTestResult strings = codegen_test_ebpf_string_symbols(arguments);
     result.succeeded_test_count += strings.succeeded_test_count;
@@ -623,7 +624,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_argument_images(UnitTestArg
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -695,7 +696,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_integer_images(UnitTestArgu
         u8 expected[] = {0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd, 0xff, 200};
         BUSTER_TEST(arguments, data.length >= sizeof(expected) && memcmp(data.pointer, expected, sizeof(expected)) == 0);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -848,7 +849,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                     if (ssa) BUSTER_TEST(arguments, reloads <= count + 1);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     String8 sources[] = {
@@ -902,7 +903,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     ByteSlice fixture = file_read(arguments->arena, S8("tests/basic_c_ebpf_stack_liveness.c"), (FileReadOptions){0});
@@ -933,7 +934,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                                                                    (u32)((u32)inputs[index] * 7u + 4u)));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     for (u32 sample = 0; sample < 3; sample += 1)
@@ -966,7 +967,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
             if (sample == 0) BUSTER_TEST(arguments, artifact.success && artifact.stats.max_stack_bytes == 512);
             else BUSTER_TEST(arguments, !artifact.success && artifact.error.code == EBPF_ERROR_STACK_LIMIT && artifact.bytes.length == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_stack_liveness"));
     return result;
@@ -1060,7 +1061,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // The VM refuses what it does not model. A helper placed before the entry
@@ -1084,7 +1085,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
             u64 observed = 0;
             BUSTER_TEST(arguments, artifact.success && !codegen_test_ebpf_execute(artifact.bytes, 7, 2, &observed));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Hand-assembled functions pin each VM rule. When the kernel is available
     // it must agree on acceptance and on the result.
@@ -1151,10 +1152,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
             oracle.kernel_executions += 1;
             if (!kernel_agreed) arguments->show(arguments, S8("eBPF kernel rule {u32}: {S8}, observed {u64}\n"), index, reason, kernel_observed);
             BUSTER_TEST(arguments, kernel_agreed);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_kernel_regressions"));
+    return result;
+}
+
+// Each source is valid C the frontend lowers without diagnostics, so the eBPF
+// emitter alone must refuse it: no bytes, object or ELF image, the documented
+// error code, and the exact text the backend capability catalogue cites (#309).
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_rejections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CodegenTestEbpfRejection CodegenTestEbpfRejection;
+    struct CodegenTestEbpfRejection
+    {
+        String8 source;
+        String8 diagnostic;
+        EbpfErrorCode code;
+        u8 reserved[4];
+    };
+    CodegenTestEbpfRejection rejections[] = {
+        {S8("struct pair { long first; long second; }; long helper(struct pair value) { return value.first + value.second; }"),
+         S8("aggregate eBPF subprogram arguments are unsupported"), EBPF_ERROR_UNSUPPORTED_ABI},
+        {S8("long sum(int count, ...) { return count; }"), S8("variadic functions are unsupported by eBPF"), EBPF_ERROR_VARIADIC},
+        {S8("long probe(long (*callee)(long), long value) { return callee(value); }"),
+         S8("indirect calls are unsupported by the eBPF backend"), EBPF_ERROR_INDIRECT_CALL},
+        {S8("long probe(long* counter, long value) { return __atomic_fetch_add(counter, value, __ATOMIC_SEQ_CST); }"),
+         S8("atomic IR operations are not yet lowered by the eBPF backend"), EBPF_ERROR_ATOMIC},
+        {S8("typedef int V4 __attribute__((vector_size(16))); int probe(void) { V4 value = {1, 2, 3, 4}; V4 used = value + value; return used[0]; }"),
+         S8("aggregate eBPF SSA values are unsupported"), EBPF_ERROR_UNSUPPORTED_AGGREGATE},
+        // A used vector result is refused earlier as an aggregate SSA value, so
+        // the discarded splat is what reaches the SIMD opcode itself.
+        {S8("void probe(void) { __builtin_buster_simd_splat_u8(7); }"),
+         S8("exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"), EBPF_ERROR_SIMD},
+        {S8("_Thread_local long counter; long probe(long value) { return counter + value; }"),
+         S8("thread-local storage is unsupported by eBPF"), EBPF_ERROR_TLS},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(rejections); fixture += 1)
+    {
+        CodegenTestEbpfRejection* rejection = rejections + fixture;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        CPreprocessResult tokens = c_preprocess(arena, rejection->source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParseResult parsed = c_parse(arena, tokens);
+        CIRLowerResult lowered = {0};
+        if (!tokens.error_count && !parsed.diagnostic_count)
+        {
+            lowered = c_lower_to_ir(arena, S8("ebpf-rejection.c"), tokens, parsed, target);
+        }
+        bool lowered_cleanly = !tokens.error_count && !parsed.diagnostic_count && lowered.program && lowered.diagnostic_count == 0;
+        if (!lowered_cleanly) arguments->show(arguments, S8("eBPF rejection {u32}: the C frontend refused the source\n"), fixture);
+        BUSTER_TEST(arguments, lowered_cleanly);
+        if (lowered_cleanly)
+        {
+            EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+            bool rejected = !artifact.success && artifact.error.code == rejection->code;
+            bool no_output = artifact.bytes.length == 0 && artifact.object.length == 0 && artifact.elf.length == 0;
+            bool exact = string_first_sequence(artifact.error.message, rejection->diagnostic) != BUSTER_STRING_NO_MATCH &&
+                         string_first_sequence(artifact.error.diagnostic, rejection->diagnostic) != BUSTER_STRING_NO_MATCH;
+            if (!rejected || !no_output || !exact)
+            {
+                arguments->show(arguments, S8("eBPF rejection {u32}: success {u32}, code {u32}, bytes {u64}: {S8}\n"), fixture,
+                                (u32)artifact.success, (u32)artifact.error.code, artifact.bytes.length, artifact.error.message);
+            }
+            BUSTER_TEST(arguments, rejected);
+            BUSTER_TEST(arguments, no_output);
+            BUSTER_TEST(arguments, exact);
+        }
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 

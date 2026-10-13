@@ -1,0 +1,42 @@
+{
+ "x86_64/fast": {
+  "values": 1262330,
+  "spills": 66949,
+  "reloads": 109575,
+  "boundary_spills": 23862,
+  "boundary_reloads": 13378,
+  "copies": 291737,
+  "rematerializations": 56505,
+  "code_bytes": 13667473
+ },
+ "x86_64/quality": {
+  "values": 1262330,
+  "spills": 59439,
+  "reloads": 89385,
+  "boundary_spills": 20974,
+  "boundary_reloads": 12728,
+  "copies": 286614,
+  "rematerializations": 43610,
+  "code_bytes": 13551818
+ },
+ "aarch64/fast": {
+  "values": 1233475,
+  "spills": 69900,
+  "reloads": 99940,
+  "boundary_spills": 30086,
+  "boundary_reloads": 22496,
+  "copies": 85567,
+  "rematerializations": 43954,
+  "code_bytes": 12973560
+ },
+ "aarch64/quality": {
+  "values": 1233475,
+  "spills": 63400,
+  "reloads": 85899,
+  "boundary_spills": 26924,
+  "boundary_reloads": 20686,
+  "copies": 82604,
+  "rematerializations": 37493,
+  "code_bytes": 12933244
+ }
+}

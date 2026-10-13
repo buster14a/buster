@@ -22,10 +22,10 @@ FAKE_IDE = r'''
 #else
 #include <unistd.h>
 #endif
-#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
-#define PRIMARY_MODULE "c_frontend_tests"
-#else
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
 #define PRIMARY_MODULE "compiler_driver_tests"
+#else
+#define PRIMARY_MODULE "c_frontend_tests"
 #endif
 int main(int argc, char** argv)
 {
@@ -113,7 +113,9 @@ class MatrixUnitObservationTests(unittest.TestCase):
         subprocess.run(command, cwd=ROOT, check=True, timeout=120)
         fake = cls.directory / "ide.c"
         fake.write_text(FAKE_IDE)
-        subprocess.run([compiler, str(fake), "-o", str(cls.ide)], cwd=ROOT, check=True, timeout=30)
+        # Same ceiling as the driver compile: hosted Windows clang has stalled
+        # past 30 seconds on this one-file fixture and ejected a merge group.
+        subprocess.run([compiler, str(fake), "-o", str(cls.ide)], cwd=ROOT, check=True, timeout=120)
 
     @classmethod
     def tearDownClass(cls):

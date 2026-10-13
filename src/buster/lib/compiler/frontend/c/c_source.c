@@ -25,6 +25,9 @@
 //                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
+//   c_source_trim_row_pair                     per-file token and checkpoint
+//                                              reservations trimmed to their
+//                                              counts after each file
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
@@ -54,6 +57,8 @@
 //                                              sidecar consumed by parser
 //                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
+//   c_macro_builtin_token                     dynamic builtin spelling and
+//                                              macro-only filename prefix maps
 //   c_semantic_integer_transform_builtin,     fixed unsigned builtin signatures
 //   c_integer_transform_bits                  and bounded bit-transform folding
 //   c_macro_expansion_tasks_reserve ..         shared LIFO task batches,
@@ -68,6 +73,9 @@
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
 //   c_preprocess_directive_line_end             comment-aware directive ends
+//   c_token_kind_name                          token-kind spelling (one
+//                                              definition for unity and
+//                                              split builds)
 //   c_frame_wrap_conditional_tokens             conditional whitespace and sites
 //   c_integer_operation,                       C integer operators over the
 //   c_integer_constant_binary/unary            shared ir_integer_* semantics:
@@ -1449,6 +1457,39 @@ bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
 }
 #endif
 
+// Each translated file reserves one checkpoint row per source byte and each
+// lexed file one token row per byte, but uses a few percent of them. Two
+// arrays filled together sit back to back; left as reserved, the first one's
+// unwritten tail separates live rows, and the pages and huge pages around it
+// fault in for nothing (#1307). When the pair is still the arena's newest
+// allocation, the second array's used rows move down behind the first one's
+// written prefix and the cursor returns to their end, so the next file packs
+// against them. The vacated rows are cleared again: everything above the
+// pair's written extent stays zero, and the arena's dirty mark stops there
+// instead of covering the gap no row ever reached. No reader goes past a
+// count. Returns the second array's possibly moved start.
+BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 first_used, u64 first_written, u64 first_reserved, u8* second,
+                                               u64 second_used, u64 second_reserved, u64 second_alignment)
+{
+    u8* result = second;
+    u8* base = (u8*)arena;
+    if (second_used && second == first + first_reserved && base + arena->position == second + second_reserved)
+    {
+        u8* moved = (u8*)align_forward_unchecked((u64)(first + first_used), second_alignment);
+        if (moved < second)
+        {
+            memmove(moved, second, second_used);
+            u8* moved_end = moved + second_used;
+            u8* vacated = BUSTER_MAX(moved_end, second);
+            memset(vacated, 0, (u64)(second + second_used - vacated));
+            u8* written_end = BUSTER_MAX(moved_end, first + BUSTER_MIN(first_written, first_reserved));
+            arena_release_unwritten_tail(arena, (u64)(moved_end - base), (u64)(written_end - base));
+            result = moved;
+        }
+    }
+    return result;
+}
+
 // GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
@@ -1727,6 +1768,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             .pointer = translated,
             .length = output,
         };
+        checkpoint_offsets = (u32*)c_source_trim_row_pair(arena, (u8*)checkpoints, sizeof(*checkpoints) * checkpoint_count,
+                                                          sizeof(*checkpoints) * checkpoint_count, sizeof(*checkpoints) * plan->checkpoint_capacity, (u8*)checkpoint_offsets,
+                                                          sizeof(*checkpoint_offsets) * checkpoint_count,
+                                                          sizeof(*checkpoint_offsets) * plan->checkpoint_capacity, BUSTER_ALIGN_OF(u32));
         result.checkpoints = checkpoints;
         result.checkpoint_offsets = checkpoint_offsets;
         result.checkpoint_count = checkpoint_count;
@@ -3813,6 +3858,12 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
                     C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
                     C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
+                    // The emitter's full-width stores may have written its
+                    // sixteen slack rows past the count.
+                    result.token_shapes = (CTokenShape*)c_source_trim_row_pair(arena, (u8*)result.tokens, sizeof(CToken) * result.token_count,
+                                                                               sizeof(CToken) * (result.token_count + 16), sizeof(CToken) * token_capacity, (u8*)result.token_shapes,
+                                                                               sizeof(CTokenShape) * result.token_count,
+                                                                               sizeof(CTokenShape) * token_capacity, BUSTER_ALIGN_OF(CTokenShape));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
@@ -4183,6 +4234,9 @@ struct CMacro
     // while __BASE_FILE__ retains the root path independently of #line.
     u32 builtin_counter;
     String8 builtin_base_path;
+    CMacroPrefixMap* builtin_prefix_maps;
+    u32 builtin_prefix_map_count;
+    bool builtin_in_directive;
 };
 
 typedef struct CMacroPushMacro CMacroPushMacro;
@@ -4273,6 +4327,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
     { S8_INITIALIZER("__builtin_complex"), C_SYMBOL_BUILTIN_COMPLEX },
+    // Clang's source-location builtins: the expansion point's presumed line
+    // (an int constant), file name and enclosing function name.
+    { S8_INITIALIZER("__builtin_LINE"), C_SYMBOL_BUILTIN_SOURCE_LINE },
+    { S8_INITIALIZER("__builtin_FILE"), C_SYMBOL_BUILTIN_SOURCE_FILE },
+    { S8_INITIALIZER("__builtin_FUNCTION"), C_SYMBOL_BUILTIN_SOURCE_FUNCTION },
     { S8_INITIALIZER("__builtin_strlen"), C_SYMBOL_BUILTIN_STRLEN },
     { S8_INITIALIZER("__builtin___clear_cache"), C_SYMBOL_BUILTIN_CLEAR_CACHE },
     { S8_INITIALIZER("__builtin_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
@@ -4394,9 +4453,13 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_infl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nanl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_valf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_huge_val"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_vall"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnan"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
@@ -4559,6 +4622,15 @@ BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
                   builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
                   builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
                   builtin == C_SYMBOL_BUILTIN_VA_END;
+    return result;
+}
+
+// Clang's __builtin_LINE, __builtin_FILE and __builtin_FUNCTION: argument-free
+// queries of the call's expansion point, typed and lowered without an entity.
+BUSTER_C_SHARED bool c_semantic_source_location_builtin(CSymbolBuiltin builtin)
+{
+    bool result = builtin == C_SYMBOL_BUILTIN_SOURCE_LINE || builtin == C_SYMBOL_BUILTIN_SOURCE_FILE ||
+                  builtin == C_SYMBOL_BUILTIN_SOURCE_FUNCTION;
     return result;
 }
 
@@ -4834,7 +4906,26 @@ bool c_semantic_math_link_is_long_double(String8 link_name)
     CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
            string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
-           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+           c_semantic_math_special_value(link_name).kind == C_TYPE_LONG_DOUBLE || (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+}
+
+// The constant-valued special-float builtins by link name: the census every
+// result-type query, arity check, constant folder and runtime lowering reads.
+// c_ir_math_builtin_link_name folds the spellings onto six link names:
+// `__builtin_inf` onto huge_val, `__builtin_huge_valf` onto inff, and
+// `__builtin_huge_vall` and `__builtin_infl` onto infl.
+CMathSpecialValue c_semantic_math_special_value(String8 link_name)
+{
+    CMathSpecialValue result = {.kind = C_TYPE_INVALID, .special = C_MATH_SPECIAL_NONE};
+    bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val")) || string_equal(link_name, S8("infl"));
+    bool quiet_nan = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanl"));
+    if (infinity || quiet_nan)
+    {
+        char8 last = link_name.pointer[link_name.length - 1];
+        result.kind = last == 'f' ? C_TYPE_FLOAT : string_equal(link_name, S8("infl")) || string_equal(link_name, S8("nanl")) ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+        result.special = infinity ? C_MATH_SPECIAL_INFINITY : C_MATH_SPECIAL_QUIET_NAN;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -5229,27 +5320,21 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
 enum
 {
     C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 512,
+    C_SYMBOL_INITIAL_SLOT_CAPACITY = 1u << 14,
+    C_SYMBOL_INITIAL_NAME_CAPACITY = 1u << 12,
 };
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_SHARED u16 c_parse_word_bits_compute(String8 spelling);
 
-BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
+// Interns the predefined range into a table whose arrays are allocated at the
+// initial capacities, and derives its builtin kinds and class and word bits.
+BUSTER_C_INTERNAL void c_symbol_table_seed(CSymbolTable* table)
 {
-    CSymbolTable table = {
-        .arena = arena,
-        .slot_capacity = 1u << 14,
-        .name_capacity = 1u << 12,
-    };
-    table.names = arena_allocate(arena, String8, table.name_capacity);
-    table.slots = arena_allocate(arena, CSymbolSlot, table.slot_capacity);
-    memset(table.slots, 0, sizeof(*table.slots) * table.slot_capacity);
-    table.builtin_kinds = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    table.word_bits = arena_allocate(arena, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    memset(table.builtin_kinds, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    memset(table.class_bits, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    memset(table.word_bits, 0, sizeof(*table.word_bits) * C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table->slots, 0, sizeof(*table->slots) * table->slot_capacity);
+    memset(table->builtin_kinds, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table->class_bits, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table->word_bits, 0, sizeof(*table->word_bits) * C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     // The well-known names go in first and in enumerator order, because the
     // passes that compare against them spell the id as the enumerator itself
     // rather than reading it back out of the table.
@@ -5259,35 +5344,111 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
         // match nothing, so the gap is caught here rather than as a pass
         // that silently stops recognizing its keyword.
         BUSTER_CHECK(c_symbol_well_known_spellings[well_known].length);
-        u32 id = c_symbol_intern(&table, c_symbol_well_known_spellings[well_known]);
+        u32 id = c_symbol_intern(table, c_symbol_well_known_spellings[well_known]);
         BUSTER_CHECK(id == well_known);
     }
     for (u64 index = 0; index < C_SYMBOL_PREDEFINED_COUNT; index += 1)
     {
-        u32 id = c_symbol_intern(&table, c_symbol_predefined[index].name);
+        u32 id = c_symbol_intern(table, c_symbol_predefined[index].name);
         BUSTER_CHECK(id == C_SYMBOL_WELL_KNOWN_COUNT + index);
         // Routed through the spelling scan instead of reading
         // c_symbol_predefined[index].builtin directly, so the two
         // classification paths cannot drift.
-        table.builtin_kinds[id] = (u8)c_symbol_builtin_from_spelling(c_symbol_predefined[index].name);
+        table->builtin_kinds[id] = (u8)c_symbol_builtin_from_spelling(c_symbol_predefined[index].name);
     }
     // The declaration keywords and the classified extras join the predefined
     // range; their class bits come from the same compute the spelling
     // fallback uses, so the two classification paths cannot drift.
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings); index += 1)
     {
-        c_symbol_intern(&table, c_declaration_keyword_spellings[index]);
+        c_symbol_intern(table, c_declaration_keyword_spellings[index]);
     }
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_symbol_classified_extras); index += 1)
     {
-        c_symbol_intern(&table, c_symbol_classified_extras[index]);
+        c_symbol_intern(table, c_symbol_classified_extras[index]);
     }
-    BUSTER_VALIDATE(table.count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
-    table.predefined_limit = table.count;
-    for (u32 id = 1; id <= table.count; id += 1)
+    BUSTER_VALIDATE(table->count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table->predefined_limit = table->count;
+    for (u32 id = 1; id <= table->count; id += 1)
     {
-        table.class_bits[id] = c_parse_token_class_compute(table.names[id]);
-        table.word_bits[id] = c_parse_word_bits_compute(table.names[id]);
+        table->class_bits[id] = c_parse_token_class_compute(table->names[id]);
+        table->word_bits[id] = c_parse_word_bits_compute(table->names[id]);
+    }
+}
+
+// Every table starts with the same predefined range: nothing above depends on
+// the unit, its options or its arena. Deriving it -- about five hundred
+// interns and spelling classifications -- was repeated by every compile, so a
+// process that compiles more than once derives it into this prototype once
+// and starts each later table as a copy of it (#3913). The first table of a
+// process still seeds itself, so a one-compile process does no extra work.
+// The prototype's names are the static spellings above, which every copy can
+// share; a copy allocates the same arrays at the same capacities, in the same
+// order, as a seeded table.
+BUSTER_GLOBAL_LOCAL String8 c_symbol_prototype_names[C_SYMBOL_INITIAL_NAME_CAPACITY];
+BUSTER_GLOBAL_LOCAL CSymbolSlot c_symbol_prototype_slots[C_SYMBOL_INITIAL_SLOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u8 c_symbol_prototype_builtin_kinds[C_SYMBOL_PREDEFINED_LIMIT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u8 c_symbol_prototype_class_bits[C_SYMBOL_PREDEFINED_LIMIT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u16 c_symbol_prototype_word_bits[C_SYMBOL_PREDEFINED_LIMIT_CAPACITY];
+BUSTER_GLOBAL_LOCAL CSymbolTable c_symbol_prototype;
+BUSTER_GLOBAL_LOCAL bool c_symbol_prototype_built;
+// Whether a table has seeded itself, written only while no other thread runs.
+BUSTER_GLOBAL_LOCAL bool c_symbol_table_seeded_once;
+
+BUSTER_C_INTERNAL void c_symbol_prototype_build(void)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    c_symbol_prototype = (CSymbolTable){
+        .names = c_symbol_prototype_names,
+        .slots = c_symbol_prototype_slots,
+        .builtin_kinds = c_symbol_prototype_builtin_kinds,
+        .class_bits = c_symbol_prototype_class_bits,
+        .word_bits = c_symbol_prototype_word_bits,
+        .slot_capacity = C_SYMBOL_INITIAL_SLOT_CAPACITY,
+        .name_capacity = C_SYMBOL_INITIAL_NAME_CAPACITY,
+    };
+    c_symbol_table_seed(&c_symbol_prototype);
+    // The predefined range never grows a table or decodes a UCN name, so the
+    // prototype has no arena and still owns only the static arrays above.
+    BUSTER_CHECK(c_symbol_prototype.names == c_symbol_prototype_names && c_symbol_prototype.slots == c_symbol_prototype_slots &&
+                 !c_symbol_prototype.has_ucn_names);
+    c_symbol_prototype_built = true;
+}
+
+BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
+{
+    CSymbolTable table = {
+        .arena = arena,
+        .slot_capacity = C_SYMBOL_INITIAL_SLOT_CAPACITY,
+        .name_capacity = C_SYMBOL_INITIAL_NAME_CAPACITY,
+    };
+    table.names = arena_allocate(arena, String8, table.name_capacity);
+    table.slots = arena_allocate(arena, CSymbolSlot, table.slot_capacity);
+    table.builtin_kinds = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table.word_bits = arena_allocate(arena, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    bool serial = os_is_only_live_thread();
+    if (!c_symbol_prototype_built && serial && c_symbol_table_seeded_once)
+    {
+        c_symbol_prototype_build();
+    }
+    if (c_symbol_prototype_built)
+    {
+        memcpy(table.names, c_symbol_prototype_names, sizeof(*table.names) * (c_symbol_prototype.count + 1u));
+        memcpy(table.slots, c_symbol_prototype_slots, sizeof(c_symbol_prototype_slots));
+        memcpy(table.builtin_kinds, c_symbol_prototype_builtin_kinds, sizeof(c_symbol_prototype_builtin_kinds));
+        memcpy(table.class_bits, c_symbol_prototype_class_bits, sizeof(c_symbol_prototype_class_bits));
+        memcpy(table.word_bits, c_symbol_prototype_word_bits, sizeof(c_symbol_prototype_word_bits));
+        table.count = c_symbol_prototype.count;
+        table.predefined_limit = c_symbol_prototype.predefined_limit;
+    }
+    else
+    {
+        c_symbol_table_seed(&table);
+        if (serial)
+        {
+            c_symbol_table_seeded_once = true;
+        }
     }
     return table;
 }
@@ -6603,6 +6764,29 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
                 }
             }
             path = string_slice(path, basename_start, path.length);
+        }
+        if (!first->builtin_in_directive)
+        {
+            for (u32 remaining = first->builtin_prefix_map_count; remaining; remaining -= 1)
+            {
+                CMacroPrefixMap mapping = first->builtin_prefix_maps[remaining - 1];
+                if (string_starts_with_sequence(path, mapping.old_prefix))
+                {
+                    String8 suffix = string_slice(path, mapping.old_prefix.length, path.length);
+                    u64 length = mapping.new_prefix.length + suffix.length;
+                    char8* mapped = c_space_allocate(space, length);
+                    if (mapping.new_prefix.length)
+                    {
+                        memcpy(mapped, mapping.new_prefix.pointer, mapping.new_prefix.length);
+                    }
+                    if (suffix.length)
+                    {
+                        memcpy(mapped + mapping.new_prefix.length, suffix.pointer, suffix.length);
+                    }
+                    path = (String8){.pointer = mapped, .length = length};
+                    break;
+                }
+            }
         }
         u64 capacity = path.length * 4 + 3;
         char8* quoted = c_space_allocate(space, capacity);
@@ -8181,7 +8365,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_inf",           "__builtin_inff", "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_inf",           "__builtin_inff", "__builtin_infl", "__builtin_nan", "__builtin_nanf", "__builtin_nanl",
+        "__builtin_huge_val",      "__builtin_huge_valf", "__builtin_huge_vall", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
         "__builtin_isnormal",      "__builtin_fpclassify", "__builtin_isgreater", "__builtin_isgreaterequal",
@@ -8199,6 +8384,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
         "__builtin_ia32_psrlqi128",
         "__builtin_types_compatible_p", "__builtin_classify_type", "__builtin_offsetof",
+        "__builtin_LINE",          "__builtin_FILE", "__builtin_FUNCTION",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",
@@ -8224,7 +8410,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         // eBPF also rejects floating-point operations. Operand type/width
         // restrictions remain the responsibility of semantic lowering.
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
-        bool native = cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+        bool native = cpu_arch_is_x86(cpu_arch) || cpu_arch == CPU_ARCH_AARCH64;
         // __builtin_return_address reads the frame record of the System V and
         // Darwin native backends; Win64/Windows-AArch64 frames, Wasm64 and
         // eBPF refuse it, so those targets answer 0.
@@ -9092,6 +9278,7 @@ struct CPreprocessSourceFrame
     u32 guard_symbol;
     u8 guard_state;
     bool line_start;
+    bool system_header;
     FileMapRead source_map;
     CIncludeSearchOrigin include_origin;
 };
@@ -9287,6 +9474,36 @@ BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* tab
 }
 
 #undef C_INCLUDE_FILE_SLOT_HASH
+
+BUSTER_C_INTERNAL void c_preprocess_dependency_record(Arena* arena, CPreprocessDetail* detail, CIncludeFileEntry* entry, String8 path,
+                                                       bool system, u32* capacity)
+{
+    if (entry->dependency_slot)
+    {
+        CPreprocessDependency* dependency = detail->dependencies + entry->dependency_slot - 1;
+        if (dependency->system && !system)
+        {
+            dependency->system = false;
+        }
+    }
+    else
+    {
+        if (detail->dependency_count == *capacity)
+        {
+            u32 next_capacity = *capacity ? (*capacity <= UINT32_MAX / 2 ? *capacity * 2 : UINT32_MAX) : 16;
+            CPreprocessDependency* dependencies = arena_allocate(arena, CPreprocessDependency, next_capacity);
+            if (detail->dependency_count)
+            {
+                memcpy(dependencies, detail->dependencies, (u64)detail->dependency_count * sizeof(*dependencies));
+            }
+            detail->dependencies = dependencies;
+            *capacity = next_capacity;
+        }
+        u32 index = detail->dependency_count++;
+        detail->dependencies[index] = (CPreprocessDependency){.path = path, .system = system};
+        entry->dependency_slot = index + 1;
+    }
+}
 
 // Whether an inclusion of `entry` produces no tokens: #pragma once, a repeated
 // #import (the root is entered before the table exists, so it is compared
@@ -10903,7 +11120,7 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "#define INT_MIN (-2147483647 - 1)\n"
                     "#define INT_MAX 2147483647\n"
                     "#define UINT_MAX 4294967295U\n"
-                    "#if defined(_WIN64)\n"
+                    "#if __SIZEOF_LONG__ == 4\n"
                     "#define LONG_MIN INT_MIN\n"
                     "#define LONG_MAX INT_MAX\n"
                     "#define ULONG_MAX UINT_MAX\n"
@@ -12093,22 +12310,53 @@ struct CTargetFeatureMacro
     String8 name;
     TargetCpuFeature feature;
     CpuArch cpu_arch;
+    bool i386_only;
 };
 
-// Exactly the features `<buster/lib/simd.h>` tests, in the GNU spelling.  The
-// list is deliberately short: every entry is a promise that the frontend and
-// the canonical backend can compile code written behind it.
+// GNU feature macros mirror the selected target even where code generation is
+// not available for that target.
 BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
-    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
+    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE__"), TARGET_CPU_FEATURE_X86_SSE, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__SSE3__"), TARGET_CPU_FEATURE_X86_SSE3, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSSE3__"), TARGET_CPU_FEATURE_X86_SSSE3, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4A__"), TARGET_CPU_FEATURE_X86_SSE4A, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4_1__"), TARGET_CPU_FEATURE_X86_SSE4_1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4_2__"), TARGET_CPU_FEATURE_X86_SSE4_2, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512CD__"), TARGET_CPU_FEATURE_X86_AVX512CD, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512IFMA__"), TARGET_CPU_FEATURE_X86_AVX512IFMA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512PF__"), TARGET_CPU_FEATURE_X86_AVX512PF, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512ER__"), TARGET_CPU_FEATURE_X86_AVX512ER, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VNNI__"), TARGET_CPU_FEATURE_X86_AVX512VNNI, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512BITALG__"), TARGET_CPU_FEATURE_X86_AVX512BITALG, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VPOPCNTDQ__"), TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX5124VNNIW__"), TARGET_CPU_FEATURE_X86_AVX5124VNNIW, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX5124FMAPS__"), TARGET_CPU_FEATURE_X86_AVX5124FMAPS, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VP2INTERSECT__"), TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512BF16__"), TARGET_CPU_FEATURE_X86_AVX512BF16, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512FP16__"), TARGET_CPU_FEATURE_X86_AVX512FP16, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX10_1__"), TARGET_CPU_FEATURE_X86_AVX10_1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__F16C__"), TARGET_CPU_FEATURE_X86_F16C, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__FMA__"), TARGET_CPU_FEATURE_X86_FMA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__FMA4__"), TARGET_CPU_FEATURE_X86_FMA4, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AES__"), TARGET_CPU_FEATURE_X86_AES, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__PCLMUL__"), TARGET_CPU_FEATURE_X86_PCLMUL, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__POPCNT__"), TARGET_CPU_FEATURE_X86_POPCNT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__LZCNT__"), TARGET_CPU_FEATURE_X86_LZCNT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__BMI__"), TARGET_CPU_FEATURE_X86_BMI1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__BMI2__"), TARGET_CPU_FEATURE_X86_BMI2, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__3dNOW__"), TARGET_CPU_FEATURE_X86_3DNOW, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__3dNOW_A__"), TARGET_CPU_FEATURE_X86_3DNOWA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64, false },
 };
 
 // The preprocessor's end-of-phase boundary. Everything c_preprocess builds is
@@ -12142,7 +12390,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 // fields still follow the explicit rehoming rules below.
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 632 + 32 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 648 + 32 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
 BUSTER_CT_CHECK(sizeof(CPragmaState) == 8);
 
@@ -12301,6 +12549,18 @@ BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResul
         {
             detail->lexed_files[index].path = c_preprocess_seal_string(seal, detail->lexed_files[index].path);
         }
+        detail->dependencies = c_preprocess_seal_typed(seal, detail->dependencies, CPreprocessDependency, detail->dependency_count);
+        for (u32 index = 0; index < detail->dependency_count; index += 1)
+        {
+            String8 path = detail->dependencies[index].path;
+            if (path.pointer)
+            {
+                detail->dependencies[index].path = string_duplicate_arena(seal->destination, path, false);
+                seal->metrics.references += 1;
+                seal->metrics.sealed_bytes += path.length;
+                seal->metrics.sealed_objects += 1;
+            }
+        }
         detail->macro_dump = c_preprocess_seal_string(seal, detail->macro_dump);
         result->detail = detail;
     }
@@ -12354,10 +12614,15 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
     if (result->detail)
     {
         count += c_test_pointer_in_range(result->detail->lexed_files, start, end) +
+                 c_test_pointer_in_range(result->detail->dependencies, start, end) +
                  c_test_pointer_in_range(result->detail->output_spacing, start, end);
         for (u32 index = 0; index < result->detail->lexed_file_count; index += 1)
         {
             count += c_test_pointer_in_range(result->detail->lexed_files[index].path.pointer, start, end);
+        }
+        for (u32 index = 0; index < result->detail->dependency_count; index += 1)
+        {
+            count += c_test_pointer_in_range(result->detail->dependencies[index].path.pointer, start, end);
         }
     }
     return count;
@@ -12618,7 +12883,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                               });
     // Preprocessed input already completed phase one; synthesized spellings
     // and command definitions likewise lex with replacement disabled.
-    bool trigraphs = !options.already_preprocessed && c_translate_trigraphs_enabled(options.dialect);
+    bool trigraphs = !options.already_preprocessed && (options.trigraph_mode == C_TRIGRAPH_MODE_DIALECT ? c_translate_trigraphs_enabled(options.dialect)
+                                                                                                         : options.trigraph_mode == C_TRIGRAPH_MODE_ENABLED);
     CLexResult root_lex = c_source_cache_lex(arena, space, source, trigraphs, options.dialect, options.source_cache);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
@@ -12715,12 +12981,20 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         "__CLANG_ATOMIC_CHAR32_T_LOCK_FREE", "__CLANG_ATOMIC_WCHAR_T_LOCK_FREE", "__CLANG_ATOMIC_SHORT_LOCK_FREE",   "__CLANG_ATOMIC_INT_LOCK_FREE",
         "__CLANG_ATOMIC_LONG_LOCK_FREE",     "__CLANG_ATOMIC_LLONG_LOCK_FREE",   "__CLANG_ATOMIC_POINTER_LOCK_FREE",
     };
+    bool i386_target = options.target.cpu_arch == CPU_ARCH_I386;
+    bool i386_i386 = i386_target && options.target.cpu_model == CPU_MODEL_X86_I386;
     CToken* lock_free_replacement = arena_allocate(arena, CToken, 1);
     lock_free_replacement[0] = c_space_token(space, S8("2"), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    bool i386_cx8 = i386_target && options.target.cpu_model != CPU_MODEL_X86_I386 &&
+                    options.target.cpu_model != CPU_MODEL_AMD_I486;
+    CToken* non_lock_free_replacement = arena_allocate(arena, CToken, 1);
+    non_lock_free_replacement[0] = c_space_token(space, S8("1"), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
     for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(lock_free_macro_names); macro_index += 1)
     {
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)lock_free_macro_names[macro_index]), lock_free_replacement, 1, 0, 0, false,
-                       false);
+        String8 name = string_from_pointer((char8*)lock_free_macro_names[macro_index]);
+        bool llong_lock_free = i386_target && !i386_cx8 && string_equal(name, S8("__CLANG_ATOMIC_LLONG_LOCK_FREE"));
+        CToken* replacement = llong_lock_free ? non_lock_free_replacement : lock_free_replacement;
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, name, replacement, 1, 0, 0, false, false);
     }
     static char const* gcc_lock_free_macro_names[] = {
         "__GCC_ATOMIC_BOOL_LOCK_FREE", "__GCC_ATOMIC_CHAR_LOCK_FREE", "__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
@@ -12729,8 +13003,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     };
     for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(gcc_lock_free_macro_names); macro_index += 1)
     {
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)gcc_lock_free_macro_names[macro_index]),
-                       lock_free_replacement, 1, 0, 0, false, false);
+        String8 name = string_from_pointer((char8*)gcc_lock_free_macro_names[macro_index]);
+        bool llong_lock_free = i386_target && !i386_cx8 && string_equal(name, S8("__GCC_ATOMIC_LLONG_LOCK_FREE"));
+        CToken* replacement = i386_i386 || llong_lock_free ? non_lock_free_replacement : lock_free_replacement;
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, name, replacement, 1, 0, 0, false, false);
+    }
+    if (i386_cx8)
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro,
+                                   S8("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8"), S8("1"));
     }
     c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL"), S8("1"));
     String8* feature_parameters = arena_allocate(arena, String8, 1);
@@ -12825,8 +13106,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
-    String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
-    String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_pointer_type = i386_target ? S8("int") : layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
+    String8 unsigned_pointer_type = i386_target ? S8("unsigned int")
+                                 : layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
     bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
     bool unsigned_wint_target = !short_wchar_target && !apple_target && !wasm_target;
     // Equal widths do not select the platform's typedef identity. Darwin
@@ -12854,7 +13136,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             C_DEFINE_TYPE_MACRO("__k8__", S8("1"));
         }
     }
-    if (options.target.cpu_arch == CPU_ARCH_X86_64 || apple_target)
+    if (cpu_arch_is_x86(options.target.cpu_arch) || apple_target)
     {
         C_DEFINE_TYPE_MACRO("__REGISTER_PREFIX__", S8(""));
     }
@@ -12922,11 +13204,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             String8 signed_max_name = string_format(arena, S8("__INT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
             String8 unsigned_max_name = string_format(arena, S8("__UINT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
             String8 signed_width_name = string_format(arena, S8("__INT_{S8}{S8}_WIDTH__"), family, integer_widths[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_name, signed_integer_types[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_name, unsigned_integer_types[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_max_name, signed_integer_maxima[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_max_name, unsigned_integer_maxima[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_width_name, integer_widths[width_index]);
+            bool i386_fast16 = i386_target && kind_index && width_index == 1;
+            String8 signed_type = i386_fast16 ? S8("int") : signed_integer_types[width_index];
+            String8 unsigned_type = i386_fast16 ? S8("unsigned int") : unsigned_integer_types[width_index];
+            String8 signed_max = i386_fast16 ? S8("2147483647") : signed_integer_maxima[width_index];
+            String8 unsigned_max = i386_fast16 ? S8("4294967295U") : unsigned_integer_maxima[width_index];
+            String8 width = i386_fast16 ? S8("32") : integer_widths[width_index];
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_name, signed_type);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_name, unsigned_type);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_max_name, signed_max);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_max_name, unsigned_max);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_width_name, width);
         }
     }
     C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_TYPE__", wasm_target ? S8("long") : S8("int"));
@@ -12958,17 +13246,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_max_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_max_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", i386_target ? S8("long long int") : signed_max_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", i386_target ? S8("unsigned long long int") : unsigned_max_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
     C_DEFINE_TYPE_MACRO("__UINT16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__INT32_TYPE__", S8("int"));
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
-    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", i386_target ? S8("long long int") : signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", i386_target ? S8("unsigned long long int") : unsigned_64_type);
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", i386_target ? S8("long int") : short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_WCHAR_T__", short_wchar_target ? S8("2") : S8("4"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wchar_target ? S8("2") : S8("4"));
@@ -13068,7 +13356,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // binary32/64 on every hosted target here; the long double family
     // follows the target's layout below.
     // Supported targets evaluate float/double at their declared precision.
-    C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD__", S8("0"));
+    C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD__", i386_target ? S8("2") : S8("0"));
+    if (i386_target)
+    {
+        C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD_TS_18661_3__", S8("2"));
+    }
     C_DEFINE_TYPE_MACRO("__FLT_RADIX__", S8("2"));
     C_DEFINE_TYPE_MACRO("__FLT_MANT_DIG__", S8("24"));
     C_DEFINE_TYPE_MACRO("__FLT_DIG__", S8("6"));
@@ -13203,9 +13495,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("_MSC_VER", S8("1940"));
         C_DEFINE_TYPE_MACRO("_MSC_FULL_VER", S8("194000000"));
         C_DEFINE_TYPE_MACRO("_MSC_EXTENSIONS", S8("1"));
-        // Preserve the Windows header spelling for needed body retention.
-        // Neither spelling injects a storage class or COMDAT semantics.
-        C_DEFINE_TYPE_MACRO("__forceinline", S8("__inline"));
+        // Preserve Windows force-inline semantics while retaining the inline
+        // keyword's ordinary C linkage behavior.
+        C_DEFINE_TYPE_MACRO("__forceinline", S8("__attribute__((always_inline)) __inline"));
         C_DEFINE_TYPE_MACRO("SORTPP_PASS", S8("1"));
         C_DEFINE_TYPE_MACRO("_WIN64", S8("1"));
         if (options.target.cpu_arch == CPU_ARCH_X86_64)
@@ -13303,12 +13595,91 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     {
         c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
     }
-    String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
+    if (options.target.cpu_arch == CPU_ARCH_I386)
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__LAHF_SAHF__"), S8("1"));
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__code_model_32__"), S8("1"));
+    }
+    String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_I386 ? S8("__i386__")
+                               : options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
                                : options.target.cpu_arch == CPU_ARCH_WASM32  ? S8("__wasm32__")
                                : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
                                : options.target.cpu_arch == CPU_ARCH_BPFEL   ? S8("__bpfel__")
                                                                              : S8("__x86_64__");
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
+#define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
+    if (i386_target)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__i386"), standard_replacement, 1, 0, 0, false, false);
+        if (c_preprocess_dialect_is_gnu(options.dialect))
+        {
+            c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("i386"), standard_replacement, 1, 0, 0, false, false);
+        }
+        if (options.target.cpu_model == CPU_MODEL_X86_I386)
+        {
+            C_DEFINE_TYPE_MACRO("__tune_i386__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_I486)
+        {
+            C_DEFINE_TYPE_MACRO("__i486", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i486__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_i486__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_PENTIUM)
+        {
+            C_DEFINE_TYPE_MACRO("__i586", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i586__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentium", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentium__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_i586__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_pentium__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_K6 ||
+                 options.target.cpu_model == CPU_MODEL_AMD_K6_2 ||
+                 options.target.cpu_model == CPU_MODEL_AMD_K6_3)
+        {
+            C_DEFINE_TYPE_MACRO("__k6", S8("1"));
+            C_DEFINE_TYPE_MACRO("__k6__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_k6__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_AMD_K6_2)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_k6_2__", S8("1"));
+            }
+            else if (options.target.cpu_model == CPU_MODEL_AMD_K6_3)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_k6_3__", S8("1"));
+            }
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_GEODE)
+        {
+            C_DEFINE_TYPE_MACRO("__tune_geode__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_ATHLON ||
+                 options.target.cpu_model == CPU_MODEL_AMD_ATHLON_XP)
+        {
+            C_DEFINE_TYPE_MACRO("__athlon", S8("1"));
+            C_DEFINE_TYPE_MACRO("__athlon__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_athlon__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_AMD_ATHLON_XP)
+            {
+                C_DEFINE_TYPE_MACRO("__athlon_sse__", S8("1"));
+                C_DEFINE_TYPE_MACRO("__tune_athlon_sse__", S8("1"));
+            }
+        }
+        else if (options.target.cpu_model == CPU_MODEL_BASELINE || options.target.cpu_model == CPU_MODEL_X86_I686)
+        {
+            C_DEFINE_TYPE_MACRO("__i686", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i686__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentiumpro", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentiumpro__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_X86_I686)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_i686__", S8("1"));
+                C_DEFINE_TYPE_MACRO("__tune_pentiumpro__", S8("1"));
+            }
+        }
+    }
+#undef C_DEFINE_TYPE_MACRO
     if (options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64)
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
@@ -13332,21 +13703,25 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__arm64__"), standard_replacement, 1, 0, 0, false, false);
     }
-    // The vector-extension macros the GNU family predefines from -march, so a
-    // header guarding an explicit SIMD kernel writes one condition that holds
-    // for clang, gcc, and the self-hosted stages alike.  Only the features the
-    // buster SIMD vocabulary can actually lower are published; announcing more
-    // would invite a host header down a path this frontend cannot compile.
     for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(c_target_feature_macros); feature_index += 1)
     {
         CTargetFeatureMacro entry = c_target_feature_macros[feature_index];
-        if (entry.cpu_arch == options.target.cpu_arch && target_cpu_feature_has(options.target, entry.feature))
+        if ((!entry.i386_only || options.target.cpu_arch == CPU_ARCH_I386) &&
+            cpu_arch_is_x86(entry.cpu_arch) && cpu_arch_is_x86(options.target.cpu_arch) &&
+            !(entry.feature == TARGET_CPU_FEATURE_X86_MMX && options.target.cpu_arch == CPU_ARCH_X86_64) &&
+            target_cpu_feature_has(options.target, entry.feature))
         {
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);
         }
     }
+    TargetCpuFeatures model_features = target_cpu_features_default(options.target.cpu_arch, options.target.cpu_model);
+    if (options.target.cpu_arch == CPU_ARCH_I386 &&
+        target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_SSE))
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__FXSR__"), S8("1"));
+    }
     CToken hosted_replacement = standard_replacement[0];
-    if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
+    if (options.freestanding || options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
         options.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         hosted_replacement.offset = C_SPELLING_ZERO;
@@ -13404,6 +13779,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
+    first_macro->builtin_prefix_maps = options.macro_prefix_maps;
+    first_macro->builtin_prefix_map_count = options.macro_prefix_map_count;
     if (!options.already_preprocessed)
     {
         c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
@@ -13455,6 +13832,20 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     CIncludeFileTable include_files = {
         .arena = arena,
     };
+    u32 dependency_capacity = 0;
+    if (options.record_dependencies && options.source_path.length && !string_equal(options.source_path, S8("-")))
+    {
+        CIncludeFileEntry* root_file = 0;
+        CIncludeFileStatus root_status = c_include_file_entry(&include_files, root_frame.identity, options.source_path, &root_file);
+        if (root_status == C_INCLUDE_FILE_OK)
+        {
+            c_preprocess_dependency_record(arena, result.detail, root_file, options.source_path, false, &dependency_capacity);
+        }
+        else
+        {
+            c_include_file_diagnostic(arena, &result, (CSourceLocation){.line = 1, .column = 1}, root_status, options.source_path);
+        }
+    }
     CIncludeProbeTable include_probes = {
         .arena = arena,
     };
@@ -13524,6 +13915,12 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         first_macro->builtin_frame = source_frame;
         first_macro->builtin_token_offset = token.offset;
         first_macro->builtin_path = source_frame->logical_path;
+        if (options.macro_prefix_map_count)
+        {
+            // GCC leaves filenames used by directives physical, notably
+            // #include __FILE__ and #line operands.
+            first_macro->builtin_in_directive = line_start && c_token_is_punctuator(&token, C_PUNCTUATOR_HASH);
+        }
         if (line_start && c_token_is_punctuator(&token, C_PUNCTUATOR_HASH))
         {
             bool directive_live = c_preprocess_is_active(conditional);
@@ -13817,6 +14214,19 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                             }
                             else
                             {
+                                bool include_system = false;
+                                if (options.record_dependencies)
+                                {
+                                    include_system = source_frame->system_header ||
+                                                     include_origin.kind == C_INCLUDE_SEARCH_SYSTEM_PATH ||
+                                                     include_origin.kind == C_INCLUDE_SEARCH_BUILTIN;
+                                    if (include_origin.kind != C_INCLUDE_SEARCH_BUILTIN &&
+                                        !string_equal(include_path, S8("<command-line>")))
+                                    {
+                                        c_preprocess_dependency_record(arena, result.detail, include_file, include_path,
+                                                                      include_system, &dependency_capacity);
+                                    }
+                                }
                                 if (is_import)
                                 {
                                     // Mark before descending so a recursive
@@ -13859,6 +14269,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                         .depth = source_frame->depth + 1,
                                         .line_start = true,
                                         .include_origin = include_origin,
+                                        .system_header = include_system,
                                     };
                                     include_frame->map_entry = map.count;
                                     c_source_map_append(&map, (IrSourceRegion){
@@ -14031,9 +14442,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                      !conditional->else_seen && conditional->parent_active && !conditional->branch_taken);
                 c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[directive_end].offset, directive_live);
                 first_macro->builtin_token_offset = directive.offset;
+                first_macro->builtin_in_directive = true;
                 c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, directive_kind, directive,
                                                    directive_index, directive_end, expansion_limit, &result, options, &include_probes, &conditional);
                 first_macro->builtin_token_offset = token.offset;
+                first_macro->builtin_in_directive = false;
                 logical_end = directive_end;
                 continue;
             }
@@ -14400,18 +14813,21 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
 #if BUSTER_INCLUDE_TESTS
 #define C_TEST_UNIT_REGISTRY_RESERVED_SIZE BUSTER_MB(64)
 // One unit this thread preprocessed and has not yet released: its three
-// private arenas, the arena its result lives in, and that arena's position
-// when preprocessing began (rewinding below it kills the result).
+// private arenas, the arena its result lives in, that arena's position
+// when preprocessing began (rewinding below it kills the result), and the
+// thread's registration serial, which orders units against test scopes.
 typedef struct CTestUnitEntry CTestUnitEntry;
 struct CTestUnitEntry
 {
     Arena* arenas[3];
     Arena* owner;
     u64 owner_position;
+    u64 serial;
 };
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
 BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
 {
@@ -14426,8 +14842,9 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Ar
         {
             c_test_unit_registry = entry;
         }
-        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position};
+        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position, .serial = c_test_unit_serial};
         c_test_unit_registry_count += 1;
+        c_test_unit_serial += 1;
     }
 }
 
@@ -14496,14 +14913,17 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_unregister(Arena* spelling)
     }
 }
 
-void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+// Releases every unit the predicate selects: those owned by `owner` at or
+// above `position` (every unit when `owner` is null) that registered at or
+// after `serial`.
+BUSTER_GLOBAL_LOCAL void c_test_release_preprocess_units(Arena* owner, u64 position, u64 serial)
 {
     u64 index = c_test_unit_registry_count;
     while (index > 0)
     {
         index -= 1;
         CTestUnitEntry entry = c_test_unit_registry[index];
-        if (!owner || (entry.owner == owner && entry.owner_position >= position))
+        if (entry.serial >= serial && (!owner || (entry.owner == owner && entry.owner_position >= position)))
         {
             c_test_unit_remove(index);
             for (u32 arena_index = 0; arena_index < BUSTER_ARRAY_LENGTH(entry.arenas); arena_index += 1)
@@ -14512,6 +14932,21 @@ void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
             }
         }
     }
+}
+
+void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+{
+    c_test_release_preprocess_units(owner, position, 0);
+}
+
+u64 c_test_preprocess_unit_mark(void)
+{
+    return c_test_unit_serial;
+}
+
+void c_test_release_preprocess_arenas_since(u64 mark)
+{
+    c_test_release_preprocess_units(0, 0, mark);
 }
 
 void c_test_release_preprocess_arenas(void)
@@ -14651,34 +15086,49 @@ void c_prewarm(void)
     {
         c_declaration_keyword_slots_build();
     }
+    if (!c_symbol_prototype_built)
+    {
+        c_symbol_prototype_build();
+    }
 }
 
-#if !BUSTER_UNITY_BUILD
 String8 c_token_kind_name(CTokenKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case C_TOKEN_INVALID:
-        return S8("invalid");
+        result = S8("invalid");
+        break;
     case C_TOKEN_END_OF_FILE:
-        return S8("end of file");
+        result = S8("end of file");
+        break;
     case C_TOKEN_IDENTIFIER:
-        return S8("identifier");
+        result = S8("identifier");
+        break;
     case C_TOKEN_PREPROCESSING_NUMBER:
-        return S8("preprocessing number");
+        result = S8("preprocessing number");
+        break;
     case C_TOKEN_CHARACTER_LITERAL:
-        return S8("character literal");
+        result = S8("character literal");
+        break;
     case C_TOKEN_STRING_LITERAL:
-        return S8("string literal");
+        result = S8("string literal");
+        break;
     case C_TOKEN_PUNCTUATOR:
-        return S8("punctuator");
+        result = S8("punctuator");
+        break;
     case C_TOKEN_NEWLINE:
-        return S8("newline");
+        result = S8("newline");
+        break;
     case C_TOKEN_PRAGMA:
-        return S8("pragma");
+        result = S8("pragma");
+        break;
     case C_TOKEN_KIND_COUNT:
-        return S8("invalid token kind");
+    default:
+        result = S8("invalid token kind");
+        break;
     }
-    return S8("invalid token kind");
+
+    return result;
 }
-#endif

@@ -34,16 +34,23 @@
 //                                                coverage and lane policy
 //   xed_import_*, assembly_import_*              x86 metadata importer (XED)
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
+//   bootstrap_process_owner_*                  native bootstrap case helper build
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
+//   tools/external_projects.c                   main-only project routing and records
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
 //   tools/ffmpeg_compatibility.c                 opt-in pristine FFmpeg portable census
+//   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
+//   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
+//   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
+//                                                and compatibility_ide_selection_self_test
 //   compatibility_spawn_self_test              harness environment/script contracts
+//   tools/curl_compat.c                         opt-in pristine curl build-system census
 //   test_raddebugger_action                     pinned upstream unity compilation/link diagnostic
 //   test_cpython_reference_action              opt-in Clang-only harness replay
 //   process_arguments, main                      command dispatch
@@ -103,9 +110,12 @@
 typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
+    BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER,
+    BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_COMPILER_CLOSURE,
+    BUILD_COMMAND_COMPILER_EVIDENCE,
     BUILD_COMMAND_PRODUCTION_PROFILE,
     BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST,
     BUILD_COMMAND_GENERATE,
@@ -124,6 +134,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_GENERATE_GUARD_SELF_TEST,
     BUILD_COMMAND_LUA_STAGING_SELF_TEST,
     BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST,
+    BUILD_COMMAND_COMPATIBILITY_IDE_SELECTION_SELF_TEST,
     BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
@@ -144,10 +155,15 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_MUSL,
+    BUILD_COMMAND_TEST_USERSPACE,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_RADDEBUGGER,
+    BUILD_COMMAND_TEST_CURL,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
+    BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS,
+    BUILD_COMMAND_TEST_QEMU,
+    BUILD_COMMAND_QEMU_INPUT_SELF_TEST,
     BUILD_COMMAND_TEST_CLANG_SUITE,
     BUILD_COMMAND_TEST_FFMPEG,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
@@ -155,6 +171,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_SOURCE_SIZE,
     BUILD_COMMAND_CI_NO_CODE,
+    BUILD_COMMAND_EXTERNAL_PROJECTS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
@@ -654,6 +671,7 @@ struct TestCjsonOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define CJSON_COMPATIBILITY_COMMIT "c859b25da02955fef659d658b8f324b5cde87be3"
@@ -666,6 +684,7 @@ struct TestZlibOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define ZLIB_COMPATIBILITY_COMMIT "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
@@ -681,6 +700,7 @@ struct TestLuaOptions
     String8 source_directory;
     String8 compatibility_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define LUA_COMPATIBILITY_COMMIT "6e22fedb74cf0c9b6656e9fce8b7331db847c605"
@@ -695,6 +715,7 @@ struct TestYyjsonOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define YYJSON_COMPATIBILITY_TAG "0.12.0"
@@ -708,6 +729,7 @@ struct TestStbOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 // LZ4 is consumed from a caller-provided pristine checkout.  The harness owns
@@ -720,6 +742,7 @@ struct TestLz4Options
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 // sbase is consumed from a caller-provided pristine checkout. It is the
@@ -731,6 +754,7 @@ struct TestSbaseOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define SBASE_COMPATIBILITY_COMMIT "c546c3a5724c81cee9a11d816a38ccdf17472129"
@@ -749,6 +773,7 @@ struct TestRaddebuggerOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
     bool self_test;
 };
 
@@ -770,6 +795,7 @@ struct TestDoomOptions
     String8 source_directory;
     String8 iwad_path;
     String8 config;
+    String8 build_directory;
 };
 
 #define DOOM_COMPATIBILITY_COMMIT "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284"
@@ -786,6 +812,7 @@ struct TestMuslOptions
     // cross-ABI links, which is what the acceptance inventory needs on its own.
     String8 libc_test_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define MUSL_COMPATIBILITY_TAG "v1.2.6"
@@ -836,6 +863,7 @@ struct TestQuickjsOptions
     String8 source_directory;
     String8 test262_directory;
     String8 config;
+    String8 build_directory;
 };
 
 #define QUICKJS_COMPATIBILITY_VERSION "2026-06-04"
@@ -846,6 +874,7 @@ struct TestCpythonOptions
 {
     String8 source_directory;
     String8 config;
+    String8 build_directory;
     bool reference_only;
 };
 
@@ -2797,8 +2826,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_is_canonical(Generate generate, C
     bool valid_arguments = !generate.cmake_arguments.length;
     if (generate.ci)
     {
-        valid_arguments = generate.cmake_arguments.length == 1 &&
-                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"));
+        // The partition option only selects test_all's unit launcher; it
+        // changes no compile or link input of the produced ide (#3912).
+        u64 count = generate.cmake_arguments.length;
+        valid_arguments = (count == 1 || count == 2) &&
+                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")) &&
+                          (count == 1 || string_equal(generate.cmake_arguments.pointer[1], S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON")));
     }
 
     bool result = generate.compiler == BUILD_COMPILER_CLANG && !generate.cc_set && !generate.linker_set && !generate.config_set && !generate.sanitize &&
@@ -4330,6 +4363,9 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, Strin
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("-g"));
+    // Stage compiles keep the host CPU so the fixed point still covers the
+    // compiler's own SIMD paths; the driver default is baseline (#1557).
+    os_argument_builder_append(&builder, S8("-march=native"));
     if (register_allocator_flag.length)
     {
         os_argument_builder_append(&builder, register_allocator_flag);
@@ -4413,6 +4449,9 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_object_compile_arguments(Arena* arena
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("-g"));
+    // Stage compiles keep the host CPU so the fixed point still covers the
+    // compiler's own SIMD paths; the driver default is baseline (#1557).
+    os_argument_builder_append(&builder, S8("-march=native"));
     if (register_allocator_flag.length) { os_argument_builder_append(&builder, register_allocator_flag); }
     os_argument_builder_append(&builder, S8("-v"));
     os_argument_builder_append(&builder, source_metrics);
@@ -4801,13 +4840,37 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_validate_action(Arena* a
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* arena, void* data)
 {
     BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
-    remove_path_recursive(arena, fanout->private_bootstrap_path);
-    if (path_exists(arena, fanout->private_bootstrap_path))
+    u64 start = os_now_microseconds();
+    OsError error = os_file_delete_checked(fanout->private_bootstrap_path);
+    OsError first_error = error;
+    u32 attempts = 1;
+#if BUSTER_WINDOWS
+    // The owned snapshot is an executable file, never a tree. Just-run image
+    // cleanup already uses this bound in the compiler tests: native held and
+    // released handles recover in tens of milliseconds. Keep permanent locks
+    // and read-only files failed, without changing a self-host/job timeout.
+    enum { RETRY_MICROSECONDS = 500000, RETRY_MILLISECONDS = 10, MAX_ATTEMPTS = 51 };
+    while ((error.v == ERROR_SHARING_VIOLATION || error.v == ERROR_ACCESS_DENIED) &&
+           attempts < MAX_ATTEMPTS && os_now_microseconds() - start < RETRY_MICROSECONDS)
+    {
+        Sleep(RETRY_MILLISECONDS);
+        error = os_file_delete_checked(fanout->private_bootstrap_path);
+        attempts += 1;
+    }
+#endif
+    bool remains = path_exists(arena, fanout->private_bootstrap_path);
+    ProcessResult result = error.v || remains ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+    if (first_error.v || remains)
+    {
+        string_print(S8("BOOTSTRAP_SNAPSHOT_CLEANUP path={S8} first_error={u32} final_error={u32} attempts={u32} elapsed_us={u64} status={S8} error={EOs}\n"),
+                     fanout->private_bootstrap_path, first_error.v, error.v, attempts, os_now_microseconds() - start,
+                     result == PROCESS_RESULT_SUCCESS ? S8("recovered") : S8("failed"), error);
+    }
+    if (result != PROCESS_RESULT_SUCCESS)
     {
         string_print(S8("error: could not remove the private self-host bootstrap snapshot\n"));
-        return PROCESS_RESULT_FAILED;
     }
-    return PROCESS_RESULT_SUCCESS;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 stage1, String8 stage2, ProcessRun* stage1_run, ProcessRun* stage2_run
@@ -8889,7 +8952,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, S
         String8 mode = string_format(arena, S8("-fregister-allocator={S8}"), modes[i]);
         String8 trace = string_format(arena, S8("-fbootstrap-trace={S8}"), output);
         String8 metrics = string_format(arena, S8("-fsource-metrics={S8}.metrics"), output);
-        String8 compile_arguments[] = {compiler, S8("cc"), mode, trace, metrics, S8("tests/self_host_bootstrap_probe.c"), S8("-o"), output};
+        String8 compile_arguments[] = {compiler, S8("cc"), S8("-march=native"), mode, trace, metrics, S8("tests/self_host_bootstrap_probe.c"), S8("-o"), output};
         SelfHostAuditRun compile = self_host_audit_run(arena, string_format_z(arena, S8("{S8}.compile"), output),
                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments));
         valid = self_host_audit_process_ok(compile, false) && self_host_audit_artifacts(arena, output);
@@ -8917,7 +8980,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, S
     if (valid)
     {
         String8 output = string_format_z(arena, S8("{S8}.rejected"), prefix);
-        String8 arguments[] = {compiler, S8("cc"), S8("tests/self_host_bootstrap_invalid.c"), S8("-o"), output};
+        String8 arguments[] = {compiler, S8("cc"), S8("-march=native"), S8("tests/self_host_bootstrap_invalid.c"), S8("-o"), output};
         SelfHostAuditRun rejected = self_host_audit_run(arena, output, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
         valid = self_host_audit_process_ok(rejected, true) && !path_exists(arena, output);
         if (valid && reference.length)
@@ -10508,24 +10571,179 @@ BUSTER_GLOBAL_LOCAL bool cjson_git_verify(Arena* arena, String8 source_directory
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 cjson_ide_path(Arena* arena, String8 config)
+// Compatibility harnesses resolve the `ide` they drive through this one
+// policy (#1920). An explicit configuration selects exactly
+// <build-directory>/<config>/ide or nothing: the opposite configuration and
+// the flat tree are never substituted. Only an omitted configuration searches
+// Release, then Debug, then the flat <build-directory>/ide, whose
+// configuration is unknown. compatibility_ide_selection_self_test pins it.
+typedef enum CompatIdeSelection
 {
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(configs); i += 1)
+    COMPAT_IDE_SELECTION_MISSING,
+    COMPAT_IDE_SELECTION_EXPLICIT,
+    COMPAT_IDE_SELECTION_DEFAULT,
+    COMPAT_IDE_SELECTION_FLAT,
+} CompatIdeSelection;
+
+typedef struct CompatIde CompatIde;
+struct CompatIde
+{
+    String8 path;
+    String8 effective_config;
+    CompatIdeSelection selection;
+};
+
+#if BUSTER_WINDOWS
+#define COMPAT_IDE_EXECUTABLE_NAME "ide.exe"
+#else
+#define COMPAT_IDE_EXECUTABLE_NAME "ide"
+#endif
+#define COMPAT_IDE_DEFAULT_BUILD_DIRECTORY "build"
+
+BUSTER_GLOBAL_LOCAL String8 compat_ide_root(String8 build_directory)
+{
+    return build_directory.length ? build_directory : S8(COMPAT_IDE_DEFAULT_BUILD_DIRECTORY);
+}
+
+BUSTER_GLOBAL_LOCAL String8 compat_ide_selection_name(CompatIdeSelection selection)
+{
+    String8 result = S8("missing");
+    switch (selection)
     {
-        if (!configs[i].length)
-        {
-            continue;
-        }
-        String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[i]), S8("ide"));
+        break;
+    case COMPAT_IDE_SELECTION_MISSING:
+        break;
+    case COMPAT_IDE_SELECTION_EXPLICIT:
+        result = S8("explicit");
+        break;
+    case COMPAT_IDE_SELECTION_DEFAULT:
+        result = S8("default");
+        break;
+    case COMPAT_IDE_SELECTION_FLAT:
+        result = S8("flat");
+        break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompatIde compat_ide_select(Arena* arena, String8 build_directory, String8 config)
+{
+    CompatIde result = {0};
+    String8 root = compat_ide_root(build_directory);
+    String8 executable = S8(COMPAT_IDE_EXECUTABLE_NAME);
+    if (config.length)
+    {
+        String8 candidate = path_join(arena, path_join(arena, root, config), executable);
         if (path_exists(arena, candidate))
         {
-            return candidate;
+            result = (CompatIde){.path = candidate, .effective_config = config, .selection = COMPAT_IDE_SELECTION_EXPLICIT};
         }
     }
+    else
+    {
+        String8 defaults[] = {S8("Release"), S8("Debug")};
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(defaults) && !result.path.length; i += 1)
+        {
+            String8 candidate = path_join(arena, path_join(arena, root, defaults[i]), executable);
+            if (path_exists(arena, candidate))
+            {
+                result = (CompatIde){.path = candidate, .effective_config = defaults[i], .selection = COMPAT_IDE_SELECTION_DEFAULT};
+            }
+        }
+        String8 flat = path_join(arena, root, executable);
+        if (!result.path.length && path_exists(arena, flat))
+        {
+            result = (CompatIde){.path = flat, .effective_config = S8("unknown"), .selection = COMPAT_IDE_SELECTION_FLAT};
+        }
+    }
+    return result;
+}
 
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
+// Selects the harness compiler once and reports the request next to what was
+// selected; an empty result has already been explained.
+BUSTER_GLOBAL_LOCAL String8 compat_ide_resolve(Arena* arena, String8 command, String8 build_directory, String8 config)
+{
+    CompatIde ide = compat_ide_select(arena, build_directory, config);
+    String8 root = compat_ide_root(build_directory);
+    if (ide.path.length)
+    {
+        string_print(S8("COMPAT_IDE command={S8} build_directory={S8} requested_config={S8} effective_config={S8} selection={S8} ide={S8}\n"), command, root,
+                     config.length ? config : S8("default"), ide.effective_config, compat_ide_selection_name(ide.selection), ide.path);
+    }
+    else if (config.length)
+    {
+        string_print(S8("error: {S8} --config {S8} requires {S8}; no other configuration is substituted\n"), command, config,
+                     path_join(arena, path_join(arena, root, config), S8(COMPAT_IDE_EXECUTABLE_NAME)));
+    }
+    else
+    {
+        string_print(S8("error: {S8} found no ide under {S8} (searched Release, Debug, then the flat tree)\n"), command, root);
+    }
+    return ide.path;
+}
+
+// Inert files stand in for the compiler: every population of
+// {Release, Debug, flat} in its own root, crossed with every request. One
+// root's name contains a space; roots never borrow each other's executables.
+BUSTER_GLOBAL_LOCAL ProcessResult compatibility_ide_selection_self_test(Arena* arena)
+{
+    enum
+    {
+        COMPAT_IDE_POPULATION_RELEASE = 1,
+        COMPAT_IDE_POPULATION_DEBUG = 2,
+        COMPAT_IDE_POPULATION_FLAT = 4,
+        COMPAT_IDE_POPULATION_COUNT = 8,
+    };
+    // Per population: the expected pick for an omitted, Debug and Release
+    // request; R/D/F name the Release, Debug and flat executables, '-' none.
+    const char* expected[COMPAT_IDE_POPULATION_COUNT] = {"---", "R-R", "DD-", "RDR", "F--", "R-R", "DD-", "RDR"};
+    String8 requests[] = {{0}, S8("Debug"), S8("Release")};
+    String8 scratch = {0};
+    bool passed = summary_self_test_claim_directory(arena, S8("compatibility-ide-selection"), &scratch);
+    u64 cell_count = 0;
+    u64 failure_count = 0;
+    for (u64 population = 0; passed && population < COMPAT_IDE_POPULATION_COUNT; population += 1)
+    {
+        String8 root = string_format(arena, S8("{S8}/tree {u64}"), scratch, population);
+        String8 release = path_join(arena, path_join(arena, root, S8("Release")), S8(COMPAT_IDE_EXECUTABLE_NAME));
+        String8 debug = path_join(arena, path_join(arena, root, S8("Debug")), S8(COMPAT_IDE_EXECUTABLE_NAME));
+        String8 flat = path_join(arena, root, S8(COMPAT_IDE_EXECUTABLE_NAME));
+        make_directory_recursive(arena, path_join(arena, root, S8("Release")));
+        make_directory_recursive(arena, path_join(arena, root, S8("Debug")));
+        passed = (!(population & COMPAT_IDE_POPULATION_RELEASE) || summary_self_test_write_text(release, S8("inert\n"))) &&
+                 (!(population & COMPAT_IDE_POPULATION_DEBUG) || summary_self_test_write_text(debug, S8("inert\n"))) &&
+                 (!(population & COMPAT_IDE_POPULATION_FLAT) || summary_self_test_write_text(flat, S8("inert\n")));
+        for (u64 request = 0; passed && request < BUSTER_ARRAY_LENGTH(requests); request += 1)
+        {
+            CompatIde actual = compat_ide_select(arena, root, requests[request]);
+            char pick = expected[population][request];
+            String8 expected_path = pick == 'R' ? release : pick == 'D' ? debug : pick == 'F' ? flat : (String8){0};
+            String8 expected_config = pick == 'R' ? S8("Release") : pick == 'D' ? S8("Debug") : pick == 'F' ? S8("unknown") : (String8){0};
+            CompatIdeSelection expected_selection = pick == '-' ? COMPAT_IDE_SELECTION_MISSING
+                                                    : requests[request].length ? COMPAT_IDE_SELECTION_EXPLICIT
+                                                    : pick == 'F' ? COMPAT_IDE_SELECTION_FLAT
+                                                                  : COMPAT_IDE_SELECTION_DEFAULT;
+            bool cell_passed = string_equal(actual.path, expected_path) && string_equal(actual.effective_config, expected_config) &&
+                               actual.selection == expected_selection;
+            if (!cell_passed)
+            {
+                string_print(S8("error: compatibility ide selection: population {u64} request {S8}: selected {S8} ({S8}), expected {S8} ({S8})\n"), population,
+                             requests[request].length ? requests[request] : S8("default"), actual.path.length ? actual.path : S8("none"),
+                             compat_ide_selection_name(actual.selection), expected_path.length ? expected_path : S8("none"),
+                             compat_ide_selection_name(expected_selection));
+                failure_count += 1;
+            }
+            cell_count += 1;
+        }
+    }
+    if (scratch.length)
+    {
+        remove_path_recursive(arena, scratch);
+    }
+    passed = passed && failure_count == 0 && cell_count == COMPAT_IDE_POPULATION_COUNT * BUSTER_ARRAY_LENGTH(requests);
+    string_print(S8("COMPATIBILITY_IDE_SELECTION_SELF_TEST cells={u64} failures={u64} status={S8}\n"), cell_count, failure_count,
+                 passed ? S8("pass") : S8("fail"));
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 BUSTER_GLOBAL_LOCAL String8 cjson_mode_flag(Arena* arena, String8 mode)
@@ -10566,6 +10784,8 @@ BUSTER_GLOBAL_LOCAL bool cjson_compile_buster(Arena* arena, String8 ide, String8
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    // Host build: keep the host CPU the driver used to default to (#1557).
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, include_root);
     os_argument_builder_append(&builder, include_tests);
@@ -10702,7 +10922,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = cjson_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_cjson"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -10840,6 +11060,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
     String8 ide_arguments_array[] = {
         ide,
         S8("cc"),
+        S8("-march=native"),
         S8("-g0"),
         include_root,
         S8("-fregister-allocator=fast"),
@@ -11067,6 +11288,7 @@ BUSTER_GLOBAL_LOCAL bool stb_compile_buster(Arena* arena, String8 ide, String8 s
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, include_root);
     os_argument_builder_append(&builder, S8("-DSTBI_NO_SIMD"));
@@ -11229,15 +11451,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
             goto stb_action_done;
         }
     }
+    String8 vorbis_source = path_join(arena, source_directory, S8("stb_vorbis.c"));
     String8 image_write_test_source = path_join(arena, source_directory, S8("tests/image_write_test.c"));
     String8 ds_test_source = path_join(arena, source_directory, S8("tests/test_ds.c"));
-    if (!path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) || !stb_git_verify(arena, source_directory))
+    if (!path_exists(arena, vorbis_source) || !path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) ||
+        !stb_git_verify(arena, source_directory))
     {
         string_print(S8("error: test_stb checkout is missing applicable tests or is not pristine\n"));
         goto stb_action_done;
     }
 
-    String8 ide = cjson_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_stb"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -11272,6 +11496,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
         {
             goto stb_action_done;
         }
+    }
+
+
+    // Compile-only coverage for the pristine Vorbis implementation (#3616).
+    String8 vorbis_clang_object = path_join(arena, output_directory, S8("stb_vorbis-clang.o"));
+    if (!stb_compile_clang(arena, clang, source_directory, vorbis_source, vorbis_clang_object, (SliceString8){0}))
+    {
+        goto stb_action_done;
     }
 
     String8 ds_churn_wrapper = path_join(arena, wrappers_directory, S8("stb_ds_churn_test.c"));
@@ -11325,6 +11557,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
             mode_ok = mode_ok && stb_compile_buster(arena, ide, source_directory, path_join(arena, wrappers_directory, wrapper_names[unit_index]), object,
                                                      metric, mode, (SliceString8){0}, &elapsed_us, mode_index == 0) &&
                       stb_metrics_report(arena, mode, wrapper_names[unit_index], metric, elapsed_us);
+        }
+
+
+        String8 vorbis_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u64 form = 0; form < BUSTER_ARRAY_LENGTH(vorbis_frontends); form += 1)
+        {
+            String8 object = path_join(arena, mode_directory, string_format(arena, S8("stb_vorbis-{u64}.o"), form));
+            String8 metric = path_join(arena, mode_metrics, string_format(arena, S8("stb_vorbis-{u64}.metrics"), form));
+            String8 extra[] = {vorbis_frontends[form]};
+            u64 elapsed_us = 0;
+            bool vorbis_ok = stb_compile_buster(arena, ide, source_directory, vorbis_source, object, metric, mode,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(extra), &elapsed_us, false) &&
+                stb_metrics_report(arena, mode, S8("stb_vorbis.c"), metric, elapsed_us);
+            string_print(S8("STB_COMPILE unit=stb_vorbis.c allocator={S8} frontend={S8} status={S8}\n"),
+                mode, vorbis_frontends[form], vorbis_ok ? S8("pass") : S8("fail"));
+            mode_ok = mode_ok && vorbis_ok;
         }
 
         String8 probe_object = path_join(arena, mode_directory, S8("probe.o"));
@@ -11544,24 +11792,6 @@ BUSTER_GLOBAL_LOCAL bool zlib_git_verify(Arena* arena, String8 source_directory)
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 zlib_ide_path(Arena* arena, String8 config)
-{
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
-    {
-        if (configs[index].length)
-        {
-            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
-            if (path_exists(arena, candidate))
-            {
-                return candidate;
-            }
-        }
-    }
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
-}
-
 BUSTER_GLOBAL_LOCAL String8 zlib_mode_flag(Arena* arena, String8 mode)
 {
     return string_format(arena, S8("-fregister-allocator={S8}"), mode);
@@ -11607,6 +11837,7 @@ BUSTER_GLOBAL_LOCAL bool zlib_compile_buster(Arena* arena, String8 ide, String8 
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     os_argument_builder_append(&builder, include_root);
@@ -11850,7 +12081,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_zlib_action(Arena* arena, void* data)
     {
         return PROCESS_RESULT_FAILED;
     }
-    String8 ide = zlib_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_zlib"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     String8 ar = executable_resolve_in_path(arena, S8("ar"));
     String8 git = executable_resolve_in_path(arena, S8("git"));
@@ -12283,6 +12514,7 @@ BUSTER_GLOBAL_LOCAL bool lua_compile_buster(Arena* arena, String8 ide, String8 s
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     os_argument_builder_append(&builder, include_root);
@@ -12590,7 +12822,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
         string_print(S8("error: Lua compatibility checkout is missing testes/all.lua\n"));
         return PROCESS_RESULT_FAILED;
     }
-    String8 ide = zlib_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_lua"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -12998,25 +13230,6 @@ BUSTER_GLOBAL_LOCAL bool yyjson_git_verify(Arena* arena, String8 source_director
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 yyjson_ide_path(Arena* arena, String8 config)
-{
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
-    {
-        if (!configs[index].length)
-        {
-            continue;
-        }
-        String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
-        if (path_exists(arena, candidate))
-        {
-            return candidate;
-        }
-    }
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
-}
-
 BUSTER_GLOBAL_LOCAL bool yyjson_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
 {
     SelfHostSourceMetrics metrics = {0};
@@ -13050,6 +13263,7 @@ BUSTER_GLOBAL_LOCAL bool yyjson_compile_buster(Arena* arena, String8 ide, String
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, include_src);
     os_argument_builder_append(&builder, include_util);
@@ -13139,7 +13353,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_yyjson_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = yyjson_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_yyjson"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -13469,26 +13683,6 @@ BUSTER_GLOBAL_LOCAL bool lz4_git_verify(Arena* arena, String8 source_directory)
     return true;
 }
 
-// The `ide` executable the harness drives, preferring the requested
-// configuration and falling back to whichever one is built.
-BUSTER_GLOBAL_LOCAL String8 compat_ide_path(Arena* arena, String8 config)
-{
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
-    {
-        if (configs[index].length)
-        {
-            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
-            if (path_exists(arena, candidate))
-            {
-                return candidate;
-            }
-        }
-    }
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
-}
-
 BUSTER_GLOBAL_LOCAL bool lz4_metrics_report(Arena* arena, String8 config_name, String8 mode, String8 unit, String8 path, u64 elapsed_us)
 {
     SelfHostSourceMetrics metrics = {0};
@@ -13607,10 +13801,9 @@ BUSTER_GLOBAL_LOCAL bool lz4_compile_buster(Arena* arena, String8 ide, String8 s
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     lz4_append_common_flags(&builder, flags);
-    if (cpu_flag.length)
-    {
-        os_argument_builder_append(&builder, cpu_flag);
-    }
+    // A host build without an explicit CPU keeps the host CPU the driver
+    // used to default to (#1557).
+    os_argument_builder_append(&builder, cpu_flag.length ? cpu_flag : S8("-march=native"));
     os_argument_builder_append(&builder, allocator_flag);
     os_argument_builder_append(&builder, metrics_flag);
     if (verbose)
@@ -14038,7 +14231,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = compat_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_lz4"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     String8 ar = executable_resolve_in_path(arena, S8("ar"));
     if (!ar.length)
@@ -15358,7 +15551,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_raddebugger_action(Arena* arena, void* da
         }
         String8 clang = executable_resolve_in_path(arena, S8("clang"));
         String8 pkg_config = executable_resolve_in_path(arena, S8("pkg-config"));
-        String8 ide = compat_ide_path(arena, configuration);
+        String8 ide = compat_ide_resolve(arena, S8("test_raddebugger"), options.build_directory, configuration);
         String8 build_parent = os_path_absolute(arena, S8("build"), true);
         if (admitted)
         {
@@ -15517,6 +15710,7 @@ struct TestSqliteOptions
     String8 amalgamation_directory;
     String8 source_directory;
     String8 config;
+    String8 build_directory;
 };
 
 // One pinned upstream file: its path relative to the checkout, its exact byte
@@ -15619,6 +15813,7 @@ BUSTER_GLOBAL_LOCAL bool sqlite_compile_buster(Arena* arena, String8 ide, String
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     sqlite_append_defines(&builder, flags);
@@ -15881,7 +16076,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sqlite_action(Arena* arena, void* data)
     string_print(S8("SQLITE_SOURCE version={S8} manifest={S8} amalgamation={S8} source={S8}\n"), S8(SQLITE_COMPATIBILITY_VERSION),
                  S8(SQLITE_COMPATIBILITY_MANIFEST), amalgamation, source_directory);
 
-    String8 ide = compat_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_sqlite"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -16321,6 +16516,7 @@ BUSTER_GLOBAL_LOCAL bool sbase_compile(Arena* arena, String8 compiler, bool bust
     if (buster)
     {
         os_argument_builder_append(&builder, S8("cc"));
+        os_argument_builder_append(&builder, S8("-march=native"));
     }
     else
     {
@@ -17110,7 +17306,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
     {
         ar = executable_resolve_in_path(arena, S8("llvm-ar"));
     }
-    String8 ide = compat_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_sbase"), options.build_directory, options.config);
     if (!git.length || !clang.length || !shell.length || !yacc.length || !tar.length || !make.length || !ar.length || !ide.length)
     {
         string_print(S8("error: test_sbase requires a built ide executable and git, clang, sh, yacc, tar, make and ar/llvm-ar in PATH\n"));
@@ -17444,24 +17640,6 @@ BUSTER_GLOBAL_LOCAL bool doom_git_verify(Arena* arena, String8 source_directory)
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 doom_ide_path(Arena* arena, String8 config)
-{
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
-    {
-        if (configs[index].length)
-        {
-            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
-            if (path_exists(arena, candidate))
-            {
-                return candidate;
-            }
-        }
-    }
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
-}
-
 BUSTER_GLOBAL_LOCAL u64 doom_hash_file(Arena* arena, String8 path, u64* size_out)
 {
     TemporalArena scratch = scratch_begin(&arena, 1);
@@ -17574,6 +17752,7 @@ BUSTER_GLOBAL_LOCAL bool doom_compile_buster(Arena* arena, String8 ide, String8 
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     doom_append_common_flags(&builder, include_flag);
@@ -17834,7 +18013,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_doom_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = doom_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_doom"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -19033,24 +19212,6 @@ BUSTER_GLOBAL_LOCAL bool quickjs_git_verify(Arena* arena, String8 source_directo
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 quickjs_ide_path(Arena* arena, String8 config)
-{
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
-    {
-        if (configs[index].length)
-        {
-            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
-            if (path_exists(arena, candidate))
-            {
-                return candidate;
-            }
-        }
-    }
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
-}
-
 // The C stack a Buster-built QuickJS needs, and why the harness hands out so
 // much of it.  Buster gives every sibling block in a function its own frame
 // slot where Clang overlaps the ones whose live ranges cannot intersect, and
@@ -19162,6 +19323,7 @@ BUSTER_GLOBAL_LOCAL bool quickjs_compile_buster(Arena* arena, String8 ide, Strin
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     quickjs_append_common_flags(&builder, flags);
     os_argument_builder_append(&builder, allocator_flag);
@@ -19549,7 +19711,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = quickjs_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_quickjs"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -20329,24 +20491,6 @@ BUSTER_GLOBAL_LOCAL bool musl_git_verify(Arena* arena, String8 source_directory)
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 musl_ide_path(Arena* arena, String8 config)
-{
-    String8 configs[] = {config, S8("Release"), S8("Debug")};
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
-    {
-        if (configs[index].length)
-        {
-            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
-            if (path_exists(arena, candidate))
-            {
-                return candidate;
-            }
-        }
-    }
-    String8 fallback = S8("build/ide");
-    return path_exists(arena, fallback) ? fallback : (String8){0};
-}
-
 typedef struct MuslDirectoryEntry MuslDirectoryEntry;
 struct MuslDirectoryEntry
 {
@@ -21098,6 +21242,7 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_buster(Arena* arena, String8 ide, String8 
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     musl_append_common_flags(&builder, flags);
     os_argument_builder_append(&builder, allocator_flag);
     if (metrics_flag.length)
@@ -21155,7 +21300,7 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_clang(Arena* arena, String8 clang, String8
 // the same command, which is the whole of what assembling a `.s` is.
 BUSTER_GLOBAL_LOCAL bool musl_assemble_buster(Arena* arena, String8 ide, String8 source, String8 output, u64* elapsed_us, String8* diagnostic)
 {
-    String8 arguments[] = {ide, S8("cc"), S8("-c"), S8("-o"), output, source};
+    String8 arguments[] = {ide, S8("cc"), S8("-march=native"), S8("-c"), S8("-o"), output, source};
     u64 start = os_now_microseconds();
     MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, false);
     if (elapsed_us)
@@ -21937,6 +22082,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, L
     {
         os_argument_builder_append(&builder, build->ide);
         os_argument_builder_append(&builder, S8("cc"));
+        os_argument_builder_append(&builder, S8("-march=native"));
     }
     else
     {
@@ -22934,7 +23080,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = musl_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_musl"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     String8 linker = executable_resolve_in_path(arena, S8("ld"));
     String8 ar = executable_resolve_in_path(arena, S8("ar"));
@@ -23888,6 +24034,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
     String8 arguments[] = {
         ide,
         S8("cc"),
+        S8("-march=native"),
         S8("-g"),
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),
@@ -24210,7 +24357,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     {
         return PROCESS_RESULT_FAILED;
     }
-    String8 ide = compat_ide_path(arena, options.config);
+    String8 ide = compat_ide_resolve(arena, S8("test_cpython"), options.build_directory, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     if (!ide.length || !clang.length)
     {
@@ -24614,6 +24761,42 @@ BUSTER_GLOBAL_LOCAL void x86_completion_census_add_existing(Arena* arena, BuildA
 #endif
 }
 
+#if BUSTER_WINDOWS && !BUSTER_SINGLE_THREADED
+typedef struct BuildBootstrapCleanupLanes BuildBootstrapCleanupLanes;
+struct BuildBootstrapCleanupLanes
+{
+    Arena* arena;
+    BuildArtifactFanout fanout;
+    OsFileDescriptor* holder;
+    OsError blocked;
+    ProcessResult cleaned;
+    bool closed;
+    bool skipped;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType build_bootstrap_cleanup_lane(void* pointer)
+{
+    BuildBootstrapCleanupLanes* state = (BuildBootstrapCleanupLanes*)pointer;
+    if (lane_count() == 2)
+    {
+        if (!lane_index()) state->blocked = os_file_delete_checked(state->fanout.private_bootstrap_path);
+        lane_sync();
+        if (!lane_index()) state->cleaned = build_artifact_fanout_cleanup_action(state->arena, &state->fanout);
+        else
+        {
+            Sleep(20);
+            state->closed = os_file_close(state->holder);
+        }
+    }
+    else
+    {
+        state->skipped = true;
+        state->closed = os_file_close(state->holder);
+        state->cleaned = build_artifact_fanout_cleanup_action(state->arena, &state->fanout);
+    }
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool include_large_snapshot)
 {
     String8 ci_arguments[] = {
@@ -24638,17 +24821,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    // Process partitioning is a test launcher choice, never an admitted
-    // artifact-fanout producer argument. ARM opts in only without fanout.
+    // Process partitioning is a test launcher choice, so it is the one
+    // admitted producer argument; any other extra argument still disqualifies.
     String8 partition_arguments[] = {
         S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
     };
     Generate partitioned = canonical;
     partitioned.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(partition_arguments);
-    if (build_artifact_fanout_is_canonical(partitioned, release))
+    String8 unadmitted_arguments[] = {
+        S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+        S8("-DBUSTER_UNITY_BUILD=OFF"),
+    };
+    Generate unadmitted = canonical;
+    unadmitted.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(unadmitted_arguments);
+    if (!build_artifact_fanout_is_canonical(partitioned, release) || build_artifact_fanout_is_canonical(unadmitted, release))
     {
-        string_print(S8("error: artifact fan-out accepted a partitioned producer\n"));
+        string_print(S8("error: artifact fan-out must admit only the partition launcher argument\n"));
         return PROCESS_RESULT_FAILED;
     }
     if (!build_artifact_fanout_worker_quota_valid(S8("1")) || build_artifact_fanout_worker_quota_valid((String8){0}) ||
@@ -25247,6 +25436,60 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         return PROCESS_RESULT_FAILED;
     }
 
+#if BUSTER_WINDOWS
+    // Real Win32 handles prove the retry set without a synthetic native error.
+    bool native_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    OsFileDescriptor* holder = native_cleanup ? os_file_open(lifecycle_copy, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1}) : 0;
+    native_cleanup = native_cleanup && holder != 0;
+    if (holder)
+    {
+        OsError blocked = os_file_delete_checked(lifecycle_copy);
+        native_cleanup = native_cleanup && blocked.v == ERROR_SHARING_VIOLATION &&
+                         build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) != PROCESS_RESULT_SUCCESS && path_exists(arena, lifecycle_copy);
+        bool closed = os_file_close(holder);
+        native_cleanup = native_cleanup && closed && build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) == PROCESS_RESULT_SUCCESS;
+    }
+    bool released_cleanup = true;
+    bool release_skipped = true;
+#if !BUSTER_SINGLE_THREADED
+    released_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    holder = released_cleanup ? os_file_open(lifecycle_copy, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                             (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1}) : 0;
+    released_cleanup = released_cleanup && holder != 0;
+    if (holder)
+    {
+        BuildBootstrapCleanupLanes state = {.arena = arena, .fanout = lifecycle_fanout, .holder = holder};
+        lane_run(2, build_bootstrap_cleanup_lane, &state);
+        release_skipped = state.skipped;
+        released_cleanup = released_cleanup && (state.skipped || state.blocked.v == ERROR_SHARING_VIOLATION) &&
+                           state.closed && state.cleaned == PROCESS_RESULT_SUCCESS && !path_exists(arena, lifecycle_copy);
+    }
+#endif
+    bool readonly_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    String16 wide = string16_from_string8(arena, lifecycle_copy, true);
+    readonly_cleanup = readonly_cleanup && SetFileAttributesW(wide.pointer, FILE_ATTRIBUTE_READONLY) != 0;
+    if (readonly_cleanup)
+    {
+        OsError denied = os_file_delete_checked(lifecycle_copy);
+        readonly_cleanup = denied.v == ERROR_ACCESS_DENIED &&
+                           build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) != PROCESS_RESULT_SUCCESS && path_exists(arena, lifecycle_copy);
+        bool restored = SetFileAttributesW(wide.pointer, FILE_ATTRIBUTE_NORMAL) != 0;
+        readonly_cleanup = readonly_cleanup && restored && build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) == PROCESS_RESULT_SUCCESS;
+    }
+    BuildArtifactFanout invalid_fanout = {.private_bootstrap_path = string_format_z(arena, S8("{S8}?"), lifecycle_copy)};
+    OsError invalid = os_file_delete_checked(invalid_fanout.private_bootstrap_path);
+    bool invalid_cleanup = invalid.v == ERROR_INVALID_NAME && build_artifact_fanout_cleanup_action(arena, &invalid_fanout) != PROCESS_RESULT_SUCCESS;
+    string_print(S8("BOOTSTRAP_SNAPSHOT_NATIVE_TEST held={u32} released={S8} readonly={u32} invalid={u32}\n"),
+                 (u32)native_cleanup, release_skipped ? S8("skipped") : released_cleanup ? S8("pass") : S8("fail"),
+                 (u32)readonly_cleanup, (u32)invalid_cleanup);
+    if (!native_cleanup || !released_cleanup || !readonly_cleanup || !invalid_cleanup)
+    {
+        string_print(S8("error: artifact fan-out native snapshot cleanup controls failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+#endif
+
     bool large_snapshot_result = true;
     if (include_large_snapshot)
     {
@@ -25382,9 +25625,12 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     bool result = false;
     switch (command)
     {
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_COMPILER_CLOSURE:
+        case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
@@ -25392,12 +25638,17 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
+        case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_TEST_FFMPEG:
+        case BUILD_COMMAND_TEST_USERSPACE:
+        case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
         case BUILD_COMMAND_CI_NO_CODE:
+        case BUILD_COMMAND_EXTERNAL_PROJECTS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
@@ -25426,9 +25677,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_COMPILER_EVIDENCE, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
+        {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_FFMPEG, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_USERSPACE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
@@ -25472,6 +25727,9 @@ struct MatrixTestTree
     // unless matrix_superbuild_allocate_jobs serializes the test phases.
     u32 parallel_jobs;
     u32 test_jobs;
+    // Inner Ninja --parallel for clang_analyze plus optnone_audit
+    // (matrix_superbuild_analyze_jobs); zero means serial.
+    u32 analyze_jobs;
     u32 unity_only : 1;
     u32 test_serialized : 1;
     u32 unity_analysis_scheduled : 1;
@@ -25483,6 +25741,10 @@ struct MatrixTestTree
 // budget the superbuild admits one tree per CPU (matrix_superbuild_outer_jobs)
 // and shares the budget between test trees (matrix_superbuild_allocate_jobs).
 #define MATRIX_SUPERBUILD_LOW_CORE_THREADS 4
+// The post-test analyzers overlap only on hosts with at least this much
+// memory: hosted Linux and Windows runners report 15.6-16 GiB, while the
+// 7 GiB macOS runners keep them serial (#3912).
+#define MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY BUSTER_GB(12)
 
 typedef struct MatrixSuperbuildSelfHostPlan MatrixSuperbuildSelfHostPlan;
 struct MatrixSuperbuildSelfHostPlan
@@ -26737,6 +26999,15 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
     return BUSTER_MIN(split_tree_limit, tree_count);
 }
 
+// clang_analyze keeps two workers and optnone_audit replays one frontend.
+// Its longest shard leaves one worker idle for most of the run (hosted Linux
+// x86-64: 57 s analysis, 26 s audit, back to back), so a host with the CPUs
+// and memory for all three processes runs the two commands together.
+BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_analyze_jobs(u32 thread_count, u64 memory_bytes)
+{
+    return thread_count >= 3 && memory_bytes >= MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY ? 2 : 1;
+}
+
 // Ninja admits ready edges from a shared pool in declaration order, and a fresh
 // CI checkout has no `.ninja_log` for its critical-path scheduler to learn from.
 // Declaring the longest trees first therefore decides whether the slowest test
@@ -27163,7 +27434,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
             .combination_indices = {0},
             .combination_count = 1,
             .parallel_jobs = 1,
+            .analyze_jobs = 2,
             .unity_only = 1,
+            .unity_analysis_scheduled = 1,
         },
         {
             .build_directory = S8("build/gcc-debug"),
@@ -27198,7 +27471,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_BUILD_TARGETS ide:Debug)")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
-                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_CONFIG Release)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_JOBS 2)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_ANALYZE_JOBS 1)")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
 
     // A four-CPU checks shard: the two sanitized test trees keep their build
@@ -27233,6 +27509,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     if (low_core_result != PROCESS_RESULT_SUCCESS ||
         matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
+        matrix_superbuild_analyze_jobs(4, 16759504896ull) != 2 || matrix_superbuild_analyze_jobs(3, BUSTER_GB(7)) != 1 ||
+        matrix_superbuild_analyze_jobs(2, BUSTER_GB(64)) != 1 ||
         !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
         !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         !matrix_superbuild_self_host_plan_valid(linux_self_host, linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16) ||
@@ -27378,6 +27656,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_test_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_JOBS {u32})\n"), prefix, BUSTER_MAX(tree.analyze_jobs, 1)));
         // Whole-table audits ride on the same canonical tree that already
         // owns clang_analyze: unsanitized optimized Clang, exactly one tree
         // per platform. They read only generated metadata tables and source
@@ -27510,6 +27789,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         {
             focused_test_result = generate_guard_self_test(arena);
         }
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = compatibility_ide_selection_self_test(arena);
+        }
 #if BUSTER_LINUX || BUSTER_APPLE
         if (focused_test_result == PROCESS_RESULT_SUCCESS)
         {
@@ -27590,11 +27873,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
-    // Sanitized Clang and Windows AArch64 Release trees use the existing
-    // isolated-process runner at four or more test workers. Smaller quotas
-    // retain the ordinary invocation (tools/ci_unit_tests.c). Windows AArch64
-    // has no artifact-fanout consumer; supported canonical producers retain
-    // exactly the standard arguments (build_artifact_fanout_is_canonical).
+    // Every Clang CI tree, including the canonical Release producer, uses the
+    // existing isolated-process runner at four or more test workers (#3912).
+    // Smaller quotas and single-threaded drivers retain the ordinary
+    // invocation (tools/ci_unit_tests.c); the option changes no artifact input.
     BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8_INITIALIZER("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
@@ -27644,7 +27926,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && (tree_plan.sanitize || (coverage_target.windows && coverage_target.aarch64)) ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
@@ -27803,6 +28085,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
         string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
                      matrix_superbuild_outer_jobs(thread_count, tree_count));
+        u64 memory_bytes = os_get_physical_memory_size();
+        u32 analyze_jobs = matrix_superbuild_analyze_jobs(thread_count, memory_bytes);
+        string_print(S8("BUSTER_SUPERBUILD_POST_TEST: analyze_jobs={u32} memory_mib={u64}\n"), analyze_jobs, memory_bytes >> 20);
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            trees[tree_i].analyze_jobs = trees[tree_i].unity_analysis_scheduled ? analyze_jobs : 0;
+        }
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
             string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} tests={u32} jobs={u32} directory={S8}\n"), tree_i,
@@ -39185,6 +39474,7 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 
 // Native semantic matrix and bounded reducer; policy stays in the build driver.
 #include "tools/differential.c"
+#include "tools/aarch64_assembly_census.c"
 #include "tools/gpu_toolchains.c"
 #include "tools/native_retirement_census.c"
 #include "tools/uefi_boot.c"
@@ -39265,6 +39555,136 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
                             .spawn_options = {.use_process_environment = 1}};
 }
 
+// Build ownership for the bootstrap regression broker stays here, including
+// compiler qualification, flags, private output paths and process deadlines.
+// Always compile: there is no cache entry whose freshness Python must infer.
+enum
+{
+    BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS = 60,
+    BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES = 65536,
+};
+
+BUSTER_GLOBAL_LOCAL bool bootstrap_process_owner_run(Arena* arena, SliceString8 arguments, u64 timeout_seconds)
+{
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){
+        .use_process_environment = 1,
+        .new_process_group = 1,
+        .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+        .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES,
+                                         [STANDARD_STREAM_ERROR] = BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES},
+                           .total = 2 * BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES},
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+    });
+    ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
+    if (spawn.handle)
+    {
+        wait = os_process_wait_deadline(arena, spawn, timeout_seconds * 1000000);
+    }
+    string_print(S8("{S8}{S8}"), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]),
+                 BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]));
+    bool result = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !wait.output_truncated &&
+                  !wait.capture_failed && !build_compiler_query_cleanup_failed(wait);
+    if (!result)
+    {
+        string_print(S8("error: bootstrap process owner command failed result={S8} status={u32} timeout={u32} capture={u32} cleanup={u32}: {[]S8}\n"),
+                     build_compiler_query_process_result_name(wait.result), wait.platform_status, (u32)wait.timed_out,
+                     (u32)(wait.output_truncated || wait.capture_failed), (u32)build_compiler_query_cleanup_failed(wait), arguments);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bootstrap_process_owner_main(Arena* arena, SliceString8 arguments, bool run_tests)
+{
+    bool success = arguments.length == 0;
+    if (!success)
+    {
+        string_print(S8("error: bootstrap_process_owner and bootstrap_process_owner_test accept no arguments\n"));
+    }
+    MatrixCoverageCapability compiler = {0};
+    if (success)
+    {
+        success = matrix_coverage_probe(arena, matrix_coverage_target_current(), BUILD_COMPILER_CLANG,
+                                       cmake_cc(arena, BUILD_COMPILER_CLANG), &compiler);
+        if (!success)
+        {
+            string_print(S8("error: bootstrap process owner requires qualified native Clang: {S8}\n"), compiler.reason);
+        }
+    }
+    String8 directory = {0};
+    if (success)
+    {
+        // Separate from generate's disposable trees and never overwrite an
+        // existing session, including after PID reuse or concurrent calls.
+        make_directory_recursive(arena, S8(".cache/bootstrap-process-owner"));
+        u64 timestamp = os_now_microseconds();
+        for (u32 attempt = 0; attempt < 32 && !directory.length; attempt += 1)
+        {
+            String8 candidate = string_format_z(arena, S8(".cache/bootstrap-process-owner/{u64}-{u64}-{u32}"),
+                                                os_get_current_process_id(), timestamp, attempt);
+            OsDirectoryCreateResult created = os_make_directory_exclusive(candidate);
+            if (created.created)
+            {
+                directory = os_path_absolute(arena, candidate, true);
+            }
+            else if (!created.existing_directory)
+            {
+                break;
+            }
+        }
+        success = directory.length != 0;
+        if (!success)
+        {
+            string_print(S8("error: cannot claim a private bootstrap process owner output directory\n"));
+        }
+    }
+#if BUSTER_WINDOWS
+    String8 names[] = {S8("windows_process_tree.exe"), S8("windows_process_tree_test.exe")};
+#else
+    String8 names[] = {S8("windows_process_tree"), S8("windows_process_tree_test")};
+#endif
+    String8 sources[] = {S8("tools/windows_process_tree.c"), S8("tools/windows_process_tree_test.c")};
+    String8 executables[2] = {0};
+    for (u32 i = 0; i < (run_tests ? 2u : 1u) && success; i += 1)
+    {
+        executables[i] = path_join(arena, directory, names[i]);
+        String8 compile[] = {compiler.path, S8("-std=c11"), S8("-O1"), S8("-Wall"), S8("-Wextra"), S8("-Werror"),
+                             S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"), S8("-Isrc"),
+                             sources[i],
+#if BUSTER_WINDOWS
+                             S8("-Wno-microsoft-enum-forward-reference"), S8("-lshell32"),
+#endif
+                             S8("-o"), executables[i]};
+        // One bounded attempt. Never publish an incomplete executable or
+        // reuse an earlier helper after a compiler/cleanup failure.
+        success = bootstrap_process_owner_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile), BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS);
+        if (success && !path_exists(arena, executables[i]))
+        {
+            string_print(S8("error: native compiler did not produce bootstrap process owner output: {S8}\n"), executables[i]);
+            success = false;
+        }
+    }
+#if BUSTER_WINDOWS
+    if (success)
+    {
+        String8 selftest[] = {executables[0], S8("selftest")};
+        success = bootstrap_process_owner_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(selftest), BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS);
+    }
+#endif
+    if (success && run_tests)
+    {
+        String8 tests[] = {executables[1]};
+        success = bootstrap_process_owner_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tests), BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS);
+    }
+    if (success)
+    {
+        // The adapter forwards the path without owning compiler/cache policy.
+        // Retain this private binary for the invoking test process's lifetime.
+        string_print(S8("BOOTSTRAP_PROCESS_OWNER {S8}\n"), executables[0]);
+    }
+    ProcessResult result = success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
 // A same-runner CI comparison. A separately checked-out baseline is required;
 // the generated workload and flags are owned by the candidate harness, shared
 // byte-for-byte by both compiler executables. Never restore timing baselines or
@@ -39332,7 +39752,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
                 S8("--candidate-id"), head_sha.length ? head_sha : S8("unspecified"),
                 S8("--output"), S8("build/throughput-ci-results"), S8("--profile"), S8("ci"),
                 S8("--mode"), S8("all"), S8("--pairs"), S8("20"), S8("--warmups"), S8("2"), S8("--timeout"), S8("120"),
-                S8("--cpu"), S8("auto")};
+#if BUSTER_MACOS
+                // macOS has no CPU affinity API, so `--cpu auto` finds no CPU;
+                // the informative hosted timing job (#2761) runs unpinned.
+#else
+                S8("--cpu"), S8("auto"),
+#endif
+            };
             bench_throughput_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(benchmark));
             result = PROCESS_RESULT_SUCCESS;
         }
@@ -39348,12 +39774,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/compiler_experiment_supervisor.c"
 #include "tools/compiler_closure_phase.c"
 #include "tools/compiler_closure.c"
+#include "tools/compiler_evidence.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
+#include "tools/external_projects.c"
 #include "tools/ci_unit_tests.c"
+#include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/ffmpeg_compatibility.c"
 #include "tools/compiler_profile_qualification.c"
+#include "tools/userspace_qualification.c"
+#include "tools/curl_compat.c"
 
 ProcessResult process_arguments(void)
 {
@@ -39368,9 +39799,12 @@ ProcessResult process_arguments(void)
 
 BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
+        [BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER] = S8_INITIALIZER("bootstrap_process_owner"),
+        [BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST] = S8_INITIALIZER("bootstrap_process_owner_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
+        [BUILD_COMMAND_COMPILER_EVIDENCE] = S8_INITIALIZER("compiler_evidence"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
         [BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST] = S8_INITIALIZER("production_profile_self_test"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
@@ -39389,6 +39823,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_GENERATE_GUARD_SELF_TEST] = S8_INITIALIZER("generate_guard_self_test"),
         [BUILD_COMMAND_LUA_STAGING_SELF_TEST] = S8_INITIALIZER("lua_staging_self_test"),
         [BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST] = S8_INITIALIZER("compatibility_spawn_self_test"),
+        [BUILD_COMMAND_COMPATIBILITY_IDE_SELECTION_SELF_TEST] = S8_INITIALIZER("compatibility_ide_selection_self_test"),
         [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
@@ -39409,10 +39844,15 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
+        [BUILD_COMMAND_TEST_USERSPACE] = S8_INITIALIZER("test_userspace"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
+        [BUILD_COMMAND_TEST_CURL] = S8_INITIALIZER("test_curl"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
+        [BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS] = S8_INITIALIZER("test_aarch64_assembly_census"),
+        [BUILD_COMMAND_TEST_QEMU] = S8_INITIALIZER("test_qemu"),
+        [BUILD_COMMAND_QEMU_INPUT_SELF_TEST] = S8_INITIALIZER("qemu_input_self_test"),
         [BUILD_COMMAND_TEST_CLANG_SUITE] = S8_INITIALIZER("test_clang_suite"),
         [BUILD_COMMAND_TEST_FFMPEG] = S8_INITIALIZER("test_ffmpeg"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
@@ -39420,6 +39860,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_SOURCE_SIZE] = S8_INITIALIZER("source_size"),
         [BUILD_COMMAND_CI_NO_CODE] = S8_INITIALIZER("ci_no_code"),
+        [BUILD_COMMAND_EXTERNAL_PROJECTS] = S8_INITIALIZER("external_projects"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
@@ -39513,9 +39954,13 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         SliceString8 owned_arguments = {.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i};
         switch (command)
         {
+            case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
+            case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
+                result = bootstrap_process_owner_main(arena, owned_arguments, command == BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST); break;
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_COMPILER_EVIDENCE: result = compiler_evidence_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
@@ -39523,12 +39968,17 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION: result = compiler_profile_qualification_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_FFMPEG: result = ffmpeg_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_TEST_USERSPACE: result = userspace_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
             case BUILD_COMMAND_CI_NO_CODE: result = ci_no_code_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_EXTERNAL_PROJECTS: result = external_projects_main(arena, owned_arguments); break;
             case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
@@ -40523,7 +40973,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
         }
         break;
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_COMPILER_CLOSURE:
+        case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         {
@@ -40590,9 +41043,19 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             result = lua_staging_self_test(arena);
         }
         break;
+        case BUILD_COMMAND_QEMU_INPUT_SELF_TEST:
+        {
+            result = qemu_self_test(arena);
+        }
+        break;
         case BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST:
         {
             result = compatibility_spawn_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_COMPATIBILITY_IDE_SELECTION_SELF_TEST:
+        {
+            result = compatibility_ide_selection_self_test(arena);
         }
         break;
         case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:
@@ -40666,66 +41129,79 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_TEST_CJSON:
         {
+            test_cjson_options.build_directory = build_directory;
             test_cjson_action_add(arena, test_cjson_options);
         }
         break;
         case BUILD_COMMAND_TEST_ZLIB:
         {
+            test_zlib_options.build_directory = build_directory;
             test_zlib_action_add(arena, test_zlib_options);
         }
         break;
         case BUILD_COMMAND_TEST_LUA:
         {
+            test_lua_options.build_directory = build_directory;
             test_lua_action_add(arena, test_lua_options);
         }
         break;
         case BUILD_COMMAND_TEST_YYJSON:
         {
+            test_yyjson_options.build_directory = build_directory;
             test_yyjson_action_add(arena, test_yyjson_options);
         }
         break;
         case BUILD_COMMAND_TEST_STB:
         {
+            test_stb_options.build_directory = build_directory;
             test_stb_action_add(arena, test_stb_options);
         }
         break;
         case BUILD_COMMAND_TEST_LZ4:
         {
+            test_lz4_options.build_directory = build_directory;
             test_lz4_action_add(arena, test_lz4_options);
         }
         break;
         case BUILD_COMMAND_TEST_SQLITE:
         {
+            test_sqlite_options.build_directory = build_directory;
             test_sqlite_action_add(arena, test_sqlite_options);
         }
         break;
         case BUILD_COMMAND_TEST_SBASE:
         {
+            test_sbase_options.build_directory = build_directory;
             test_sbase_action_add(arena, test_sbase_options);
         }
         break;
         case BUILD_COMMAND_TEST_DOOM:
         {
+            test_doom_options.build_directory = build_directory;
             test_doom_action_add(arena, test_doom_options);
         }
         break;
         case BUILD_COMMAND_TEST_QUICKJS:
         {
+            test_quickjs_options.build_directory = build_directory;
             test_quickjs_action_add(arena, test_quickjs_options);
         }
         break;
         case BUILD_COMMAND_TEST_MUSL:
         {
+            test_musl_options.build_directory = build_directory;
             test_musl_action_add(arena, test_musl_options);
         }
         break;
         case BUILD_COMMAND_TEST_CPYTHON:
         {
+            test_cpython_options.build_directory = build_directory;
             test_cpython_action_add(arena, test_cpython_options);
         }
         break;
         case BUILD_COMMAND_TEST_RADDEBUGGER:
         {
+            test_raddebugger_options.build_directory = build_directory;
             test_raddebugger_action_add(arena, test_raddebugger_options);
         }
         break;
@@ -40734,12 +41210,17 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
+        case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_TEST_FFMPEG:
+        case BUILD_COMMAND_TEST_USERSPACE:
+        case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
         case BUILD_COMMAND_CI_NO_CODE:
+        case BUILD_COMMAND_EXTERNAL_PROJECTS:
         {
             // Executed before the ordinary build-option parser.
         }

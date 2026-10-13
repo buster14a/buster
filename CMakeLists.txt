@@ -1102,6 +1102,7 @@ buster_register_module(compiler_aarch64_semantics "${BUSTER_SOURCE_DIR}/compiler
 buster_register_module(compiler_aarch64_system_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_system_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_syntax "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_syntax${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_semantic_vm "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_semantic_vm${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_simd_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_direct_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_direct_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_complex_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_complex_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_memory_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_memory_semantics${COMMON_EXTENSION}")
@@ -1130,6 +1131,7 @@ buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm
 buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
 buster_register_module(compiler_spirv "${BUSTER_SOURCE_DIR}/compiler/spirv/spirv${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
+buster_register_module(compiler_embed "${BUSTER_SOURCE_DIR}/compiler/embed/embed${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
 buster_register_module(x86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
@@ -1203,6 +1205,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/pdb/pdb_test.c
     src/buster/tests/compiler/object/object_test.c
     src/buster/tests/compiler/jit/jit_test.c
+    src/buster/tests/compiler/embed/embed_test.c
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
     src/buster/tests/compiler/spirv/spirv_test.c
@@ -1272,6 +1275,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/pdb/pdb_test.h
     src/buster/tests/compiler/object/object_test.h
     src/buster/tests/compiler/jit/jit_test.h
+    src/buster/tests/compiler/embed/embed_test.h
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
     src/buster/tests/compiler/spirv/spirv_test.h
@@ -2171,6 +2175,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_semantics
     compiler_aarch64_system_semantics
     compiler_aarch64_semantic_vm
+    compiler_aarch64_simd_semantics
     compiler_aarch64_direct_simd
     compiler_aarch64_complex_simd
     compiler_aarch64_memory_semantics
@@ -2200,6 +2205,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_ebpf
     compiler_spirv
     compiler_driver
+    compiler_embed
     simd
     file
     target
@@ -2213,6 +2219,7 @@ if (NOT BUSTER_INVESTIGATION_REVISION STREQUAL "")
 endif()
 
 include(cmake/HotReloadDemo.cmake)
+include(cmake/CompilerSdk.cmake)
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES
@@ -2486,6 +2493,8 @@ endif()
 
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
     if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")
+        # Neither target takes the console pool: the superbuild's --parallel,
+        # chosen by build.c from host memory, decides whether the two overlap.
         add_custom_target(clang_analyze
             COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
                 clang_analyze
@@ -2493,7 +2502,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
                 --config "$<CONFIG>"
                 --quiet
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
             COMMENT "Running clang --analyze"
             VERBATIM
         )
@@ -2506,7 +2514,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
                 --config "$<CONFIG>"
                 --quiet
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
             COMMENT "Auditing optnone in the unity ide"
             VERBATIM
         )

@@ -141,6 +141,8 @@ MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a637212
 ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
 # #2276 successor: the combined #2203/#2428 declaration with only the caller row updated.
 STACK_CALLER_SUPPORT_CONTRACT_SHA256 = "086b7020a566ac43c854fc84c2835a1eed872ea9f4f5763d8c521df04845194b"
+# #2889 successor: only the four frozen SIMD vocabulary fixture rows change.
+SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256 = "80065d1e9da7d6ce0ae36aee6a7d2c4b7f6f64134a0af3e7537d7b34fe81d66e"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -911,7 +913,8 @@ def _verify_archived_fixture_inputs(replay, source_root):
             ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
             MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
             ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-            STACK_CALLER_SUPPORT_CONTRACT_SHA256):
+            STACK_CALLER_SUPPORT_CONTRACT_SHA256,
+            SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256):
         _fail("archived replay support contract identity mismatch")
     approved = {}
     try:

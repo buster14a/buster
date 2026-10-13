@@ -140,6 +140,36 @@ _frozen_actions = frozen_suite("frozen_action_pins", "tests/action_pins_test.py"
 
 
 class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
+    def test_mobile_monitor_runner_policy_and_evidence(self):
+        source = (ROOT / ".github/workflows/ios-monitor-tests.yml").read_text()
+        jobs = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)",
+                               source.split("\njobs:\n", 1)[1]))
+        self.assertEqual(set(jobs), {"launch-trace", "fake-tools", "native-probes"})
+        for name, runner, cap, artifact in (("launch-trace", "macos-26", 5, "ios-launch-trace"),
+                                            ("fake-tools", "macos-15", 10, "mobile-lifecycle")):
+            with self.subTest(job=name):
+                job = jobs[name]
+                self.assertEqual(re.findall(r"(?m)^        os: \[(.*?)\]$", job),
+                                 ["ubuntu-26.04, " + runner])
+                self.assertIn("    runs-on: ${{ matrix.os }}\n", job)
+                self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", job), [str(cap)])
+                self.assertIn("fail-fast: false", job)
+                self.assertIn("name: " + artifact +
+                              "-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}", job)
+                for command in ("python3 --version", "/bin/bash --version", "bash --version",
+                                "python3 ios/gnu_timeout.py"):
+                    self.assertIn(command, job)
+                self.assertIn("${{ runner.temp }}/mobile-monitor-tool-versions.log", job)
+                self.assertIn("${{ runner.temp }}/machine-specifications/", job)
+        native = jobs["native-probes"]
+        self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", native), ["macos-26"])
+        self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", native), ["30"])
+        self.assertEqual(source.count("macos-15"), 1)
+        policy = (ROOT / "docs/apple-ci-policy.md").read_text()
+        for required in ("Temporary fake-tools version exception", "**Purpose:**", "**Evidence:**",
+                         "**Owner:**", "**Review condition:**", "#3479"):
+            self.assertIn(required, policy)
+
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             with self.subTest(path=path.name):
@@ -190,6 +220,15 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         completion = ci.split("\n  complete:", 1)[1]
         self.assertIn("ref: main", completion)
         self.assertIn("path: no-code-trusted", completion)
+        # #3395: the workspace stays shallow; reclassification reads its own
+        # bare blobless candidate and never fetches lazily or into the workspace.
+        self.assertEqual(re.findall(r"(?m)^\s+fetch-depth: (.*)$", completion), ["1", "1"])
+        self.assertIn("fetch --quiet --no-tags --no-write-fetch-head --filter=blob:none", completion)
+        self.assertIn('"$SOURCE_URL" "$TESTED_SHA" "$policy"', completion)
+        self.assertIn("GIT_NO_LAZY_FETCH: '1'", completion)
+        self.assertIn('ci_no_code --repo "$RUNNER_TEMP/no-code-candidate"', completion)
+        self.assertNotIn("git fetch --quiet --no-tags origin", completion)
+        self.assertNotIn("persist-credentials: true", completion)
         audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", audit).group(1)
         self.assertEqual(tuple(line.rstrip() for line in events.splitlines()
@@ -422,13 +461,14 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("always()", artifact)
 
 
-    def test_ordinary_desktop_has_no_full_lint_ancestor(self):
+    def test_desktop_has_no_lint_ancestor_in_any_event(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         blocks = dict(re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:|\Z)",
                                  text.split("\njobs:\n", 1)[1]))
         desktop = blocks["test"].split("    steps:", 1)[0]
-        self.assertIn("needs: [queue_lint, reuse, no_code_plan]", desktop)
-        self.assertIn("github.event_name != 'merge_group' || needs.queue_lint.result == 'success'", desktop)
+        # Merge-group lint runs beside desktop; CI complete still requires it (#3912).
+        self.assertIn("needs: [reuse, no_code_plan]", desktop)
+        self.assertNotIn("queue_lint", desktop)
         self.assertNotIn("needs.lint", desktop)
         self.assertIn("needs: [reuse, no_code_plan]", blocks["native"])
         self.assertIn("needs: no_code_plan", blocks["queue_lint"])
@@ -454,7 +494,8 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("test_all_combinations_ci", native)
         self.assertIn("fail-fast: false", native)
         self.assertNotIn("actions/download-artifact", native)
-        self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential (plus ebpf_kernel on Linux x86-64)", native)
+        self.assertIn("matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel'", native)
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
         self.assertEqual(entries, list(zip(_frozen_ci.github_ci_time.UNIX_NATIVE, (
             "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26"))))

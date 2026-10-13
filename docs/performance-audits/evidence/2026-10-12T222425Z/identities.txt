@@ -1,0 +1,24 @@
+# Revision
+commit 64021a34ac2bcd0d0e673012b6e70c24944b9489
+tree   0ececef69d68bd9cebf186be45d8405a09f760e6
+# Host
+model name	: Intel(R) Xeon(R) Processor @ 2.10GHz
+nproc 4
+Linux 6.18.44-fc-v114
+# Toolchain
+tcc version 0.9.28rc 2026-09-04 HEAD@0fb54300 (x86_64 Linux)
+Ubuntu clang version 18.1.3 (1ubuntu1)
+cmake version 3.28.3
+ninja 1.11.1
+tinycc source commit 0fb54300b56512754221d80adda85ddb9815bceb (git -C /tmp/claude-0/tools/tinycc rev-parse HEAD: 0fb54300b56512754221d80adda85ddb9815bceb)
+# Outputs (sha256, bytes); the binaries and objects themselves are not retained
+8aad700616510b0fbef38a915db35c7d4e8fa05a050e1ff683c6d6f046b2b61e 33885128 build/Release/ide
+bac601560f3b358f16f10fd5e7cbab204ee4067907196a95b42bf4428177e6d6 38488256 build/CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o
+bac601560f3b358f16f10fd5e7cbab204ee4067907196a95b42bf4428177e6d6 38488256 scratch/ide_trace.o
+bac601560f3b358f16f10fd5e7cbab204ee4067907196a95b42bf4428177e6d6 38488256 scratch/plain.o
+77a7cfe0039484f75e1acb3acf223d669bfe75915a8b25459818d2d37f022c5e 38277160 scratch/noat.o
+19532564ab1b2372fcc09b601c54a1f8a9bf14fb4b63173478a4175909d4605c 18533616 scratch/nog.o
+a5d71c0195f0d47cc0f3e21cf4bfde0dfbea883376a160371fe146e1ae019a46 5734115 scratch/plain.text
+a5d71c0195f0d47cc0f3e21cf4bfde0dfbea883376a160371fe146e1ae019a46 5734115 scratch/noat.text
+e4d8cc4a130e812eb5b92d8b8002c16c175ed29e56e5dffd6ce58144abb46863 5734099 scratch/nog.text
+f9a672f5b2b8c91575d195f9131f376ed35913ae18494c298963bef3779a8464 5012837 scratch/ide_trace.json

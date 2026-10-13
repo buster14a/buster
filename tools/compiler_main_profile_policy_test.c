@@ -256,7 +256,62 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_route_self_test(Arena* arena)
     observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,long_policy,22),
         facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},previous);
     cases+=1;failures+=observed.valid;
+    // #3212 items 5-6: only the reviewed fixed-40 profile, only in qualified-40;
+    // every other state or profile name is refused instead of reinterpreted.
+    String8 profile_states[]={S8("qualified-40"),S8("qualified-40"),S8("qualified-40"),S8("qualified-80"),S8("enabled")};
+    String8 profile_names[]={S8("compiler-compare-v1"),S8("compiler-main-80pairs-candidate-v1"),S8("compiler-main-40pairs-candidate-v1"),
+        S8("compiler-main-40pairs-v1"),S8("compiler-main-40pairs-v1")};
+    for(u64 i=0;i<BUSTER_ARRAY_LENGTH(profile_states);i+=1)
+    {
+        CompilerMainPolicyFixture changed=initial;changed.policy[2]=profile_states[i];changed.policy[4]=profile_names[i];
+        observed=compiler_main_policy_test_validate(arena,changed);
+        cases+=1;failures+=observed.valid;
+    }
+    CompilerMainPolicyFixture certified=initial;certified.certificate[4]=S8("compiler-main-80pairs-candidate-v1");
+    observed=compiler_main_policy_test_validate(arena,certified);
+    cases+=1;failures+=observed.valid;
+    long_policy[3]=initial.policy[3];long_policy[4]=S8("compiler-main-40pairs-v1");
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,long_policy,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},previous);
+    cases+=1;failures+=observed.valid;
+    long_policy[2]=S8("owned-long");long_policy[17]=S8("-");
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,long_policy,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},(String8){0});
+    cases+=1;failures+=observed.valid;
+    disabled[4]=S8("compiler-main-40pairs-v1");
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,disabled,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},(String8){0});
+    cases+=1;failures+=observed.valid;
+    disabled[4]=S8("compiler-compare-v1");
+    // Rollback from an active fixed-40 policy restores compiler-compare-v1 at
+    // the same H and runtime pins, with no certificate carried forward.
+    String8 short_policy[22]={0};
+    for(u64 i=0;i<22;i+=1)short_policy[i]=initial.policy[i];
+    String8 short_previous=compiler_main_policy_test_fields(arena,compiler_main_policy_names,short_policy,22);
+    String8 restored[22]={0};
+    for(u64 i=0;i<22;i+=1)restored[i]=initial.policy[i];
+    restored[2]=S8("rollback");restored[4]=S8("compiler-compare-v1");restored[15]=S8("-");restored[16]=S8("-");
+    restored[17]=S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,restored,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},short_previous);
+    cases+=1;failures+=!(observed.valid&&observed.owned&&string_equal(observed.policy[4],S8("compiler-compare-v1")));
+    restored[17]=initial.facts[4];
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,restored,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},short_previous);
+    cases+=1;failures+=observed.valid;
+    restored[17]=S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");restored[7]=S8("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,restored,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},short_previous);
+    cases+=1;failures+=observed.valid;
+    restored[7]=initial.policy[7];
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,restored,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},(String8){0});
+    cases+=1;failures+=observed.valid;
+    observed=compiler_main_route_validate(arena,compiler_main_policy_test_fields(arena,compiler_main_policy_names,restored,22),
+        facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},
+        compiler_main_policy_test_fields(arena,compiler_main_policy_names,disabled,22));
+    cases+=1;failures+=observed.valid;
     string_print(S8("COMPILER_MAIN_ROUTE_SELF_TEST cases={u64} failures={u64} physical_execution=none\n"),cases,failures);
-    bool result=cases==57&&failures==0;
+    bool result=cases==71&&failures==0;
     return result;
 }

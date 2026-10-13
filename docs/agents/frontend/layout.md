@@ -503,6 +503,24 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
 
+## Nested tag scan bounds
+
+The default type machine reuses the translation unit's existing delimiter-pair
+index to skip complete nested aggregate bodies in layout, alignment, member
+range, storage-specifier and definition scans. Index construction is charged
+once; clipped ranges and malformed delimiter streams retain the scan's refusal
+semantics. Active aggregate-member frame count follows successful push,
+completion and failure discard, so deciding whether a core frame is nested
+takes one operation.
+
+`c_test_nested_tag_scan_growth` generates valid depth-1,000 and depth-2,000
+records and checks their layouts. Test-only counters cover actual index
+construction, delimiter operations, layout/alignment/member token visits and
+ancestor decisions. Each population must grow by at most 2.2 times. These
+deterministic work bounds are diagnostic correctness evidence, not a measured
+Zen 5 performance result. Before/after complete compiler instruction counts,
+object identity and the self-host fixed point are recorded on #3497.
+
 ## `_Alignof` over an object
 
 GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
@@ -787,7 +805,17 @@ target and the member it is handed, so it adds no agenda prerequisite.
   [whole-unit pass scaling](semantic-validation.md#whole-unit-pass-scaling).
   An idle machine's cold member-offset query finishes its pending list once,
   so subsequent offset queries use committed dependencies instead of rebuilding
-  the whole table for each member.
+  the whole table for each member. An attempt that stops after reading an open
+  type waits on it (`c_parse_layout_pass_wait`, the last open read is the
+  blocker), and that type's publish readies it ahead of the rest of the pass.
+  A type listed before what it contains -- an outer record before its nested
+  ones, a record before the array type of its member -- therefore resolves in
+  the same pass, so a chain of D such links takes O(D) attempts instead of D
+  passes (#3312). A retry only moves an attempt earlier than the next pass would
+  make it, so the passes still stop on a pass without progress. Lowering's
+  type-mapping passes in `c_lower_to_ir_reserved_run` retry the same way
+  (`c_ir_type_mapping_next`, `c_ir_type_mapping_blocker`), so an array type is
+  not re-evaluated pass after pass while its element record waits for a layout.
 - **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used
   for queries with no cache and no type-parse machine: enumerator `sizeof`
   folds and other machineless constant evaluation. A member-offset query of a

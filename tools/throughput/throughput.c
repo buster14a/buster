@@ -2,7 +2,8 @@
  * Ownership: this executable owns deterministic inputs and per-process timing;
  * build.c owns compiler construction. No third-party library is required.
  * Map: tp_generate (synthetic workloads), tp_workload_check/tp_workload_admit
- * (real-source qualification), tp_measure (commands), tp_run (paired trials),
+ * (real-source qualification), tp_real_source_prepare (timed real-source
+ * descriptors), tp_measure (commands), tp_run (paired trials),
  * tp_compare (strict raw-sample replay and CI decision), tp_self_test (tests).
  * qualification.h owns optional dedicated-host admission and cooperative locks.
  * cpuset.h owns CPU sets/topology; scaling.h owns the multi-TU `scale` series.
@@ -44,7 +45,10 @@
 #define TP_DEFAULT_WORKLOAD_MASK ((1u << TP_DEFAULT_CASES) - 1u)
 #define TP_ALL_WORKLOAD_MASK ((1u << TP_CASES) - 1u)
 #define TP_ALL_MODE_MASK ((1u << TP_MODES) - 1u)
-#define TP_MAX_JOBS (TP_CASES * TP_MODES + TP_SELF_HOST_STAGES)
+/* `run --real-source DESCRIPTOR ROOT` times a version-2 descriptor's frozen
+ * compile_link_argv: one process per descriptor and allocator mode. */
+#define TP_MAX_REAL_SOURCES 4
+#define TP_MAX_JOBS (TP_CASES * TP_MODES + TP_MAX_REAL_SOURCES * TP_MODES + TP_SELF_HOST_STAGES)
 #define TP_ROUNDS 2
 #define TP_MAX_FLAGS 32
 #define TP_RAW_HEADER "round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,instructions,branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,output_bytes,source_bytes,source_lines,source_functions,output_sha256,minor_faults,major_faults,voluntary_context_switches,involuntary_context_switches\n"
@@ -53,6 +57,8 @@ static char const* const tp_case_names[TP_CASES] = {
     "tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure",
     "macros", "aggregate-abi"};
 static char const* const tp_modes[TP_MODES] = {"fast", "quality"};
+
+typedef struct TpRealSource TpRealSource;
 
 typedef struct TpConfig
 {
@@ -84,6 +90,10 @@ typedef struct TpConfig
     char const* environment_manifest;
     char const* runtime_manifest;
     char const* retirement_input;
+    char const* real_descriptors[TP_MAX_REAL_SOURCES];
+    char const* real_roots[TP_MAX_REAL_SOURCES];
+    unsigned real_count;
+    TpRealSource* real_sources;
     char const* flags[TP_MAX_FLAGS];
     unsigned flag_count;
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
@@ -112,6 +122,7 @@ typedef struct TpJob
     unsigned mode;
     unsigned stage;
     int assembly;
+    TpRealSource* real;
 } TpJob;
 
 typedef struct TpRow
@@ -219,7 +230,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->cpu = -1;
     config->lease_fd = -1;
     config->guard = 1;
-    config->scale_shape_mask = (1u << 4) - 1u;
+    config->scale_shape_mask = (1u << TP_SCALE_SHAPES) - 1u;
     config->scale_repeats = 10;
     config->scale_exclude_core = -1;
     int ok = 1, selected_workloads = 0, selected_shapes = 0;
@@ -254,6 +265,20 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         else if (!strcmp(key, "--allow-smt"))
         {
             config->scale_allow_smt = 1;
+        }
+        else if (!strcmp(key, "--real-source"))
+        {
+            ok = i + 2 < argc && config->real_count < TP_MAX_REAL_SOURCES;
+            if (ok)
+            {
+                config->real_descriptors[config->real_count] = argv[i + 1];
+                config->real_roots[config->real_count++] = argv[i + 2];
+                i += 2;
+            }
+            else
+            {
+                tp_error("--real-source takes DESCRIPTOR ROOT, at most %u times", TP_MAX_REAL_SOURCES);
+            }
         }
         else if (i + 1 >= argc)
         {
@@ -379,6 +404,9 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             if (!ok) tp_error("invalid value for %s: %s", key, value);
         }
     }
+    /* Real-source descriptors replace the default synthetic corpus unless
+     * --workload also selects synthetic cases. */
+    if (config->real_count && !selected_workloads) config->workload_mask = 0;
     ok = ok && config->pairs > 0 && config->pairs <= TP_MAX_PAIRS && config->warmups >= 1 &&
          config->warmups <= 20 && config->timeout > 0 && config->timeout <= 3600 &&
          config->seed > 0 && config->scale > 0 && config->scale <= 64 &&
@@ -397,6 +425,13 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     if (config->guard && config->workload_mask != TP_DEFAULT_WORKLOAD_MASK && !strcmp(config->command, "run"))
     {
         tp_error("custom workload selection requires --no-guard; the predeclared CI corpus is unchanged");
+        ok = 0;
+    }
+    if (config->real_count && (strcmp(config->command, "run") || config->guard || config->flag_count ||
+                               config->assembly || config->allocation_baseline || config->pmu))
+    {
+        tp_error("--real-source applies only to run, requires --no-guard, and refuses --flag, --artifact assembly, "
+                 "allocation probes and PMU replays: its compile_link_argv template is frozen");
         ok = 0;
     }
     if (!!config->allocation_baseline != !!config->allocation_candidate ||
@@ -660,16 +695,77 @@ static int tp_sample_csv(FILE* file, unsigned round, unsigned pair, unsigned ord
 
 /* Validate the complete cross product before allocating or writing any job.
  * Masks are checked first, so the bounded sums/products cannot overflow. */
+#include "tree.h"
+#include "workload.h"
+
+/* One `run --real-source DESCRIPTOR ROOT`. Its workload names the descriptor:
+ * path, input tree hash and requested translation-unit bytes. The parsed
+ * descriptor and expanded argv are large, so tp_run owns them in its arena. */
+struct TpRealSource
+{
+    TpWorkload workload;
+    TpWorkloadDescriptor descriptor;
+    char root[TP_PATH_CAP];
+    char descriptor_sha256[65];
+    TpWorkloadExpandedArguments arguments;
+};
+
+/* Parse every descriptor and verify its staged inventory before any timing. */
+static int tp_real_source_prepare(TpConfig* config, Arena* arena)
+{
+    TpRealSource* sources = config->real_count ? arena_allocate_zeroed(arena, TpRealSource, config->real_count) : NULL;
+    int ok = !config->real_count || sources;
+    for (unsigned i = 0; i < config->real_count && ok; ++i)
+    {
+        TpRealSource* real = sources + i;
+        TpWorkloadDescriptor const* descriptor = &real->descriptor;
+        char tree[65];
+        uint64_t bytes = 0, lines = 0;
+        ok = tp_absolute(config->real_descriptors[i], real->workload.path) && tp_absolute(config->real_roots[i], real->root) &&
+             tp_workload_regular_file(real->workload.path) && tp_workload_directory(real->root) &&
+             tp_hash_file(real->workload.path, real->descriptor_sha256, &bytes, &lines) &&
+             tp_workload_descriptor_parse(real->workload.path, &real->descriptor) &&
+             !strcmp(descriptor->schema, TP_WORKLOAD_DESCRIPTOR_SCHEMA) && descriptor->compile_link_argument_count &&
+             descriptor->link_input_count && tp_workload_csv_contains(descriptor->operations, "source-to-linked-executable") &&
+             strlen(descriptor->name) < sizeof(real->workload.name);
+        for (unsigned mode = 0; mode < TP_MODES && ok; ++mode)
+            if (config->mode_mask & (1u << mode)) ok = tp_workload_csv_contains(descriptor->allocator_modes, tp_modes[mode]);
+        for (unsigned j = 0; j < i && ok; ++j) ok = strcmp(sources[j].descriptor.name, descriptor->name) != 0;
+        if (!ok) tp_error("real-source descriptor is not a unique version-2 compile-link descriptor for every selected mode: %s",
+                          config->real_descriptors[i]);
+        ok = ok && tp_workload_descriptor_inputs(real->root, descriptor, tree);
+        if (ok)
+        {
+            strcpy(real->workload.name, descriptor->name);
+            memcpy(real->workload.hash, descriptor->input_tree_sha256, sizeof(real->workload.hash));
+            real->workload.bytes = descriptor->requested_translation_unit_bytes;
+        }
+    }
+    config->real_sources = ok ? sources : NULL;
+    return ok;
+}
+
+/* After timing: the descriptor and its complete staged tree are unchanged. */
+static int tp_real_source_unchanged(TpRealSource const* real)
+{
+    char hash[65], tree[65];
+    uint64_t bytes = 0, lines = 0;
+    int ok = tp_hash_file(real->workload.path, hash, &bytes, &lines) && !strcmp(hash, real->descriptor_sha256) &&
+             tp_workload_descriptor_inputs(real->root, &real->descriptor, tree);
+    if (!ok) tp_error("real-source descriptor or staged inputs changed during the run: %s", real->workload.name);
+    return ok;
+}
+
 static int tp_job_count(TpConfig const* config, unsigned capacity, unsigned* count)
 {
-    int ok = config->workload_mask && !(config->workload_mask & ~TP_ALL_WORKLOAD_MASK) &&
-             config->mode_mask && !(config->mode_mask & ~TP_ALL_MODE_MASK);
+    int ok = (config->workload_mask || config->real_count) && !(config->workload_mask & ~TP_ALL_WORKLOAD_MASK) &&
+             config->real_count <= TP_MAX_REAL_SOURCES && config->mode_mask && !(config->mode_mask & ~TP_ALL_MODE_MASK);
     unsigned workloads = 0, modes = 0, required = 0;
     if (ok)
     {
         for (unsigned kind = 0; kind < TP_CASES; ++kind) workloads += !!(config->workload_mask & (1u << kind));
         for (unsigned mode = 0; mode < TP_MODES; ++mode) modes += !!(config->mode_mask & (1u << mode));
-        required = workloads * modes + (config->self_host_root ? TP_SELF_HOST_STAGES : 0);
+        required = (workloads + config->real_count) * modes + (config->self_host_root ? TP_SELF_HOST_STAGES : 0);
         ok = required <= capacity;
     }
     *count = ok ? required : 0;
@@ -687,7 +783,15 @@ static int tp_prepare_jobs(TpConfig const* config, TpWorkload const workloads[TP
         {
             if (!(config->workload_mask & (1u << kind))) continue;
             for (unsigned mode = 0; mode < TP_MODES; ++mode)
-                if (config->mode_mask & (1u << mode)) jobs[next++] = (TpJob){workloads[kind], mode, 0, config->assembly};
+                if (config->mode_mask & (1u << mode)) jobs[next++] = (TpJob){workloads[kind], mode, 0, config->assembly, NULL};
+        }
+        /* Real-source jobs precede the self-host stages, which stay last. */
+        ok = !config->real_count || config->real_sources;
+        for (unsigned real = 0; real < config->real_count && ok; ++real)
+        {
+            for (unsigned mode = 0; mode < TP_MODES; ++mode)
+                if (config->mode_mask & (1u << mode))
+                    jobs[next++] = (TpJob){config->real_sources[real].workload, mode, 0, 0, config->real_sources + real};
         }
         for (unsigned stage = 1; config->self_host_root && stage <= TP_SELF_HOST_STAGES && ok; ++stage)
         {
@@ -715,7 +819,7 @@ static char const* tp_artifact_extension(TpJob const* job)
 {
     /* Self-host stages must remain executable even in an assembly-output run.
      * Path validation can inspect the job without touching compiler options. */
-    return job->stage ? ".exe" : job->assembly ? ".s" : ".o";
+    return job->stage || job->real ? ".exe" : job->assembly ? ".s" : ".o";
 }
 
 static void tp_compile_arguments(TpConfig const* config, TpJob const* job,
@@ -774,9 +878,29 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
     snprintf(leaf, sizeof(leaf), "%s.log", sample_id);
     ok = ok && tp_path(log, output_root, leaf);
     TpArguments arguments;
-    if (ok)
+    char** argv = arguments.values;
+    unsigned argc = 0;
+    if (ok && job->real)
+    {
+        /* The descriptor's frozen compile-link template; only the measured
+         * allocator mode replaces the admission default. */
+        TpWorkloadExpandedArguments* expanded = &job->real->arguments;
+        ok = tp_workload_expand_arguments(&job->real->descriptor, compiler, job->real->root,
+                                          job->real->descriptor.compile_link_arguments,
+                                          job->real->descriptor.compile_link_argument_count, NULL, artifact, metrics, NULL,
+                                          expanded) &&
+             snprintf(expanded->mode, sizeof(expanded->mode), "-fregister-allocator=%s", tp_modes[job->mode]) > 0;
+        argv = expanded->values;
+        argc = expanded->count;
+        directory = job->real->root;
+    }
+    else if (ok)
     {
         tp_compile_arguments(config, job, compiler, artifact, metrics, &arguments);
+        argc = arguments.count;
+    }
+    if (ok)
+    {
         /* Reject a stale artifact rather than accidentally benchmarking a
          * failed compiler that left last iteration's output behind. */
         ok = (remove(artifact) == 0 || errno == ENOENT) && (remove(metrics) == 0 || errno == ENOENT);
@@ -786,17 +910,17 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
         fputs("{\"sample\":", commands); tp_json_string(commands, sample_id);
         fputs(",\"cwd\":", commands); tp_json_string(commands, directory);
         fputs(",\"argv\":[", commands);
-        for (unsigned i = 0; i < arguments.count; ++i)
+        for (unsigned i = 0; i < argc; ++i)
         {
             if (i) fputc(',', commands);
-            tp_json_string(commands, arguments.values[i]);
+            tp_json_string(commands, argv[i]);
         }
         fputs("]}\n", commands);
         ok = fflush(commands) == 0;
     }
     if (ok)
     {
-        row->process = tp_process(arguments.values, directory, log, config->timeout, config->cpu, pmu);
+        row->process = tp_process(argv, directory, log, config->timeout, config->cpu, pmu);
         TpProcess const* p = &row->process;
         ok = !p->launch_error && !p->timed_out && !p->signal_number && p->exit_code == 0 && p->wall_seconds > 0.0;
         if (!ok)
@@ -876,6 +1000,26 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
             tp_json_string(file, tp_case_names[kind]);
         }
         fputs("],", file);
+        /* Present only with --real-source, so synthetic metadata keeps its bytes. */
+        if (config->real_count)
+        {
+            fputs("\"real_sources\":[", file);
+            for (unsigned i = 0; i < config->real_count; ++i)
+            {
+                TpRealSource const* real = config->real_sources + i;
+                if (i) fputc(',', file);
+                fputs("{\"name\":", file); tp_json_string(file, real->descriptor.name);
+                fputs(",\"descriptor\":", file); tp_json_string(file, real->workload.path);
+                fputs(",\"descriptor_sha256\":", file); tp_json_string(file, real->descriptor_sha256);
+                fputs(",\"source_root\":", file); tp_json_string(file, real->root);
+                fputs(",\"input_tree_sha256\":", file); tp_json_string(file, real->descriptor.input_tree_sha256);
+                fprintf(file, ",\"requested_translation_unit_bytes\":%" PRIu64 ",\"inputs\":%u,\"link_inputs\":%u,"
+                              "\"operation\":\"source-to-linked-executable\",\"template\":\"compile_link_argv\"}",
+                        real->descriptor.requested_translation_unit_bytes, real->descriptor.input_count,
+                        real->descriptor.link_input_count);
+            }
+            fputs("],", file);
+        }
         fputs("\"process_diagnostics_scope\":\"Linux wait4 child usage; faults and context switches, not PMU events; copied after timing; other platforms unavailable; diagnostic only\",", file);
         if (config->host)
         {
@@ -934,7 +1078,7 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
             fprintf(file, "{\"job\":%u,\"name\":", i); tp_json_string(file, w->name);
             fputs(",\"mode\":", file); tp_json_string(file, tp_modes[jobs[i].mode]);
             fputs(",\"artifact\":", file);
-            tp_json_string(file, jobs[i].stage ? "executable" : jobs[i].assembly ? "assembly" : "object");
+            tp_json_string(file, jobs[i].stage || jobs[i].real ? "executable" : jobs[i].assembly ? "assembly" : "object");
             fputs(",\"source\":", file); tp_json_string(file, w->path);
             fputs(",\"sha256\":", file); tp_json_string(file, w->hash);
             fprintf(file, ",\"bytes\":%" PRIu64 ",\"physical_lines\":%" PRIu64 ",\"defined_functions\":%" PRIu64 "}",
@@ -1407,10 +1551,6 @@ static int tp_compare(char const* root)
     return result;
 }
 
-#include "tree.h"
-static int tp_mkdirs(char const* path);
-#include "workload.h"
-
 static int tp_mkdirs(char const* path)
 {
     char copy[TP_PATH_CAP];
@@ -1486,6 +1626,7 @@ static int tp_run(TpConfig config)
     ok = ok && jobs && first && tp_mkdirs(input_dir) && tp_mkdirs(output_dir);
     TpWorkload workloads[TP_CASES];
     if (ok) ok = tp_generate(&config, input_dir, workloads);
+    if (ok) ok = tp_real_source_prepare(&config, arena);
     if (ok) ok = tp_prepare_jobs(&config, workloads, jobs, job_count, &job_count);
     char frozen_hash[65] = {0};
     if (ok && config.self_host_root)
@@ -1704,7 +1845,11 @@ static int tp_run(TpConfig config)
         /* Generated inputs must also remain immutable. */
         for (unsigned job = 0; job < job_count && ok; ++job)
         {
-            if (!jobs[job].stage)
+            if (jobs[job].real)
+            {
+                ok = tp_real_source_unchanged(jobs[job].real);
+            }
+            else if (!jobs[job].stage)
             {
                 uint64_t bytes, lines;
                 char hash[65];
@@ -2059,6 +2204,8 @@ static void tp_help(void)
           "--artifact object|assembly (ordinary jobs only; default object; self-host stages stay executable),\n"
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
+          "--real-source DESCRIPTOR ROOT (repeatable; times a version-2 descriptor's frozen compile_link_argv on its\n"
+          "verified staged tree; replaces defaults unless --workload is given; no --flag, assembly, PMU or allocation),\n"
           "--no-guard (required for custom workload runs; no performance pass claimed).\n"
           "Descriptor outcomes: pass|failed|inconclusive|unavailable. check-workload verifies exact staged inputs,\n"
           "compiler and evidence identities, but never executes the oracle or admits a workload.\n"

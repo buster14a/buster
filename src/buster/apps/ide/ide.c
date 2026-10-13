@@ -1,5 +1,6 @@
 // The `ide` executable: a headless compiler driver (`ide cc` ->
-// run_c_compiler -> the compiler_driver_* API in driver.h), test runner
+// run_c_compiler, `ide run` -> run_c_program -> compiler_driver_* and jit_*),
+// test runner
 // (`ide test` -> compiler_run_tests -> library_tests), benchmark driver
 // (`ide bench`, the BENCH_C_FRONTEND line; `ide bench-select`, BENCH_SELECT),
 // fuzz entrypoint, and x86-64
@@ -33,6 +34,7 @@
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 #endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.h>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
@@ -58,6 +60,7 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/ebpf/ebpf.h>
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/embed/embed.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 #include <buster/lib/target.h>
@@ -65,6 +68,13 @@
 #include <buster/tests/test.h>
 #include <buster/tests/sanitizer_test_internal.h>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
+#endif
+#if BUSTER_LINK_LIBC && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
 #endif
 
 #if BUSTER_UNITY_BUILD
@@ -120,6 +130,7 @@
 #include <buster/lib/compiler/assembly/aarch64_syntax.c>
 #endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.c>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.c>
@@ -148,6 +159,7 @@
 #include <buster/lib/compiler/ebpf/ebpf.c>
 #include <buster/lib/compiler/spirv/spirv.c>
 #include <buster/lib/compiler/driver/driver.c>
+#include <buster/lib/compiler/embed/embed.c>
 #include <buster/lib/hash.c>
 #endif
 
@@ -159,6 +171,7 @@ typedef enum CompilerCommand
     COMPILER_COMMAND_BENCH,
     COMPILER_COMMAND_BENCH_SELECT,
     COMPILER_COMMAND_CC,
+    COMPILER_COMMAND_RUN,
     COMPILER_COMMAND_INVESTIGATE,
     COMPILER_COMMAND_FUZZ,
     COMPILER_COMMAND_X86_64_COMPLETION_CENSUS,
@@ -169,6 +182,7 @@ struct CompilerProgram
 {
     ProgramState state;
     SliceString8 cc_arguments;
+    SliceString8 run_program_arguments;
     SliceString8 fuzz_arguments;
     String8 completion_census_output_path;
     bool completion_census_require_source_complete;
@@ -187,6 +201,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
+                    "  ide run <C compiler options and inputs> [-- <program arguments>]\n"
                     "  ide investigate <capture> <object> [--offset=<file-byte-offset>] [--expect-revision=<sha>]\n"
                     "  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
@@ -220,15 +235,41 @@ ProcessResult process_arguments(void)
         }
         return PROCESS_RESULT_SUCCESS;
     }
-    if (string_equal(command, S8("cc")) || string_equal(command, S8("investigate")))
+    if (string_equal(command, S8("cc")) || string_equal(command, S8("investigate")) || string_equal(command, S8("run")))
     {
-        compiler_state.command = string_equal(command, S8("cc")) ? COMPILER_COMMAND_CC : COMPILER_COMMAND_INVESTIGATE;
-        compiler_state.cc_arguments = (SliceString8){.pointer = arguments.pointer + 2, .length = arguments.length - 2};
+        if (string_equal(command, S8("run")))
+        {
+            u64 separator = arguments.length;
+            for (u64 index = 2; index < arguments.length; index += 1)
+            {
+                if (string_equal(arguments.pointer[index], S8("--")))
+                {
+                    separator = index;
+                    break;
+                }
+            }
+            compiler_state.command = COMPILER_COMMAND_RUN;
+            compiler_state.cc_arguments = (SliceString8){.pointer = arguments.pointer + 2, .length = separator - 2};
+            if (separator < arguments.length)
+            {
+                compiler_state.run_program_arguments =
+                    (SliceString8){.pointer = arguments.pointer + separator + 1, .length = arguments.length - separator - 1};
+            }
+        }
+        else
+        {
+            compiler_state.command = string_equal(command, S8("cc")) ? COMPILER_COMMAND_CC : COMPILER_COMMAND_INVESTIGATE;
+            compiler_state.cc_arguments = (SliceString8){.pointer = arguments.pointer + 2, .length = arguments.length - 2};
+        }
         return PROCESS_RESULT_SUCCESS;
     }
     if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
+#if BUSTER_INCLUDE_TESTS
+        // Tests exercise native code unless they select a target (#1557).
+        compiler_driver_host_cpu_default = true;
+#endif
         ProcessResult result = PROCESS_RESULT_SUCCESS;
         for (u64 index = 2; result == PROCESS_RESULT_SUCCESS && index < arguments.length; index += 1)
         {
@@ -1979,13 +2020,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
-    // --version, -dumpversion and -dumpmachine answer without compiling.
+    // Compiler and native-linker identity queries answer without reading inputs.
     bool query = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.query != COMPILER_DRIVER_QUERY_NONE;
     if (query)
     {
         string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
     }
-    for (u32 input_index = 0; invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
+    for (u32 input_index = 0; !query && invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
     {
         if (string_equal(invocation.input_paths[input_index], S8("-")))
         {
@@ -1996,6 +2037,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                 invocation.diagnostic = S8("could not read standard input");
             }
         }
+    }
+    // -fearly-exit forks here, before the first lane_run starts the gang;
+    // from now on this is the child, and the parent reports its status at
+    // os_early_exit_release below (#3686).
+    if (!query && invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.early_exit)
+    {
+        (void)os_early_exit_arm();
     }
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.
@@ -2010,6 +2058,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.linker_report.length)
+    {
+        string_print(S8("{S8}"), compile.linker_report);
+    }
     if (compile.warning.length)
     {
         compiler_print_diagnostic(S8("{S8}"), compile.warning);
@@ -2096,6 +2148,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        if (invocation.intern_block_constants)
+        {
+            CIRConstantInternStatistics interned = compile.constant_interning;
+            string_print(S8("C_CONSTANT_INTERN lookups={u64} hits={u64} stale={u64}\n"), interned.lookups, interned.hits, interned.stale);
+        }
         CTypeLayoutStatistics layout = compile.type_layout;
         string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
@@ -2112,9 +2169,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
             // Counts, not times: what the tree expression typer did for the unit's function bodies and file-scope initializers.
             string_print(S8("C_AST_TYPES bodies={u64} initializers={u64} nodes_typed={u64} nodes_accepted={u64} answers={u64} declines={u64} misses={u64} "
-                            "gated={u64}\n"),
+                            "gated={u64} lookups_settled={u64} lookups_walked={u64}\n"),
                          tree.types.bodies, tree.types.initializers, tree.types.nodes_typed, tree.types.nodes_accepted, tree.types.answers,
-                         tree.types.declines, tree.types.misses, tree.types.gated);
+                         tree.types.declines, tree.types.misses, tree.types.gated, tree.types.lookups_settled, tree.types.lookups_walked);
             // Counts: the declaration split read from the tree, and the units handed to the token walker.
             string_print(S8("C_AST_SPLIT units={u64} records={u64} assertions={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.split.units, tree.split.records, tree.split.assertions, tree.split.fallbacks,
@@ -2122,13 +2179,51 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.split.fallbacks ? tree.split.fallback_token : UINT32_MAX);
             // Counts: the statement plans the body binder followed, and the bodies left to its token walk.
             string_print(S8("C_AST_STATEMENTS bodies={u64} segments={u64} segment_tokens={u64} uses={u64} bails={u64} declaration_hints={u64} "
-                            "loop_hints={u64} declines={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
+                            "loop_hints={u64} declines={u64} declarator_hints={u64} initializer_hints={u64} auto_skips={u64} "
+                            "declarator_declines={u64} braced={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.statements.bodies, tree.statements.segments, tree.statements.segment_tokens, tree.statements.uses, tree.statements.bails,
-                         tree.statements.declaration_hints, tree.statements.loop_hints, tree.statements.declines, tree.statements.fallbacks,
+                         tree.statements.declaration_hints, tree.statements.loop_hints, tree.statements.declines, tree.statements.declarator_hints,
+                         tree.statements.initializer_hints, tree.statements.auto_skips, tree.statements.declarator_declines, tree.statements.braced,
+                         tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
+            // Counts: the declaration specifier runs read from the tree, and the runs left to the type machine, by reason.
+            CAstSpecifierStatistics specifiers = tree.specifiers;
+            string_print(S8("C_AST_SPECIFIERS lists={u64} indexed={u64} index_reads={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+                            "storage={u64} primitive={u64} typedef={u64} reason={S8} fallback_token={u32}\n"),
+                         specifiers.lists, specifiers.indexed, specifiers.index_reads, specifiers.primitive_answers, specifiers.typedef_answers, specifiers.fallbacks,
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF],
+                         c_ast_specifier_fallback_name(specifiers.fallbacks ? specifiers.reason : C_AST_SPECIFIER_FALLBACK_NONE),
+                         specifiers.fallbacks ? specifiers.fallback_token : UINT32_MAX);
+            // Counts: the extent table lowering read controlled body ranges from, and the queries its token walker answered.
+            string_print(S8("C_AST_EXTENTS bodies={u64} entries={u64} entry_declines={u64} answers={u64} walked_input={u64} walked_anchor={u64} "
+                            "walked_shape={u64} refused_input={u64} refused_anchor={u64} reason={S8} fallback_token={u32}\n"),
+                         tree.extents.bodies, tree.extents.entries, tree.extents.entry_declines, tree.extents.answers,
+                         tree.extents.walked[C_AST_EXTENT_FALLBACK_INPUT], tree.extents.walked[C_AST_EXTENT_FALLBACK_ANCHOR],
+                         tree.extents.walked[C_AST_EXTENT_FALLBACK_SHAPE], tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_INPUT],
+                         tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_ANCHOR], c_ast_extent_fallback_name(tree.extents.reason),
+                         tree.extents.reason ? tree.extents.fallback_token : UINT32_MAX);
+            // Counts: the type-name runs skipped as no type name or read from the tree, and the runs left to the type machine, by reason.
+            string_print(S8("C_AST_TYPE_NAMES skips={u64} retries={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+                            "storage={u64} primitive={u64} typedef={u64}\n"),
+                         specifiers.type_name_skips, specifiers.type_name_retries, specifiers.type_name_primitive_answers, specifiers.type_name_typedef_answers,
+                         specifiers.type_name_fallbacks, specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT],
+                         specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE],
+                         specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
+            // Counts: the member specifier runs read from the tree inside tag definitions, and the runs left to the type machine, by reason.
+            string_print(S8("C_AST_MEMBERS primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} storage={u64} "
+                            "primitive={u64} typedef={u64}\n"),
+                         specifiers.member_primitive_answers, specifiers.member_typedef_answers, specifiers.member_fallbacks,
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
+            // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
+            string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
+                         tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
         }
-        if (invocation.fast_passes)
+        // Also report disabled passes: -O0 must expose its selected policy.
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
@@ -2138,11 +2233,38 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                              (u32)invocation.measure_fast_passes, measurement.nanoseconds, measurement.visits, measurement.changes);
             }
             IrFastStatistics measurement = compile.fast;
+            for (u64 index = 0; index < measurement.decline_count; index += 1)
+            {
+                IrFastDecline decline = measurement.declines[index];
+                IrValidationResult validation = decline.validation;
+                string_print(S8("IR_FAST_DECLINE source={S8} function={S8} scope={S8} error={u32} block={u32} instruction={u32}\n"),
+                             decline.source, decline.function_name,
+                             validation.function.value == IR_ID_UNDERLYING_INVALID ? S8("module") : S8("function"),
+                             (u32)validation.error, validation.block.value, validation.instruction.value);
+            }
             string_print(S8("IR_FAST functions={u64} validation_skips={u64} budget_skips={u64} provenance_skips={u64} parameter_budget_hits={u64} "
                             "scratch_peak_bound={u64} retained_bound={u64} compact_ns={u64} instructions_before={u64} instructions_after={u64}\n"),
                          measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
                          measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
                          measurement.instructions_before, measurement.instructions_after);
+            if (invocation.fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE))
+            {
+                IrFastCseStatistics cse = measurement.cse;
+                string_print(S8("IR_FAST_CSE blocks={u64} candidates={u64} hits={u64} window_hits={u64} commuted_hits={u64} constant_hits={u64} "
+                                "probes={u64} collisions={u64} metadata_declines={u64} saturation_declines={u64} table_bytes={u64} max_block_candidates={u64}\n"),
+                             cse.blocks, cse.candidates, cse.hits, cse.window_hits, cse.commuted_hits, cse.constant_hits, cse.probes, cse.collisions,
+                             cse.metadata_declines, cse.saturation_declines, cse.table_bytes, cse.max_block_candidates);
+            }
+        }
+        IrInlineStatistics inlining = compile.inlining;
+        if (invocation.inline_options.tiny || inlining.candidates || inlining.always_inlined)
+        {
+            string_print(S8("IR_INLINE tiny={u32} candidates={u64} inlined={u64} always_inlined={u64} copied_instructions={u64} growth={u64} "
+                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64} "
+                            "released_bytes={u64}\n"),
+                         (u32)invocation.inline_options.tiny, inlining.candidates, inlining.inlined, inlining.always_inlined,
+                         inlining.copied_instructions, inlining.growth, inlining.budget_skips, inlining.shape_skips,
+                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits, inlining.released_bytes);
         }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "
@@ -2254,10 +2376,333 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             result = PROCESS_RESULT_FAILED;
         }
     }
+    // Every artifact and report is out: an armed parent exits now, and the
+    // translation-unit arena's teardown below (and exit_mmap after it) runs
+    // in the background.
+    os_early_exit_release((u8)result);
     arena_destroy(arena, 1);
     return result;
 }
 
+
+#if BUSTER_LINK_LIBC && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID
+#define IDE_RUN_ADD_BINDING(function)                                                                                                    \
+    do                                                                                                                                   \
+    {                                                                                                                                    \
+        __typeof__(&function) function_pointer = &function;                                                                              \
+        void* function_address = 0;                                                                                                      \
+        BUSTER_CT_CHECK(sizeof(function_pointer) == sizeof(function_address));                                                          \
+        memcpy(&function_address, &function_pointer, sizeof(function_address));                                                          \
+        BUSTER_CHECK(binding_count < BUSTER_ARRAY_LENGTH(bindings));                                                                     \
+        bindings[binding_count++] = (JitHostBinding){.name = S8(#function), .address = function_address, .kind = OBJECT_SYMBOL_FUNCTION}; \
+    } while (0)
+#endif
+
+BUSTER_GLOBAL_LOCAL ProcessResult run_c_program(void)
+{
+    ProcessResult result = PROCESS_RESULT_FAILED;
+#if !BUSTER_LINUX || !BUSTER_CPU_ARCH_X86_64 || BUSTER_ANDROID
+    compiler_print_diagnostic(S8("run: error: ide run supports only x86-64 Linux hosts\n"));
+#else
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+    });
+    if (arena)
+    {
+        SliceString8 compiler_arguments = compiler_state.cc_arguments;
+        bool has_standard_input = false;
+        bool has_language_option = false;
+        for (u64 index = 0; index < compiler_arguments.length; index += 1)
+        {
+            String8 argument = compiler_arguments.pointer[index];
+            has_standard_input = has_standard_input || string_equal(argument, S8("-"));
+            has_language_option =
+                has_language_option ||
+                (argument.length >= 2 && string_equal(string_slice(argument, 0, 2), S8("-x")));
+        }
+        if (has_standard_input && !has_language_option)
+        {
+            String8* input_arguments = arena_allocate(arena, String8, compiler_arguments.length + 4);
+            u64 input_argument_count = 0;
+            bool language_set = false;
+            for (u64 index = 0; index < compiler_arguments.length; index += 1)
+            {
+                String8 argument = compiler_arguments.pointer[index];
+                if (!language_set && string_equal(argument, S8("-")))
+                {
+                    input_arguments[input_argument_count++] = S8("-x");
+                    input_arguments[input_argument_count++] = S8("c");
+                    input_arguments[input_argument_count++] = argument;
+                    input_arguments[input_argument_count++] = S8("-x");
+                    input_arguments[input_argument_count++] = S8("none");
+                    language_set = true;
+                }
+                else
+                {
+                    input_arguments[input_argument_count++] = argument;
+                }
+            }
+            compiler_arguments = (SliceString8){.pointer = input_arguments, .length = input_argument_count};
+        }
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_arguments);
+        String8 refusal = {0};
+        bool refused = false;
+        if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            refusal = invocation.diagnostic;
+            refused = true;
+        }
+        else if (invocation.target.cpu_arch != CPU_ARCH_X86_64 || invocation.target.os != OPERATING_SYSTEM_LINUX)
+        {
+            String8 target = string_format(arena, S8("{S8}-{S8}"), cpu_arch_to_string_os(invocation.target.cpu_arch),
+                                           operating_system_to_string_os(invocation.target.os));
+            String8 target_prefixes[] = {S8("--target="), S8("-target=")};
+            for (u64 index = 0; index < compiler_state.cc_arguments.length; index += 1)
+            {
+                String8 argument = compiler_state.cc_arguments.pointer[index];
+                if ((string_equal(argument, S8("-target")) || string_equal(argument, S8("--target"))) &&
+                    index + 1 < compiler_state.cc_arguments.length)
+                {
+                    target = compiler_state.cc_arguments.pointer[index + 1];
+                    break;
+                }
+                bool found = false;
+                for (u64 prefix_index = 0; prefix_index < BUSTER_ARRAY_LENGTH(target_prefixes) && !found; prefix_index += 1)
+                {
+                    String8 prefix = target_prefixes[prefix_index];
+                    if (argument.length >= prefix.length && string_equal(string_slice(argument, 0, prefix.length), prefix))
+                    {
+                        target = string_slice(argument, prefix.length, argument.length);
+                        found = true;
+                    }
+                }
+                if (found)
+                {
+                    break;
+                }
+            }
+            refusal = string_format(arena, S8("target {S8} is not supported by ide run"), target);
+            refused = true;
+        }
+        else if (invocation.query != COMPILER_DRIVER_QUERY_NONE)
+        {
+            refusal = S8("queries are not supported by ide run");
+            refused = true;
+        }
+        else if (invocation.action != COMPILER_DRIVER_ACTION_LINK)
+        {
+            refusal = S8("ide run requires a link action");
+            refused = true;
+        }
+        else if (invocation.output_path.length)
+        {
+            refusal = S8("ide run does not accept -o");
+            refused = true;
+        }
+        else if (invocation.library_count || invocation.library_path_count || invocation.framework_count ||
+                 invocation.framework_path_count || invocation.linker_argument_count)
+        {
+            refusal = S8("ide run binds only its documented host imports and loads no libraries");
+            refused = true;
+        }
+        else if (invocation.image_kind != NATIVE_IMAGE_EXECUTABLE)
+        {
+            refusal = S8("ide run only supports executable image kind");
+            refused = true;
+        }
+        else if (invocation.emit_llvm_bitcode)
+        {
+            refusal = S8("ide run does not support LLVM bitcode");
+            refused = true;
+        }
+        else if (invocation.has_gpu_target)
+        {
+            refusal = S8("ide run does not support GPU targets");
+            refused = true;
+        }
+        else if (!invocation.input_count)
+        {
+            refusal = S8("ide run requires at least one input");
+            refused = true;
+        }
+        else if (compiler_state.run_program_arguments.length > (u64)INT32_MAX - 1)
+        {
+            refusal = S8("ide run received too many program arguments");
+            refused = true;
+        }
+        if (refused)
+        {
+            compiler_print_diagnostic(S8("run: error: {S8}\n"), refusal);
+        }
+        else
+        {
+            for (u32 input_index = 0; input_index < invocation.input_count && !refused; input_index += 1)
+            {
+                if (string_equal(invocation.input_paths[input_index], S8("-")))
+                {
+                    invocation.standard_input = c_compiler_read_standard_input(arena);
+                    if (!invocation.standard_input.pointer)
+                    {
+                        refusal = S8("could not read standard input");
+                        refused = true;
+                    }
+                }
+            }
+            if (refused)
+            {
+                compiler_print_diagnostic(S8("run: error: {S8}\n"), refusal);
+            }
+            else
+            {
+                invocation.retain_linked_object = true;
+                invocation.omit_spelled_bytes = true;
+                CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
+                if (compile.warning.length)
+                {
+                    compiler_print_diagnostic(S8("{S8}"), compile.warning);
+                }
+                if (compile.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    u32 reported = 0;
+                    for (u32 index = 0; index < compile.input_result_count && invocation.keep_going; index += 1)
+                    {
+                        CompilerDriverInputResult const* input = &compile.inputs[index];
+                        if (input->status == COMPILER_DRIVER_INPUT_STATUS_REJECTED || input->status == COMPILER_DRIVER_INPUT_STATUS_FAILED)
+                        {
+                            compiler_print_diagnostic(S8("run: error: {S8}\n"),
+                                                      input->message.length ? input->message : input->diagnostic_code);
+                            reported += 1;
+                        }
+                    }
+                    if (!reported)
+                    {
+                        compiler_print_diagnostic(S8("run: error: {S8}\n"), compile.diagnostic);
+                    }
+                }
+                else
+                {
+                    bool main_is_defined = false;
+                    for (u32 index = 0; index < compile.object.symbol_count; index += 1)
+                    {
+                        ObjectSymbol const* symbol = &compile.object.symbols[index];
+                        if (string_equal(symbol->name, S8("main")) && symbol->global && symbol->kind == OBJECT_SYMBOL_FUNCTION &&
+                            symbol->section < compile.object.section_count &&
+                            compile.object.sections[symbol->section].kind == OBJECT_SECTION_TEXT)
+                        {
+                            main_is_defined = true;
+                        }
+                    }
+                    if (!main_is_defined)
+                    {
+                        compiler_print_diagnostic(S8("run: error: no definition of main\n"));
+                    }
+                    else
+                    {
+                        JitHostBinding bindings[40] = {0};
+                        u32 binding_count = 0;
+#if BUSTER_LINK_LIBC
+                        IDE_RUN_ADD_BINDING(puts);
+                        IDE_RUN_ADD_BINDING(putchar);
+                        IDE_RUN_ADD_BINDING(printf);
+                        IDE_RUN_ADD_BINDING(sprintf);
+                        IDE_RUN_ADD_BINDING(snprintf);
+                        IDE_RUN_ADD_BINDING(vprintf);
+                        IDE_RUN_ADD_BINDING(vsnprintf);
+                        IDE_RUN_ADD_BINDING(getchar);
+                        IDE_RUN_ADD_BINDING(strlen);
+                        IDE_RUN_ADD_BINDING(strcmp);
+                        IDE_RUN_ADD_BINDING(strncmp);
+                        IDE_RUN_ADD_BINDING(strcpy);
+                        IDE_RUN_ADD_BINDING(strncpy);
+                        IDE_RUN_ADD_BINDING(strcat);
+                        IDE_RUN_ADD_BINDING(strchr);
+                        IDE_RUN_ADD_BINDING(strrchr);
+                        IDE_RUN_ADD_BINDING(strstr);
+                        IDE_RUN_ADD_BINDING(memcpy);
+                        IDE_RUN_ADD_BINDING(memmove);
+                        IDE_RUN_ADD_BINDING(memset);
+                        IDE_RUN_ADD_BINDING(memcmp);
+                        IDE_RUN_ADD_BINDING(malloc);
+                        IDE_RUN_ADD_BINDING(calloc);
+                        IDE_RUN_ADD_BINDING(realloc);
+                        IDE_RUN_ADD_BINDING(free);
+                        IDE_RUN_ADD_BINDING(atoi);
+                        IDE_RUN_ADD_BINDING(atol);
+                        IDE_RUN_ADD_BINDING(strtol);
+                        IDE_RUN_ADD_BINDING(strtoul);
+                        IDE_RUN_ADD_BINDING(strtod);
+                        IDE_RUN_ADD_BINDING(abs);
+                        IDE_RUN_ADD_BINDING(labs);
+                        IDE_RUN_ADD_BINDING(qsort);
+                        IDE_RUN_ADD_BINDING(rand);
+                        IDE_RUN_ADD_BINDING(srand);
+                        IDE_RUN_ADD_BINDING(exit);
+                        IDE_RUN_ADD_BINDING(abort);
+                        IDE_RUN_ADD_BINDING(write);
+                        IDE_RUN_ADD_BINDING(read);
+                        IDE_RUN_ADD_BINDING(__errno_location);
+#endif
+                        JitProgram program = jit_link_object(&compile.object, (JitOptions){
+                            .bindings = bindings,
+                            .binding_count = binding_count,
+                        });
+                        void* main_address = 0;
+                        if (program.error == JIT_ERROR_NONE)
+                        {
+                            main_address = jit_program_symbol(&program, S8("main"));
+                            if (!main_address && program.error == JIT_ERROR_NONE)
+                            {
+                                program.error = JIT_ERROR_SYMBOL_NOT_FOUND;
+                            }
+                        }
+                        if (program.error != JIT_ERROR_NONE)
+                        {
+                            String8 error = jit_error_string(program.error);
+                            compiler_print_diagnostic(S8("run: error: JIT link failed: {S8}"), error);
+                            if (program.failing_symbol.length)
+                            {
+                                compiler_print_diagnostic(S8(" (symbol '{S8}')"), program.failing_symbol);
+                            }
+                            compiler_print_diagnostic(S8("\n"));
+                            jit_program_release(&program);
+                        }
+                        else
+                        {
+                            u64 argument_count = 1 + compiler_state.run_program_arguments.length;
+                            char** argv = arena_allocate(arena, char*, argument_count + 1);
+                            argv[0] = (char*)string_duplicate_arena(arena, invocation.input_paths[0], true).pointer;
+                            for (u64 index = 0; index < compiler_state.run_program_arguments.length; index += 1)
+                            {
+                                argv[index + 1] =
+                                    (char*)string_duplicate_arena(arena, compiler_state.run_program_arguments.pointer[index], true).pointer;
+                            }
+                            argv[argument_count] = 0;
+                            typedef int IdeRunMain(int, char**, char**);
+                            IdeRunMain* main_function = 0;
+                            BUSTER_CT_CHECK(sizeof(main_function) == sizeof(main_address));
+                            memcpy(&main_function, &main_address, sizeof(main_function));
+                            int status = main_function((int)argument_count, argv, program_state->input.raw_environment);
+#if BUSTER_LINK_LIBC
+                            entry_point_exit_code_set(status);
+                            result = PROCESS_RESULT_SUCCESS;
+#else
+                            result = status == 0 ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+#endif
+                            jit_program_release(&program);
+                        }
+                    }
+                }
+            }
+        }
+        arena_destroy(arena, 1);
+    }
+#endif
+    return result;
+}
+
+#if BUSTER_LINK_LIBC && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID
+#undef IDE_RUN_ADD_BINDING
+#endif
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_process_spawn_probe(String8 mode)
@@ -2440,6 +2885,8 @@ ProcessResult entry_point(void)
         case COMPILER_COMMAND_CC:
         case COMPILER_COMMAND_INVESTIGATE:
             return compiler_state.command == COMPILER_COMMAND_CC ? run_c_compiler() : investigation_command(program_state->arena, compiler_state.cc_arguments);
+        case COMPILER_COMMAND_RUN:
+            return run_c_program();
         case COMPILER_COMMAND_FUZZ:
 #if BUSTER_FUZZ_AVAILABLE
             return buster_fuzz_run(compiler_state.fuzz_arguments);

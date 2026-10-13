@@ -36,13 +36,30 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          # #3768: fetch blobs only for the regression dependency closure.
+          # Non-cone mode avoids materializing large root/docs siblings.
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/
+            /tools/
+            /src/buster/lib/base.h
+            /docs/agents/workflow.md
+            /docs/merge-queue-admission.md
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Build and exercise native maintenance discovery
+        timeout-minutes: 1
+        run: |
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
+          tools/main_push_inventory --self-test
+          gcc -std=c11 -Isrc -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined tools/main_push_inventory.c -o "$RUNNER_TEMP/main-push-inventory-sanitized"
+          "$RUNNER_TEMP/main-push-inventory-sanitized" --self-test
       - name: Exercise merge-tree fixtures and workflow policy
+        timeout-minutes: 1
         run: |
           python3 -B tools/merge_conflict_preflight_test.py -v
           python3 -B tools/merge_conflict_preflight_refresh_test.py -v

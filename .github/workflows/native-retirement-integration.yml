@@ -500,6 +500,8 @@ jobs:
       - name: Run all affected tool and workflow self-tests on the exact final tree
         working-directory: integration
         run: |
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
+          tools/main_push_inventory --self-test
           python3 tools/native_retirement_dependency_binding_test.py -v
           python3 tools/native_retirement_integration_test.py -v
           python3 tools/native_retirement_automation_test.py -v
@@ -833,9 +835,16 @@ jobs:
               echo "superseded=true" >> "$GITHUB_OUTPUT"
               exit 76
             fi
+            # Main movement is supersession only when main_admissible rejects
+            # it: an automatic catch-up whose movement catch-up-main admits
+            # did not fail because of main, so its lease failure stays exit 1.
             if [[ "$current_head" == "$head" && "$current_base" != "$base" ]]; then
-              echo "superseded=true" >> "$GITHUB_OUTPUT"
-              exit 75
+              lease_status=0
+              main_admissible "$current_base" || lease_status=$?
+              if [[ "$lease_status" == 75 ]]; then
+                echo "superseded=true" >> "$GITHUB_OUTPUT"
+                exit 75
+              fi
             fi
             exit 1
           fi

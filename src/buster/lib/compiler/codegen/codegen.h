@@ -108,29 +108,8 @@ struct CodegenAbiSignature
 };
 
 typedef struct CodegenFunction CodegenFunction;
-typedef enum CodegenUnwindActionKind
-{
-    CODEGEN_UNWIND_ACTION_PUSH_REGISTER,
-    CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
-    CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER,
-    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK,
-    CODEGEN_UNWIND_ACTION_NOP,
-    CODEGEN_UNWIND_ACTION_COUNT,
-} CodegenUnwindActionKind;
-
-typedef struct CodegenUnwindAction CodegenUnwindAction;
-struct CodegenUnwindAction
-{
-    // Offset of the first instruction after this prolog operation.
-    u32 code_offset;
-    // Stack bytes for ALLOCATE_STACK, or the post-operation SP-relative
-    // offset for SAVE_REGISTER and SET_FRAME_POINTER.
-    u32 value;
-    CodegenUnwindActionKind kind;
-    u8 register_index;
-    u8 reserved[3];
-};
-
+// CodegenUnwindAction lives in machine.h: the machine encoders publish it
+// as each frame instruction is emitted.
 typedef struct CodegenFunctionDescriptor CodegenFunctionDescriptor;
 struct CodegenFunctionDescriptor
 {
@@ -279,6 +258,16 @@ typedef enum CodegenModuleRelocationKind
     CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12,
     CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21,
     CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12,
+    // Darwin AArch64's ADRP and 64-bit LDR of the GOT slot holding the address
+    // of a symbol this module does not define (ARM64_RELOC_GOT_LOAD_PAGE21 and
+    // GOT_LOAD_PAGEOFF12).
+    CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21,
+    CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12,
+    // AArch64 ELF general-dynamic descriptor instruction sites (562/563/564/569).
+    CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21,
+    CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+    CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
+    CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
     CODEGEN_MODULE_RELOCATION_COUNT,
 } CodegenModuleRelocationKind;
 
@@ -355,6 +344,7 @@ typedef enum CodegenFallbackReason
     CODEGEN_FALLBACK_ENCODING,
     CODEGEN_FALLBACK_OUTPUT_CAPACITY,
     CODEGEN_FALLBACK_UNWIND,
+    CODEGEN_FALLBACK_MACHINE_SCRATCH,
     CODEGEN_FALLBACK_REASON_COUNT,
 } CodegenFallbackReason;
 

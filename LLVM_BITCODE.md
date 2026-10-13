@@ -64,6 +64,12 @@ binary size. Call `llvm_bitcode_artifact_is_valid` before consuming the bytes.
 Deterministic emission is the default. Types, constants, globals, functions,
 basic blocks, and instruction results receive stable IDs before records are
 written, so identical canonical IR and options produce identical bitcode.
+Requested global and function sections receive one-based IDs in first-seen
+order (globals, then functions). A content-keyed hash index locates those IDs
+without rescanning prior names; declarations and absent names keep ID zero.
+Equal names share an ID even when their storage differs. The index never
+determines record order.
+
 The unit test emits the same module twice, compares every byte, verifies the
 bitcode magic, and checks the reported counts.
 
@@ -93,6 +99,25 @@ add no types, globals or constants, preserving zero-registration output.
 The existing canonical validator rejects malformed registration targets and
 priorities; duplicate reserved linkage names or record/value count overflow
 fail without publishing artifact bytes.
+
+Canonical `IrModule.aliases` pairs (`__attribute__((alias("target")))`) emit
+version-1 `MODULE_CODE_ALIAS` records after every global and function record,
+with their names in the module value symbol table (#1338). Each record carries
+the target record's value type, address space 0, the target's value id, the
+alias symbol's own linkage (external, weak or internal) and visibility, and the
+target global's thread-local mode, so `@other = alias i32 (), ptr @target`
+replaces the unresolved `declare i32 @other()` older output contained. The
+alias symbol's own declaration rows are not emitted. An alias whose target is
+not a function or global definition in the emitted module fails with
+`LLVM bitcode alias target is not a function or global definition`; an
+indirect alias (`__attribute__((ifunc))`) still fails with `LLVM bitcode does
+not represent ifunc symbols`. `llvm_bitcode_test_alias` writes its embedded
+C unit to test scratch, so the record checks also run in the Android and iOS
+bundles, and reads the alias records independently in both frontend forms,
+checks deterministic repeated emission, and on Linux links and runs the unit
+through Clang at `-O0` and `-O2`: function and data aliases, an alias used
+before its declaration with a static target, weak, hidden and internal
+aliases, and address equality with the target.
 
 Canonical scalar integer leading-zero count, trailing-zero count, and
 population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
