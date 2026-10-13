@@ -1,0 +1,62 @@
+Recorded working directory:
+/home/david/Documents/Codex/2026-10-13/ana/work/buster
+
+The baseline and candidate were built serially in this same configured tree,
+then copied into ../frozen. Do not regenerate a build directory while another
+build, test, or measurement uses it. Keep the recorded source and binary hashes
+in experiment-manifest.json; a rebuild on another machine is a new identity.
+
+Release configuration and target:
+./build.sh generate --cc clang
+./build.sh build --config Release -t ide
+
+Native evidence helper (unmodified repository source):
+clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/performance_evidence.c -lm -o ../performance-evidence
+
+Final instruction comparison:
+env -u BUSTER_TEST_JOBS -u BUSTER_TEST_RETAIN_IMAGES ../performance-evidence compare --claim work-reduction --tool perf-stat --events instructions --baseline ../frozen/ide-baseline --candidate ../frozen/ide-candidate-v3 --baseline-revision 56221853cc5b11acb33e10ceca29484f7560bcf6 --candidate-revision e1fb941cbe4463050a8e94231ac73717984f8ff7 --out ../ab-os-instructions-v3 --runs 6 --warmup 1 -- test --verbose=0 --module=os_tests
+
+Final native full-suite comparison:
+Run ../run_native_pair.py with each index 0 through 5, sequentially. Each call
+runs one alternating pair, refuses to overwrite a completed run, and records
+exact-child wait4 usage, monotonic elapsed time, exit status, revision and hash.
+Then run ../summarize_native_pairs.py. Scripts expect buster/ and frozen/ beside
+them. The original driver sessions were launched from the task directory:
+python3 -u work/run_native_pair.py 0
+python3 -u work/run_native_pair.py 1
+python3 -u work/run_native_pair.py 2
+python3 -u work/run_native_pair.py 3
+python3 -u work/run_native_pair.py 4
+python3 -u work/run_native_pair.py 5
+python3 work/summarize_native_pairs.py
+
+Final correctness and analysis:
+./build.sh build --config Release -t clang_analyze
+./build/Release/ide test --verbose=0 --module=os_tests
+BUSTER_TEST_JOBS=1 ./build.sh test_self_host --config Release
+./build.sh source_size --base 56221853cc5b11acb33e10ceca29484f7560bcf6
+
+Sanitizer configuration was generated once in a separate tree, then rebuilt:
+./build.sh generate --sanitize --cc clang --build-directory build/sanitize
+./build.sh build --build-directory build/sanitize --config Release -t ide
+./build/sanitize/Release/ide test --verbose=0 --module=os_tests
+
+Inherited-procfs diagnostic (known pre-existing churn-test failure, #2380):
+unshare --user --map-root-user --pid --fork ../frozen/ide-baseline test --verbose=0 --module=os_tests
+unshare --user --map-root-user --pid --fork ../frozen/ide-candidate-v3 test --verbose=0 --module=os_tests
+
+Follow-up CPU sampling (known retained-image assertion failures, #3674):
+env -u BUSTER_TEST_JOBS BUSTER_TEST_RETAIN_IMAGES=1 perf record --no-buildid-cache -e cycles:u -F 199 --call-graph fp -o ../perf-final/candidate.data -- ../frozen/ide-candidate-v3 test --verbose=0
+env DEBUGINFOD_URLS= perf script -i ../perf-final/candidate.data -F comm,pid,tid,period,event
+env DEBUGINFOD_URLS= perf report -i ../perf-final/candidate.data --stdio --no-children --no-demangle -g none --sort comm,dso --percent-limit 1
+
+Audit checks:
+python3 tools/new_audit.py --check
+python3 tools/check_markdown_links.py
+git diff --check
+
+Superluminal exports were made serially with the installed SuperluminalCmd
+LLM interface and the analysis session was closed. Complete functions and
+threads plus selected callgraph rows are in capture/; export-inventory.json
+pins the full local callgraphs. The original capture and binary recordings
+are not duplicated in Git.

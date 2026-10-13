@@ -1,0 +1,245 @@
+{
+  "schema": "buster-native-pair-summary-v1",
+  "complete": true,
+  "claim": "native-runtime",
+  "evidence_class": "native-host",
+  "method": "exact-child wait4 and monotonic clock; 50 ms poll; two-sided paired sign test excluding ties; ratio of medians; 1 percent minimum effect",
+  "collector": "run_native_pair.py",
+  "collector_sha256": "d7bde57516e3b8b9f0cf17f4a39ecb471c6a8de039aaf8c19bbfc40cdd28be84",
+  "summary_script_sha256": "4496785ab414236f8e1d7d141cf82bae984894b9e46e0b22023d021e4e9318b3",
+  "host": {
+    "cpu": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics",
+    "uname": [
+      "Linux",
+      "minipc",
+      "7.2.9-2-cachyos",
+      "#1 SMP PREEMPT_DYNAMIC Thu, 08 Oct 2026 15:06:16 +0000",
+      "x86_64",
+      ""
+    ]
+  },
+  "baseline_revision": "56221853cc5b11acb33e10ceca29484f7560bcf6",
+  "candidate_revision": "e1fb941cbe4463050a8e94231ac73717984f8ff7",
+  "baseline_binary_sha256": "3bbbad302908dba2fffe5c43967654f4df1f19d4b4aded7379d1a1cc5df62b60",
+  "candidate_binary_sha256": "513dd3b6183c14a4a6e191bddaadf6bbf0b7b7530b1658b308fd30949dfd431b",
+  "arguments": [
+    "test",
+    "--verbose=0"
+  ],
+  "pairs": 6,
+  "additional_warmups": 0,
+  "order": "A0 B0 B1 A1 A2 B2 B3 A3 A4 B4 B5 A5",
+  "metrics": [
+    {
+      "name": "wall_seconds",
+      "baseline": [
+        134.08174328799942,
+        125.97507205599686,
+        124.4502931149982,
+        124.60513458400237,
+        125.00757034699927,
+        124.70796012899518
+      ],
+      "candidate": [
+        122.5070356590004,
+        121.04935784700501,
+        115.57830903699505,
+        116.04406559999916,
+        115.58108771099796,
+        115.78199214099732
+      ],
+      "baseline_median": 124.85776523799723,
+      "candidate_median": 115.91302887049824,
+      "relative_change": -0.07163940785299983,
+      "sign_test_p": 0.03125,
+      "verdict": "improvement"
+    },
+    {
+      "name": "user_seconds",
+      "baseline": [
+        63.693582,
+        59.201725,
+        59.025687,
+        58.39477,
+        58.99508,
+        58.805233
+      ],
+      "candidate": [
+        61.722342,
+        60.869362,
+        57.071232,
+        57.341198,
+        57.075641,
+        57.180655
+      ],
+      "baseline_median": 59.0103835,
+      "candidate_median": 57.2609265,
+      "relative_change": -0.029646596009666792,
+      "sign_test_p": 0.21875,
+      "verdict": "inconclusive"
+    },
+    {
+      "name": "system_seconds",
+      "baseline": [
+        34.916448,
+        31.751557,
+        30.555019,
+        30.615737,
+        30.691688,
+        30.542121
+      ],
+      "candidate": [
+        26.140426,
+        25.437441,
+        23.59918,
+        23.56362,
+        23.559256,
+        23.457021
+      ],
+      "baseline_median": 30.653712499999997,
+      "candidate_median": 23.581400000000002,
+      "relative_change": -0.23071634471681024,
+      "sign_test_p": 0.03125,
+      "verdict": "improvement"
+    },
+    {
+      "name": "max_rss_kib",
+      "baseline": [
+        1740348,
+        1738680,
+        1740764,
+        1737112,
+        1740432,
+        1740320
+      ],
+      "candidate": [
+        1740460,
+        1738704,
+        1740228,
+        1740416,
+        1737500,
+        1737840
+      ],
+      "baseline_median": 1740334.0,
+      "candidate_median": 1739466.0,
+      "relative_change": -0.0004987548367152428,
+      "sign_test_p": 1.0,
+      "verdict": "inconclusive"
+    },
+    {
+      "name": "minor_faults",
+      "baseline": [
+        7113748,
+        7110087,
+        7111314,
+        7109947,
+        7108239,
+        7132914
+      ],
+      "candidate": [
+        7111978,
+        7112125,
+        7111275,
+        7110420,
+        7111690,
+        7111537
+      ],
+      "baseline_median": 7110700.5,
+      "candidate_median": 7111613.5,
+      "relative_change": 0.00012839803898367919,
+      "sign_test_p": 1.0,
+      "verdict": "inconclusive"
+    },
+    {
+      "name": "major_faults",
+      "baseline": [
+        6,
+        6,
+        0,
+        1,
+        3,
+        6
+      ],
+      "candidate": [
+        0,
+        2,
+        0,
+        3,
+        1,
+        6
+      ],
+      "baseline_median": 4.5,
+      "candidate_median": 1.5,
+      "relative_change": -0.6666666666666667,
+      "sign_test_p": 0.625,
+      "verdict": "inconclusive"
+    },
+    {
+      "name": "voluntary_switches",
+      "baseline": [
+        56859,
+        51369,
+        51031,
+        51970,
+        52205,
+        54243
+      ],
+      "candidate": [
+        53780,
+        55456,
+        51241,
+        52409,
+        52941,
+        52568
+      ],
+      "baseline_median": 52087.5,
+      "candidate_median": 52754.5,
+      "relative_change": 0.012805375569954425,
+      "sign_test_p": 0.6875,
+      "verdict": "inconclusive"
+    },
+    {
+      "name": "involuntary_switches",
+      "baseline": [
+        14432,
+        14296,
+        10883,
+        9666,
+        9846,
+        12423
+      ],
+      "candidate": [
+        14245,
+        12836,
+        10632,
+        13029,
+        8704,
+        11418
+      ],
+      "baseline_median": 11653.0,
+      "candidate_median": 12127.0,
+      "relative_change": 0.04067622071569543,
+      "sign_test_p": 0.21875,
+      "verdict": "inconclusive"
+    }
+  ],
+  "unit_assertions": {
+    "A": [
+      6990238,
+      6990238,
+      6990238,
+      6990238,
+      6990238,
+      6990238
+    ],
+    "B": [
+      6990239,
+      6990239,
+      6990239,
+      6990239,
+      6990239,
+      6990239
+    ]
+  },
+  "limits": "Only this native host, workload, configuration, and process population; no Zen 5 or other-platform claim. A/A control covered os_tests, not the complete suite."
+}
