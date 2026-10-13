@@ -544,7 +544,8 @@ without facts for identical bitcode and diagnostics.
   `-Wexpansion-to-defined`-equivalent warning is added. The registered
   `c_macro_produced_defined_tests` covers nested object-like and function-like
   token-paste producers, both operand spellings, `#if`/`#elif`, defined,
-  empty, undefined and literal-operator controls.
+  empty, undefined and literal-operator controls, plus feature queries whose
+  argument contains the identifier `defined`.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a

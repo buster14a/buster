@@ -8963,46 +8963,6 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
     return true;
 }
 
-// Macro expansion may introduce a defined operator after the source-token pass.
-// The rescan context has already marked its identifier operand no-expand; reduce
-// those operators here before the conditional expression's ordinary identifiers
-// become zero-valued operands.
-BUSTER_C_INTERNAL bool c_conditional_defined_operators(CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
-                                                       CPreprocessTokenNode* first)
-{
-    char8 const* base = space->base;
-    bool valid = true;
-    CPreprocessTokenNode* node = first;
-    while (node && valid)
-    {
-        if (node->token.token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, node->token.token, S8("defined")))
-        {
-            CPreprocessTokenNode* operand = node->next;
-            bool parenthesized = operand && c_token_is_punctuator(&operand->token.token, C_PUNCTUATOR_LEFT_PARENTHESIS);
-            operand = parenthesized ? operand->next : operand;
-            valid = operand && operand->token.token.kind == C_TOKEN_IDENTIFIER;
-            CPreprocessTokenNode* close = valid && parenthesized ? operand->next : 0;
-            valid = valid && (!parenthesized || (close && c_token_is_punctuator(&close->token.token, C_PUNCTUATOR_RIGHT_PARENTHESIS)));
-            if (valid)
-            {
-                CMacro* macro = c_macro_find_token(first_macro, symbols, base, &operand->token.token);
-                node->token.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
-                node->token.token.punctuator = C_PUNCTUATOR_NONE;
-                node->token.token.offset = macro && macro->definition.defined ? C_SPELLING_ONE : C_SPELLING_ZERO;
-                node->token.token.length = 1;
-                node->token.token.symbol = 0;
-                node->next = parenthesized ? close->next : operand->next;
-                node = node->next;
-            }
-        }
-        else
-        {
-            node = node->next;
-        }
-    }
-    return valid;
-}
-
 // Parse-side constant queries share the reducer but retain their existing
 // semantics; only conditional-inclusion arithmetic widens decoded types.
 BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
@@ -9083,10 +9043,6 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
         }
         first_expanded = valid && transformed_count ? nodes : 0;
         expanded_count = transformed_count;
-    }
-    if (valid && preprocessor_arithmetic)
-    {
-        valid = c_conditional_defined_operators(space, symbols, first_macro, first_expanded);
     }
     if (valid)
     {

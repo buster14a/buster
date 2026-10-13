@@ -1628,6 +1628,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_produced_defined_tests(UnitTestArgume
             S8("pasted_name_is_undefined"),
         },
         {
+            S8("feature-builtin-argument-named-defined"),
+            S8("#define QUERY __has_builtin(defined)\n"
+               "#if QUERY\n"
+               "wrong_builtin_query\n"
+               "#else\n"
+               "feature_query_defined_argument\n"
+               "#endif\n"),
+            S8("feature_query_defined_argument"),
+        },
+        {
+            S8("feature-include-header-named-defined"),
+            S8("#define QUERY __has_include(<defined.h>)\n"
+               "#if QUERY\n"
+               "wrong_include_query\n"
+               "#else\n"
+               "feature_query_defined_header\n"
+               "#endif\n"),
+            S8("feature_query_defined_header"),
+        },
+        {
             S8("literal-defined-controls"),
             S8("#define VALUE 0\n"
                "#if defined(VALUE) && defined VALUE && !defined(MISSING)\n"
