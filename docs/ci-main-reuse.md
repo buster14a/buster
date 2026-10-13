@@ -137,6 +137,22 @@ independent publisher proof. The retained #3785 public payload and its negative
 identity controls exercise the ordinary inventory and a queued-to-cancelled
 transition between the full reuse decision and finish.
 
+The #3885 terminal-first form and **Not measured: superseded before execution**
+are authenticated by that same original announcement writer and lifecycle
+controller proof. Quoted prior waiting text supplies no current identities.
+The current heading, request, executor, candidate, baseline and native outcome
+must agree with the exact report format. Neutral supersession additionally
+requires the successful first-attempt automatic-main request, cancelled
+first-attempt executor, complete numeric-zero/empty exact-attempt jobs, and
+unchanged current request/executor identities. The trusted native controller
+owns the cancellation-cause annotation and pinned concurrency-policy verdict;
+the reader does not infer it from a newer timestamp or from zero jobs alone.
+An executor link on this recovered report selects lifecycle authentication,
+not a missing measurement publisher. Ordinary failures/cancellations keep
+their original conclusions, and normal measured publication keeps its full
+publisher/workload proof. The retained native read-only rendering fixture is
+not a deployed neutral check; its composed tests use synthetic provenance.
+
 ## Qualification and measurement
 
 Run `python3 -B tools/main_ci_reuse_test.py -v` and the existing workflow

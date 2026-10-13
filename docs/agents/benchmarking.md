@@ -620,9 +620,11 @@ captures (#2741).
   plus one maintained report comment on the commit (#2804). The linked
   Actions `compare` job supplies live preparation/measurement state; a queued
   custom check does not prove that the physical job has not started. During merge bursts only
-  the newest pending commit is measured; the others' checks read
-  **Not measured** and name the range comparison that covers their change.
-  A range result does not isolate one commit. A range since the last actual
+  the newest pending commit is measured; displaced commits remain
+  **Not measured**. Native recovery reports verified pre-execution pending
+  replacement as neutral, retaining the native cancellation and its exact
+  attempt. It claims no successor result or range coverage from a request
+  alone. A validated range result does not isolate one commit. A range since the last actual
   measurement that changes only reviewed prose is completed as neutral
   **Not measured** without allocating the 9700X
   ([unchanged-input skip](../compiler-main-unchanged-skip.md), #3923). See the
