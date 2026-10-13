@@ -59,7 +59,10 @@ finalizer execution protocol, so a nonempty INIT_ARRAY or FINI_ARRAY returns
 `JIT_ERROR_INIT_FINI_UNSUPPORTED` before scratch/image allocation. Section size
 includes both stored bytes and virtual extent. Zero-size arrays without
 relocations remain inert placeholders; relocations in an empty array are
-invalid input, while ordinary debug-only relocations remain ignored.
+invalid input, while ordinary debug-only relocations remain ignored. An object
+that requires an executable stack returns `JIT_ERROR_EXECUTABLE_STACK`, also
+before allocation. The JIT is the only in-process object loader; the object
+layer's former loader was retired in its favor (#2677).
 
 Registered `jit_tests` check direct and serialized native-format objects with
 legitimate function-pointer entries, malformed relocation controls, zero-size

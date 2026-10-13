@@ -75,10 +75,10 @@ section in `ObjectFile`.
 
 The ELF reader records an input note's executable bit before skipping
 nonallocated sections. `ObjectFile.requires_executable_stack` survives
-merges and selected archive members. Native image and in-memory linking
-refuse an explicit request: executable stacks are unsupported, and the
-driver diagnostic names the requesting object or archive member. No image
-is published for that input. A missing note is accepted as nonexecuting,
+merges and selected archive members. Native image linking and the JIT
+(`JIT_ERROR_EXECUTABLE_STACK`) refuse an explicit request: executable stacks
+are unsupported, and the driver diagnostic names the requesting object or
+archive member. No image is published for that input. A missing note is accepted as nonexecuting,
 matching LLD's policy; Buster does not infer GNU ld's target-dependent
 executable default. Existing Buster ELF images retain their stack policy
 (RW on dynamic images; no stack header on the static writers).
@@ -397,8 +397,8 @@ families. Invalid kinds report zero width and false TLS. The table's row count
 is checked against the enum, and registered named golden rows independently
 check every kind once.
 
-The printer, codegen object conversion, object writer and in-memory linker
-use the same width. JIT and UEFI consume the same TLS classification and keep
+The printer, codegen object conversion and object writer use the same
+width. JIT and UEFI consume the same TLS classification and keep
 their own supported-kind routing; UEFI refuses Mach-O TLV requests as
 unsupported TLS before producing an image. Registered tests check a COFF
 SECTION relocation in the final two payload bytes, its one-byte-short
@@ -418,24 +418,19 @@ by the evidence script recorded with the introducing audit.
 
 ## In-memory executable sections
 
-`object_link_executable` relocates an object inside one temporary writable,
-nonexecutable reservation, then publishes it only after final protection and
-instruction-cache flushing succeed. Each nonempty section occupies its own
-page-rounded span: text becomes RX, mutable data and zero-fill become RW, and
-readonly/unwind/initializer/debug sections become R. No final page is both
-writable and executable. Section alignments greater than a host page remain
-absolute address constraints; padding stays readonly.
-
-`ObjectExecutable.address` names the first nonempty text section. Its
-`allocation_address` and `allocation_size` name the complete reservation,
-including any alignment prefix, and `object_release_executable` releases that
-reservation. Failed layout, relocation, protection or cache flushing publishes
-neither address. This helper does not register unwind tables or run constructors,
-and thread-local relocations still require an external runtime and are refused.
+The object layer has no in-memory loader of its own. Tests that run an
+`ObjectFile` in-process link it with `jit_link_object` and release it with
+`jit_program_release` ([JIT](../src/buster/lib/compiler/jit/jit.h)), which owns
+W^X finalization, call thunks and explicit host bindings. The JIT admits only
+the host target, so object tests retarget a host-architecture fixture to
+`target_native` before linking it. Relocation rules for foreign targets are
+checked through the shared patch helpers (`object_aarch64_elf_page_relocate`,
+`a64_page_relocation_apply`) against a modeled image layout instead.
 
 The registered `object_test_executable_sections` checks data and BSS through
 PC-relative and absolute references on x86-64/AArch64, repeated updates,
-over-page alignment and Linux, Windows and macOS mapping permission queries.
+the JIT's refusal of over-page section alignment, and Linux, Windows and
+macOS mapping permission queries.
 
 ## AArch64 textual assembly preservation
 

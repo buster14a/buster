@@ -878,6 +878,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
         {S8("-O0"), S8("-fcanonical-fast-cse"), cse},
         {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
     };
+    struct { String8 first; String8 second; bool intern; } interning[] = {
+        {S8("source.c"), S8("-O2"), false},
+        {S8("-fcanonical-intern-constants"), S8("-O0"), true},
+        {S8("-fcanonical-intern-constants"), S8("-fno-canonical-intern-constants"), false},
+        {S8("-fno-canonical-intern-constants"), S8("-fcanonical-intern-constants"), true},
+        {S8("-fcanonical-intern-constants"), S8("-fno-canonical-fast"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(interning); index += 1)
+    {
+        String8 command[] = {interning[index].first, interning[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.intern_block_constants == interning[index].intern);
+    }
     struct { String8 first; String8 second; bool window; } strategies[] = {
         {S8("-fcanonical-fast-cse-strategy=window"), S8("source.c"), true},
         {S8("-fcanonical-fast-cse-strategy=window"), S8("-fcanonical-fast-cse-strategy=table"), false},
@@ -1187,11 +1200,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     {
         // Every subset of the adopted recipe, then the recipe plus opt-in CSE
         // on the shared fixture and, natively, on the separate CSE control
-        // with the table and then the linear window strategy.
-        for (u32 selection = 0; selection <= IR_FAST_ALL + 3; selection += 1)
+        // with the table and then the linear window strategy, and finally
+        // the shared fixture with CSE and construction-time interning.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 4; selection += 1)
         {
-            bool control = selection >= IR_FAST_ALL + 2;
+            bool control = selection == IR_FAST_ALL + 2 || selection == IR_FAST_ALL + 3;
             bool window = selection == IR_FAST_ALL + 3;
+            // Construction-time constant interning (#3011) on the shared fixture.
+            bool intern = selection == IR_FAST_ALL + 4;
             if (control && backend >= native_count) continue;
             u32 mask = selection <= IR_FAST_ALL ? selection : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -1227,6 +1243,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             command[count++] = S8("-fcanonical-fast");
             if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
+            if (intern) command[count++] = S8("-fcanonical-intern-constants");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
                 bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
@@ -1238,7 +1255,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
-            BUSTER_TEST(arguments, invocation.fast_cse_window == window);
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
