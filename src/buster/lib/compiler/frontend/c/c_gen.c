@@ -856,6 +856,7 @@ BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, 
     case C_TYPE_ENUM:
     case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
+    default:
         valid = false;
         break;
     }
