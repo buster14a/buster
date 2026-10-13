@@ -347,6 +347,7 @@ struct TreeLaunchStatus
 
 #if defined(WINDOWS_PROCESS_TREE_TEST)
 BUSTER_GLOBAL_LOCAL u32 tree_test_startup_delay_ms;
+BUSTER_GLOBAL_LOCAL WCHAR const* tree_test_startup_cancel_path;
 BUSTER_GLOBAL_LOCAL u32 tree_test_cleanup_delay_ms;
 BUSTER_GLOBAL_LOCAL u32 tree_test_status_delay_ms;
 // Publication stages, each timestamped once its operation returns (#3816).
@@ -365,6 +366,8 @@ struct TreeTestLaunchContext
 {
     TreeLaunchStatus status;
     u64 cleanup_limit_ns;
+    u64 cancel_observed_ns;
+    bool startup_cancel_created;
     u64 publication_started_ns;
     u64 publication_finished_ns;
     bool publication_clock_valid;
@@ -478,6 +481,14 @@ BUSTER_GLOBAL_LOCAL bool tree_cancel_requested(WCHAR const* status_path, bool* v
             result = readable;
         }
     }
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+    if (result && !tree_test_launch_context.cancel_observed_ns)
+    {
+        // A diagnostic clock read cannot change the owner's clock validity.
+        TreeLaunchStatus clock = tree_test_launch_context.status;
+        tree_test_launch_context.cancel_observed_ns = tree_clock_ns(&clock);
+    }
+#endif
     *valid = *valid && readable;
     return result;
 }
@@ -561,7 +572,7 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     bool valid = true;
     bool assigned = false;
 #if defined(WINDOWS_PROCESS_TREE_TEST)
-    tree_test_launch_context = (TreeTestLaunchContext){0};
+    tree_test_launch_context = (TreeTestLaunchContext){.status = status};
     Sleep(tree_test_startup_delay_ms);
 #endif
     u64 now = tree_clock_ns(&status);
@@ -578,6 +589,18 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
             startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
             startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
             memcpy(command, command_line, (wcslen(command_line) + 1) * sizeof(WCHAR));
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+            // Arrive after the initial cancel check and job establishment, but
+            // before root creation. No writer scheduling or sleep margin is used.
+            if (tree_test_startup_cancel_path)
+            {
+                HANDLE request = CreateFileW(tree_test_startup_cancel_path, GENERIC_WRITE, 0, 0,
+                                             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+                valid = request != INVALID_HANDLE_VALUE;
+                if (valid) valid = CloseHandle(request) != 0;
+                tree_test_launch_context.startup_cancel_created = valid;
+            }
+#endif
             now = tree_clock_ns(&status);
             status.cancelled = tree_cancel_requested(status_path, &valid);
             status.runtime_timed_out = !status.cancelled && status.clock_valid && now >= deadline_ns;
