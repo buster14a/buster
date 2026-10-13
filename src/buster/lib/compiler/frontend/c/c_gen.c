@@ -797,116 +797,51 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
 BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
 {
     IR_SEMANTIC_RECORD(TARGET_SCALAR_QUERIES, 1);
-    TargetDataLayout layout = target_data_layout(target);
     *ir_kind = IR_TYPE_INTEGER;
     *bit_width = 0;
     *is_signed = false;
     *alignment = 0;
+    bool valid = true;
     switch (kind)
     {
     case C_TYPE_VOID:
         *ir_kind = IR_TYPE_VOID;
-        return true;
+        break;
     case C_TYPE_BOOL:
         *ir_kind = IR_TYPE_BOOLEAN;
-        *bit_width = layout.boolean.bit_width;
-        *alignment = layout.boolean.alignment;
-        return true;
+        break;
     case C_TYPE_CHAR:
-        *bit_width = layout.plain_char.bit_width;
-        *is_signed = layout.plain_char_is_signed;
-        *alignment = layout.plain_char.alignment;
-        return true;
+        *is_signed = target_plain_char_is_signed(target);
+        break;
     case C_TYPE_SIGNED_CHAR:
-        *bit_width = layout.signed_char.bit_width;
-        *is_signed = true;
-        *alignment = layout.signed_char.alignment;
-        return true;
-    case C_TYPE_UNSIGNED_CHAR:
-        *bit_width = layout.unsigned_char.bit_width;
-        *alignment = layout.unsigned_char.alignment;
-        return true;
     case C_TYPE_SHORT:
-        *bit_width = layout.short_integer.bit_width;
-        *is_signed = true;
-        *alignment = layout.short_integer.alignment;
-        return true;
-    case C_TYPE_UNSIGNED_SHORT:
-        *bit_width = layout.unsigned_short_integer.bit_width;
-        *alignment = layout.unsigned_short_integer.alignment;
-        return true;
     case C_TYPE_INT:
-        *bit_width = layout.integer.bit_width;
-        *is_signed = true;
-        *alignment = layout.integer.alignment;
-        return true;
-    case C_TYPE_UNSIGNED_INT:
-        *bit_width = layout.unsigned_integer.bit_width;
-        *alignment = layout.unsigned_integer.alignment;
-        return true;
     case C_TYPE_LONG:
-        *bit_width = layout.long_integer.bit_width;
-        *is_signed = true;
-        *alignment = layout.long_integer.alignment;
-        return true;
-    case C_TYPE_UNSIGNED_LONG:
-        *bit_width = layout.unsigned_long_integer.bit_width;
-        *alignment = layout.unsigned_long_integer.alignment;
-        return true;
     case C_TYPE_LONG_LONG:
-        *bit_width = layout.long_long_integer.bit_width;
-        *is_signed = true;
-        *alignment = layout.long_long_integer.alignment;
-        return true;
-    case C_TYPE_UNSIGNED_LONG_LONG:
-        *bit_width = layout.unsigned_long_long_integer.bit_width;
-        *alignment = layout.unsigned_long_long_integer.alignment;
-        return true;
     case C_TYPE_INT128:
-        *bit_width = layout.integer128.bit_width;
         *is_signed = true;
-        *alignment = layout.integer128.alignment;
-        return true;
+        break;
+    case C_TYPE_UNSIGNED_CHAR:
+    case C_TYPE_UNSIGNED_SHORT:
+    case C_TYPE_UNSIGNED_INT:
+    case C_TYPE_UNSIGNED_LONG:
+    case C_TYPE_UNSIGNED_LONG_LONG:
     case C_TYPE_UNSIGNED_INT128:
-        *bit_width = layout.unsigned_integer128.bit_width;
-        *alignment = layout.unsigned_integer128.alignment;
-        return true;
+        break;
     case C_TYPE_FLOAT16:
     case C_TYPE_BFLOAT16:
-    {
-        TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
-        *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = narrow.bit_width;
-        *alignment = narrow.alignment;
-        return true;
-    }
     case C_TYPE_FLOAT:
-        *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = layout.float_type.bit_width;
-        *alignment = layout.float_type.alignment;
-        return true;
     case C_TYPE_DOUBLE:
-        *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = layout.double_type.bit_width;
-        *alignment = layout.double_type.alignment;
-        return true;
     case C_TYPE_LONG_DOUBLE:
         *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = layout.long_double_type.bit_width;
-        *alignment = layout.long_double_type.alignment;
-        return true;
+        break;
     case C_TYPE_VA_LIST:
         *ir_kind = IR_TYPE_VA_LIST;
-        *bit_width = layout.va_list.bit_width;
-        *alignment = layout.va_list.alignment;
-        return true;
+        break;
     case C_TYPE_NULLPTR:
         *ir_kind = IR_TYPE_POINTER;
-        *bit_width = layout.pointer.bit_width;
-        *alignment = layout.pointer.alignment;
-        return true;
-    // The complex kinds are two-element aggregates, not scalars; they are
-    // built by c_ir_scalar_type before it reaches this ladder.
+        break;
+    // Complex values and storage-only half are handled by their own owners.
     case C_TYPE_FLOAT16_COMPLEX:
     case C_TYPE_FLOAT_COMPLEX:
     case C_TYPE_DOUBLE_COMPLEX:
@@ -921,9 +856,16 @@ BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, 
     case C_TYPE_ENUM:
     case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
-        return false;
+        valid = false;
+        break;
     }
-    return false;
+    if (valid && kind != C_TYPE_VOID)
+    {
+        TargetTypeLayout layout = c_parse_builtin_layout(target, kind);
+        *bit_width = layout.bit_width;
+        *alignment = layout.alignment;
+    }
+    return valid;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind);
