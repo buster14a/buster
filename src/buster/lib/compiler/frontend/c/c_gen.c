@@ -2024,9 +2024,9 @@ BUSTER_C_SHARED bool c_ir_declaration_has_gnu_inline_semantics(CPreprocessResult
            c_ir_attribute_marker_in_range(preprocess, declaration.token_start, end, C_IR_ATTRIBUTE_MARKER_GNU_INLINE);
 }
 
-/* Whether a function definition is GNU inline-only: `extern inline` under GNU
-   inline semantics. It emits no symbol, so the unit may still give the
-   external definition, which is the one every call binds to. */
+/* Whether the definition has the GNU `extern inline` spelling under GNU inline
+   semantics. c_parse combines this declaration fact with the matched entity's
+   linkage before marking the definition inline-only. */
 BUSTER_C_SHARED bool c_ir_declaration_is_gnu_inline_only(CPreprocessResult preprocess, CDeclaration declaration)
 {
     u64 inline_words = C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT);

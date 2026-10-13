@@ -18158,8 +18158,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
 // declared `static` keeps internal linkage for a later declaration without a
 // storage class. An `inline` definition after such a prototype is an ordinary
 // internal definition that a call needs, not a C99 inline-only definition that
-// leaves the call unresolved. An inline-only body (every declaration `inline`,
-// none `extern`) and a plain prototype before the body keep their meanings.
+// leaves the call unresolved. Under GNU inline semantics, `extern inline` after
+// the prototype is also an internal definition; unused bodies are still dropped.
+// A true inline-only body and a plain prototype before its body keep their meanings.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_declaration_inline_definition(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18229,6 +18230,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_declaration_inline_definition(U
         IrSymbol* only_symbol = only ? ir_symbol_from_id(&lowered.program->symbols, only->symbol) : 0;
         BUSTER_TEST(arguments, only && only->state != IR_FUNCTION_LOWERED && !only->block_count);
         BUSTER_TEST(arguments, only_symbol && !only_symbol->is_definition && only_symbol->linkage == IR_LINKAGE_EXTERNAL);
+    }
+    struct
+    {
+        String8 source;
+        String8 used_name;
+        String8 unused_name;
+        CPreprocessDialect dialect;
+    } gnu_inline_cases[] = {
+        {
+            S8("static int gnu89_used(void);\n"
+               "extern inline int gnu89_used(void) { return 11; }\n"
+               "static int gnu89_unused(void);\n"
+               "extern inline int gnu89_unused(void) { return 13; }\n"
+               "int gnu89_caller(void) { return gnu89_used(); }\n"),
+            S8("gnu89_used"),
+            S8("gnu89_unused"),
+            C_PREPROCESS_DIALECT_GNU89,
+        },
+        {
+            S8("static int gnu_attribute_used(void);\n"
+               "extern inline __attribute__((gnu_inline)) int gnu_attribute_used(void) { return 17; }\n"
+               "static int gnu_attribute_unused(void);\n"
+               "extern inline __attribute__((gnu_inline)) int gnu_attribute_unused(void) { return 19; }\n"
+               "int gnu_attribute_caller(void) { return gnu_attribute_used(); }\n"),
+            S8("gnu_attribute_used"),
+            S8("gnu_attribute_unused"),
+            C_PREPROCESS_DIALECT_GNU17,
+        },
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(gnu_inline_cases); case_index += 1)
+    {
+        CPreprocessResult gnu_tokens = c_preprocess(temporary.arena, gnu_inline_cases[case_index].source,
+                                                    (CPreprocessOptions){
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                        .dialect = gnu_inline_cases[case_index].dialect,
+                                                    });
+        CParseResult gnu_parse = c_parse(temporary.arena, gnu_tokens);
+        CIRLowerResult gnu_lowered = c_lower_to_ir(temporary.arena, S8("gnu-inline-static-linkage.c"), gnu_tokens, gnu_parse,
+                                                   target_native);
+        BUSTER_TEST(arguments, gnu_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, gnu_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, gnu_lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, gnu_lowered.program != 0))
+        {
+            IrModule* gnu_module = gnu_lowered.program->modules;
+            BUSTER_TEST(arguments, gnu_module->rejected_function_count == 0);
+            IrFunction* used = c_test_find_ir_function(gnu_module, gnu_inline_cases[case_index].used_name);
+            IrSymbol* used_symbol = used ? ir_symbol_from_id(&gnu_lowered.program->symbols, used->symbol) : 0;
+            BUSTER_TEST(arguments, used && used->state == IR_FUNCTION_LOWERED && used->block_count);
+            BUSTER_TEST(arguments, used_symbol && used_symbol->is_definition && used_symbol->linkage == IR_LINKAGE_INTERNAL);
+            IrFunction* unused = c_test_find_ir_function(gnu_module, gnu_inline_cases[case_index].unused_name);
+            BUSTER_TEST(arguments, unused && unused->state == IR_FUNCTION_NOT_LOWERED && !unused->block_count);
+        }
     }
     // The opposite order gives one identifier both linkages and stays an
     // error whichever declaration carries the body.

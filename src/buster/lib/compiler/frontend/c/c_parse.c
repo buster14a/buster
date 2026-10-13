@@ -44305,6 +44305,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = existing_index,
             };
+            // GNU extern-inline bodies are inline-only only for externally linked entities.
+            // C17 6.2.2p4 keeps an extern declaration internally linked after a visible static prototype.
+            if (declaration->is_gnu_inline_only && existing->has_internal_linkage)
+            {
+                declaration->is_gnu_inline_only = false;
+            }
             u32 conflicting_hint_token = UINT32_MAX;
             if (declaration_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE))
             {
