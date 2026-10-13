@@ -18,6 +18,9 @@
 // split, the declaration split read from the tree (c_parse_ast_from_tree) to
 // c_parse_ast's records field by field (c_ast_corpus_split), and the tree
 // expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types).
+// c_ast_test_sizeof_handoff runs the same inputs through the sizeof handoff
+// comparison (c_test_sizeof_handoff_set), which holds lowering's `sizeof`
+// sizes to semantic analysis's answers.
 // c_ast_test_types probes the typer's accepted kinds, declines and misses one
 // range at a time; c_ast_test_type_lookups holds its name checks to the
 // machine on shadowing shapes; c_ast_test_split runs the tree split on one
@@ -3046,6 +3049,166 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
                                tally.extent_walked[C_AST_EXTENT_FALLBACK_ANCHOR] == 0);
     return result;
 }
+
+// Rows kept and lowering answers that agree with them over the fixtures, and
+// rows with the frontend's own sources: about 108, 101 and 7,120 on Linux
+// x86-64 (17 of all the rows from constant contexts, the rest from the
+// validation walk's own queries).
+enum
+{
+    C_AST_SIZEOF_HANDOFF_ROW_FLOOR = 90,
+    C_AST_SIZEOF_HANDOFF_AGREE_FLOOR = 85,
+    C_AST_SIZEOF_HANDOFF_HOSTED_ROW_FLOOR = 6000,
+};
+
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, GitHub #2531) over
+// the corpus inputs: each input is analysed again with the comparison on and,
+// when the analysis is clean, lowered with it on, so every `sizeof` size
+// lowering settles is held to the semantic rows for its keyword. Analysis of a
+// frontend source with its headers outgrows a test scratch arena, so each
+// input gets an arena of its own.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_sizeof_handoff_unit(UnitTestArguments* arguments, String8 label, String8 source, CPreprocessOptions options,
+                                                             CTestSizeofHandoff* sum, u64* lowered_units)
+{
+    UnitTestResult result = {0};
+    ArenaCreation creation = {.reserved_size = BUSTER_GB(16), .flags = {.no_pool = true}};
+    Arena* arena = arena_create(creation);
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        options.target = target_native;
+        options.data_layout = target_data_layout(target_native);
+        CPreprocessResult preprocess = c_preprocess(arena, source, options);
+        if (!preprocess.error_count)
+        {
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            c_test_sizeof_handoff_take();
+            c_test_sizeof_handoff_set(true);
+            CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+            bool clean = !syntax.diagnostic_count && analysis.analysis_complete && !analysis.diagnostic_count;
+            CIRLowerResult lowered = clean ? c_lower_to_ir(arena, label, preprocess, analysis, target_native) : (CIRLowerResult){0};
+            c_test_sizeof_handoff_set(false);
+            CTestSizeofHandoff taken = c_test_sizeof_handoff_take();
+            *lowered_units += clean && lowered.program && !lowered.diagnostic_count;
+            for (u32 producer = 0; producer < C_SIZEOF_OPERAND_PRODUCER_COUNT; producer += 1)
+            {
+                sum->rows[producer] += taken.rows[producer];
+            }
+            sum->row_bytes += taken.row_bytes;
+            sum->repeats += taken.repeats;
+            sum->conflicts += taken.conflicts;
+            sum->extra_queries += taken.extra_queries;
+            sum->outside_population += taken.outside_population;
+            sum->scope_differs += taken.scope_differs;
+            sum->signedness_compared += taken.signedness_compared;
+            for (u32 path = 0; path < C_TEST_SIZEOF_HANDOFF_PATHS; path += 1)
+            {
+                for (u32 outcome = 0; outcome < C_TEST_SIZEOF_HANDOFF_OUTCOMES; outcome += 1)
+                {
+                    sum->outcomes[path][outcome] += taken.outcomes[path][outcome];
+                }
+            }
+            for (u32 index = 0; index < taken.first_count; index += 1)
+            {
+                CTestSizeofHandoffMismatch const* mismatch = taken.first + index;
+                CSourceLocation location = mismatch->keyword < preprocess.token_count
+                                               ? c_preprocess_token_location(&preprocess, preprocess.tokens[mismatch->keyword])
+                                               : (CSourceLocation){0};
+                BUSTER_TEST_RAW(arguments, false,
+                                string_format(arguments->arena,
+                                              S8("{S8}: sizeof at token {u32} (line {u32}, column {u32}): semantic kind {u32} size {u32} signed {u32} (producer {u32}), "
+                                                 "lowering size {u64} signed {u32} (path {u32})"),
+                                              label, mismatch->keyword, location.line, location.column, (u32)mismatch->kind, (u32)mismatch->semantic_size,
+                                              (u32)mismatch->semantic_signed, (u32)mismatch->producer, mismatch->lowering_size,
+                                              (u32)mismatch->lowering_signed, (u32)mismatch->path));
+            }
+        }
+        c_preprocess_release(&preprocess);
+        BUSTER_VALIDATE(arena_destroy(arena, 1));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_handoff(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CAstCorpusList list = c_ast_corpus_collect(arguments->arena);
+    BUSTER_TEST(arguments, list.valid);
+    String8 includes[] = {S8("tests")};
+    CTestSizeofHandoff sum = {0};
+    u64 lowered_units = 0;
+    for (u32 index = 0; index < list.path_count; index += 1)
+    {
+        String8 path = list.paths[index];
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        ByteSlice file = string_equal(path, S8("tests/basic_c_dialect.c")) ? (ByteSlice){0} : file_read(temporary.arena, path, (FileReadOptions){0});
+        if (file.pointer && file.length)
+        {
+            CPreprocessOptions options = {
+                .source_path = path,
+                .include_paths = includes,
+                .include_path_count = 1,
+                .dialect = c_ast_corpus_in(c_ast_corpus_c23, BUSTER_ARRAY_LENGTH(c_ast_corpus_c23), path) ? C_PREPROCESS_DIALECT_C23
+                                                                                                            : C_PREPROCESS_DIALECT_GNU17,
+            };
+            c_ast_test_merge(&result, c_ast_sizeof_handoff_unit(arguments, path, (String8){.pointer = (char8*)file.pointer, .length = file.length},
+                                                                options, &sum, &lowered_units));
+        }
+        c_test_scratch_end(temporary);
+    }
+    u64 fixture_rows = sum.rows[C_SIZEOF_OPERAND_PRODUCER_CONSTANT] + sum.rows[C_SIZEOF_OPERAND_PRODUCER_VALIDATION];
+    u64 fixture_agree = sum.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_AGREE] +
+                        sum.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_AGREE];
+    BUSTER_TEST_RAW(arguments, fixture_rows >= C_AST_SIZEOF_HANDOFF_ROW_FLOOR && fixture_agree >= C_AST_SIZEOF_HANDOFF_AGREE_FLOOR,
+                    string_format(arguments->arena, S8("sizeof handoff over the fixtures: {u64} rows, {u64} agreeing answers, below the floor"),
+                                  fixture_rows, fixture_agree));
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    String8 paths[] = {
+        S8("src/buster/lib/compiler/frontend/c/c_source.c"),
+        S8("src/buster/lib/compiler/frontend/c/c_parse.c"),
+        S8("src/buster/lib/compiler/frontend/c/c_gen.c"),
+        S8("src/buster/lib/compiler/frontend/c/c_ast.c"),
+    };
+    bool hosted = os_path_followed_stats(S8("/usr/include/stdint.h")).kind == OS_FILE_KIND_REGULAR;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths) && hosted; index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 command[] = {S8("-Isrc"), S8("-fsyntax-only"), paths[index]};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        ByteSlice file = file_read(temporary.arena, paths[index], (FileReadOptions){0});
+        if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && file.pointer && file.length))
+        {
+            CPreprocessOptions options = {
+                .source_path = paths[index],
+                .macro_operations = invocation.macro_operations,
+                .macro_operation_count = invocation.macro_operation_count,
+                .include_paths = invocation.include_paths,
+                .include_path_count = invocation.include_path_count,
+                .system_include_paths = invocation.system_include_paths,
+                .system_include_path_count = invocation.system_include_path_count,
+                .dialect = C_PREPROCESS_DIALECT_GNU17,
+            };
+            c_ast_test_merge(&result, c_ast_sizeof_handoff_unit(arguments, paths[index], (String8){.pointer = (char8*)file.pointer, .length = file.length},
+                                                                options, &sum, &lowered_units));
+        }
+        c_test_scratch_end(temporary);
+    }
+    u64 hosted_rows = sum.rows[C_SIZEOF_OPERAND_PRODUCER_CONSTANT] + sum.rows[C_SIZEOF_OPERAND_PRODUCER_VALIDATION] - fixture_rows;
+    BUSTER_TEST_RAW(arguments, !hosted || hosted_rows >= C_AST_SIZEOF_HANDOFF_HOSTED_ROW_FLOOR,
+                    string_format(arguments->arena, S8("sizeof handoff over the frontend sources: {u64} rows, below the floor"), hosted_rows));
+#endif
+    // A key is kept once per producer; a second, different answer for it is a
+    // semantic disagreement with itself.
+    BUSTER_TEST_RAW(arguments, sum.conflicts == 0, string_format(arguments->arena, S8("{u64} sizeof handoff rows conflict"), sum.conflicts));
+    // Each disagreement was reported with its location by the unit above.
+    u64 mismatches = 0;
+    for (u32 path = 0; path < C_TEST_SIZEOF_HANDOFF_PATHS; path += 1)
+    {
+        mismatches += sum.outcomes[path][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH] + sum.outcomes[path][C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH];
+    }
+    BUSTER_TEST_RAW(arguments, mismatches == 0, string_format(arguments->arena, S8("{u64} sizeof answers disagree with semantic analysis"), mismatches));
+    BUSTER_TEST(arguments, lowered_units != 0);
+    return result;
+}
 #endif
 
 // The independent expected-syntax oracle (#3102): written from c_ast.h and
@@ -5637,6 +5800,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_AST_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_corpus);
+    C_AST_TEST_FIXTURE(arguments, c_ast_test_sizeof_handoff);
 #endif
     C_AST_TEST_FIXTURE(arguments, c_ast_test_truncations);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_deep);

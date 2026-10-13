@@ -157,6 +157,11 @@ frontend-selector probes, wild-linker-v1, link-tls-v1 or
 self-host-inline-compare-v1. Inline self-host acceptance, the ast-pilot and
 constant-reuse acceptance legs and scaling are admitted by the snapshot plan.
 
+Sealed raw evidence ([#2918](compiler-evidence-v1.md)) covers only ordinary
+`legacy-rebuild` attempts. A default `snapshot-v1` pull attempt therefore
+publishes as `legacy-unsealed`, while an explicit rollback or fallback attempt
+is sealed. This lasts until the seal is extended to the snapshot route.
+
 A snapshot, restore or verify that fails never falls back. The attempt fails
 closed with the native `failed_step`, and nothing is rebuilt or repaired.
 

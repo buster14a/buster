@@ -7456,6 +7456,108 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_cached_plan_lanes(UnitTe
     return result;
 }
 
+// A cohort prepares only its own native family (#53). A later invocation of
+// the other family, cohort or serial, must release the parked gang before its
+// serial prewarm and still match the serial bytes. In process the tables are
+// already warm, so the prepared-family mask witnesses the sequencing; fresh
+// `cc` children start cold and catch a lane reaching the other family's lazy
+// fill.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batch_families(UnitTestArguments* arguments, Arena* arena, String8 input, String8 output,
+                                                                           u32 workers)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    u32 const families[] = {BUSTER_COMPILER_DRIVER_TEST_FAMILY_X86_64, BUSTER_COMPILER_DRIVER_TEST_FAMILY_AARCH64};
+    CompilerDriverInvocation invocations[BUSTER_ARRAY_LENGTH(targets)];
+    ByteSlice references[BUSTER_ARRAY_LENGTH(targets)];
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 command[] = {S8("-target"), targets[target], S8("-g"), S8("-nostdinc"), S8("-o"), output,
+                             input, S8("tests/basic_c_constructor_order.c"), input,
+                             S8("tests/basic_c_constructor_order_second.c"), input};
+        invocations[target] = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        invocations[target].compile_jobs = 1;
+        CompilerDriverResult serial = compiler_driver_execute_invocation(arena, invocations[target]);
+        BUSTER_TEST_RAW(arguments, serial.error == COMPILER_DRIVER_ERROR_NONE, serial.diagnostic);
+        references[target] = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, references[target].length != 0);
+    }
+
+    u32 sequences_run = 0;
+    if (workers > 1 && compiler_driver_test_native_families_reset())
+    {
+        for (u32 first = 0; first < BUSTER_ARRAY_LENGTH(targets); first += 1)
+        {
+            u32 second = first ^ 1;
+            // The second family runs as a cohort, then (after a fresh reset)
+            // as a serial compile while the first cohort's gang is parked.
+            for (u32 second_serial = 0; second_serial < 2; second_serial += 1)
+            {
+                if (!BUSTER_REQUIRE(arguments, compiler_driver_test_native_families_reset()))
+                {
+                    break;
+                }
+                u32 const order[] = {first, second, first};
+                for (u32 step = 0; step < BUSTER_ARRAY_LENGTH(order); step += 1)
+                {
+                    u32 target = order[step];
+                    u32 jobs = step == 1 && second_serial ? 1 : workers;
+                    invocations[target].compile_jobs = jobs;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocations[target]);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.compilation_workers == jobs);
+                    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, bytes.length && bytes.length == references[target].length &&
+                                          memory_compare(bytes.pointer, references[target].pointer, bytes.length));
+                    u32 prepared = compiler_driver_test_native_families_prepared();
+                    u32 expected = step ? families[first] | families[second] : families[first];
+                    BUSTER_TEST(arguments, prepared == expected);
+                    // A cohort leaves its gang parked; a serial switch to an
+                    // unprepared family must have released it first.
+                    BUSTER_TEST(arguments, (thread_context_selected()->lane_gang != 0) == (jobs > 1));
+                }
+                sequences_run += 1;
+            }
+        }
+    }
+
+    u32 cold_children = 0;
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    String8 child_output = buster_test_temporary_path(arena, S8("buster-unit-batch-family"), S8(".out"));
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        ByteSlice child_bytes[2] = {0};
+        String8 jobs[] = {S8("-fcompile-jobs=1"), S8("-fcompile-jobs=2")};
+        for (u32 job = 0; job < BUSTER_ARRAY_LENGTH(jobs); job += 1)
+        {
+            String8 child_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"), targets[target], jobs[job], S8("-g"),
+                                       S8("-nostdinc"), S8("-o"), child_output, input, S8("tests/basic_c_constructor_order.c"), input,
+                                       S8("tests/basic_c_constructor_order_second.c"), input};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command), (SliceString8){0}, (SliceString8){0},
+                                                        capture);
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult waited = os_process_wait_deadline(arena, child, 60000000);
+                BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                                BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                child_bytes[job] = file_read(arena, child_output, (FileReadOptions){0});
+                cold_children += 1;
+            }
+        }
+        BUSTER_TEST(arguments, child_bytes[0].length && child_bytes[0].length == child_bytes[1].length &&
+                              memory_compare(child_bytes[0].pointer, child_bytes[1].pointer, child_bytes[0].length));
+    }
+#endif
+    if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+    {
+        arguments->show(arguments, S8("UNIT_BATCH_FAMILIES_V1 workers={u32} sequences={u32} cold_children={u32} status={S8}\n"), workers,
+                        sequences_run, cold_children, result.test_count == result.succeeded_test_count ? S8("pass") : S8("fail"));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7543,6 +7645,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
             c_test_scratch_end(attempt);
         }
     }
+    UnitTestResult families = compiler_driver_test_unit_batch_families(arguments, arena, input, output, workers);
+    result.test_count += families.test_count;
+    result.succeeded_test_count += families.succeeded_test_count;
 
     String8 first_path = buster_test_temporary_path(arena, S8("buster-unit-batch-first"), S8(".c"));
     String8 later_path = buster_test_temporary_path(arena, S8("buster-unit-batch-later"), S8(".c"));

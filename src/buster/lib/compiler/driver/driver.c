@@ -50,7 +50,9 @@
 // shares the serial/lane reservation path, and a failed reservation is a
 // resource failure with its required size. Opt-in native C link batches publish
 // in input order only after the gang returns; assembly and archive selection
-// remain serial boundaries.
+// remain serial boundaries. compiler_driver_native_family_prepare prepares
+// only the cohort's native family and releases a parked gang (lane_release)
+// before preparing another one; compiler_parallel_prewarm prepares both.
 // Dependency output follows successful C object or bounded -Wp assembly
 // publication: the preprocessor contributes identity-deduplicated prerequisites
 // and this driver renders their Makefile after the artifact writer succeeds.
@@ -9918,18 +9920,101 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocati
     return result;
 }
 
+typedef enum CompilerDriverNativeFamily
+{
+    COMPILER_DRIVER_NATIVE_FAMILY_X86_64,
+    COMPILER_DRIVER_NATIVE_FAMILY_AARCH64,
+    COMPILER_DRIVER_NATIVE_FAMILY_COUNT,
+} CompilerDriverNativeFamily;
+
+// Families whose complete multi-lane preparation has run. Written only while
+// the caller is the only live thread, so no reader can race the write; an
+// unpublished family is simply prepared again, which its tables make cheap.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_family_prepared[COMPILER_DRIVER_NATIVE_FAMILY_COUNT];
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_target(CpuArch cpu_arch)
+{
+    return cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverNativeFamily compiler_driver_native_family(CpuArch cpu_arch)
+{
+    return cpu_arch == CPU_ARCH_AARCH64 ? COMPILER_DRIVER_NATIVE_FAMILY_AARCH64 : COMPILER_DRIVER_NATIVE_FAMILY_X86_64;
+}
+
+// Everything a gang compiling native C for cpu_arch reads, filled before the
+// gang runs. The x86 caches fill lazily under a serial check, so they must be
+// complete; AArch64 readers keep an exact lazy fallback but would pay the
+// decode on every lookup. Parked workers are live threads (os.h), so a family
+// not yet prepared first releases the calling thread's gang; the next lane_run
+// recreates it. Preparing only the target family keeps the other family's
+// cold cost out of the multi-lane entry (#53).
+BUSTER_GLOBAL_LOCAL void compiler_driver_native_family_prepare(CpuArch cpu_arch)
+{
+    CompilerDriverNativeFamily family = compiler_driver_native_family(cpu_arch);
+    if (compiler_driver_native_target(cpu_arch) && !compiler_driver_native_family_prepared[family])
+    {
+        // Inside an embedding caller's lane there is no gang of ours to
+        // release; that caller prewarmed before its gang ran.
+        if (!os_is_only_live_thread() && lane_count() == 1)
+        {
+            lane_release();
+        }
+        compiler_prewarm();
+        if (family == COMPILER_DRIVER_NATIVE_FAMILY_X86_64)
+        {
+            codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
+            machine_x86_64_exact_prewarm_all();
+            buster_x86_metadata_prewarm_all_forms();
+        }
+        else
+        {
+            codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_AARCH64});
+            buster_aarch64_prewarm();
+            buster_aarch64_semantics_prewarm();
+        }
+        // Another caller's threads may still be live; the tables then stayed
+        // ready or failed their own serial checks, and the flag stays clear.
+        if (os_is_only_live_thread())
+        {
+            compiler_driver_native_family_prepared[family] = true;
+        }
+    }
+}
+
 void compiler_parallel_prewarm(void)
 {
-    compiler_prewarm();
-    // A later invocation may change targets while our persistent gang is
-    // parked. Prepare both native families before the first worker exists;
-    // this opt-in cold cost must not leak into ordinary serial compilation.
-    codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
-    machine_x86_64_exact_prewarm_all();
-    buster_x86_metadata_prewarm_all_forms();
-    buster_aarch64_prewarm();
-    buster_aarch64_semantics_prewarm();
+    // An embedding caller's gang may switch targets while it runs, and the
+    // driver cannot release that gang, so this entry prepares both families.
+    compiler_driver_native_family_prepare(CPU_ARCH_X86_64);
+    compiler_driver_native_family_prepare(CPU_ARCH_AARCH64);
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool compiler_driver_test_native_families_reset(void)
+{
+    if (lane_count() == 1)
+    {
+        lane_release();
+    }
+    bool result = os_is_only_live_thread();
+    if (result)
+    {
+        memset(compiler_driver_native_family_prepared, 0, sizeof(compiler_driver_native_family_prepared));
+    }
+    return result;
+}
+
+u32 compiler_driver_test_native_families_prepared(void)
+{
+    u32 result = 0;
+    for (u32 family = 0; family < COMPILER_DRIVER_NATIVE_FAMILY_COUNT; family += 1)
+    {
+        result |= compiler_driver_native_family_prepared[family] ? (u32)1 << family : 0;
+    }
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
 {
@@ -10183,6 +10268,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic;
         goto finish;
+    }
+    // An earlier cohort may have left its gang parked with only its own
+    // family prepared. Even a serial compile of the other family fills tables
+    // lazily under a serial check, so it gets the complete family first. A
+    // process that never ran a cohort keeps the serial lazy path.
+    if (lane_count() == 1 && compiler_driver_native_target(invocation.target.cpu_arch) &&
+        (compiler_driver_native_family_prepared[COMPILER_DRIVER_NATIVE_FAMILY_X86_64] ||
+         compiler_driver_native_family_prepared[COMPILER_DRIVER_NATIVE_FAMILY_AARCH64]) &&
+        !compiler_driver_native_family_prepared[compiler_driver_native_family(invocation.target.cpu_arch)] && !os_is_only_live_thread())
+    {
+        compiler_driver_native_family_prepare(invocation.target.cpu_arch);
     }
     if (invocation.query == COMPILER_DRIVER_QUERY_LINKER_VERSION)
     {
@@ -10741,7 +10837,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 }
                 if (unit_task_count > 1 && !units_prewarmed)
                 {
-                    compiler_parallel_prewarm();
+                    compiler_driver_native_family_prepare(invocation.target.cpu_arch);
                     units_prewarmed = true;
                 }
                 CompilerDriverUnitBatch batch = {

@@ -45,6 +45,8 @@ Map (searchable symbols):
     PREPARATION_SELECTION_SCHEMA, DEFAULT_CLOSURE_POLICY,
         preparation_selection_problems                     closure policy, rollback and fallback (#3211)
     THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE   named historical corpus (#3714)
+    EVIDENCE_INVENTORY, evidence_lab_required, evidence_corpus_required,
+        evidence_identity                                  sealed raw evidence v1 (#2918)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
@@ -177,6 +179,61 @@ THROUGHPUT_HISTORICAL_PROFILE = dict(
             "revision's ./build.sh bench_throughput in a detached worktree under the work directory",
     harness_revision=THROUGHPUT_HISTORICAL_HARNESS_REVISION,
     admission=f"pull request merge base predates {THROUGHPUT_HARNESS_FLOOR}")
+# Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md). The producer
+# exports these members as required, writes EVIDENCE_OMISSIONS, and seals the
+# bundle last with the trusted `./build.sh compiler_evidence seal`; the
+# publisher re-derives the same inventory natively with `verify`. The native
+# tables in tools/compiler_evidence.c must stay equal (compiler_test checks).
+EVIDENCE_INVENTORY = "buster-compiler-ordinary-raw-v1"
+EVIDENCE_MANIFEST = "evidence-manifest.tsv"
+EVIDENCE_SEAL = "evidence-seal.txt"
+EVIDENCE_OMISSIONS = "evidence-omissions.json"
+EVIDENCE_OMISSIONS_SCHEMA = "buster-compiler-evidence-omissions-v1"
+EVIDENCE_OMISSION_REASONS = ("excluded-type", "member-limit", "byte-budget", "file-budget", "changed-during-copy",
+                             "read-error")
+EVIDENCE_OMISSION_EXAMPLES = 50
+EVIDENCE_LAB_FIXED = ("compare.json", "summary.json", "pairs.json", "a/lab.json", "b/lab.json", "a/env/env.json")
+EVIDENCE_LAB_LOGS = ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log")
+EVIDENCE_CORPUS_CORE = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl",
+                        "capabilities.jsonl", "complete.txt", "summary.json", "cpuinfo.txt")
+# Identity lines after schema and inventory, in manifest order.
+EVIDENCE_IDENTITY_KEYS = ("repository", "request_run", "request_attempt", "executor_run", "executor_attempt",
+                          "trusted_revision", "baseline_revision", "candidate_revision", "baseline_tree",
+                          "candidate_tree", "lab_profile", "corpus_profile", "corpus_harness_revision")
+
+
+def evidence_lab_required(pairs: int, counters: tuple[bool, bool], metrics: tuple[bool, bool]) -> tuple[str, ...]:
+    """Lab-relative required members for a plan of `pairs` and each variant's declared streams."""
+    required = [*EVIDENCE_LAB_FIXED, *(f"{variant}/{log}" for variant in "ab" for log in EVIDENCE_LAB_LOGS)]
+    for index, variant in enumerate("ab"):
+        for pair in range(1, pairs + 1):
+            required.extend(f"pairs/{pair:04d}-{variant}{suffix}" for suffix, declared in
+                            ((".csv", counters[index]), (".ccmetrics", metrics[index])) if declared)
+    return tuple(required)
+
+
+def evidence_corpus_required(profile: dict) -> tuple[str, ...]:
+    """Corpus-relative required members of an admitted corpus profile."""
+    return (*EVIDENCE_CORPUS_CORE, *(f"inputs/{name}.c" for name in profile["workloads"]))
+
+
+def evidence_identity(receipt: dict, request_attempt: str) -> str:
+    """The trusted identity lines of a receipt's ordinary attempt, or '' when it has none."""
+    identity = receipt.get("identity") if isinstance(receipt, dict) else None
+    profile, corpus = (receipt.get("profile"), receipt.get("throughput_profile")) if isinstance(receipt, dict) else (None, None)
+    text = ""
+    if isinstance(identity, dict) and isinstance(profile, dict) and isinstance(corpus, dict):
+        harness = corpus.get("harness_revision") if corpus.get("name") == THROUGHPUT_HISTORICAL_PROFILE["name"] \
+            else identity.get("base")
+        values = (identity.get("repository"), identity.get("request_run_id"), request_attempt, identity.get("run_id"),
+                  identity.get("run_attempt"), identity.get("trusted_revision"), identity.get("base"),
+                  identity.get("head"), identity.get("base_tree"), identity.get("head_tree"), profile.get("name"),
+                  corpus.get("name"), harness)
+        if all(isinstance(value, str) and value and "\t" not in value and "\n" not in value for value in values):
+            text = "".join(f"{key}\t{value}\n" for key, value in zip(EVIDENCE_IDENTITY_KEYS, values))
+    return text
+
+
 # The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
 # is one `bench_throughput scale` bundle on the candidate binary, with the
 # --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
