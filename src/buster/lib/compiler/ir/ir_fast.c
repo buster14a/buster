@@ -1467,14 +1467,14 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 // the strict canonical form; a legacy certified shape stays a
                 // call when optional and reports its call when required. A
                 // module-wide scan here would repeat the FAST input guard on
-                // every default compile. A rewritten caller with a mandatory
-                // splice is checked at once. When FAST will run, one whose
-                // splices were all optional is listed instead and proven by
-                // the next module-wide scan below, which already covers its
-                // rows (#48); otherwise it too is checked at once.
+                // every default compile. Each rewritten caller is checked at
+                // once by the splice proof over what its splices rewrote
+                // (ir_validate_canonical_splice), so `validated` still holds
+                // afterwards. Every function proven and left unchanged is
+                // published in module->inline_proven for the guard below
+                // (#3854).
                 module->inlining = (IrInlineStatistics){0};
-                result = ir_inline_module(program, module, program->fast_passes != 0);
-                if (module->inline_unchecked_count) validated = false;
+                result = ir_inline_module(program, module, IR_INLINE_SPLICE_FAULT_NONE);
             }
             module->inline_complete = result.error == IR_VALIDATION_NONE;
         }
@@ -1508,9 +1508,15 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
                     u64 promoted_before = module->local_promotion.promoted_locals;
                     ir_promote_function(program, function, &module->local_promotion);
-                    if (attribution && module->local_promotion.promoted_locals != promoted_before)
+                    // ir_promote_function rewrites rows only when it promotes.
+                    bool promoted = module->local_promotion.promoted_locals != promoted_before;
+                    if (attribution && promoted)
                     {
                         attribution[index] |= IR_PROMOTION_CHANGED;
+                    }
+                    if (module->inline_proven && promoted)
+                    {
+                        module->inline_proven[index] = 0;
                     }
                 }
             }
@@ -1555,20 +1561,10 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             // own scratch region.
             IrFastCseTable cse = {0};
             if (program->fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE)) cse = ir_fast_cse_table(scratch.arena, 0, &module->fast.cse);
-            // Callers whose optional splices skipped their own output check
-            // (ir_inline_module) are proven here by the same per-function input
-            // validation; one that fails is an inlining-output error, never a
-            // decline. Other failures keep their legacy decline.
-            u8* unchecked = 0;
-            if (!validated && module->inline_unchecked_count)
-            {
-                unchecked = arena_allocate_zeroed(scratch.arena, u8, module->function_count);
-                for (u32 listed = 0; listed < module->inline_unchecked_count; listed += 1)
-                {
-                    unchecked[module->inline_unchecked_callers[listed]] = 1;
-                }
-            }
-            module->inline_unchecked_count = 0;
+            // A function ir_inline_module proved, in the state it still has,
+            // needs no second per-function check; the shared scope above is
+            // still checked.
+            u8 const* proven = module->inline_proven;
             for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
             {
                 IrFunction* function = module->functions + index;
@@ -1577,19 +1573,13 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     IrValidationResult input = scope;
                     if (!validated && input.error == IR_VALIDATION_NONE)
                     {
-                        input = ir_validate_canonical_function(program, function);
-                    }
-                    if (input.error != IR_VALIDATION_NONE && unchecked && unchecked[index])
-                    {
-                        // A shared-scope failure says nothing about the
-                        // splice, so attribute only the caller's own rows.
-                        IrValidationResult own = scope.error == IR_VALIDATION_NONE
-                                                     ? input
-                                                     : ir_validate_canonical_function(program, function);
-                        if (own.error != IR_VALIDATION_NONE)
+                        if (proven && proven[index])
                         {
-                            result = own;
-                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                            module->inlining.reused_proofs += 1;
+                        }
+                        else
+                        {
+                            input = ir_validate_canonical_function(program, function);
                         }
                     }
                     if (result.error == IR_VALIDATION_NONE && input.error != IR_VALIDATION_NONE)
@@ -1644,6 +1634,8 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 }
             }
         }
+        // The inliner's proofs describe rows a later call may have changed.
+        module->inline_proven = 0;
     }
     return result;
 }

@@ -674,19 +674,56 @@ spliced caller again after its last splice (an output failure reports the
 so the planner checks a caller's debug-local scopes and scope parents once
 rather than once per site. A mandatory call whose caller or callee is a legacy producer-certified
 shape that fails that check is diagnosed; an optional one stays a call (all of
-an invalid caller's planned optional sites count as shape skips). When FAST
-is selected, a caller whose splices were all optional skips that output check:
-it is listed in `inline_unchecked_callers` and proven by the validation that
-follows anyway (the promotion output check of a checked build, else the FAST
-input guard's per-function check). A listed caller that fails reports the
-`inlining output` boundary instead of a FAST decline; a shared-scope failure is
-attributed to it only if its own rows also fail, and failures outside the list
-keep their legacy decline. This removed 0.87 G of 3.4 G inliner instructions
-from an uncapped tiny self-host compile under cachegrind (#48). Any other
-rewritten caller is checked at once, so the FAST input guard still checks all
-functions on a producer-certified default compile. The verbose
+an invalid caller's planned optional sites count as shape skips).
+
+Every spliced caller was proven valid just before its splices, so its output
+check, `ir_validate_canonical_splice`, walks only what they rewrote (#3854).
+Before the first splice the pass records the original blocks that hold
+planned sites, their rows and the values those rows and the blocks'
+parameters define (`IrValidationSplice`). The check then reuses the full
+validator's per-block step on those blocks and every new block, marking every
+other row as already owned and every other old value as already defined, so a
+rewritten chain that reaches an untouched row, or a rewritten row that also
+defines an untouched value, is refused. It requires the rewritten chains to
+reach exactly the recorded rows plus every new row, rechecks the parameters
+of every block (predecessor lists are rebuilt for all of them) and sweeps
+only recorded and new values. Rows outside the rewritten blocks keep their
+verdict because a row check reads only its own row, its operands' records,
+counts that only grow, and three facts about an operand's defining row; the
+argument is spelled out above `ir_validate_canonical_splice`. Label metadata
+or a published CFG makes the check refuse, as does a spliced call result of
+pointer-to-function type left without a defining row, the one rewrite that
+changes an outside row's verdict (#3988).
+
+The check may refuse a valid caller but never accepts one the full validator
+refuses, provided the splices wrote only what was recorded. A production
+build trusts that write set. When the check refuses, the full validator
+decides and names the location, and a checked build
+(`BUSTER_IR_TRANSFORM_CHECKS`) also runs the full validator after every splice
+batch, so a write outside the recorded set still fails there. `IR_INLINE`
+reports `splice_proofs` and `splice_fallbacks`. Since every rewritten caller
+is checked at once, a module the input check had already proven stays proven.
+
+When FAST will run, the pass publishes one byte per function in
+`module->inline_proven` for every function it proved and left in that state:
+callees, callers that kept all their sites as calls, and spliced callers.
+Promotion clears the byte of a function it rewrites. The FAST input guard
+skips the per-function check of a marked function (`reused_proofs`) but still
+checks the shared scope, and preparation drops the table before it returns.
+A legacy caller that failed its check is never marked, so the guard checks it
+and keeps its FAST decline. On the unity self-host source, under local
+callgrind with a tests-off `-march=x86-64-v3` build (diagnostic, not a
+performance result), the tiny-on stage-1 compile proves 661 spliced callers
+with no fallback, reuses 721 proofs and retires 85.1 M fewer instructions
+(26.154 G to 26.069 G, -0.33%). The default compile, whose 70 mandatory
+sites take the same path, retires 30.1 M fewer (25.768 G to 25.738 G). The
+object bytes are unchanged in both. Both checks share one walk
+(`ir_validate_function_walk`): two walks over shared helpers cost the default
+compile 11.6 M to 16.8 M more instructions, because the leaf validators then
+had two callers and were no longer inlined. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
-growth, rejection categories, visits and released relocation bytes. These counts are diagnostics, not a
+growth, rejection categories, visits, released relocation bytes, splice proofs
+and fallbacks, and reused proofs. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first
 resource category, requested amount and applicable limit in the source diagnostic.
 

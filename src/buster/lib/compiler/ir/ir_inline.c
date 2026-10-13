@@ -1,6 +1,10 @@
 // Bounded direct canonical inlining. Included after ir_inline_cfg.c and
 // ir_promote.c; the CFG helper owns block/value/local cloning, while this file
-// owns candidate policy, recursion bounds, deterministic order and budgets.
+// owns candidate policy, recursion bounds, deterministic order and budgets
+// (ir_inline_module). It also records what each caller's splices may rewrite
+// (ir_inline_splice_region) for the output proof, ir_validate_canonical_splice
+// in ir.c, and publishes the proofs it leaves standing (module->inline_proven).
+// ir_inline_plant_fault and ir_test_inline_module are the test seam.
 #define IR_INLINE_NONE UINT32_MAX
 #define IR_INLINE_FUNCTION_SCRATCH_BYTES 64u
 #define IR_INLINE_PLAN_ALIGNMENT_BYTES 256u
@@ -120,6 +124,116 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_function_strict(IrProgram* program, IrModule*
     bool result = strict[index] == IR_INLINE_STRICT_VALID;
     return result;
 }
+
+// What one batch of splices into `caller` may rewrite, recorded before the
+// first (IrValidationSplice): the original blocks holding planned sites, the
+// rows they hold and the values those rows and the blocks' parameters define.
+BUSTER_GLOBAL_LOCAL IrValidationSplice ir_inline_splice_region(Arena* arena, IrFunction const* caller, u32 const* planned_heads, u32 original_blocks)
+{
+    IrValidationSplice result = {.base_blocks = caller->block_count, .base_instructions = caller->instruction_count,
+                                 .base_values = caller->value_count};
+    u32 parameters = 0;
+    for (u32 block = 0; block < original_blocks; block += 1)
+    {
+        if (planned_heads[block] != IR_INLINE_NONE)
+        {
+            result.block_count += 1;
+            for (u32 row = caller->blocks[block].first_instruction.value; row < caller->instruction_count; row = caller->instructions[row].next.value)
+            {
+                result.row_count += 1;
+            }
+            parameters += caller->blocks[block].parameter_count;
+        }
+    }
+    result.blocks = arena_allocate(arena, u32, result.block_count ? result.block_count : 1u);
+    result.rows = arena_allocate(arena, u32, result.row_count ? result.row_count : 1u);
+    result.values = arena_allocate(arena, u32, result.row_count + parameters ? result.row_count + parameters : 1u);
+    u32 block_cursor = 0;
+    u32 row_cursor = 0;
+    for (u32 block = 0; block < original_blocks; block += 1)
+    {
+        if (planned_heads[block] != IR_INLINE_NONE)
+        {
+            result.blocks[block_cursor] = block;
+            block_cursor += 1;
+            for (IrBlockParameter const* parameter = caller->blocks[block].first_parameter;
+                 parameter && result.value_count < result.row_count + parameters; parameter = parameter->next)
+            {
+                result.values[result.value_count] = parameter->value.value;
+                result.value_count += parameter->value.value < caller->value_count;
+            }
+            for (u32 row = caller->blocks[block].first_instruction.value; row < caller->instruction_count; row = caller->instructions[row].next.value)
+            {
+                result.rows[row_cursor] = row;
+                row_cursor += 1;
+                u32 value = caller->instructions[row].result.value;
+                if (value < caller->value_count && caller->values[value].definition.value == row)
+                {
+                    result.values[result.value_count] = value;
+                    result.value_count += 1;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// Plants one IrInlineSpliceFault in a spliced caller (ir_test_inline_module).
+BUSTER_GLOBAL_LOCAL void ir_inline_plant_fault(IrFunction* caller, IrValidationSplice const* region, IrInlineSpliceFault fault)
+{
+    bool planted = fault == IR_INLINE_SPLICE_FAULT_NONE;
+    for (u32 row = region->base_instructions; !planted && row < caller->instruction_count; row += 1)
+    {
+        IrInstruction* instruction = caller->instructions + row;
+        if (fault == IR_INLINE_SPLICE_FAULT_OPERAND && instruction->operand_count)
+        {
+            instruction->operands[0].value = caller->value_count + 7u;
+            planted = true;
+        }
+        else if (fault == IR_INLINE_SPLICE_FAULT_SECOND_DEFINITION && instruction->result.value < caller->value_count)
+        {
+            for (u32 outside = 0; !planted && outside < region->base_instructions; outside += 1)
+            {
+                u32 value = caller->instructions[outside].result.value;
+                bool in_region = false;
+                for (u32 index = 0; index < region->row_count; index += 1) in_region |= region->rows[index] == outside;
+                if (!in_region && value < region->base_values && caller->values[value].definition.value == outside)
+                {
+                    instruction->result.value = value;
+                    caller->values[value].definition.value = row;
+                    planted = true;
+                }
+            }
+        }
+    }
+    for (u32 block = region->base_blocks; !planted && block < caller->block_count; block += 1)
+    {
+        IrBlock* target = caller->blocks + block;
+        if (fault == IR_INLINE_SPLICE_FAULT_ORPHAN && target->first_instruction.value != target->last_instruction.value)
+        {
+            target->first_instruction = caller->instructions[target->first_instruction.value].next;
+            planted = true;
+        }
+        else if (fault == IR_INLINE_SPLICE_FAULT_INCOMING && target->first_parameter)
+        {
+            target->first_parameter->incoming_count += 1;
+            planted = true;
+        }
+    }
+    for (u32 row = 0; !planted && fault == IR_INLINE_SPLICE_FAULT_OUTSIDE && row < region->base_instructions; row += 1)
+    {
+        bool in_region = false;
+        for (u32 index = 0; index < region->row_count; index += 1) in_region |= region->rows[index] == row;
+        if (!in_region && caller->instructions[row].operand_count)
+        {
+            caller->instructions[row].operands[0].value = caller->value_count + 7u;
+            planted = true;
+        }
+    }
+    BUSTER_CHECK(planted);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL void ir_inline_record_budget_refusal(IrModule* module, bool required,
                                                                   IrInlineBudgetReason reason, u64 demand, u64 limit)
@@ -516,12 +630,11 @@ u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows)
     return result;
 }
 
-// `defer_optional_output` lets a caller whose splices were all optional skip
-// its own strict output check and be listed in module->inline_unchecked_callers
-// instead. Preparation passes it only when the FAST input guard will scan the
-// whole module anyway, and attributes any failure of a listed caller to this
-// pass (the FAST input guard in ir_prepare_canonical_module).
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module, bool defer_optional_output)
+// Every function the pass proves strictly valid and leaves in that state is
+// published in module->inline_proven when FAST will run, so the FAST input
+// guard reuses the proof (ir_prepare_canonical_module). `fault` is
+// IR_INLINE_SPLICE_FAULT_NONE outside ir_test_inline_module.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module, IrInlineSpliceFault fault)
 {
     IrValidationResult result = (IrValidationResult){.error = IR_VALIDATION_NONE, .boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT};
     if (!program || !program->arena || !module)
@@ -531,8 +644,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
     else if (!module->inline_complete)
     {
         module->inlining = (IrInlineStatistics){0};
-        module->inline_unchecked_callers = 0;
-        module->inline_unchecked_count = 0;
+        module->inline_proven = 0;
         IrInlineOptions options = program->inline_options;
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
         if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
@@ -1380,9 +1492,15 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         total_copies = total_copies_before;
                     }
                     bool changed = false;
-                    bool required_splice = false;
+                    // Every caller with planned sites passed the strict check
+                    // as it stands now (as a mandatory site's caller, after the
+                    // relocation bound, or as an earlier batch's output), so
+                    // the batch's output check needs only what it rewrites.
+                    bool proof_base = strict[caller_index] == IR_INLINE_STRICT_VALID && !caller->published_cfg;
+                    IrValidationSplice region = {0};
                     if (function_sites != function_sites_used[caller_index])
                     {
+                        if (proof_base) region = ir_inline_splice_region(function_arena, caller, planned_heads, original_blocks);
                         // One growth per table, to exactly the counts admission
                         // charged (as geometric growth from the current capacity),
                         // so no table is reallocated when its final count still
@@ -1415,7 +1533,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             changed = true;
                             module->inlining.inlined += 1;
                             module->inlining.always_inlined += symbol && symbol->always_inline;
-                            required_splice |= symbol && symbol->always_inline;
                             module->inlining.copied_instructions += copied;
                             module->inlining.growth += caller->instruction_count - rows_before;
                         }
@@ -1430,26 +1547,26 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // over-approximates, so no full-function remap or compaction is needed here.
                         ir_inline_cfg_rebuild_predecessors(program->arena, caller);
                         ir_function_invalidate_cfg(caller);
-                        if (defer_optional_output && !required_splice)
+#if BUSTER_INCLUDE_TESTS
+                        ir_inline_plant_fault(caller, &region, fault);
+#endif
+                        // The splice proof decides alone in a production build.
+                        // When it refuses, the full check gives the verdict and
+                        // the location; a checked build runs the full check
+                        // anyway, so a write outside the region is still caught.
+                        bool proven = proof_base && ir_validate_canonical_splice(program, caller, &region).error == IR_VALIDATION_NONE;
+                        module->inlining.splice_proofs += proven;
+                        module->inlining.splice_fallbacks += !proven;
+                        IrValidationResult output = ir_validation_ok();
+                        if (!proven || BUSTER_IR_TRANSFORM_CHECKS)
                         {
-                            // Unknown again: a later read as a callee rechecks it.
-                            strict[caller_index] = 0;
-                            if (!module->inline_unchecked_callers)
-                            {
-                                module->inline_unchecked_callers = arena_allocate(program->arena, u32, count);
-                            }
-                            module->inline_unchecked_callers[module->inline_unchecked_count] = caller_index;
-                            module->inline_unchecked_count += 1;
+                            output = ir_validate_canonical_function(program, caller);
                         }
-                        else
+                        strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
+                        if (output.error != IR_VALIDATION_NONE)
                         {
-                            IrValidationResult output = ir_validate_canonical_function(program, caller);
-                            strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
-                            if (output.error != IR_VALIDATION_NONE)
-                            {
-                                result = output;
-                                result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
-                            }
+                            result = output;
+                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
                         }
                         module->local_promotion_complete = false;
                         module->local_promotion = (IrLocalPromotionStatistics){0};
@@ -1466,10 +1583,32 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 // remaining open runs back before codegen peaks.
                 module->inlining.released_bytes += ir_inline_cfg_discard_release(&discard);
                 if (result.error == IR_VALIDATION_NONE) module->inline_complete = true;
+                // Only the FAST input guard reads the proofs, and it runs next.
+                bool any_proven = false;
+                for (u32 index = 0; index < count && !any_proven; index += 1) any_proven = strict[index] == IR_INLINE_STRICT_VALID;
+                if (result.error == IR_VALIDATION_NONE && program->fast_passes && any_proven)
+                {
+                    module->inline_proven = arena_allocate(program->arena, u8, count);
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        module->inline_proven[index] = strict[index] == IR_INLINE_STRICT_VALID && !module->functions[index].published_cfg;
+                    }
+                }
                 }
                 scratch_end(planning);
             }
         }
     }
+#if !BUSTER_INCLUDE_TESTS
+    (void)fault;
+#endif
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+IrValidationResult ir_test_inline_module(IrProgram* program, IrModule* module, IrInlineSpliceFault fault)
+{
+    IrValidationResult result = ir_inline_module(program, module, fault);
+    return result;
+}
+#endif
