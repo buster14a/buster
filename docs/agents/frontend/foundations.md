@@ -1712,6 +1712,13 @@ values and designators once. The type worklist checks every member and rejects
 volatile or atomic storage from this representation shortcut. Existing integer,
 floating, boolean and null-pointer zero representations are retained; no libc
 helper is introduced. Small or qualified aggregates retain typed construction.
+
+The runtime braced-item scan tracks top-level conditional depth as well. The
+middle operand of `?:` is a full expression (C11 6.5.15), so a comma there
+stays in its initializer element; after the matching colon, the next top-level
+comma still begins another element. The registered
+`c_test_conditional_comma_initializer` checks both selected values and call
+effects for this shape on the default and `-fc-ast-pilot` paths (#4088).
 The large-frame fixture checks zeroed nested storage, explicit values, copies
 and odd byte tails under both frontend lowering modes. This prevents initializer
 expansion from exceeding Windows ARM64's unwind function-size limit.

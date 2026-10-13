@@ -34202,6 +34202,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
+        u32 conditional_depth = 0;
         while (end < close)
         {
             CToken token = builder->preprocess.tokens[end];
@@ -34229,7 +34230,14 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             {
                 braces -= 1;
             }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!parentheses && !brackets && !braces &&
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ||
+                      c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)))
+            {
+                conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
+            }
+            else if (!parentheses && !brackets && !braces && !conditional_depth &&
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
             {
                 break;
             }
