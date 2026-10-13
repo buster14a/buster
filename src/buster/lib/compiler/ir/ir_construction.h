@@ -154,6 +154,7 @@
     X(PREPARATION_CALLS, preparation_calls) \
     X(PREPARATION_INPUT_VALIDATIONS, preparation_input_validations) \
     X(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, preparation_promotion_output_validations) \
+    X(PREPARATION_PROMOTION_PROOFS_REUSED, preparation_promotion_proofs_reused) \
     X(PREPARATION_FAST_INPUT_VALIDATIONS, preparation_fast_input_validations) \
     X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
     X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \

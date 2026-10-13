@@ -18,7 +18,8 @@
 // input, inlining-output, promotion-output and FAST-output certification boundaries, then
 // publishes the final canonical CFG after all selected transformations.
 // ir_validate_promotion_output leaves out of the promotion-output check any
-// function whose certified input already failed the strict validator.
+// function whose certified input already failed the strict validator, retaining
+// successful per-function proofs until FAST admission in the same preparation.
 // ir_validate_fast_output likewise excludes only bodies FAST left untouched.
 #include <buster/lib/time.h>
 
@@ -1405,12 +1406,13 @@ IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 
 #define IR_PROMOTION_INPUT_INVALID 1u
 #define IR_PROMOTION_CHANGED 2u
+#define IR_PROMOTION_OUTPUT_VALID 4u
 
 // The promotion-output check for certified input in a checked build. It skips
 // functions that failed the strict validator before promotion, and a function
 // promotion left unchanged that fails now had the same defect before it ran.
 // Both count in `excluded`; only a changed function that was valid fails.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_promotion_output(IrProgram* program, IrModule* module, u8 const* attribution, u32* excluded)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_promotion_output(IrProgram* program, IrModule* module, u8* attribution, u32* excluded)
 {
     IrValidationResult result = ir_validate_canonical_scope(program, module);
     for (u32 index = 0; result.error == IR_VALIDATION_NONE && index < module->function_count; index += 1)
@@ -1432,6 +1434,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_promotion_output(IrProgram* p
                 else if (checked.error != IR_VALIDATION_NONE)
                 {
                     *excluded += 1;
+                }
+                else
+                {
+                    attribution[index] |= IR_PROMOTION_OUTPUT_VALID;
                 }
             }
         }
@@ -1466,6 +1472,8 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
     }
     else
     {
+        TemporalArena preparation_scratch = scratch_begin(&program->arena, 1);
+        u8* promotion_proofs = 0;
         // True while the strict canonical validator has passed over the
         // module in exactly its current state. Every scan that succeeds sets
         // it and every mutation clears it, so the FAST input guard below --
@@ -1511,11 +1519,10 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             // promotion can rewrite them (only functions with LOCAL rows can
             // change). The output check leaves those out: promotion did not
             // cause their defects, and an unchecked build accepts them.
-            TemporalArena scratch = scratch_begin(&program->arena, 1);
             u8* attribution = 0;
             if (input_certified && BUSTER_IR_TRANSFORM_CHECKS && module->function_count)
             {
-                attribution = arena_allocate(scratch.arena, u8, module->function_count);
+                attribution = arena_allocate(preparation_scratch.arena, u8, module->function_count);
                 memset(attribution, 0, module->function_count);
             }
             for (u32 index = 0; index < module->function_count; index += 1)
@@ -1561,8 +1568,11 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
                 }
                 validated = checked && result.error == IR_VALIDATION_NONE && !excluded;
+                if (result.error == IR_VALIDATION_NONE)
+                {
+                    promotion_proofs = attribution;
+                }
             }
-            scratch_end(scratch);
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
         }
         if (result.error == IR_VALIDATION_NONE && program->fast_passes && !module->fast_complete)
@@ -1601,6 +1611,14 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                         if (proven && proven[index])
                         {
                             module->inlining.reused_proofs += 1;
+                        }
+                        else if (promotion_proofs && (promotion_proofs[index] & IR_PROMOTION_OUTPUT_VALID))
+                        {
+                            // A legacy-invalid neighbor cannot discard this
+                            // body's strict post-promotion proof. Nothing has
+                            // changed its rows since that check; shared scope
+                            // is still checked above, and FAST output below.
+                            IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_PROOFS_REUSED, 1);
                         }
                         else
                         {
@@ -1661,6 +1679,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
         }
         // The inliner's proofs describe rows a later call may have changed.
         module->inline_proven = 0;
+        scratch_end(preparation_scratch);
     }
     return result;
 }
