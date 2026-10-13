@@ -757,7 +757,7 @@ jobs:
           persist-credentials: false
       - name: Record pristine FFmpeg source identity
         id: ffmpeg_source_identity
-        if: ${{ !cancelled() && steps.ffmpeg_input.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
@@ -765,7 +765,7 @@ jobs:
           source-repository: FFmpeg/FFmpeg
       - name: Verify pinned FFmpeg source and retain license text
         id: ffmpeg_source_verified
-        if: ${{ !cancelled() && steps.ffmpeg_source_identity.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ffmpeg_input.outcome == 'success' && steps.ffmpeg_source_identity.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
