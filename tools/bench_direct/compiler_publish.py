@@ -52,12 +52,22 @@ Only an attempt whose authenticated workflow revision has no record retention
 step may lack the machine record (machine_record_required); a record that is
 present is still checked.
 
+Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
+artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
+with the strict sampling_archive reader and verified by the trusted native
+`./build.sh compiler_evidence verify` under the identity this publisher
+authorized (verify_evidence_bundle); the receipt's evidence_bundle must name
+the verified manifest (evidence_bundle_problems). An artifact with neither is
+legacy-unsealed: its outcome stands and its raw bytes are reported unverified.
+Anything else fails closed.
+
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle,
 validate_compiler_probes_bundle, validate_frontend_selector_bundle and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 validate_selfhost_inline_bundle (#58),
-decide (pure decision), inventory_rows (discharged inventory rows),
+decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
+(sealed raw evidence), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
 verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
@@ -88,6 +98,7 @@ from inline_acceptance import metrics as inline_metrics, validate_documents as v
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
+from compiler_receipt import EVIDENCE_INVENTORY, EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
@@ -118,6 +129,11 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
+# Sealed raw evidence (#2918): the bundle's 4096 entries plus the receipt and machine record.
+EVIDENCE_ARCHIVE_MEMBERS = 8192
+EVIDENCE_VERIFY_TIMEOUT_SECONDS = 600
+EVIDENCE_VERIFY_COMMAND = (os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                        "build.sh"), "compiler_evidence")
 ANALYZER_MEMBER_LIMIT = 32 * 1024 * 1024
 ANALYZER_BUNDLE_LIMIT = ARTIFACT_LIMIT * 3 // 4
 AUTHORIZE_JOBS = {"main": "Authorize the main commit comparison"}
@@ -504,7 +520,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
            expected_phase_driver_sha256: str | None = None,
            expected_measurement_revision: str | None = None,
            expected_throughput_profile: dict | None = None,
-           dispatch_refusal: str = "") -> tuple[str, str, list[str]]:
+           dispatch_refusal: str = "", evidence_bundle: dict | None = None) -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
     expected_throughput_profile is THROUGHPUT_PROFILE unless hosted pull authorization admitted
@@ -514,6 +530,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
     from the evidence artifact. Scaling is checked whenever the receipt names
     its profile; only a pull request that asked for it has one.
+    evidence_bundle is verify_evidence_bundle's account of the artifact's sealed raw evidence
+    (#2918); None (publication-only recovery, the owned routes) leaves it unchecked.
     A receipt from before the corpus leg (#2761) has no throughput_profile;
     only publication-only recovery of such a past attempt passes
     require_throughput=False, and a receipt that names the profile is always
@@ -604,6 +622,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
                                                         analyzer_bundle))
             else:
+                if evidence_bundle is not None:
+                    reasons.extend(evidence_bundle_problems(receipt, evidence_bundle))
                 reasons.extend(classify(summary, receipt.get("binaries"), expected_profile=expected_profile))
                 reasons.extend(validate_closure(receipt, throughput.get("closure") if isinstance(throughput, dict) else None,
                                                 expected_phase_schema=expected_phase_schema, expected_profile=expected_profile,
@@ -756,6 +776,82 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
             reasons.append(f"host measurement state is {state!r}")
             reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
     return conclusion, title, reasons
+
+
+def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str) -> dict:
+    """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
+
+    {"state": "legacy-unsealed"} when read_evidence found neither control file; {"state": "verified",
+    "members", "payload_bytes", "manifest_sha256"} when `compiler_evidence verify` reproduces the sealed
+    manifest from the extracted bytes; otherwise {"state": "refused", "reason"}. The identity comes from
+    the authorized expected identity and admitted profiles, never from the receipt.
+    """
+    import tempfile
+    result: dict = {"state": "legacy-unsealed"}
+    if "sealed_files" in throughput:
+        files = throughput.get("sealed_files")
+        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile},
+                                     request_attempt)
+        result = {"state": "refused", "reason": throughput.get("sealed_problem") or "sealed evidence archive is unreadable"}
+        if isinstance(files, dict) and not identity:
+            result["reason"] = "the authorized identity cannot name a sealed bundle"
+        elif isinstance(files, dict):
+            try:
+                with tempfile.TemporaryDirectory(prefix="compiler-evidence-") as temporary:
+                    bundle = os.path.join(temporary, "bundle")
+                    os.mkdir(bundle)
+                    for name, data in files.items():
+                        target = os.path.join(bundle, *name.split("/"))
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                                               0o600), "wb") as writer:
+                            writer.write(data)
+                    with open(os.path.join(temporary, "identity.tsv"), "w", encoding="utf-8") as writer:
+                        writer.write(identity)
+                    completed = subprocess.run([*EVIDENCE_VERIFY_COMMAND, "verify", bundle,
+                                                os.path.join(temporary, "identity.tsv")],
+                                               capture_output=True, text=True, timeout=EVIDENCE_VERIFY_TIMEOUT_SECONDS,
+                                               check=False)
+                lines = (completed.stdout or "").strip().splitlines()
+                line = lines[-1] if lines else (completed.stderr or "").strip()[-400:]
+                fields = dict(item.split("=", 1) for item in line.split()[1:] if "=" in item)
+                if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
+                        fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
+                        re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
+                    result = {"state": "verified", "members": int(fields["members"]),
+                              "payload_bytes": int(fields["payload_bytes"]), "manifest_sha256": fields["manifest_sha256"]}
+                else:
+                    result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
+            except (OSError, ValueError, subprocess.SubprocessError, UnicodeError) as error:
+                result["reason"] = f"sealed evidence could not be verified: {error.__class__.__name__}: {error}"
+    return result
+
+
+def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
+    """Reasons a measured receipt's raw-evidence claim disagrees with the verified artifact (#2918)."""
+    claimed = receipt.get("evidence_bundle")
+    problems: list[str] = []
+    if bundle.get("state") == "legacy-unsealed":
+        if claimed is not None:
+            problems.append("receipt names sealed raw evidence that the artifact does not carry")
+    elif bundle.get("state") != "verified":
+        problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
+    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != EVIDENCE_INVENTORY or \
+            any(claimed.get(key) != bundle.get(key) for key in ("manifest_sha256", "members", "payload_bytes")):
+        problems.append("receipt evidence_bundle does not name the verified sealed manifest")
+    return problems
+
+
+def evidence_bundle_note(bundle: dict) -> str:
+    """One report line for the artifact's raw-evidence state; refusals are reasons instead."""
+    note = ""
+    if bundle.get("state") == "legacy-unsealed":
+        note = ("raw evidence: legacy-unsealed (no v1 manifest or seal, #2918); the outcome stands but its "
+                "retained raw bytes are unverified")
+    elif bundle.get("state") == "verified":
+        note = (f"raw evidence: sealed {EVIDENCE_INVENTORY} verified natively, {bundle['members']} members, "
+                f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}")
+    return note
 
 
 class DuplicateKey(ValueError):
@@ -1235,7 +1331,8 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
         problem = "evidence artifact is expired, oversized or malformed"
     else:
         artifact = rows[0]
-        with zipfile.ZipFile(io.BytesIO(api.download(rows[0]["archive_download_url"]))) as archive:
+        payload = api.download(rows[0]["archive_download_url"])
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             # Aliases only detect collisions; required members are still looked up by exact name.
             members: dict = {}
             aliases: set = set()
@@ -1318,6 +1415,14 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                           "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
                                       for index, name in enumerate(SCALING_PROFILE["series"])},
                           "machine": machine}
+            # Sealed raw evidence (#2918): the whole bundle, through the strict bounded reader.
+            if not problem and (EVIDENCE_MANIFEST in members or EVIDENCE_SEAL in members):
+                try:
+                    throughput["sealed_files"] = sampling_archive(payload, member_limit=EVIDENCE_ARCHIVE_MEMBERS,
+                                                                  require_nonexecutable=True)
+                except ValueError as error:
+                    throughput["sealed_files"] = None
+                    throughput["sealed_problem"] = f"sealed evidence archive refused: {error}"
             if isinstance(receipt, dict) and receipt.get("closure") is not None:
                 closure_files: dict = {}
                 for operation in ("snapshot", "restore", "verify"):
@@ -1831,6 +1936,10 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     return text
 
 
+# The bench workflow's run-name: "9700X request <request run>.<request attempt> head <sha>".
+REQUEST_TITLE = re.compile(r"9700X request ([1-9][0-9]*)\.([1-9][0-9]*) head ([0-9a-f]{40})")
+
+
 def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> tuple[dict, str, str, list[str]]:
     """(expected, authorize result, compare result, problems) of a past main attempt from GitHub's records.
 
@@ -1858,6 +1967,11 @@ def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> 
     head = heads[0] if len(heads) == 1 else ""
     expected = {"mode": "main", "repository": repository, "ref": "refs/heads/main", "head": head,
                 "trusted_revision": run.get("head_sha", ""), "run_id": run_id, "run_attempt": attempt}
+    # The workflow's own run-name records the request run and attempt that started it; sealed
+    # raw evidence (#2918) is verified under that original request attempt.
+    title = REQUEST_TITLE.fullmatch(run.get("display_title", "")) if isinstance(run.get("display_title"), str) else None
+    if title and title.group(3) == head:
+        expected["titled_request"] = (title.group(1), title.group(2))
     if not head:
         problems.append(f"expected one evidence artifact of attempt {attempt}, found {len(heads)}")
     return expected, result["authorize"], result["compare"], problems
@@ -5771,6 +5885,7 @@ def main() -> int:
         workflow_revision = ""
         if recover:
             expected, authorize_result, compare_result, problems = recovered_identity(api, repository, run_id, attempt)
+            titled = expected.pop("titled_request", None)
             head = expected["head"]
             authorized = authorize_result == "success" and not problems
             # The original run's own workflow revision, before the Main route rebinds trusted_revision.
@@ -5783,7 +5898,7 @@ def main() -> int:
                         "run_id": run_id, "run_attempt": attempt}
             if mode == "main":
                 expected.update(first_parent=get("BQ_FIRST_PARENT"), range=get("BQ_RANGE"))
-            compare_result, problems = get("BQ_COMPARE_RESULT"), []
+            compare_result, problems, titled = get("BQ_COMPARE_RESULT"), [], None
             authorized = get("BQ_AUTHORIZE_RESULT") == "success" and get("BQ_AUTHORIZED_ATTEMPT") == attempt
         notes.extend(problems)
         receipt = summary = None
@@ -5793,6 +5908,7 @@ def main() -> int:
         route = None
         machine_problems: list[str] = []
         machine_facts: dict = {}
+        evidence_bundle: dict | None = None
         if mode == "main" and authorized:
             try:
                 route = main_route(api, repository, run_id, attempt)
@@ -5829,6 +5945,15 @@ def main() -> int:
                 problems = bind_request(api, expected, receipt, trusted_main_route=route)
                 notes.extend(problems)
                 authorized = not problems
+            owned = route is not None and route["main_owned"]
+            if isinstance(receipt, dict) and not owned and receipt.get("profile") == PROFILE:
+                # Recovery verifies under the original request attempt its own run-name records; one
+                # that names another request run, or none, cannot name a sealed bundle and refuses it.
+                request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
+                    titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt)
+                if evidence_bundle_note(evidence_bundle):
+                    notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):
                 require = not recover or machine_record_required(api, workflow_revision)
                 machine_problems, machine_facts = machine_record(throughput.get("machine"), receipt, mode, run_id,
@@ -5844,7 +5969,7 @@ def main() -> int:
                                                 "expected_measurement_revision": route["main_measurement_revision"]}
                                                if route is not None and route["main_owned"] else
                                                {"expected_throughput_profile": expected_corpus,
-                                                "dispatch_refusal": refusal}))
+                                                "dispatch_refusal": refusal, "evidence_bundle": evidence_bundle}))
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)
@@ -5856,6 +5981,8 @@ def main() -> int:
         shown["inventory_coverage"] = covered_inventory_rows(receipt, conclusion, mode)
         if machine_facts:
             shown["machine"] = machine_facts
+        if evidence_bundle is not None:
+            shown["evidence_bundle_verified"] = evidence_bundle
         if route is not None:
             shown["main_route"] = {key: route[key] for key in ("main_owned", *MAIN_ROUTE_FIELDS)}
         # The corpus as its own retained summary says, never the host's digest.

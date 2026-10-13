@@ -256,6 +256,10 @@ struct CParsePrimitiveSpelling
 BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
+// Size and alignment of an unevaluated sizeof/_Alignof operand whose type is
+// storage-only __fp16 or built from it, which has no canonical IR type.
+BUSTER_C_EXTERN bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                           u32 start, u32 end, bool type_name, u64* size_out, u32* alignment_out);
 // Whether a call through this function type ends control flow because the
 // declarator that derived it spelled `noreturn`. The set behind it is empty
 // in almost every translation unit; see CParseResult.noreturn_function_types.
@@ -1822,6 +1826,17 @@ BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResu
 
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;
+
+#if BUSTER_INCLUDE_TESTS
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, c_parse.c).
+// Lowering asks whether it is on before it does any work for it, then reports
+// each `sizeof` size it settles (or its resolver's refusal) for one keyword
+// token, with the signedness of its integer type when it had one (`typed`):
+// `path` is a C_TEST_SIZEOF_HANDOFF_PATH_* value.
+BUSTER_C_EXTERN bool c_sizeof_handoff_enabled(void);
+BUSTER_C_EXTERN void c_sizeof_handoff_compare(CParseResult* result, CPreprocessResult const* preprocess, u32 keyword, bool answered, u64 size,
+                                              bool typed, bool lowering_signed, u32 path);
+#endif
 
 #if BUSTER_INCLUDE_TESTS
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed

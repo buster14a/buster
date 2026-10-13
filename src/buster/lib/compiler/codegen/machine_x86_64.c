@@ -10063,9 +10063,9 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512_features[] = {S8_INITIALIZE
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER("cx16")};
 
 // Expansion/prologue instructions use a small, closed set of physical
-// shapes.  Each shape resolves through the metadata selector once, on a
-// serial thread, and only the resulting opaque machine token is published to
-// workers.  The signature deliberately describes physical shape/value
+// shapes.  Each shape resolves through the metadata selector once, on the
+// first thread that looks it up, and only the resulting opaque machine token
+// is published, under the entry's once-claim.  The signature deliberately describes physical shape/value
 // classes, not register numbers or byte templates; dynamic registers,
 // displacements, and immediates are still validated by the metadata transform
 // on every emission.
@@ -10074,12 +10074,12 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER(
 // 336 queries each run a generic selector search -- about 45 M instructions
 // in total, more than a one-function compile spends on everything else --
 // while an ordinary compile reaches a few dozen of the 267 distinct shapes.
-// Registration hashes each query and keeps its parameters; the first serial
-// lookup of a registered shape resolves the same query the eager walk would
-// have resolved first, and a shape outside the closed set still misses and
-// fails closed.  machine_x86_64_exact_prewarm_all resolves every
-// registration, including the duplicate-signature agreement checks, and must
-// run before a gang may emit.
+// Registration hashes each query and keeps its parameters; the first lookup
+// of a registered shape, serial or on a lane, resolves the same query the
+// eager walk would have resolved first, and a shape outside the closed set
+// still misses and fails closed.  machine_x86_64_exact_prewarm_all resolves
+// every registration, including the duplicate-signature agreement checks,
+// for the audits.
 #define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 288u
 #define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
 #define MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY 384u
@@ -10087,6 +10087,8 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER(
 #define MACHINE_X64_METADATA_SHAPE_PENDING 0u
 #define MACHINE_X64_METADATA_SHAPE_VALID 1u
 #define MACHINE_X64_METADATA_SHAPE_INVALID 2u
+// The once-claim busy code of an entry being resolved (see once_claim_u8).
+#define MACHINE_X64_METADATA_SHAPE_RESOLVING 3u
 typedef struct MachineX64MetadataShapeCacheEntry MachineX64MetadataShapeCacheEntry;
 struct MachineX64MetadataShapeCacheEntry
 {
@@ -11588,14 +11590,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_x64_encoder_store_field(u8* desti
 // Prewarm registers a dense table (its structural checks, slots, token and
 // flags) without encoding it: the 64 tables cost about 10,800 metadata
 // encodes, while a small compile reads a few cells of a few dozen (#1295).  A
-// cell is encoded on its first serial read, by the same query and probe the
-// eager walk ran for its distinct register key, and a replicated cell copies
-// that key's record.  A zero byte count means not yet encoded; every encoding
-// is at least one byte.  A cell whose encode or probe fails is marked failed
-// and refuses, so the caller takes its metadata path, as it did for an
-// unprepared table.  machine_x86_64_exact_prewarm_all encodes every cell of
-// every table before a gang may emit, so worker lanes only read; it marks a
-// table ready, or failed when any cell refused.
+// cell is encoded on its first read from any thread, by the same query and
+// probe the eager walk ran for its distinct register key, and a replicated
+// cell copies that key's record.  A zero byte count means not yet encoded;
+// every encoding is at least one byte.  Each cell's once-claim byte lives
+// beside the records, not in them: the emitter copies whole records, byte
+// count included, so the byte count has one writer -- a release store after
+// the bytes -- and is only ever loaded by other threads.  A cell whose encode
+// or probe fails is marked failed and refuses, so the caller takes its
+// metadata path, as it did for an unprepared table.
+// machine_x86_64_exact_prewarm_all encodes every cell of every table, for the
+// audits, and marks a table ready, or failed when any cell refused.
 #define MACHINE_X64_GPR_ENCODING_TABLE_PENDING 0u
 #define MACHINE_X64_GPR_ENCODING_TABLE_READY 1u
 #define MACHINE_X64_GPR_ENCODING_TABLE_FAILED 2u
@@ -11603,6 +11608,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_x64_encoder_store_field(u8* desti
 struct MachineX64GprEncodingTable
 {
     MachineX64GprEncoding encodings[256];
+    // Each cell's once-claim: 0 pending, 1 encoding, 2 published.
+    u8 cell_claims[256];
     MachineX64ExactRecipeVariant variant;
     BusterX86MetadataMachineExactToken token;
     u8 operand_slots[2];
@@ -11637,12 +11644,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_gpr_encoding_tables_complete;
 // projection) but does not encode its 768 cells: with their displacement
 // probes that was 1,280 metadata encodes a table, about half of the x86
 // prewarm, while a small compile reads a few dozen cells (#1295).  A cell is
-// encoded and probed on its first serial read, by the same queries the eager
+// encoded and probed on its first read, by the same queries the eager
 // walk ran.  A zero byte count means not yet encoded; every encoding is at
-// least one byte.  A cell whose encode or probe fails is marked failed and
-// refuses, so the caller takes its metadata path, as it did for an
-// unprepared table.  machine_x86_64_exact_prewarm_all encodes every cell
-// before a gang may emit, so worker lanes only read.
+// least one byte.  A cell is encoded on its first read from any thread under
+// its own once-claim byte, beside the table rather than in the record: the
+// emitter copies whole sixteen-byte records, byte count included, so the
+// byte count has one writer -- a release store after the bytes -- and is only
+// ever loaded by other threads.
+// A cell whose encode or probe fails is marked failed and refuses, so the
+// caller takes its metadata path, as it did for an unprepared table.
+// machine_x86_64_exact_prewarm_all encodes every cell, for the audits.
 #define MACHINE_X64_VARIABLE_MEMORY_TABLE_CAPACITY 16u
 #define MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT 3u
 #define MACHINE_X64_VARIABLE_MEMORY_CELL_FAILED UINT8_MAX
@@ -11650,6 +11661,8 @@ BUSTER_CT_CHECK(MACHINE_X64_VARIABLE_MEMORY_TABLE_CAPACITY <= UINT8_MAX);
 struct MachineX64VariableMemoryEncodingTable
 {
     MachineX64GprEncoding encodings[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT][256];
+    // Each cell's once-claim: 0 pending, 1 encoding, 2 published.
+    u8 cell_claims[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT][256];
     BusterX86MetadataMachineExactToken token;
     u16 operand_widths[2];
     u8 gpr_operand_index;
@@ -11776,12 +11789,14 @@ struct MachineX64FixedTemplate
 BUSTER_CT_CHECK(sizeof(MachineX64FixedTemplate) == 16);
 // `valid` is zero for an unpublished or refused row and one for a published
 // row.  Prewarm allots every row but encodes none: it marks each row pending,
-// and the row is encoded and proven on its first serial emit, by the queries
-// the eager walk ran for it, while a small compile emits a handful of rows
-// (#1295).  machine_x86_64_exact_prewarm_all publishes every row before a gang
-// may emit, so worker lanes only read.
+// and the row is encoded and proven on its first emit from any thread, under
+// the row's once-claim, by the queries the eager walk ran for it, while a
+// small compile emits a handful of rows (#1295).
+// machine_x86_64_exact_prewarm_all publishes every row, for the audits.
 #define MACHINE_X64_FIXED_TEMPLATE_PUBLISHED 1u
 #define MACHINE_X64_FIXED_TEMPLATE_PENDING 2u
+// The once-claim busy code of a row being encoded (see once_claim_u8).
+#define MACHINE_X64_FIXED_TEMPLATE_RESOLVING 3u
 BUSTER_GLOBAL_LOCAL MachineX64FixedTemplate machine_x64_fixed_templates[MACHINE_X64_FIXED_TEMPLATE_CAPACITY];
 // The operands, flags and token a dynamic family's rows are encoded from.
 typedef struct MachineX64FixedTemplateFamily MachineX64FixedTemplateFamily;
@@ -11824,7 +11839,7 @@ BUSTER_GLOBAL_LOCAL MachineX64FixedTemplateResult machine_x64_emit_fixed_templat
 {
     MachineX64FixedTemplateResult result;
     if (template_id >= MACHINE_X64_FIXED_TEMPLATE_CAPACITY ||
-        (machine_x64_fixed_templates[template_id].valid != MACHINE_X64_FIXED_TEMPLATE_PUBLISHED &&
+        (atomic_u8_load_acquire(&machine_x64_fixed_templates[template_id].valid) != MACHINE_X64_FIXED_TEMPLATE_PUBLISHED &&
          !machine_x64_fixed_template_resolve(template_id)))
     {
         result = MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED;
@@ -11869,14 +11884,14 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_fixed_template_family_row(u32 family, u32 re
     return reg < 16 ? family + reg : MACHINE_X64_FIXED_TEMPLATE_NONE;
 }
 
-// Publishes one encoding -- the bytes a scratch encoder received from the
-// bridge or from a token -- as template `template_id`.  A patched template
-// is published holding its representative value in the trailing
-// `patch_width` bytes; machine_x64_fixed_template_prove then has to accept
-// a second encoding of the shape before a worker may rely on the store.
-BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_publish(u32 template_id, MachineX64Encoder const* encoder, u8 patch_width)
+// Records one encoding -- the bytes a scratch encoder received from the
+// bridge or from a token -- in `record`, the resolver's local copy of a
+// template row.  A patched template holds its representative value in the
+// trailing `patch_width` bytes; machine_x64_fixed_template_prove then has to
+// accept a second encoding of the shape before a worker may rely on the
+// store.  machine_x64_fixed_template_resolve publishes the row.
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_publish(MachineX64FixedTemplate* record, MachineX64Encoder const* encoder, u8 patch_width)
 {
-    MachineX64FixedTemplate* record = machine_x64_fixed_templates + template_id;
     *record = (MachineX64FixedTemplate){0};
     if (!encoder->overflow && encoder->count != 0 && encoder->count <= sizeof(record->bytes) && encoder->count >= patch_width)
     {
@@ -11888,7 +11903,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_publish(u32 template_id, Mac
     }
     else
     {
-        machine_x64_fixed_template_invalid_count += 1;
+        (void)atomic_u32_add(&machine_x64_fixed_template_invalid_count, 1);
     }
 }
 
@@ -11897,9 +11912,8 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_publish(u32 template_id, Mac
 // field and spells `probe_value` little-endian inside it.  Any difference
 // retires the template: the worker's store would not reproduce what the
 // authority encodes for that value class.
-BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prove(u32 template_id, MachineX64Encoder const* probe_encoder, u64 probe_value)
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prove(MachineX64FixedTemplate* record, MachineX64Encoder const* probe_encoder, u64 probe_value)
 {
-    MachineX64FixedTemplate* record = machine_x64_fixed_templates + template_id;
     bool valid = record->valid && record->patch_width && !probe_encoder->overflow &&
                  probe_encoder->count == record->byte_count;
     for (u32 byte_index = 0; valid && byte_index < record->byte_count; byte_index += 1)
@@ -11907,7 +11921,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prove(u32 template_id, Machi
         u8 expected = (u8)(byte_index >= record->patch_offset ? probe_value >> ((byte_index - record->patch_offset) * 8u) : record->bytes[byte_index]);
         valid = probe_encoder->bytes[byte_index] == expected;
     }
-    if (record->valid && !valid) machine_x64_fixed_template_invalid_count += 1;
+    if (record->valid && !valid) (void)atomic_u32_add(&machine_x64_fixed_template_invalid_count, 1);
     record->valid = valid ? 1 : 0;
 }
 
@@ -12267,11 +12281,10 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
 
 // Encode one distinct register key of a registered table, then probe its
 // immediate or displacement field, with the queries the eager table walk ran
-// for it.  Serial only: worker lanes read cells that
-// machine_x64_gpr_encoding_tables_fill_all has already encoded.
-BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_gpr_encoding_cell_fill(MachineX64GprEncodingTable* table, u32 register_key)
+// for it, and answer the byte count to publish.  The caller holds the cell's
+// once-claim.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD u8 machine_x64_gpr_encoding_cell_fill(MachineX64GprEncodingTable* table, u32 register_key)
 {
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
     MachineX64ExactRecipeVariant const* variant = &table->variant;
     BusterX86MetadataMachineExactToken token = table->token;
     u8 immediate_operand_index = table->immediate_operand_index;
@@ -12368,10 +12381,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_gpr_encoding_cell_fill(MachineX
         valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 0 &&
                 emitted.byte_count <= BUSTER_ARRAY_LENGTH(encoding->bytes);
     }
-    if (valid)
-    {
-        encoding->byte_count = (u8)emitted.byte_count;
-    }
+    // The byte count is not stored here: the caller publishes it with a
+    // release store once every probe below has passed.
     if (valid && immediate_operand_index != UINT8_MAX)
     {
         valid = emitted.byte_count >= immediate_width;
@@ -12432,37 +12443,40 @@ BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_gpr_encoding_cell_fill(MachineX
     {
         published->bytes[MACHINE_X64_GPR_ENCODING_COMPACT_BYTES] = (u8)emitted.byte_count;
     }
-    published->byte_count = valid && emitted.byte_count ? (u8)emitted.byte_count : MACHINE_X64_GPR_ENCODING_CELL_FAILED;
+    u8 result = valid && emitted.byte_count ? (u8)emitted.byte_count : MACHINE_X64_GPR_ENCODING_CELL_FAILED;
+    return result;
 }
 
 // The byte count of cell `register_key`, encoding its distinct key first if
-// this is the first read of either; zero refuses the cell.  The projection
-// consumes zero, one or two register nibbles, so higher key bits cannot
-// affect any operand, feature or probe: a replicated cell copies only the
-// bytes the metadata query wrote for its distinct key.
+// this is the first read of either, from any thread; zero refuses the cell.
+// The projection consumes zero, one or two register nibbles, so higher key
+// bits cannot affect any operand, feature or probe: a replicated cell copies
+// only the bytes the metadata query wrote for its distinct key.  The two
+// claims are taken one after the other, never nested.
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST u32 machine_x64_gpr_encoding_resolve_cell(u32 table_index, u32 register_key)
 {
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + table_index;
     u32 distinct_key = register_key & ((1u << (4u * table->operand_count)) - 1u);
     MachineX64GprEncoding* source = table->encodings + distinct_key;
-    if (!source->byte_count)
+    if (once_claim_u8(&table->cell_claims[distinct_key], 0, 1, BUSTER_X86_ONCE_LEVEL_MACHINE_TABLE))
     {
-        machine_x64_gpr_encoding_cell_fill(table, distinct_key);
+        atomic_u8_store_release(&source->byte_count, machine_x64_gpr_encoding_cell_fill(table, distinct_key));
+        once_publish_u8(&table->cell_claims[distinct_key], 2);
     }
     MachineX64GprEncoding* encoding = table->encodings + register_key;
-    if (!encoding->byte_count)
+    if (register_key != distinct_key && once_claim_u8(&table->cell_claims[register_key], 0, 1, BUSTER_X86_ONCE_LEVEL_MACHINE_TABLE))
     {
-        BUSTER_CHECK_SERIAL_INITIALIZATION();
         memcpy(encoding->bytes, source->bytes, sizeof(encoding->bytes));
-        encoding->byte_count = source->byte_count;
+        atomic_u8_store_release(&encoding->byte_count, atomic_u8_load_acquire(&source->byte_count));
+        once_publish_u8(&table->cell_claims[register_key], 2);
     }
-    u32 result = encoding->byte_count == MACHINE_X64_GPR_ENCODING_CELL_FAILED ? 0 : encoding->byte_count;
+    u32 byte_count = atomic_u8_load_acquire(&encoding->byte_count);
+    u32 result = byte_count == MACHINE_X64_GPR_ENCODING_CELL_FAILED ? 0 : byte_count;
     return result;
 }
 
 // The complete preparation: every cell of every registered table, in key
-// order, then each table's ready or failed state.  Call it serially before
-// any lane_run that may emit x86-64 code.
+// order, then each table's ready or failed state, for the audits.
 BUSTER_GLOBAL_LOCAL void machine_x64_gpr_encoding_tables_fill_all(void)
 {
     if (!machine_x64_gpr_encoding_tables_complete)
@@ -12484,12 +12498,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_gpr_encoding_tables_fill_all(void)
 }
 
 // Encode one cell, then probe its displacement field, with the queries the
-// eager table walk ran for it.  Serial only: worker lanes read cells that
-// machine_x64_variable_memory_fill_all_cells has already encoded.
-BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_variable_memory_fill_cell(
+// eager table walk ran for it, and answer the byte count to publish.  The
+// caller holds the cell's once-claim.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD u8 machine_x64_variable_memory_fill_cell(
     MachineX64VariableMemoryEncodingTable* table, u32 displacement_class, u32 register_key)
 {
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
     s32 const class_displacements[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT] = {
         0,
         INT32_C(0x5a),
@@ -12566,28 +12579,31 @@ BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_variable_memory_fill_cell(
         }
     }
 
-    encoding->byte_count = valid ? (u8)emitted.byte_count : MACHINE_X64_VARIABLE_MEMORY_CELL_FAILED;
+    u8 result = valid ? (u8)emitted.byte_count : MACHINE_X64_VARIABLE_MEMORY_CELL_FAILED;
     WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_CELLS_BUILT, 1);
+    return result;
 }
 
-// The byte count of one cell, encoding it first if this is its first read;
-// zero refuses the cell.
+// The byte count of one cell, encoding it first if this is its first read
+// from any thread; zero refuses the cell.
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST u32 machine_x64_variable_memory_resolve_cell(
     u32 table_index, u32 displacement_class, u32 register_key)
 {
     MachineX64VariableMemoryEncodingTable* table = machine_x64_variable_memory_encoding_tables + table_index;
-    MachineX64GprEncoding const* encoding = table->encodings[displacement_class] + register_key;
-    if (!encoding->byte_count)
+    MachineX64GprEncoding* encoding = table->encodings[displacement_class] + register_key;
+    u8* claim = &table->cell_claims[displacement_class][register_key];
+    if (once_claim_u8(claim, 0, 1, BUSTER_X86_ONCE_LEVEL_MACHINE_TABLE))
     {
-        machine_x64_variable_memory_fill_cell(table, displacement_class, register_key);
+        atomic_u8_store_release(&encoding->byte_count, machine_x64_variable_memory_fill_cell(table, displacement_class, register_key));
+        once_publish_u8(claim, 2);
     }
-    u32 result = encoding->byte_count == MACHINE_X64_VARIABLE_MEMORY_CELL_FAILED ? 0 : encoding->byte_count;
+    u32 byte_count = atomic_u8_load_acquire(&encoding->byte_count);
+    u32 result = byte_count == MACHINE_X64_VARIABLE_MEMORY_CELL_FAILED ? 0 : byte_count;
     return result;
 }
 
 // The complete preparation: every cell of every registered table, in the
-// order the eager walk encoded them.  Call it serially before any lane_run
-// that may emit x86-64 code.
+// order the eager walk encoded them, for the audits.
 BUSTER_GLOBAL_LOCAL void machine_x64_variable_memory_fill_all_cells(void)
 {
     if (!machine_x64_variable_memory_encoding_tables_complete)
@@ -12595,15 +12611,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_variable_memory_fill_all_cells(void)
         BUSTER_CHECK_SERIAL_INITIALIZATION();
         for (u32 table_index = 0; table_index < machine_x64_variable_memory_encoding_table_count; table_index += 1)
         {
-            MachineX64VariableMemoryEncodingTable* table = machine_x64_variable_memory_encoding_tables + table_index;
             for (u32 displacement_class = 0; displacement_class < MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT; displacement_class += 1)
             {
                 for (u32 register_key = 0; register_key < 256; register_key += 1)
                 {
-                    if (!table->encodings[displacement_class][register_key].byte_count)
-                    {
-                        machine_x64_variable_memory_fill_cell(table, displacement_class, register_key);
-                    }
+                    (void)machine_x64_variable_memory_resolve_cell(table_index, displacement_class, register_key);
                 }
             }
         }
@@ -12864,14 +12876,15 @@ void machine_x86_64_exact_prewarm(void)
     // codegen_prewarm() completes before any worker lane can observe globals.
     // Closed-set shapes stay registered but unresolved, dense tables,
     // template rows and variable-memory cells outside the frame-chunk rows
-    // stay unencoded: a serial compile prepares the few it emits on first use.
+    // stay unencoded: a compile, serial or on lanes, prepares the few it
+    // emits on first use, each under its once-claim.
     machine_x64_exact_opcode_map_ready = true;
 }
 
-// The gang form of the prewarm: also resolves every registered shape and
-// encodes every dense table, variable-memory cell and template row, so a
-// worker lane's bridge lookups and table reads are plain reads.  Call it serially before any lane_run that may
-// emit x86-64 code, like buster_x86_metadata_prewarm_all_forms.
+// The complete form of the prewarm: also resolves every registered shape and
+// encodes every dense table, variable-memory cell and template row, with the
+// duplicate-signature agreement checks, for the audits and the test harness.
+// Lanes do not need it: they fill what they emit, like a serial compile.
 void machine_x86_64_exact_prewarm_all(void)
 {
     machine_x86_64_exact_prewarm();
@@ -13470,18 +13483,23 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
     return result;
 }
 
-// A failed resolution refuses every later bridge emission, as a failed eager
-// walk refused all of them.
+// Resolves a pending entry under its once-claim, from any thread; a thread
+// that meets the entry busy waits for the resolver's result.  A failed
+// resolution refuses that shape only.  The eager walk refused every bridge
+// emission instead, but on lanes "every later emission" would depend on
+// timing; the shape-cache audit keeps the closed set free of invalid entries,
+// so only corrupt metadata reaches this.
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_entry(MachineX64MetadataShapeCacheEntry* entry)
 {
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
-    bool valid = machine_x64_metadata_shape_resolve(machine_x64_metadata_shape_registrations + entry->registration, &entry->token);
-    entry->state = valid ? MACHINE_X64_METADATA_SHAPE_VALID : MACHINE_X64_METADATA_SHAPE_INVALID;
-    machine_x64_metadata_shape_cache_resolved_count += 1;
-    if (!valid)
+    if (once_claim_u8(&entry->state, MACHINE_X64_METADATA_SHAPE_PENDING, MACHINE_X64_METADATA_SHAPE_RESOLVING, BUSTER_X86_ONCE_LEVEL_SHAPE))
     {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        machine_x64_metadata_shape_cache_ready = false;
+        bool valid = machine_x64_metadata_shape_resolve(machine_x64_metadata_shape_registrations + entry->registration, &entry->token);
+        (void)atomic_u32_add(&machine_x64_metadata_shape_cache_resolved_count, 1);
+        if (!valid)
+        {
+            (void)atomic_u32_add(&machine_x64_metadata_shape_cache_invalid_count, 1);
+        }
+        once_publish_u8(&entry->state, valid ? MACHINE_X64_METADATA_SHAPE_VALID : MACHINE_X64_METADATA_SHAPE_INVALID);
     }
 }
 
@@ -13521,9 +13539,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
     }
 }
 
-// A registered shape still pending is resolved here, on its first lookup;
-// only a serial thread may do that, which BUSTER_CHECK_SERIAL_INITIALIZATION
-// enforces.  Shapes outside the closed set still miss.
+// A registered shape still pending is resolved here, on its first lookup,
+// by whichever thread reaches it first.  Shapes outside the closed set still
+// miss.
 BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metadata_shape_cache_find(
     String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
     BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
@@ -13547,12 +13565,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metada
         }
         slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
     }
-    if (found && found->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+    u8 state = found ? atomic_u8_load_acquire(&found->state) : MACHINE_X64_METADATA_SHAPE_INVALID;
+    if (BUSTER_UNLIKELY(state == MACHINE_X64_METADATA_SHAPE_PENDING || state == MACHINE_X64_METADATA_SHAPE_RESOLVING))
     {
         machine_x64_metadata_shape_cache_resolve_entry(found);
+        state = atomic_u8_load_acquire(&found->state);
     }
 
-    return found && found->state == MACHINE_X64_METADATA_SHAPE_VALID ? &found->token : 0;
+    return state == MACHINE_X64_METADATA_SHAPE_VALID ? &found->token : 0;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_publish_slots(void)
@@ -14406,7 +14426,7 @@ BUSTER_GLOBAL_LOCAL MachineX64Encoder machine_x64_fixed_template_scratch(u8* byt
 // Encodes one static row -- and proves a patched row's second value class --
 // through the bridge shapes the encoder site names.  A row with no shape
 // here stays unpublished.
-BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_static_row(u32 template_id)
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_static_row(u32 template_id, MachineX64FixedTemplate* record)
 {
     u8 scratch_bytes[16];
     u8 probe_bytes[16];
@@ -14433,19 +14453,19 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_static_row(u32 templ
     {
     case MACHINE_X64_FIXED_TEMPLATE_PUSH:
         (void)machine_x64_emit_metadata_register(&scratch, S8("PUSH"), reg, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_POP:
         (void)machine_x64_emit_metadata_register(&scratch, S8("POP"), reg, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_CALL_REGISTER:
         (void)machine_x64_emit_metadata_register(&scratch, S8("CALL"), reg, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_JMP_REGISTER:
         (void)machine_x64_emit_metadata_register(&scratch, S8("JMP"), reg, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_LEA_RIP:
     {
@@ -14453,49 +14473,49 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_static_row(u32 templ
             machine_x64_exact_gpr_operand(reg, 64), machine_x64_exact_rip_memory_operand(),
         };
         (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEA"), rip_operands, 2, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     }
     case MACHINE_X64_FIXED_TEMPLATE_MOV_R32_IMM32:
         // The case-value move is proven for both non-negative classes the
         // chain passes: a byte and a full 32-bit value.
         (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("MOV"), reg, 0, 32, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        machine_x64_fixed_template_publish(record, &scratch, 4);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), reg, 0x5a, 32, 32, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, 0x5a);
+        machine_x64_fixed_template_prove(record, &probe, 0x5a);
         probe = machine_x64_fixed_template_scratch(probe_bytes);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), reg, UINT64_C(0x5aa55aa5), 32, 32, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, UINT64_C(0x5aa55aa5));
+        machine_x64_fixed_template_prove(record, &probe, UINT64_C(0x5aa55aa5));
         break;
     case MACHINE_X64_FIXED_TEMPLATE_CMP32_RCX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RCX, reg, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RCX, reg, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("XOR"), reg, reg, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_LEAVE:
         (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEAVE"), 0, 0, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8:
     case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8:
         (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -8, store, 128, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 1);
+        machine_x64_fixed_template_publish(record, &scratch, 1);
         (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5b, store, 128, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, (u8)(-0x5b));
+        machine_x64_fixed_template_prove(record, &probe, (u8)(-0x5b));
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32:
     case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32:
         (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x1000, store, 128, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        machine_x64_fixed_template_publish(record, &scratch, 4);
         (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5aa55aa5, store, 128, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, (u32)-0x5aa55aa5);
+        machine_x64_fixed_template_prove(record, &probe, (u32)-0x5aa55aa5);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_POINTER:
     {
@@ -14510,104 +14530,104 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_static_row(u32 templ
         u8 const patch_widths[3] = {0, 1, 4};
         (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, base, representatives[displacement_class], pointer_store,
                                                    128, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, patch_widths[displacement_class]);
+        machine_x64_fixed_template_publish(record, &scratch, patch_widths[displacement_class]);
         if (displacement_class)
         {
             (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, base, probes[displacement_class], pointer_store, 128, 0);
-            machine_x64_fixed_template_prove(template_id, &probe, (u64)probes[displacement_class]);
+            machine_x64_fixed_template_prove(record, &probe, (u64)probes[displacement_class]);
         }
         break;
     }
     case MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_CMP64_RAX_RCX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     // The patched rows: publish a representative of the value class the
     // site passes, then prove a second value of the same class moves only
     // the trailing field.
     case MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM8:
         (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("SUB"), MACHINE_X64_RSP, 16, 64, 8, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 1);
+        machine_x64_fixed_template_publish(record, &scratch, 1);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("SUB"), MACHINE_X64_RSP, 0x5a, 64, 8, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, 0x5a);
+        machine_x64_fixed_template_prove(record, &probe, 0x5a);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM32:
         (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("SUB"), MACHINE_X64_RSP, 4096, 64, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        machine_x64_fixed_template_publish(record, &scratch, 4);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("SUB"), MACHINE_X64_RSP, UINT64_C(0x5aa55aa5), 64, 32, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, UINT64_C(0x5aa55aa5));
+        machine_x64_fixed_template_prove(record, &probe, UINT64_C(0x5aa55aa5));
         break;
     case MACHINE_X64_FIXED_TEMPLATE_PROBE:
         (void)machine_x64_emit_metadata_memory_immediate(&scratch, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_LEA_RSP_RBP_DISP8:
         (void)machine_x64_emit_metadata_register_memory(&scratch, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, -8, 64, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 1);
+        machine_x64_fixed_template_publish(record, &scratch, 1);
         (void)machine_x64_emit_metadata_register_memory(&probe, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, -0x5b, 64, 64, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, (u8)(-0x5b));
+        machine_x64_fixed_template_prove(record, &probe, (u8)(-0x5b));
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MOV_EAX_IMM32:
         (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("MOV"), MACHINE_X64_RAX, 0, 32, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        machine_x64_fixed_template_publish(record, &scratch, 4);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), MACHINE_X64_RAX, 0x5a, 32, 32, 0);
-        machine_x64_fixed_template_prove(template_id, &probe, 0x5a);
+        machine_x64_fixed_template_prove(record, &probe, 0x5a);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_RET:
         (void)machine_x64_emit_metadata_instruction(&scratch, S8("RET"), 0, 0, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_CALL_REL32:
         (void)machine_x64_emit_metadata_relative(&scratch, S8("CALL"), 0, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_JMP_REL32:
         (void)machine_x64_emit_metadata_relative(&scratch, S8("JMP"), 0, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_JZ_REL32:
         (void)machine_x64_emit_metadata_relative(&scratch, S8("JZ"), 0, 32, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_VZEROUPPER:
         (void)machine_x64_emit_metadata_instruction(&scratch, S8("VZEROUPPER"), 0, 0, avx, attributes, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_UD2:
         (void)machine_x64_emit_metadata_instruction(&scratch, S8("UD2"), 0, 0, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("XOR"), MACHINE_X64_RDX, MACHINE_X64_RDX, width, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_DIV_RCX:
         (void)machine_x64_emit_metadata_register(&scratch, S8("DIV"), MACHINE_X64_RCX, width, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX:
         (void)machine_x64_emit_metadata_register(&scratch, S8("IDIV"), MACHINE_X64_RCX, width, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO:
         (void)machine_x64_emit_metadata_instruction(&scratch, width_row ? S8("CQO") : S8("CDQ"), 0, 0, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, width, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     case MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64:
         (void)machine_x64_emit_metadata_register(&scratch, S8("MUL"), MACHINE_X64_RCX, 64, 0);
-        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        machine_x64_fixed_template_publish(record, &scratch, 0);
         break;
     default:
         break;
@@ -14807,7 +14827,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void)
 // Encodes one dynamic row the way its recipe tail or sequence step would
 // have: the family's token and fixed operands, the row's register in its
 // GPR slot.
-BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_dynamic_row(u32 template_id)
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_dynamic_row(u32 template_id, MachineX64FixedTemplate* record)
 {
     MachineX64FixedTemplateFamily const* family =
         machine_x64_fixed_template_families + machine_x64_fixed_template_row_families[template_id - MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT];
@@ -14822,33 +14842,39 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_dynamic_row(u32 temp
     MachineX64Encoder scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_exact_form(&scratch, family->token, operands, family->operand_count, family->force_disp32 != 0,
                                       family->force_lock != 0, family->mask_register_plus_one, family->zeroing != 0, 0);
-    machine_x64_fixed_template_publish(template_id, &scratch, 0);
+    machine_x64_fixed_template_publish(record, &scratch, 0);
 }
 
-// Encodes a pending row on its first emit; false keeps the caller's
-// metadata lane.  Serial only, like every lazily published table.
+// Encodes a pending row on its first emit, from any thread, into a local
+// copy under the row's once-claim, then publishes the bytes before the state;
+// a thread that meets the row being encoded waits.  False keeps the caller's
+// metadata lane.
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST bool machine_x64_fixed_template_resolve(u32 template_id)
 {
     MachineX64FixedTemplate* record = machine_x64_fixed_templates + template_id;
-    if (record->valid == MACHINE_X64_FIXED_TEMPLATE_PENDING)
+    if (once_claim_u8(&record->valid, MACHINE_X64_FIXED_TEMPLATE_PENDING, MACHINE_X64_FIXED_TEMPLATE_RESOLVING, BUSTER_X86_ONCE_LEVEL_TEMPLATE))
     {
-        BUSTER_CHECK_SERIAL_INITIALIZATION();
-        *record = (MachineX64FixedTemplate){0};
+        MachineX64FixedTemplate prepared = {0};
         if (template_id < MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT)
         {
-            machine_x64_fixed_template_prepare_static_row(template_id);
+            machine_x64_fixed_template_prepare_static_row(template_id, &prepared);
         }
         else
         {
-            machine_x64_fixed_template_prepare_dynamic_row(template_id);
+            machine_x64_fixed_template_prepare_dynamic_row(template_id, &prepared);
         }
+        memcpy(record->bytes, prepared.bytes, sizeof(record->bytes));
+        record->byte_count = prepared.byte_count;
+        record->patch_offset = prepared.patch_offset;
+        record->patch_width = prepared.patch_width;
+        once_publish_u8(&record->valid, prepared.valid ? MACHINE_X64_FIXED_TEMPLATE_PUBLISHED : 0);
     }
-    bool result = record->valid == MACHINE_X64_FIXED_TEMPLATE_PUBLISHED;
+    bool result = atomic_u8_load_acquire(&record->valid) == MACHINE_X64_FIXED_TEMPLATE_PUBLISHED;
     return result;
 }
 
-// The complete preparation: every allotted row, in row order.  Call it
-// serially before any lane_run that may emit x86-64 code.
+// The complete preparation: every allotted row, in row order, for the
+// audits.
 BUSTER_GLOBAL_LOCAL void machine_x64_fixed_templates_publish_all(void)
 {
     if (!machine_x64_fixed_templates_complete)
@@ -15246,7 +15272,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
         u32 cell_byte_count = 0;
         if (table_index < machine_x64_gpr_encoding_table_count)
         {
-            cell_byte_count = machine_x64_gpr_encoding_tables[table_index].encodings[reg].byte_count;
+            cell_byte_count = atomic_u8_load_acquire(&machine_x64_gpr_encoding_tables[table_index].encodings[reg].byte_count);
             if (BUSTER_UNLIKELY(cell_byte_count - 1u >= sizeof(machine_x64_gpr_encoding_tables[table_index].encodings[reg].bytes)))
             {
                 cell_byte_count = machine_x64_gpr_encoding_resolve_cell(table_index, reg);
@@ -15351,7 +15377,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
         WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLE_READS, 1);
         u32 register_key = reg + (base << 4);
         MachineX64GprEncoding const* encoding = table->encodings[displacement_class] + register_key;
-        u32 byte_count = encoding->byte_count;
+        u32 byte_count = atomic_u8_load_acquire(&encoding->byte_count);
         // Not yet encoded (zero) or failed: one unsigned compare sends both
         // to the cold path, which encodes on first read or refuses.
         if (BUSTER_UNLIKELY(byte_count - 1u >= BUSTER_ARRAY_LENGTH(encoding->bytes)))
@@ -15547,7 +15573,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             }
             u32 register_key = low_register + ((u32)high_register << 4);
             MachineX64GprEncoding const* encoding = table->encodings + register_key;
-            u32 byte_count = encoding->byte_count;
+            u32 byte_count = atomic_u8_load_acquire(&encoding->byte_count);
             // Not yet encoded (zero) or refused: one unsigned compare sends both
             // to the cold path, which encodes on first read or refuses; a
             // refused cell takes the lanes below.
