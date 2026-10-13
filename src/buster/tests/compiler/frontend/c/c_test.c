@@ -16096,6 +16096,8 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = 
     "}\n");
 #endif
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program);
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
