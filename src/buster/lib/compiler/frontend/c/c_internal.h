@@ -1592,6 +1592,10 @@ struct CTypeParseMachine
     // c_parse_region_facts) and by a top-level query's answer inside one
     // (c_ast_types_facts_answer).
     CAstFacts* ast_facts;
+    // The mutation count a valid root query reached before
+    // c_type_parse_root_finish dropped its records (the records stay in
+    // place): the completion run reads it to undo a run that mutated a row.
+    u32 committed_mutation_count;
     // The body binder's statement plan (c_parse_statement_plan_build) reads
     // the same tree: `ast_statement_bodies` holds the `{` of every top-level
     // function definition, ascending, and its COMPOUND_STATEMENT node, built

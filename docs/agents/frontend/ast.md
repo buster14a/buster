@@ -227,8 +227,8 @@ each `node_count` long, about 9 bytes per node:
 | Column | Bytes | Meaning |
 |---|---|---|
 | `types` | 4 | the node's C type row (`CTypeId` value), or `C_AST_FACT_NONE` |
-| `payloads` | 4 | per flag: the entity an `IDENTIFIER` names, or a bit-field member's width |
-| `flags` | 1 | `CAstFactFlag`: candidate, typed, from the machine, nonplace, bound, bit-field |
+| `payloads` | 4 | per flag: the entity an `IDENTIFIER` names, a bit-field member's width, or a string literal's length |
+| `flags` | 1 | `CAstFactFlag`: candidate, typed, from the machine, nonplace, bound, bit-field, string |
 
 The columns are dense because the tree is complete before analysis starts,
 so the node count is known and the record never grows. The tree typer's
@@ -263,10 +263,20 @@ it publishes and does not parse differently.
    the machine over its span, unchecked and in the region's mode, operands
    before operators, so each operator's run reads its operands' answers from
    the body's memo (`c_parse_region_facts`). The typer is set aside for these
-   queries. An answer is kept only when the run left every table as it was:
-   no row, bound, alignment, member, entity or scope appended, no row
-   mutated and no diagnostic. Otherwise the run is rolled back, the memo slot
-   it may have overwritten is restored, and the node is a gap.
+   queries. Nothing a run appends or mutates is kept. A run that appended a
+   row, bound, alignment record or interned-log entry, or mutated a row, is
+   rolled back, including the mutations a valid root commits
+   (`CTypeParseMachine.committed_mutation_count`), and the memo slot it may
+   have overwritten is restored. Its answer is still the node's fact when the
+   run added no member, entity, scope or diagnostic and either:
+   - the answer's row is older than the run, because the appended rows were an
+     operand's (a string literal under `[]`); or
+   - the node is a string literal. Its array row is kept in structural form
+     (`C_AST_FACT_STRING`): `types` holds the element row and `payloads` the
+     length with its terminator (`c_ast_types_facts_string`). A validator's
+     query that answers a string literal is kept in the same form.
+
+   Any other node is a gap.
 
 **Why a completion may not append.** Lowering maps every C type row to an IR
 type up front (`c_type_ir_map`), and `-g` describes every IR type. A row that

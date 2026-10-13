@@ -1797,6 +1797,7 @@ BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CPar
     }
     else
     {
+        machine->committed_mutation_count = machine->mutation_count;
         machine->mutation_count = mutation_mark;
     }
     if (machine->failed)
@@ -9064,10 +9065,15 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 u8 saved_flags = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0;
                 CParseResult checkpoint = *result;
                 u32 mutation_mark = machine->mutation_count;
+                machine->committed_mutation_count = mutation_mark;
                 CTypeId type = C_TYPE_ID_INVALID;
                 bool valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
                 facts->statistics.completion_queries += 1;
-                bool sound = !machine->failed && c_parse_region_facts_sound(machine, result, &checkpoint, mutation_mark);
+                // A valid root drops the records of the rows it mutated; they
+                // are still in place, so the rollback below can undo them.
+                bool mutated = machine->committed_mutation_count > mutation_mark;
+                machine->mutation_count = mutated ? machine->committed_mutation_count : machine->mutation_count;
+                bool sound = !mutated && !machine->failed && c_parse_region_facts_sound(machine, result, &checkpoint, mutation_mark);
                 bool appended = result->type_count != checkpoint.type_count || result->array_bound_count != checkpoint.array_bound_count ||
                                 result->type_alignment_count != checkpoint.type_alignment_count ||
                                 result->interned_type_count != checkpoint.interned_type_count ||
