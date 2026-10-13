@@ -1088,17 +1088,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
 #if !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
     u64 position = arena->position;
-    String8 input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-identity"), S8(".c")), false);
-    String8 forced_include = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-forced"), S8(".h")), false);
-    String8 object = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-object"), S8(".o")), false);
-    String8 hard_link = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-hard-link"), S8(".o")), false);
-    String8 symlink_path = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-symlink"), S8(".c")), false);
+    String8 input = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-identity"), S8(".c")), false);
+    String8 forced_include = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-forced"), S8(".h")), false);
+    String8 object = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-object"), S8(".o")), false);
+    String8 hard_link = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-hard-link"), S8(".o")), false);
+    String8 symlink_path = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-symlink"), S8(".c")), false);
     String8 forced_search_directory =
-        os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-forced-search"), S8("")), false);
+        os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-forced-search"), S8("")), false);
     String8 forced_search_header = string_format_z(arena, S8("{S8}/guard.h"), forced_search_directory);
     String8 forced_search_input =
-        os_path_absolute(arena, string_format_z(arena, S8("{S8}/search.c"), forced_search_directory), false);
-    String8 multi_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-multi"), S8(".c")), false);
+        os_path_absolute_lexical(arena, string_format_z(arena, S8("{S8}/search.c"), forced_search_directory), false);
+    String8 multi_input = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-multi"), S8(".c")), false);
     u64 multi_name = 0;
     u64 multi_extension = multi_input.length;
     for (u64 index = multi_input.length; index != 0; index -= 1)
@@ -1117,9 +1117,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     String8 multi_stem = {.pointer = multi_input.pointer + multi_name, .length = multi_extension - multi_name};
     String8 multi_output = string_format_z(arena, S8("{S8}.o"), multi_stem);
     String8 multi_bitcode_output = string_format_z(arena, S8("{S8}.bc"), multi_stem);
-    String8 assembly_directory = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8("")), false);
-    String8 assembly_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8(".S")), false);
-    String8 assembly_c_input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-assembly-main"), S8(".c")), false);
+    String8 assembly_directory = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8("")), false);
+    String8 assembly_input = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-assembly"), S8(".S")), false);
+    String8 assembly_c_input = os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-assembly-main"), S8(".c")), false);
     String8 assembly_header = string_format_z(arena, S8("{S8}/victim.h"), assembly_directory);
     String8 wasm_default_output = {0};
     if (input.length >= 2)
