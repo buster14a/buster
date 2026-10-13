@@ -56,6 +56,8 @@
 // block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
 // reuses a constant built earlier in the current block (CIrConstantIntern),
 // re-proving the cached row against retraction and truncation on every hit.
+// In BUSTER_BENCH_ALLOCATIONS builds c_ir_fold_census_body takes the #3010
+// end-of-body fold census between body lowering and SSA finish.
 // c_ir_string_object shares typed static storage between literal operands and
 // runtime places; c_ir_static_compound_literal_object guards the new general
 // compound-address materialization entry while retaining legacy shortcuts.
@@ -7638,6 +7640,33 @@ BUSTER_C_INTERNAL void c_ir_ssa_follow_retracted_row(CIntegerIrBuilder* builder,
         ssa->reads[index - 1].instruction_count = row.value;
     }
 }
+
+#if BUSTER_BENCH_ALLOCATIONS
+// The end-of-body fold census (#3010), between body lowering and SSA finish.
+// Direct SSA still holds stored values in its store events and resolved reads
+// rather than in rows, so they are handed over as readers. Always true.
+BUSTER_C_INTERNAL bool c_ir_fold_census_body(CIntegerIrBuilder* builder)
+{
+    IrFoldCensus census = ir_construction_fold_census_begin(builder->function);
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    for (u32 index = 0; ssa && index < ssa->event_count; index += 1)
+    {
+        if (ssa->events[index].opcode == IR_OPCODE_STORE)
+        {
+            ir_construction_fold_census_hold(&census, ssa->events[index].value);
+        }
+    }
+    for (u32 index = 0; ssa && index < ssa->read_count; index += 1)
+    {
+        ir_construction_fold_census_hold(&census, ssa->reads[index].replacement);
+    }
+    ir_construction_fold_census_end(builder->program, builder->function, &census);
+    return true;
+}
+#define C_IR_FOLD_CENSUS_BODY(builder) c_ir_fold_census_body(builder)
+#else
+#define C_IR_FOLD_CENSUS_BODY(builder) true
+#endif
 
 // Explicit finalization of the block-row protocol, after SSA finish has made
 // its last insertions: a refused commit, or a block the lowering left open,
@@ -66219,7 +66248,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // The error-attribute check reads the CFG the body built, before SSA
         // completion and construction rewrite it.
         if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || builder.lower_machine.failed || !c_ir_lower_body(&builder, declaration, false, 0) ||
-            !c_ir_check_error_attribute_calls(&builder) || !c_ir_atomic_aggregate_accesses_lowerable(&builder) ||
+            !C_IR_FOLD_CENSUS_BODY(&builder) || !c_ir_check_error_attribute_calls(&builder) || !c_ir_atomic_aggregate_accesses_lowerable(&builder) ||
             !c_ir_ssa_finish(&builder, &result.direct_ssa) || !c_ir_finish_construction(&builder))
         {
             CSourceLocation failure_location = builder.has_failure_location ? builder.failure_location
