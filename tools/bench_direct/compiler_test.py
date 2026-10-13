@@ -27,6 +27,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compiler_compare  # noqa: E402
+import compiler_owned_phase  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
@@ -2253,7 +2254,7 @@ class SealingRequiredTest(unittest.TestCase):
         self.assertEqual(unsealed, {"state": "unsealed"})
         self.assertEqual(compiler_publish.evidence_bundle_note(unsealed), "")
         self.assertIn("is required on this route", compiler_publish.evidence_bundle_problems({}, unsealed)[0])
-        legacy = compiler_publish.verify_evidence_bundle({}, {}, compiler_receipt.THROUGHPUT_PROFILE, "1", False)
+        legacy = compiler_publish.verify_evidence_bundle({}, {}, compiler_receipt.THROUGHPUT_PROFILE, "1", required=False)
         self.assertEqual((legacy, compiler_publish.evidence_bundle_problems({}, legacy)), ({"state": "legacy-unsealed"}, []))
 
 
@@ -2425,6 +2426,26 @@ class EvidenceTest(unittest.TestCase):
         payload = archive({"receipt.json": json.dumps(receipt()), **members})
         self.assertEqual(compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")[4]["scaling"],
                          bundles)
+
+    def test_reads_a_pull_snapshot_phase_population(self) -> None:
+        # A non-owned pull snapshot-v1 receipt's declared phases are read with their five members, so
+        # validate_closure replays them; a missing member is a problem, never an empty population (#3211).
+        current = dict(receipt(), preparation_policy="snapshot-v1",
+                       phase_ownership={"count": 1, "phases": [{"file": "0001.json"}]})
+        phase = {"owned-phases/0001.json" + suffix: suffix or "{}" for suffix in compiler_receipt.EVIDENCE_PHASE_SUFFIXES}
+        members = {"receipt.json": json.dumps(current), "throughput/summary.json": "{}", "throughput/metadata.json": "[]", **phase}
+        got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(got[2], "")
+        self.assertEqual(got[4]["closure"], {"owned_phases": {"0001.json": {
+            "receipt": b"{}", "command": b".argv", "stdout": b".stdout", "stderr": b".stderr", "bootstrap": b".bootstrap.complete"}},
+            "owned_throughput": {"summary": b"{}", "metadata": b"[]"}})
+        members.pop("owned-phases/0001.json.stderr")
+        self.assertEqual(compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")[2],
+                         "required native phase evidence owned-phases/0001.json missing or oversized")
+        ambiguous = dict(current, phase_ownership={"count": 2, "phases": [{"file": "0001.json"}, {"file": "0001.json"}]})
+        members.update(phase, **{"receipt.json": json.dumps(ambiguous)})
+        self.assertEqual(compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")[2],
+                         "native phase population is ambiguous")
 
     def test_missing_ambiguous_or_malformed_evidence(self) -> None:
         payload = archive({"receipt.json": "{not json"})
@@ -3329,7 +3350,8 @@ class HarnessTest(unittest.TestCase):
                     dict(throughput, sealed_files=dict(throughput["sealed_files"], **{"replay-refused": b""})), expected,
                     compiler_receipt.THROUGHPUT_PROFILE, "2")
         self.maxDiff = None
-        self.assertEqual(verified, {"state": "verified", "replay": {"lab_pairs": 10, "corpus_cases": 12},
+        self.assertEqual(verified, {"state": "verified", "inventory": compiler_receipt.EVIDENCE_INVENTORY,
+                                    "replay": {"lab_pairs": 10, "corpus_cases": 12},
                                     **{key: result["evidence_bundle"][key]
                                        for key in ("members", "payload_bytes", "manifest_sha256")}})
         self.assertIs(replayed[0], throughput["sealed_files"])
@@ -3355,7 +3377,7 @@ class HarnessTest(unittest.TestCase):
         summary = json.loads((evidence / "lab" / "summary.json").read_text())
         # Only recovery of a run whose producer predates sealing may stand unsealed.
         bundle = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE,
-                                                         "1", False)
+                                                         "1", required=False)
         self.assertEqual(bundle, {"state": "legacy-unsealed"})
         self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
                                                  evidence_bundle=bundle)[0], "success")
@@ -3365,8 +3387,8 @@ class HarnessTest(unittest.TestCase):
         decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
                                           evidence_bundle=required)
         self.assertEqual(decided[0], "failure")
-        self.assertIn(f"sealed raw evidence {compiler_receipt.EVIDENCE_INVENTORY} is required on this route, but the "
-                      "artifact carries neither control file", decided[2])
+        self.assertIn("sealed raw evidence v1 is required on this route, but the artifact carries neither control file",
+                      decided[2])
 
     def test_an_unreadable_or_unverifiable_sealed_bundle_fails_closed(self) -> None:
         expected = {"repository": "buster14a/buster", "request_run_id": "91", "run_id": "92", "run_attempt": "1",
@@ -3388,6 +3410,114 @@ class HarnessTest(unittest.TestCase):
             missing = compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1")
         self.assertEqual(missing["state"], "refused")
         self.assertEqual(compiler_publish.verify_evidence_bundle({"sealed_files": files}, dict(expected, head=""), corpus, "1"),
+                         {"state": "refused", "reason": "the authorized identity cannot name a sealed bundle"})
+
+    def run_snapshot_pull(self, policy: str, sealer: tuple) -> tuple[int, dict, list]:
+        """A pull attempt on `policy` whose native owner and measurement are stand-ins (#3211).
+
+        Only main's seal decision and the sealed identity are under test; the real snapshot
+        producer/consumer path is compiler_ordinary_fixture_test's.
+        """
+        seen = []
+
+        class Owner:
+            def __init__(self, driver, work, evidence, receipt, **options):
+                (evidence / "owned-phases").mkdir()
+                receipt["phase_ownership"] = {"state": "pending", "count": 14, "phases": []}
+
+            def finish(self) -> None:
+                pass
+
+        def measured(arguments, candidate, work, evidence, bins, log, receipt, summaries) -> None:
+            seen.append((arguments.evidence_seal, compiler_compare.EVIDENCE_DEFER_ALL))
+            receipt["preparation_policy"] = policy
+            if policy == "snapshot-v1":
+                receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}
+            receipt["state"] = "measured"
+
+        driver = self.root / "driver"
+        driver.write_text("")
+        with mock.patch.object(compiler_compare, "NativePhaseContext", Owner), \
+                mock.patch.object(compiler_compare, "measure", measured), \
+                mock.patch.object(compiler_compare, "EVIDENCE_SEAL_COMMAND", sealer):
+            code, result, _ = self.run_harness(self.head, mode="pull", ref="refs/pull/7/head", **{
+                "pull-head": self.head, "request-attempt": "2", "closure-policy": policy, "closure-driver": str(driver)})
+        return code, result, seen
+
+    def test_a_pull_snapshot_attempt_is_sealed_under_its_route(self) -> None:
+        # The ordinary pull snapshot-v1 route seals like legacy-rebuild, its identity naming the route
+        # and the owned-phase count, which select the snapshot inventory (#2918, #3211).
+        script = ("import sys, pathlib\n"
+                  "bundle, identity = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])\n"
+                  "(bundle.parent / 'sealed-identity.tsv').write_text(identity.read_text())\n"
+                  "(bundle / 'evidence-manifest.tsv').write_text('manifest\\n')\n"
+                  "(bundle / 'evidence-seal.txt').write_text('schema=x\\nstate=complete\\nmanifest_bytes=9\\n'\n"
+                  "    'manifest_sha256=' + 'a' * 64 + '\\nmembers=3\\npayload_bytes=4\\n')\n"
+                  "print('COMPILER_EVIDENCE_SEALED')\n")
+        for policy, inventory, route in (
+                ("snapshot-v1", compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY, [("preparation_policy", "snapshot-v1"), ("owned_phases", "14")]),
+                ("legacy-rebuild", compiler_receipt.EVIDENCE_INVENTORY, [])):
+            with self.subTest(policy=policy):
+                shutil.rmtree(self.root / "work", ignore_errors=True)
+                shutil.rmtree(self.root / "evidence", ignore_errors=True)
+                code, result, seen = self.run_snapshot_pull(policy, (sys.executable, "-c", script))
+                self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
+                self.assertEqual(seen, [(True, True)])
+                self.assertEqual((result["evidence_bundle"]["state"], result["evidence_bundle"]["inventory"]), ("sealed", inventory))
+                lines = [tuple(line.split("\t")) for line in (self.root / "sealed-identity.tsv").read_text().splitlines()]
+                self.assertEqual([key for key, _ in lines[:13]], list(compiler_receipt.EVIDENCE_IDENTITY_KEYS))
+                self.assertEqual(lines[13:], route)
+
+    def test_a_snapshot_identity_needs_its_exact_phase_count(self) -> None:
+        base = {"identity": {"repository": "buster14a/buster", "request_run_id": "91", "run_id": "92", "run_attempt": "1",
+                             "trusted_revision": "9" * 40, "base": "b" * 40, "head": "c" * 40, "base_tree": "e" * 40,
+                             "head_tree": "d" * 40},
+                "profile": compiler_receipt.PROFILE, "throughput_profile": compiler_receipt.THROUGHPUT_PROFILE}
+        legacy = compiler_receipt.evidence_identity(base, "1")
+        self.assertEqual(len(legacy.splitlines()), 13)
+        self.assertEqual(compiler_receipt.evidence_identity(dict(base, preparation_policy="legacy-rebuild"), "1"), legacy)
+        snapshot = dict(base, preparation_policy="snapshot-v1", phase_ownership={"count": 256})
+        self.assertEqual(compiler_receipt.evidence_identity(snapshot, "1"),
+                         legacy + "preparation_policy\tsnapshot-v1\nowned_phases\t256\n")
+        # The declared policy is read as validate_closure reads it: a closure record without one is snapshot-v1.
+        self.assertEqual(compiler_receipt.evidence_inventory(dict(base, closure={})), compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY)
+        for broken in (dict(snapshot, phase_ownership={"count": 0}), dict(snapshot, phase_ownership={"count": 257}),
+                       dict(snapshot, phase_ownership={"count": "14"}), dict(snapshot, phase_ownership={"count": True}),
+                       dict(base, preparation_policy="snapshot-v1"), dict(base, closure={}),
+                       dict(snapshot, preparation_policy="snapshot-v2")):
+            self.assertEqual(compiler_receipt.evidence_identity(broken, "1"), "")
+
+    def test_the_publisher_verifies_a_snapshot_bundle_under_its_route(self) -> None:
+        expected = {"repository": "buster14a/buster", "request_run_id": "91", "run_id": "92", "run_attempt": "1",
+                    "trusted_revision": "9" * 40, "base": self.base, "head": self.head, "base_tree": self.trees[1],
+                    "head_tree": self.trees[0]}
+        corpus = compiler_receipt.THROUGHPUT_PROFILE
+        receipt = {"preparation_policy": "snapshot-v1", "closure": {"policy": "snapshot-v1"}, "phase_ownership": {"count": 14},
+                   "evidence_bundle": {"state": "sealed", "inventory": compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY,
+                                       "manifest_sha256": "a" * 64, "members": 3, "payload_bytes": 4}}
+        script = ("import sys\n"
+                  "lines = open(sys.argv[3]).read().splitlines()\n"
+                  "assert lines[13:] == ['preparation_policy\\tsnapshot-v1', 'owned_phases\\t14'], lines\n"
+                  "print('COMPILER_EVIDENCE_VERIFIED members=3 payload_bytes=4 manifest_sha256=' + 'a' * 64)\n")
+        files = {"evidence-seal.txt": b"seal\n"}
+        # Replay has its own tests (SealedReplayTest); the snapshot inventory carries every member it reads.
+        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", script)), \
+                mock.patch.object(compiler_publish, "sealed_lab_replay", lambda files: 10), \
+                mock.patch.object(compiler_publish, "sealed_corpus_replay", lambda files, temporary: 12):
+            verified = compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1", receipt)
+            # The ordinary identity reproduces no snapshot manifest: the stand-in refuses it like the native verifier.
+            ordinary = compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1")
+        self.assertEqual(verified, {"state": "verified", "inventory": compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY,
+                                    "members": 3, "payload_bytes": 4, "manifest_sha256": "a" * 64,
+                                    "replay": {"lab_pairs": 10, "corpus_cases": 12}})
+        self.assertEqual(ordinary["state"], "refused")
+        self.assertEqual(compiler_publish.evidence_bundle_problems(receipt, verified), [])
+        self.assertIn(compiler_receipt.EVIDENCE_SNAPSHOT_INVENTORY, compiler_publish.evidence_bundle_note(verified))
+        claimed_ordinary = dict(receipt, evidence_bundle=dict(receipt["evidence_bundle"], inventory=compiler_receipt.EVIDENCE_INVENTORY))
+        self.assertEqual(compiler_publish.evidence_bundle_problems(claimed_ordinary, verified),
+                         ["receipt evidence_bundle does not name the verified sealed manifest"])
+        uncounted = dict(receipt, phase_ownership={"state": "complete"})
+        self.assertEqual(compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1", uncounted),
                          {"state": "refused", "reason": "the authorized identity cannot name a sealed bundle"})
 
     def test_builds_base_then_candidate_and_measures_on_the_base_tree(self) -> None:
@@ -3507,8 +3637,13 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(table("lab_logs"), list(compiler_receipt.EVIDENCE_LAB_LOGS))
         self.assertEqual(table("corpus_core"), ["throughput/" + name for name in compiler_receipt.EVIDENCE_CORPUS_CORE])
         self.assertEqual(table("omission_reasons"), list(compiler_receipt.EVIDENCE_OMISSION_REASONS))
-        self.assertEqual(re.findall(r'S8_INITIALIZER\("([a-z_]+)"\), \'', source), list(compiler_receipt.EVIDENCE_IDENTITY_KEYS))
-        for name in ("INVENTORY", "MANIFEST", "SEAL", "OMISSIONS", "OMISSIONS_SCHEMA"):
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([a-z_]+)"\), \'', source), [*compiler_receipt.EVIDENCE_IDENTITY_KEYS,
+                                                                                     *compiler_receipt.EVIDENCE_ROUTE_KEYS])
+        self.assertEqual(table("closure_members"), list(compiler_receipt.EVIDENCE_CLOSURE_MEMBERS))
+        self.assertEqual(table("phase_suffixes"), [suffix for suffix in compiler_receipt.EVIDENCE_PHASE_SUFFIXES if suffix])
+        self.assertIn('S8_INITIALIZER(""), S8_INITIALIZER(".argv")', source)
+        self.assertIn(f"#define COMPILER_EVIDENCE_PHASE_LIMIT {compiler_owned_phase.PHASE_LIMIT}ull", source)
+        for name in ("INVENTORY", "SNAPSHOT_INVENTORY", "MANIFEST", "SEAL", "OMISSIONS", "OMISSIONS_SCHEMA"):
             self.assertIn(f'#define COMPILER_EVIDENCE_{name} "{getattr(compiler_receipt, "EVIDENCE_" + name)}"', source)
         self.assertIn(f"#define COMPILER_EVIDENCE_OMISSION_EXAMPLES {compiler_receipt.EVIDENCE_OMISSION_EXAMPLES}ull", source)
         self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
@@ -7514,7 +7649,6 @@ class SelfHostInlineCompareTest(unittest.TestCase):
             "with the link-tls leg": {"receipt": dict(pull, link_tls=link_tls_evidence()[0]),
                                       "throughput": dict(corpus(), selfhost_inline_bundle=bundle,
                                                          link_tls_bundle=link_tls_evidence()[1])},
-            "with the #48 inline profile": {"receipt": dict(pull, inline_acceptance={"requested": True})},
             "with the scaling leg": {"receipt": dict(pull, scaling_profile=copy.deepcopy(compiler_receipt.SCALING_PROFILE)),
                                      "throughput": dict(corpus(), selfhost_inline_bundle=bundle, scaling=scaling())},
             "with constant-reuse acceptance": {
@@ -7671,6 +7805,34 @@ class SelfHostInlineCompareTest(unittest.TestCase):
                                      "lab/compare.json", "lab/a/lab.json", "lab/b/lab.json"]))
             self.assertFalse((root / "evidence/selfhost_inline/compare/lab/a/report.md").exists())
             self.assertEqual(record["digest"], record_value["digest"])
+
+    def test_the_presence_selected_48_inline_leg_does_not_block_this_leg(self) -> None:
+        """inline_acceptance_requested reads presence, and main has carried its line since #48 (#3969 refusal)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate, work, evidence, bins = root / "candidate", root / "work", root / "evidence", root / "bins"
+            for directory in (work, evidence, bins):
+                directory.mkdir()
+            request = candidate / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text(compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE + "\n" +
+                               compiler_receipt.SELFHOST_INLINE_REQUEST_LINE + "\n", encoding="utf-8")
+            current = {"state": "pending", "reasons": [], "timings": {"build_seconds": {}}, "binaries": {}, "lab": {}}
+            args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40, selfhost_inline_requested=True,
+                                      lab=root / "uarch_lab.py")
+            with mock.patch.object(compiler_compare, "scaling_requested", return_value=False), \
+                    mock.patch.object(compiler_compare, "build", return_value=("stopped by the test", 0.0)) as build:
+                compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+            self.assertIs(current["inline_acceptance"]["requested"], True)
+            self.assertFalse(any("cannot be combined" in reason for reason in current["reasons"]), current["reasons"])
+            build.assert_called_once()
+        record, bundle = selfhost_inline_evidence()
+        pull = selfhost_pull_receipt(record)
+        pull["inline_acceptance"] = {"requested": True, "status": "failed"}
+        unused, unused_title, reasons = compiler_publish.decide(
+            dict(EXPECTED, mode="pull"), True, "success", pull, summary(), "",
+            dict(corpus(), selfhost_inline_bundle=bundle))
+        self.assertFalse(any("self-host inline leg cannot be combined" in reason for reason in reasons), reasons)
 
     def test_leg_runs_the_trusted_helper_and_refuses_missing_stage1(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

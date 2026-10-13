@@ -56,13 +56,14 @@ Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
 artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
 with the strict sampling_archive reader and verified by the trusted native
 `./build.sh compiler_evidence verify` under the identity this publisher
-authorized (verify_evidence_bundle). The verified bytes are then replayed: the
+authorized (verify_evidence_bundle); a pull snapshot-v1 receipt's route selects
+the snapshot inventory (#3211). The verified bytes are then replayed: the
 lab's raw pairs through the trusted uarch_lab statistics (sealed_lab_replay,
 lab_raw_inference) and the corpus through this checkout's `bench_throughput
 compare` in a disposable copy (sealed_corpus_replay); the saved summaries must
-follow. The receipt's evidence_bundle must name the verified manifest
-(evidence_bundle_problems). A measured ordinary attempt must be sealed; only
-publication-only recovery of a run whose producer predates sealing
+follow. The receipt's evidence_bundle must name the verified inventory and
+manifest (evidence_bundle_problems). A measured ordinary attempt must be sealed;
+only publication-only recovery of a run whose producer predates sealing
 (sealing_required) may be legacy-unsealed, its outcome standing with its raw
 bytes reported unverified. Anything else fails closed.
 
@@ -104,7 +105,7 @@ from inline_acceptance import metrics as inline_metrics, validate_documents as v
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
-from compiler_receipt import EVIDENCE_INVENTORY, EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity
+from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
@@ -757,11 +758,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
                         reasons.append("the self-host inline leg is valid only in pull mode")
-                    inline_record = receipt.get("inline_acceptance")
+                    # The #48 inline leg is selected by presence, not freshness, so it runs beside this one.
                     if any(receipt.get(key) is not None for key in
                            ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
                             "frontend_selector", "wild_linker", "link_tls", "constant_reuse_acceptance")) or \
-                            (isinstance(inline_record, dict) and inline_record.get("requested") is True) or \
                             "scaling_profile" in receipt:
                         reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
                                        "scaling leg included")
@@ -879,7 +879,7 @@ def sealed_corpus_replay(files: dict[str, bytes], temporary: str) -> int:
 
 
 def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str,
-                           required: bool = True) -> dict:
+                           receipt: dict | None = None, required: bool = True) -> dict:
     """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
 
     {"state": "legacy-unsealed"} when read_evidence found neither control file and the route does not
@@ -887,13 +887,19 @@ def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dic
     "members", "payload_bytes", "manifest_sha256", "replay"} when `compiler_evidence verify` reproduces
     the sealed manifest from the extracted bytes and the lab and corpus replay from them
     (sealed_lab_replay, sealed_corpus_replay); otherwise {"state": "refused", "reason"}. The identity
-    comes from the authorized expected identity and admitted profiles, never from the receipt.
+    comes from the authorized expected identity and admitted profiles, never from the receipt; only a
+    snapshot-v1 receipt's route lines (its declared policy and owned-phase count) come from it, and
+    validate_closure binds that policy to its closure records, so a receipt cannot select the weaker
+    ordinary inventory for a snapshot attempt (#3211). The snapshot inventory carries every ordinary
+    member, so the same replay applies.
     """
     import tempfile
     result: dict = {"state": "unsealed" if required else "legacy-unsealed"}
     if "sealed_files" in throughput:
         files = throughput.get("sealed_files")
-        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile},
+        route = {key: receipt[key] for key in ("preparation_policy", "closure", "phase_ownership")
+                 if isinstance(receipt, dict) and key in receipt}
+        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile, **route},
                                      request_attempt)
         result = {"state": "refused", "reason": throughput.get("sealed_problem") or "sealed evidence archive is unreadable"}
         if isinstance(files, dict) and not identity:
@@ -924,7 +930,8 @@ def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dic
                         try:
                             replay = {"lab_pairs": sealed_lab_replay(files),
                                       "corpus_cases": sealed_corpus_replay(files, temporary)}
-                            result = {"state": "verified", "members": int(fields["members"]),
+                            result = {"state": "verified", "inventory": evidence_inventory(route),
+                                      "members": int(fields["members"]),
                                       "payload_bytes": int(fields["payload_bytes"]),
                                       "manifest_sha256": fields["manifest_sha256"], "replay": replay}
                         except (ValueError, LookupError, TypeError, AttributeError, ArithmeticError) as error:
@@ -944,11 +951,11 @@ def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
         if claimed is not None:
             problems.append("receipt names sealed raw evidence that the artifact does not carry")
     elif bundle.get("state") == "unsealed":
-        problems.append(f"sealed raw evidence {EVIDENCE_INVENTORY} is required on this route, but the artifact "
-                        "carries neither control file")
+        problems.append("sealed raw evidence v1 is required on this route, but the artifact carries neither "
+                        "control file")
     elif bundle.get("state") != "verified":
         problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
-    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != EVIDENCE_INVENTORY or \
+    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != bundle.get("inventory") or \
             any(claimed.get(key) != bundle.get(key) for key in ("manifest_sha256", "members", "payload_bytes")):
         problems.append("receipt evidence_bundle does not name the verified sealed manifest")
     return problems
@@ -962,7 +969,7 @@ def evidence_bundle_note(bundle: dict) -> str:
                 "retained raw bytes are unverified")
     elif bundle.get("state") == "verified":
         replay = bundle.get("replay") or {}
-        note = (f"raw evidence: sealed {EVIDENCE_INVENTORY} verified natively, {bundle['members']} members, "
+        note = (f"raw evidence: sealed {bundle['inventory']} verified natively, {bundle['members']} members, "
                 f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}; replayed "
                 f"{replay.get('lab_pairs', 'NA')} lab pairs and {replay.get('corpus_cases', 'NA')} corpus cases")
     return note
@@ -1565,6 +1572,28 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                     closure_files[operation] = archive.read(info)
                 throughput["closure"] = closure_files
+            # A non-owned pull snapshot-v1 attempt's native phase population (#3211): validate_closure
+            # replays every declared phase's five retained members, as for the owned routes.
+            ownership = receipt.get("phase_ownership") if isinstance(receipt, dict) and not problem else None
+            if isinstance(ownership, dict):
+                owned: dict = {}
+                phases = ownership.get("phases")
+                for phase in phases if isinstance(phases, list) else []:
+                    name = phase.get("file") if isinstance(phase, dict) else None
+                    if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+                        problem = "native phase population is ambiguous"
+                        break
+                    infos = {label: members.get("owned-phases/" + name + suffix) for label, suffix in
+                             (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"), ("stderr", ".stderr"),
+                              ("bootstrap", ".bootstrap.complete"))}
+                    if any(info is None or info.file_size > MEMBER_LIMIT for info in infos.values()):
+                        problem = f"required native phase evidence owned-phases/{name} missing or oversized"
+                        break
+                    owned[name] = {label: archive.read(info) for label, info in infos.items()}
+                throughput.setdefault("closure", {})["owned_phases"] = owned
+                corpus_raw = {key: members.get(f"throughput/{key}.json") for key in ("summary", "metadata")}
+                if all(info is not None and info.file_size <= MEMBER_LIMIT for info in corpus_raw.values()):
+                    throughput["closure"]["owned_throughput"] = {key: archive.read(info) for key, info in corpus_raw.items()}
             receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
             if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
                 bundle: dict = {}
@@ -6249,7 +6278,7 @@ def main() -> int:
                 # that names another request run, or none, cannot name a sealed bundle and refuses it.
                 request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
                     titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
-                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt,
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt, receipt,
                                                          not recover or sealing_required(api, workflow_revision))
                 if evidence_bundle_note(evidence_bundle):
                     notes.append(evidence_bundle_note(evidence_bundle))

@@ -817,7 +817,7 @@ class RecoveryTest(unittest.TestCase):
 
 
 # A natively verified and replayed sealed bundle (#2918), as verify_evidence_bundle reports it.
-VERIFIED = {"state": "verified", "members": 3, "payload_bytes": 4, "manifest_sha256": "a" * 64,
+VERIFIED = {"state": "verified", "inventory": compiler_receipt.EVIDENCE_INVENTORY, "members": 3, "payload_bytes": 4, "manifest_sha256": "a" * 64,
             "replay": {"lab_pairs": 12, "corpus_cases": 12}}
 
 

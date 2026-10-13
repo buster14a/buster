@@ -3732,6 +3732,7 @@ FileStats os_path_followed_stats(String8 path)
             if (status == 0)
             {
                 result.valid = true;
+                result.size = (u64)information.st_size;
                 result.device = (u64)information.st_dev;
                 result.index = (u64)information.st_ino;
                 result.permissions = (u32)(information.st_mode & 0777);
@@ -3768,7 +3769,7 @@ FileStats os_path_followed_stats(String8 path)
             if (handle != INVALID_HANDLE_VALUE)
             {
                 OsFileDescriptor* file = (OsFileDescriptor*)handle;
-                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                result = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
                 OsError close_error = os_file_close_checked(file);
                 if (result.valid && close_error.v)
                 {
