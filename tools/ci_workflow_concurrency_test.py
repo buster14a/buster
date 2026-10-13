@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline regression for retaining main-push CI during merge bursts."""
+"""Offline regression for main validation retention and coalesced admission hints."""
 
 from pathlib import Path
 import re
@@ -9,10 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class MainPushConcurrencyTests(unittest.TestCase):
     SERIAL = {
-        "native-retirement-automation.yml": "native-retirement-automation-controller",
-        "native-retirement-catch-up.yml": "native-retirement-catch-up",
-        "merge-queue-reconcile.yml": "merge-queue-admission-reconcile",
-        "pages.yml": "pages-refs/heads/main",
+        "native-retirement-automation.yml": ("native-retirement-automation-controller", "max"),
+        "native-retirement-catch-up.yml": ("native-retirement-catch-up", "max"),
+        "merge-queue-reconcile.yml": ("merge-queue-admission-reconcile", "single"),
+        "pages.yml": ("pages-refs/heads/main", "max"),
     }
 
     def context(self, event="push", number=101):
@@ -71,7 +71,7 @@ class MainPushConcurrencyTests(unittest.TestCase):
             value = value[3:-2]
         return bool(self.expression(value, context))
 
-    def test_every_main_push_workflow_retains_three_overlapping_runs(self):
+    def test_main_push_workflows_keep_active_runs_and_declared_pending_policy(self):
         inspected = set()
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             text = path.read_text()
@@ -90,8 +90,9 @@ class MainPushConcurrencyTests(unittest.TestCase):
                     self.assertFalse(self.cancelled(fields["cancel-in-progress"], context))
                 groups = {self.resolved_group(fields["group"], context) for context in contexts}
                 if path.name in self.SERIAL:
-                    self.assertEqual(groups, {self.SERIAL[path.name]})
-                    self.assertEqual(fields.get("queue"), "max")
+                    group, policy = self.SERIAL[path.name]
+                    self.assertEqual(groups, {group})
+                    self.assertEqual(fields.get("queue"), policy)
                 else:
                     self.assertEqual(len(groups), 3,
                                      "A newer main push must not replace pending validation")

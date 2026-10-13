@@ -27,12 +27,13 @@ on:
 
 permissions: {}
 
-# One serialized pass at a time. Retain up to 100 pending invocations so a
-# merge burst cannot cancel commit-visible checks through pending replacement.
+# One pass runs to completion; only the latest pending delivery is retained.
+# Deliveries are hints: each pass re-derives every live group from trusted main.
+# Coalescing prevents a burst from filling a queue of equivalent passes (#4054).
 concurrency:
   group: merge-queue-admission-reconcile
   cancel-in-progress: false
-  queue: max
+  queue: single
 
 jobs:
   reconcile:
