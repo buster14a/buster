@@ -2377,8 +2377,8 @@ extra tokens after a directive such as `#endif junk`), the GNU obsolete
 `member: value` designator in a strict ISO dialect, and semantic analysis's
 signedness-only pointer conversions (`-Wpointer-sign`, #4051), and signed
 arithmetic overflow retained by NORMAL/ENUM integer folding (`-Woverflow`,
-#1574). Each belongs to a group (`CompilerDriverWarningGroup`, mapped from the diagnostic kind by
-`compiler_driver_warning_group_of_kind`), and `compiler_driver_publish_c_diagnostics`
+#1574). Each belongs to a group (`CompilerDriverWarningGroup`), mapped from
+the diagnostic kind by `compiler_driver_warning_group_of_kind`, and `compiler_driver_publish_c_diagnostics`
 applies one `CompilerDriverWarningPolicy` to them for every input, serial or
 batched, including those whose source was replayed from the source cache.
 
@@ -2413,14 +2413,15 @@ a group or the global flag wins:
 A promoted warning is published with error severity and the option that
 promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]`,
 `[-Werror=gnu-designator]`, `[-Werror=pointer-sign]` or `[-Werror=overflow]`; a warning without a
-group gets `[-Werror]`). The unit fails with the tokenizer error (the analysis
-error for `pointer-sign`), so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+group gets `[-Werror]`). The unit fails with the tokenizer error (the analysis error for semantic
+warnings), so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
 and a batch of several inputs all return failure and write no output; the
 failed-unit rules above decide which later results are discarded. Its record
 in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
-of an error, and `tokenizer_warning_count` no longer counts it. The count
-still includes a warning that `-w` or `-Wno-<group>` dropped, as it did for `-w`
-before this policy existed; only the promoted ones are subtracted.
+of an error. Promotion subtracts it from the counter for its producer
+(`tokenizer_warning_count` or `analysis_warning_count`). A warning dropped by
+`-w` or `-Wno-<group>` remains included in that counter, as it did for `-w`
+before this policy existed.
 
 Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
 and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
