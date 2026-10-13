@@ -535,11 +535,16 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
         module->inline_unchecked_count = 0;
         IrInlineOptions options = program->inline_options;
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
-        if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
         if (!options.max_call_sites) options.max_call_sites = IR_INLINE_CALL_SITES;
         if (!options.caller_growth_shift) options.caller_growth_shift = IR_INLINE_CALLER_GROWTH_SHIFT;
         if (options.caller_growth_shift > 32u) options.caller_growth_shift = 32u;
         program->inline_options = options;
+        // Zero row limits keep required expansion under the independent work
+        // and storage guards, rather than the optional profitability caps.
+        // Preserve zero in the program so later modules use the same policy.
+        u32 required_function_growth = options.max_function_growth ? options.max_function_growth : UINT32_MAX;
+        u32 required_module_growth = options.max_module_growth ? options.max_module_growth : UINT32_MAX;
+        if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
         bool has_required = false;
         for (u32 symbol = 0; symbol < program->symbols.count; symbol += 1)
         {
@@ -1261,15 +1266,17 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             // would let a few large callers starve the rest.
                             bool scratch_within = projected_scratch <= IR_FAST_SCRATCH_BUDGET -
                                                                         BUSTER_MIN(active_scratch, (u64)IR_FAST_SCRATCH_BUDGET);
+                            u32 function_growth_limit = required ? required_function_growth : options.max_function_growth;
+                            u32 module_growth_limit = required ? required_module_growth : options.max_module_growth;
                             bool within = scratch_within && total_work <= IR_FAST_WORK_BUDGET &&
                                           function_sites < options.max_call_sites && storage != UINT64_MAX &&
                                           storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(function_storage, (u64)IR_FAST_SCRATCH_BUDGET) &&
                                           (!required ||
                                            storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(module_storage, (u64)IR_FAST_SCRATCH_BUDGET)) &&
-                                          growth <= options.max_function_growth -
-                                                        BUSTER_MIN(function_growth, options.max_function_growth) &&
-                                          growth <= options.max_module_growth -
-                                                        BUSTER_MIN(module_growth, options.max_module_growth) &&
+                                          growth <= function_growth_limit -
+                                                        BUSTER_MIN(function_growth, function_growth_limit) &&
+                                          growth <= module_growth_limit -
+                                                        BUSTER_MIN(module_growth, module_growth_limit) &&
                                           copied <= IR_FAST_WORK_BUDGET - BUSTER_MIN(total_copies, (u64)IR_FAST_WORK_BUDGET);
                             if (!within)
                             {
@@ -1304,19 +1311,19 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                 ir_inline_storage_add(storage_base, storage),
                                             IR_FAST_SCRATCH_BUDGET);
                                     }
-                                    else if (growth > options.max_function_growth -
-                                                          BUSTER_MIN(function_growth, options.max_function_growth))
+                                    else if (growth > function_growth_limit -
+                                                          BUSTER_MIN(function_growth, function_growth_limit))
                                     {
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_FUNCTION_GROWTH,
                                             ir_inline_storage_add(function_growth, growth),
-                                            options.max_function_growth);
+                                            function_growth_limit);
                                     }
-                                    else if (growth > options.max_module_growth -
-                                                          BUSTER_MIN(module_growth, options.max_module_growth))
+                                    else if (growth > module_growth_limit -
+                                                          BUSTER_MIN(module_growth, module_growth_limit))
                                     {
                                         ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_MODULE_GROWTH,
                                             ir_inline_storage_add(module_growth, growth),
-                                            options.max_module_growth);
+                                            module_growth_limit);
                                     }
                                     else
                                     {

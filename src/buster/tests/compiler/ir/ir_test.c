@@ -1968,7 +1968,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_prepared.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, defaults_program->inline_options.tiny);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
-            BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == IR_INLINE_FUNCTION_GROWTH);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == 0);
             BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
             // The module limit stays relative so each module derives its own.
             BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == 0);
@@ -2371,6 +2371,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
         }
         c_test_scratch_end(cycle_temporary);
+    }
+
+    // Required bodies can exceed both optional row caps. Explicit row limits
+    // still diagnose the same source call instead of silently retaining it.
+    for (u32 limit_case = 0; limit_case < 3; limit_case += 1)
+    {
+        TemporalArena large_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* large_arena = large_temporary.arena;
+        String8 large_head = S8("static inline __attribute__((always_inline)) int large_required(int value) {\n");
+        String8 large_statement = S8("value = value * 3 + 1;\n");
+        String8 large_tail = S8("return value; }\nint large_caller(int value) { return large_required(value); }\n");
+        u32 large_statement_count = 1200;
+        u64 large_source_size = large_head.length + large_statement_count * large_statement.length + large_tail.length;
+        char8* large_source_bytes = arena_allocate(large_arena, char8, large_source_size);
+        u64 large_cursor = large_head.length;
+        memcpy(large_source_bytes, large_head.pointer, large_head.length);
+        for (u32 statement_index = 0; statement_index < large_statement_count; statement_index += 1)
+        {
+            memcpy(large_source_bytes + large_cursor, large_statement.pointer, large_statement.length);
+            large_cursor += large_statement.length;
+        }
+        memcpy(large_source_bytes + large_cursor, large_tail.pointer, large_tail.length);
+        String8 large_source = {.pointer = large_source_bytes, .length = large_source_size};
+        CPreprocessResult large_preprocessed = c_preprocess(large_arena, large_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult large_analysis = c_parse(large_arena, large_preprocessed);
+        CIRLowerResult large_lowered = {0};
+        if (!large_preprocessed.error_count && !large_analysis.diagnostic_count)
+        {
+            large_lowered = c_lower_to_ir(large_arena, S8("canonical-inline-large-required.c"),
+                large_preprocessed, large_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, !large_preprocessed.error_count && !large_analysis.diagnostic_count && !large_lowered.diagnostic_count);
+        if (BUSTER_REQUIRE(arguments, large_lowered.program && large_lowered.program->module_count == 1))
+        {
+            IrProgram* large_program = large_lowered.program;
+            IrModule* large_module = large_program->modules;
+            large_program->fast_passes = 0;
+            large_program->inline_options = (IrInlineOptions){
+                .max_function_growth = limit_case == 1 ? IR_INLINE_FUNCTION_GROWTH : 0,
+                .max_module_growth = limit_case == 2 ? IR_INLINE_MODULE_GROWTH : 0,
+            };
+            IrFunction* large_leaf = ir_test_inline_find_function(large_module, S8("large_required"));
+            BUSTER_TEST(arguments, large_leaf && large_leaf->instruction_count > IR_INLINE_MODULE_GROWTH);
+            IrValidationResult large_prepared = ir_prepare_canonical_module(large_program, large_module, false);
+            if (limit_case == 0)
+            {
+                BUSTER_TEST(arguments, large_prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, large_module->inlining.always_inlined == 1);
+                BUSTER_TEST(arguments, large_module->inlining.growth > IR_INLINE_MODULE_GROWTH);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(large_program, large_module).error == IR_VALIDATION_NONE);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, large_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                BUSTER_TEST(arguments, large_module->inlining.required_budget_reason ==
+                    (limit_case == 1 ? IR_INLINE_BUDGET_FUNCTION_GROWTH : IR_INLINE_BUDGET_MODULE_GROWTH));
+                BUSTER_TEST(arguments, large_module->inlining.required_budget_limit ==
+                    (limit_case == 1 ? IR_INLINE_FUNCTION_GROWTH : IR_INLINE_MODULE_GROWTH));
+                BUSTER_TEST(arguments, large_module->inlining.required_budget_demand > large_module->inlining.required_budget_limit);
+                BUSTER_TEST(arguments, !large_module->inline_complete);
+            }
+        }
+        scratch_end(large_temporary);
     }
 
     // An explicit function-growth limit on a required call reports the

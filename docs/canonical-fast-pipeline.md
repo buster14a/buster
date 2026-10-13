@@ -594,8 +594,8 @@ information; the debug model does not gain inline call-stack records.
 
 Positive decimal limits are configurable through
 `-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
-`-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
-`-fcanonical-inline-module-growth=N` (default: the larger of 4096 copied rows
+`-fcanonical-inline-function-growth=N` (optional default 2048 copied rows per caller),
+`-fcanonical-inline-module-growth=N` (optional default: the larger of 4096 copied rows
 and 1/32 of the module's lowered canonical instruction rows), and
 `-fcanonical-inline-call-sites=N` (default 64 sites per caller).
 The fixed 4096-row module default stopped optional expansion of the unity
@@ -625,13 +625,17 @@ memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are ne
 dropped. `-fcanonical-inline-caller-growth-shift=N` and
 `IrInlineOptions.caller_growth_shift` override the shift (a zero API field
 selects the default, 32 or more keeps every planned site).
-The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
-headroom for larger mandatory checked-arithmetic expansions; the module, work
-and storage guards still independently bound expansion.
-Zero numeric fields in embedding options normalize to those defaults.
-Mandatory calls are processed before optional tiny candidates across the module;
-both phases share the same row-growth, call-site and per-caller limits. Mandatory
-planning and splicing share one module-wide work and retained-storage budget.
+The optional caller default is twice the 64-site times 16-row tiny-body budget.
+Required intrinsic wrappers can exceed both optional row caps (the RAD AVX-512
+probe copies 6318 rows), so zero function/module row limits leave required
+expansion to the independent work, storage and call-site guards. Explicit
+function/module row limits cap both phases and still produce a source-mapped
+refusal. Zero row limits remain zero in embedding options across modules;
+other zero numeric fields normalize to their named defaults.
+Mandatory calls are processed before optional tiny candidates across the module.
+Their growth counts against any subsequent optional row allowance, and both
+phases share the call-site limit. Mandatory planning and splicing share one
+module-wide work and retained-storage budget.
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
 work totals let the first few large callers starve every later one. Optional

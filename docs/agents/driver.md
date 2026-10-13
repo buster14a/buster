@@ -623,11 +623,13 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `-fcanonical-inline-module-growth=N`,
 `-fcanonical-inline-call-sites=N`, and
 `-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
-tiny inlining; zero is rejected and zero-valued API options normalize to the
-named defaults. Budgets cap callee instruction count, added instructions per
+tiny inlining; zero is rejected on the command line. Zero-valued API row limits
+select the optional defaults while required expansion uses the independent
+work/storage guards; other zero API fields normalize to the named defaults.
+Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
 the shift sets the caller relocation bound described below.
-Without an explicit module limit, the module budget is relative: the larger of
+Without an explicit module limit, the optional module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when
 their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
