@@ -43112,6 +43112,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_initializer(UnitTest
     return result;
 }
 
+// A `?` whose `:` never comes is a syntax error at the token that ends its
+// expression first (#4072). The default path's syntax check must say so, as
+// the syntax tree does under -fc-ast-pilot, and -c must stop there with the
+// same diagnostic instead of failing in lowering. A comma does not end the
+// middle operand, and `valid` keeps the shapes that complete a conditional
+// (GNU `x ?: y`, nesting, comma and statement-expression middles) and the
+// colons no `?` owns (labels, cases, bit-fields, _Generic and asm operands).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_missing_colon(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 invalid[] = {
+        S8("int f(int x) { int e = x ? 1; return e; }\n"),
+        S8("int f(int x) { int e = x ? 1, 2; return e; }\n"),
+        S8("int h(int); int f(int x) { return h(x ? 1); }\n"),
+        S8("int f(int x) { return x ? 1 : x ? 2; }\n"),
+        S8("int f(int x) { return x ? ({ x ? 1; }) : 2; }\n"),
+        S8("int g = 1 ? 2;\n"),
+        S8("int a[2] = { 1 ? 2 };\n"),
+    };
+    String8 expected[] = {
+        S8(":1:29: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:32: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:42: expected ':' to complete the conditional expression, found ')'"),
+        S8(":1:36: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:35: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:14: expected ':' to complete the conditional expression, found ';'"),
+        S8(":1:20: expected ':' to complete the conditional expression, found '}'"),
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(invalid) == BUSTER_ARRAY_LENGTH(expected));
+    String8 valid_parts[] = {
+        S8("int g(void);\n"),
+        S8("int k = 1 ? 2 : 3, k2 = 0 ? 2, 3 : 4;\n"),
+        S8("struct S { int a : 1 ? 2 : 3; int b; };\n"),
+        S8("int f(int x, int a, int b, int c, int d) {\n"),
+        S8("    int e = x ? g(), 1 : 0; int y = x ?: a; int z = a ? b ? c : d : e;\n"),
+        S8("    int v = x ? ({ int q = x ? 1 : 2; q; }) : 2;\n"),
+        S8("    switch (x) { case 1 ? 2 : 3: break; default: break; }\n"),
+        S8("again: x = x ? x - 1 : 0; if (x) goto again;\n"),
+        S8("    __asm__ volatile (\"\" : \"+r\"(x) : \"r\"(x ? 1 : 2));\n"),
+        S8("    return e + y + z + v + _Generic(x, int: x ? 1 : 2, default: 0); }\n"),
+    };
+    String8 valid = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid_parts), false);
+    for (u32 index = 0; index <= BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        Arena* conflicts[] = {arguments->arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        bool accepted = index == BUSTER_ARRAY_LENGTH(invalid);
+        String8 source = buster_test_temporary_path(temporary.arena, S8("conditional-missing-colon"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(accepted ? valid : invalid[index]))))
+        {
+            for (u32 form = 0; form < 4; form += 1)
+            {
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("conditional-missing-colon"), S8(".o"));
+                String8 syntax[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), source,
+                    S8("-fc-ast-pilot")};
+                String8 object[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output,
+                    source, S8("-fc-ast-pilot")};
+                SliceString8 command = form & 2 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(object) : (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax);
+                command.length -= (form & 1) == 0;
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, command);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                bool passed = accepted ? compiled.error == COMPILER_DRIVER_ERROR_NONE
+                                       : compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                             string_first_sequence(compiled.diagnostic, expected[index]) != BUSTER_STRING_NO_MATCH;
+                BUSTER_TEST_RAW(arguments, passed,
+                    string_format(temporary.arena, S8("conditional missing colon case={u32} form={u32}: {S8}"), index, form, compiled.diagnostic));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // `size_t` and `ptrdiff_t` must be pointer-width whatever target the lowering
 // is handed, because an integer converted to a pointer is widened to them on
 // the way.  The shape that broke this is the one every test above writes
@@ -66681,6 +66754,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_initializer);
     C_TEST_FIXTURE(arguments, c_test_conditional_incomplete_array_runtime);
+    C_TEST_FIXTURE(arguments, c_test_conditional_missing_colon);
     C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);

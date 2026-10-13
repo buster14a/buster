@@ -31358,6 +31358,81 @@ BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResu
     return result;
 }
 
+// Pairs the `?` at `question` with its `:` and every `?` it meets on the way
+// (#4072). `pending` receives the delimiter depth of each unmatched `?`; a `:`
+// at the innermost one's depth completes it, including GNU `x ?: y`. A comma
+// does not end a middle operand, since that is a whole expression. A `;` or a
+// closing delimiter at a pending `?`'s depth ends its expression first, and is
+// the token returned, or UINT32_MAX when every `?` is completed. `*checked_end`
+// is where the scan stopped, so a caller asks again only past it and the scans
+// stay linear over the stream. A `:` with no `?` pending at its depth (a label,
+// a case, a bit-field) is not this scan's to judge.
+BUSTER_GLOBAL_LOCAL u32 c_parser_unmatched_conditional(CPreprocessResult const* preprocess, CTokenShape const* token_shapes, u32 question,
+                                                       u32 end, u32* pending, u32* checked_end)
+{
+    u32 failure = UINT32_MAX;
+    u32 pending_count = 0;
+    u32 depth = 0;
+    u32 index = question;
+    bool open = true;
+    while (open && index < end)
+    {
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, preprocess, index);
+        CPunctuator punctuator = c_token_shape_punctuator(shape);
+        bool at_pending = pending_count && pending[pending_count - 1] == depth;
+        if (shape == C_TOKEN_END_OF_FILE)
+        {
+            open = false;
+        }
+        else if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            pending[pending_count++] = depth;
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON && at_pending)
+        {
+            pending_count -= 1;
+            open = pending_count != 0;
+        }
+        else if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+        {
+            depth += 1;
+        }
+        else if (at_pending && (punctuator == C_PUNCTUATOR_SEMICOLON || c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE)))
+        {
+            failure = index;
+            open = false;
+        }
+        else if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+        {
+            open = depth != 0;
+            depth -= depth != 0;
+        }
+        index += failure == UINT32_MAX;
+    }
+    *checked_end = index;
+    return failure;
+}
+
+// Reports the conditional the `?` at `question` leaves unfinished, unless an
+// earlier scan already covered it, with the syntax tree's wording.
+BUSTER_GLOBAL_LOCAL void c_parser_validate_conditional(Arena* arena, CParserResult* result, CPreprocessResult const* preprocess,
+                                                       CTokenShape const* token_shapes, u32 question, u32 end, u32* pending, u32* checked_end)
+{
+    if (question >= *checked_end)
+    {
+        u32 failure = c_parser_unmatched_conditional(preprocess, token_shapes, question, end, pending, checked_end);
+        if (failure != UINT32_MAX)
+        {
+            CToken token = preprocess->tokens[failure];
+            CDiagnosticKind kind = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ? C_DIAGNOSTIC_EXPECTED_DECLARATION
+                                                                                                 : C_DIAGNOSTIC_UNMATCHED_DELIMITER;
+            c_parser_diagnostic(arena, result, c_preprocess_token_location(preprocess, token), kind,
+                                string_format(arena, S8("expected ':' to complete the conditional expression, found '{S8}'"),
+                                              c_token_spelling(preprocess->spelling_base, token)));
+        }
+    }
+}
+
 typedef struct CParserBlockFrame CParserBlockFrame;
 struct CParserBlockFrame
 {
@@ -31928,6 +32003,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
         CParserTypedefNames typedef_names = {0};
         u32 index = 0;
         u32 validated_specifier_end = 0;
+        u32 validated_conditional_end = 0;
         while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
         {
             u32 start = index;
@@ -31976,6 +32052,13 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 else if (shape == C_TOKEN_IDENTIFIER)
                 {
                     c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
+                }
+                else if (punctuator == C_PUNCTUATOR_QUESTION)
+                {
+                    // The open delimiters hold at most `index` slots, which
+                    // leaves one for every `?` the scan can still meet.
+                    c_parser_validate_conditional(arena, &result, &preprocess, token_shapes, index, token_count, delimiter_stack + delimiter_count,
+                                                  &validated_conditional_end);
                 }
                 u32 decoration_end = c_parse_skip_declaration_decoration(preprocess, index, token_count);
                 if (decoration_end != index)
@@ -32080,6 +32163,11 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             else if (body_shape == C_TOKEN_IDENTIFIER)
                             {
                                 c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
+                            }
+                            else if (c_token_shape_punctuator(body_shape) == C_PUNCTUATOR_QUESTION)
+                            {
+                                c_parser_validate_conditional(arena, &result, &preprocess, token_shapes, index, token_count, delimiter_stack,
+                                                              &validated_conditional_end);
                             }
                             if (body_shape == C_TOKEN_IDENTIFIER &&
                                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("return")))
@@ -33242,6 +33330,9 @@ BUSTER_C_INTERNAL u32 c_parser_tree_probe_run_slot(u64 const* runs, u64 key)
 // validates: it steps over declaration decorations outside bodies, and checks
 // return operands only inside bodies, where the body's `{` has already
 // cleared its return state. A clean probe therefore means a clean walk. The
+// walker's conditional check (c_parser_validate_conditional) is not repeated:
+// the split runs only over a tree that built, and the tree builds no `?`
+// without its `:` or with an operand a `;` or a closing delimiter ends. The
 // stream is read in 64-token windows of the shape sidecar, and only number
 // and identifier lanes do scalar work. Two filters skip only calls that
 // cannot report: a number whose fact converted as an integer (its flags are
