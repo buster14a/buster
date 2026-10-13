@@ -1257,6 +1257,37 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `compare-pull` job next to the roughly 14-minute ordinary comparison. No
    job timeout changed.
 
+   **Issue #2676 opt-in deep-nesting leg.** The same route accepts one fresh
+   exact line `profile: frontend-nesting-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:benchmark_frontend_scaling.py@frontend-nesting`. It cannot be
+   combined with any other opt-in profile; both the harness and the
+   publisher refuse the combination. After the corpus leg,
+   `measure_frontend_nesting` runs the merge base's
+   `tools/benchmark_frontend_scaling.py --suite nesting --warmups 1
+   --repetitions 11 --cpu 2` from the base checkout on `ide-base` and
+   `ide-cand`. Each of the eleven families in `NESTING_FAMILIES` is one
+   function whose statements nest 2,000, 8,000 and 32,000 levels deep, timed
+   with `-fsyntax-only` and `-c`. Each depth is four times the last, so a
+   term growing with the square of the depth shows as a sixteenfold step.
+   The 68 cells alternate the order of the binaries, and any `-c` object
+   that differs between them fails the run.
+
+   `compiler_publish.py` re-validates the receipt's `frontend_nesting`
+   record against `frontend_nesting/provenance.json` and `results.json`
+   (`validate_frontend_nesting`, sharing `frontend_scaling_problems` with
+   the frontend-selector leg). It refuses a tool exit other than 0, binary
+   hashes that are not the measured binaries, an observed CPU other than the
+   Ryzen 7 9700X, affinity other than CPU 2, a population that is not exactly
+   the 68 profile cells with eleven samples per binary, a reported median its
+   samples do not give, an object cell without its identical-object hash, and
+   a frozen profile or cell digest that changed. Every timing is report-only.
+
+   Cost: on a hosted 4-vCPU 2.1 GHz Xeon (diagnostic, not Zen 5), the whole
+   leg took 190 s and exported 196 KB. Its 20-minute timeout keeps it inside
+   the unchanged 90-minute `compare-pull` job next to the roughly 14-minute
+   ordinary comparison. No job timeout changed.
+
    **Issue #2761 opt-in host Wild linker leg.** The same route accepts one
    fresh exact line `profile: wild-linker-v1`, selected by the same
    every-parent freshness rule. It is the Zen 5 route for
