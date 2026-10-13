@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <buster/lib/base.h>
 
 #define DISK_BUILDER_SECTOR_SIZE 512

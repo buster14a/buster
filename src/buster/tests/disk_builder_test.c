@@ -2,6 +2,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/apps/disk_builder_verification.h>
 #include <buster/lib/arena.h>
+#include <stddef.h>
 #include <string.h>
 
 BUSTER_GLOBAL_LOCAL void disk_builder_test_make_mbr(u8* disk, u32 size_in_lba)
