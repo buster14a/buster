@@ -5811,6 +5811,8 @@ struct CMacroExpansionStorage
 {
     Arena* argument_arena;
     Arena* expansion_arena;
+    // Conditional expressions have a post-rescan defined-operator extension.
+    bool conditional_expression;
     // Stop retrying after a resource failure until this storage is destroyed.
     bool failed;
 };
@@ -5822,12 +5824,20 @@ struct CMacroExpansionMark
     u64 expansion;
 };
 
+typedef enum CMacroExpansionDefinedState
+{
+    C_MACRO_EXPANSION_DEFINED_NONE,
+    C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN,
+    C_MACRO_EXPANSION_DEFINED_NAME,
+} CMacroExpansionDefinedState;
+
 typedef struct CMacroExpansionContext CMacroExpansionContext;
 struct CMacroExpansionContext
 {
     CMacroExpansionContext* parent;
     CMacroExpansionContinuation* continuation;
     u64 task_base;
+    CMacroExpansionDefinedState defined_state;
     // The root context's rescan output is the line's node list, which the
     // caller consumes. An argument context (one with a continuation) writes
     // `output_tokens` instead: one contiguous run in the expansion arena that
@@ -7871,6 +7881,38 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
             else
             {
                 CPpToken token = task.token;
+                if (storage->conditional_expression)
+                {
+                    if (context->defined_state == C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN)
+                    {
+                        if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NAME;
+                        }
+                        else if (token.token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            token.no_expand = true;
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                        }
+                        else
+                        {
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                        }
+                    }
+                    else if (context->defined_state == C_MACRO_EXPANSION_DEFINED_NAME)
+                    {
+                        if (token.token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            token.no_expand = true;
+                        }
+                        context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                    }
+                    else if (token.token.kind == C_TOKEN_IDENTIFIER &&
+                             c_token_spelling_equal(space->base, token.token, S8("defined")))
+                    {
+                        context->defined_state = C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN;
+                    }
+                }
                 if (token.token.kind == C_TOKEN_PRAGMA && !context->parent &&
                     c_preprocess_expansion_pragma(pragma_context, space->base, token, stamps, &tasks))
                 {
@@ -8987,7 +9029,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     u64 expanded_count = 0;
     if (valid && preprocessor_arithmetic)
     {
-        CMacroExpansionStorage expansion_storage = {0};
+        CMacroExpansionStorage expansion_storage = {.conditional_expression = true};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);

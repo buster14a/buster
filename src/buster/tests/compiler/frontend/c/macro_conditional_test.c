@@ -1565,6 +1565,133 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_directive_tests(UnitTestA
     return result;
 }
 
+// Macro-produced defined operators keep their operands out of ordinary macro rescanning.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_produced_defined_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 name;
+        String8 source;
+        String8 expected;
+    } cases[] = {
+        {
+            S8("parenthesized-macro-operand"),
+            S8("#define VALUE 0\n"
+               "#define CHECK defined(VALUE)\n"
+               "#if CHECK\n"
+               "parenthesized_defined\n"
+               "#else\n"
+               "wrong_parenthesized\n"
+               "#endif\n"),
+            S8("parenthesized_defined"),
+        },
+        {
+            S8("empty-unparenthesized-operand"),
+            S8("#define EMPTY\n"
+               "#define CHECK defined EMPTY\n"
+               "#if CHECK\n"
+               "empty_name_is_defined\n"
+               "#else\n"
+               "wrong_empty\n"
+               "#endif\n"),
+            S8("empty_name_is_defined"),
+        },
+        {
+            S8("nested-object-producer-in-elif"),
+            S8("#define VALUE 0\n"
+               "#define INNER defined(VALUE)\n"
+               "#define OUTER INNER\n"
+               "#if 0\n"
+               "wrong_if\n"
+               "#elif OUTER\n"
+               "nested_defined_in_elif\n"
+               "#else\n"
+               "wrong_elif\n"
+               "#endif\n"),
+            S8("nested_defined_in_elif"),
+        },
+        {
+            S8("function-like-token-paste-producer"),
+            S8("#define CHECK(name) defined(PREFIX_##name)\n"
+               "#define PREFIX_yes 0\n"
+               "#if CHECK(yes)\n"
+               "pasted_name_is_defined\n"
+               "#else\n"
+               "wrong_pasted_name\n"
+               "#endif\n"),
+            S8("pasted_name_is_defined"),
+        },
+        {
+            S8("undefined-pasted-name-in-elif"),
+            S8("#define CHECK(name) defined(PREFIX_##name)\n"
+               "#if CHECK(missing)\n"
+               "wrong_missing_if\n"
+               "#elif !CHECK(missing)\n"
+               "pasted_name_is_undefined\n"
+               "#else\n"
+               "wrong_missing_elif\n"
+               "#endif\n"),
+            S8("pasted_name_is_undefined"),
+        },
+        {
+            S8("feature-builtin-argument-named-defined"),
+            S8("#define QUERY __has_builtin(defined)\n"
+               "#if QUERY\n"
+               "wrong_builtin_query\n"
+               "#else\n"
+               "feature_query_defined_argument\n"
+               "#endif\n"),
+            S8("feature_query_defined_argument"),
+        },
+        {
+            S8("feature-include-header-named-defined"),
+            S8("#define QUERY __has_include(<defined.h>)\n"
+               "#if QUERY\n"
+               "wrong_include_query\n"
+               "#else\n"
+               "feature_query_defined_header\n"
+               "#endif\n"),
+            S8("feature_query_defined_header"),
+        },
+        {
+            S8("literal-defined-controls"),
+            S8("#define VALUE 0\n"
+               "#if defined(VALUE) && defined VALUE && !defined(MISSING)\n"
+               "literal_defined_unchanged\n"
+               "#else\n"
+               "wrong_literal_defined\n"
+               "#endif\n"),
+            S8("literal_defined_unchanged"),
+        },
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    String8 dialect_names[] = {S8("c17"), S8("gnu17")};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, cases[case_index].source,
+                                                     (CPreprocessOptions){.source_path = S8("macro-produced-defined.c"),
+                                                                          .dialect = dialects[dialect_index]});
+            String8 context = string_format(temporary.arena, S8("macro-produced defined case={S8} dialect={S8}"),
+                                            cases[case_index].name, dialect_names[dialect_index]);
+            BUSTER_TEST_RAW(arguments, actual.error_count == 0, context);
+            BUSTER_TEST_RAW(arguments, actual.warning_count == 0, context);
+            if (BUSTER_REQUIRE(arguments, actual.tokens && actual.spelling_base))
+            {
+                UnitTestResult compared = c_macro_conditional_expect_preprocessed(
+                    arguments, temporary.arena, actual, cases[case_index].expected);
+                result.test_count += compared.test_count;
+                result.succeeded_test_count += compared.succeeded_test_count;
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A failed reservation in either half of the macro arena pair is a
 // preprocessing diagnostic, and a later unit can still expand macros normally.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_reservation_tests(UnitTestArguments* arguments)
@@ -2015,6 +2142,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_reservation_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_rlimit_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_demand_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_produced_defined_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_conditional_directive_tests);
     return result;
 }
