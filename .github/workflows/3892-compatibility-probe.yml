@@ -1,0 +1,48 @@
+name: 3892 hosted compatibility probe
+on:
+  push:
+    branches: [codex/3885-neutral-pending-supersession]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove original reader refuses the new native format
+        shell: bash
+        run: |
+          cp tools/github_ci_time.py "$RUNNER_TEMP/compatible-reader.py"
+          git show 9af77caa0fba0b4a46a2730858aa4697a1f6b077:tools/github_ci_time.py > tools/github_ci_time.py
+          if python3 -B tools/github_ci_time_test.py CompilerBenchmarkInventoryTests.test_native_terminal_first_reports_preserve_recovery_and_workload_proof > "$RUNNER_TEMP/original-reader.txt" 2>&1; then
+            cat "$RUNNER_TEMP/original-reader.txt"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/original-reader.txt"
+          grep -F 'FAILED (failures=6)' "$RUNNER_TEMP/original-reader.txt"
+          cp "$RUNNER_TEMP/compatible-reader.py" tools/github_ci_time.py
+      - name: Validate compatible reader and reuse controls
+        run: |
+          python3 -B tools/github_ci_time_test.py -v
+          python3 -B tools/main_ci_reuse_test.py -v
+          python3 -B tools/ci_workflow_tools_test.py -v
+      - name: Validate native lifecycle and actual rendered composition
+        shell: bash
+        run: |
+          for cc in clang gcc; do
+            "$cc" -std=c11 -Isrc -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/lifecycle-$cc"
+            "$RUNNER_TEMP/lifecycle-$cc" --self-test
+            "$cc" -std=c11 -Isrc -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined .github/scripts/3892_report_probe_test.c -lm -o "$RUNNER_TEMP/report-$cc"
+            "$RUNNER_TEMP/report-$cc" > "$RUNNER_TEMP/native-reports-$cc.jsonl"
+            python3 -B .github/scripts/3892_report_probe_test.py "$RUNNER_TEMP/native-reports-$cc.jsonl"
+          done
+      - name: Validate documentation and source size
+        shell: bash
+        run: |
+          python3 -B tools/check_markdown_links.py
+          git diff --check origin/main...HEAD
+          clang -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver"
+          "$RUNNER_TEMP/driver" source_size --base "$(git merge-base origin/main HEAD)"
