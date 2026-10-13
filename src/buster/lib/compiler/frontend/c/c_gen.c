@@ -37753,9 +37753,14 @@ c_ir_expression_core_loop:
             u32 operand_end = c_ir_unary_expression_end(builder, index, end);
             bool postfix = operand_end > index + 1 && (c_token_is_punctuator(&builder->preprocess.tokens[operand_end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
                                                        c_token_is_punctuator(&builder->preprocess.tokens[operand_end - 1], C_PUNCTUATOR_MINUS_MINUS));
-            bool outer_prefix = c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND) ||
-                                c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS) ||
-                                c_token_is_punctuator(&token, C_PUNCTUATOR_EXCLAMATION) || c_token_is_punctuator(&token, C_PUNCTUATOR_TILDE);
+            bool size_operator_prefix = token.kind == C_TOKEN_IDENTIFIER &&
+                                        c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS);
+            bool extension_prefix = token.kind == C_TOKEN_IDENTIFIER &&
+                                    c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_EXTENSION);
+            bool outer_prefix = size_operator_prefix || extension_prefix || c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) ||
+                                c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND) || c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) ||
+                                c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_EXCLAMATION) ||
+                                c_token_is_punctuator(&token, C_PUNCTUATOR_TILDE);
             if (!outer_prefix && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index, operand_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);

@@ -12894,11 +12894,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         // A wrapped unsigned cast is truncated again by the arithmetic after it.
         {S8("char d[(unsigned)-1 + 2]; _Static_assert(sizeof(d) == 1, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[((unsigned)-1) + 3]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
-        // An unparenthesized `sizeof` operand other than a single name is not read by
-        // the bound reader, with or without a cast; the cast route keeps that scope.
-        {S8("char a[sizeof -1];"), S8("variably modified"), C_PREPROCESS_DIALECT_GNU17, false},
-        {S8("char a[(signed char)sizeof -1];"), S8("variably modified"), C_PREPROCESS_DIALECT_GNU17, false},
-        {S8("int *p; char a[(char)sizeof *p];"), S8("variably modified"), C_PREPROCESS_DIALECT_GNU17, false},
+        // sizeof a non-VLA unary operand is an integer constant expression,
+        // including when the size result is wrapped in an arithmetic cast.
+        {S8("char a[sizeof -1]; _Static_assert(sizeof(a) == sizeof(int), \"sizeof unary\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char a[(signed char)sizeof -1]; _Static_assert(sizeof(a) == (signed char)sizeof(int), \"cast sizeof unary\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("int *p; char a[(char)sizeof *p]; _Static_assert(sizeof(a) == (char)sizeof(int), \"cast sizeof dereference\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char a[(int)(float)sizeof(int) + (unsigned)1]; _Static_assert(sizeof(a) == 5, \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char a[(int)(double)1.5 + (int)(float)sizeof(long long)]; _Static_assert(sizeof(a) == 9, \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[3 + (unsigned)-1]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
