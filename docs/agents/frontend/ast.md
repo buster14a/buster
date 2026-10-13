@@ -4274,6 +4274,74 @@ diagnostic only:
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
+### Type-word tests in lowering's type queries
+
+The [type-word section](#type-word-test-and-label-proof-in-lowerings-classification)
+left one lead: `c_ir_query_execute` still called the spelling ladder
+`c_parse_type_word_for_dialect` 48,392 times (4.98 M Ir) on the base it
+measured. After that change, `c_gen.c` has two spelling-form type-word
+tests left:
+- **Site 1, `c_ir_type_name_prefix`.** It tests the first specifier token
+  of a type name that no entity binds, before looking the name up.
+- **Site 2, `c_ir_statement_expression_tail`.** It tests the first token of
+  a statement expression's trailing statement.
+
+A throwaway census build of main `446f742e` counted both on the unity
+self-host (`-g0 -c`, default flags, tests-off `-march=x86-64-v3` Release,
+Callgrind). Each site went through a noinline wrapper with noinline
+markers:
+- **Site 1** makes 48,315 calls, all from `c_ir_query_execute`, where
+  `c_ir_type_name_prefix` is inlined; 9 more come from its recursive frame.
+  - 3,571 calls answer true.
+  - 24,855 tokens are predefined symbols, and none lacks a symbol.
+  - `c_parse_type_word_for_dialect_token` answers every call the same way.
+- **Site 2** makes no call. The input has no statement expression, as the
+  [statement-expression census](#statement-expression-interiors-in-lowering)
+  found.
+
+These budgets were declared before the measured runs. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at
+`-g -c` for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `446f742e`, which the candidate branches from. The budgets:
+- **Correctness.** Both sites read the token form instead of the spelling.
+  Site 2 is swapped for exactness, not for its count. Reference-check
+  builds (Debug and sanitized) compare the two answers for every identifier
+  token each site tests. The `-c` objects (`-g0` and `-g`) must be
+  byte-identical across the four arms. `test_self_host` must keep its fixed
+  point, and `test_all` must pass.
+- **The test (D against A).** No function makes a call to
+  `c_parse_type_word_for_dialect` from `c_gen.c`'s lowering on this input.
+- **The whole compile.** `-c` (`-g0`) must fall by at least 3 M Ir, both D
+  against A and C against B. Below that floor the result is recorded as
+  negative and no code ships. `-fsyntax-only` runs no lowering, so it is not
+  measured.
+- **Not in scope.** The dead-code hop's 18,882 label proofs (2.19 M) stay
+  under the floor; this census does not change them.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
+The hosted census is
+[`2026-10-13T084504Z`](../../performance-audits/2026-10-13T084504Z.md),
+diagnostic only:
+- **Both sites ship on the token path.** Both arms fall by 4.09 M Ir
+  (−0.016% default, −0.018% pilot). `c_ir_query_execute` makes no
+  spelling-ladder call, and no caller of the ladder remains in either
+  candidate arm. The objects are byte-identical across the four arms at
+  `-g0` and `-g`.
+- **Leads, unclaimed:** the dead-code hop's proofs (2.19 M), still under the
+  floor.
+- Zen 5 validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
 ### Settling the name checks, second cut
 
 This section has its own anchor because other open AST branches append to

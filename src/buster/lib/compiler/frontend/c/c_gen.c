@@ -31452,8 +31452,17 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
     }
     CToken first = builder->preprocess.tokens[index];
     CEntityId entity = first.kind == C_TOKEN_IDENTIFIER ? c_ir_identifier_entity(builder, index) : C_ENTITY_ID_INVALID;
+#if BUSTER_REFERENCE_CHECKS
+    // The type-word test below reads the symbol's word bits; the spelling
+    // ladder it replaces is the reference.
+    if (first.kind == C_TOKEN_IDENTIFIER)
+    {
+        BUSTER_CHECK(c_parse_type_word_for_dialect_token(builder->preprocess, first) ==
+                     c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect));
+    }
+#endif
     if (entity.value == C_ID_UNDERLYING_INVALID && first.kind == C_TOKEN_IDENTIFIER &&
-        !c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect))
+        !c_parse_type_word_for_dialect_token(builder->preprocess, first))
     {
         CScopeId scope = c_ir_current_scope(builder);
         entity = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, scope, &first);
@@ -41643,9 +41652,18 @@ BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder
     {
         CToken first = builder->preprocess.tokens[tail_start];
         CEntityId first_entity = c_ir_identifier_entity(builder, tail_start);
+#if BUSTER_REFERENCE_CHECKS
+        // The type-word test below reads the symbol's word bits; the
+        // spelling ladder it replaces is the reference.
+        if (first.kind == C_TOKEN_IDENTIFIER)
+        {
+            BUSTER_CHECK(c_parse_type_word_for_dialect_token(builder->preprocess, first) ==
+                         c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect));
+        }
+#endif
         bool declaration = first.kind == C_TOKEN_IDENTIFIER &&
                            (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF) ||
-                            c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect) ||
+                            c_parse_type_word_for_dialect_token(builder->preprocess, first) ||
                             (first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF) ||
                             (first_entity.value == C_ID_UNDERLYING_INVALID &&
                              c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder), first)));
