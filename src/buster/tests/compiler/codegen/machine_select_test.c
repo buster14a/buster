@@ -1086,7 +1086,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
                     continue;
                 }
                 bool defined = virtual_register->definition_point != MACHINE_POINT_INVALID;
-                MachineInstruction* definition = defined ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
+                // A definition point implies selected rows; the explicit test
+                // lets the analyzer see that (#3952).
+                MachineInstruction* definition = defined && selected.function.instructions ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
                 u16 opcode = definition ? definition->opcode : 0;
                 if (machine_selection_test_folded_index(function, row))
                 {
