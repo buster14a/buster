@@ -399,11 +399,12 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 // The same wait, given up on after `timeout_microseconds`: the child is killed,
 // whatever it had already written is still returned, and `timed_out` says the
 // deadline is why. Zero waits forever, which is what os_process_wait_sync does.
-// On Windows, each captured-pipe scan polls the leader. Finite deadlines
-// are checked after every nonterminal bounded pass, including while bytes keep
-// arriving. After first observing leader exit, the waiter drains another pass
-// and closes inherited writers after a later empty pass with a repeated
-// signaled poll.
+// On Windows, each ordinary captured-pipe scan polls the leader and checks
+// a finite deadline even while bytes keep arriving. On the first signaled poll,
+// it freezes the remaining available byte count per stream, drains only that
+// bounded snapshot in at-most-16-KiB reads, and closes each reader at zero.
+// Later descendant writes cannot extend the snapshot. Zero timeout waits
+// forever.
 // Synchronous regular-file spill and metadata I/O can delay deadline servicing;
 // this is not a hard wall-clock bound on storage or operating-system scheduling.
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);

@@ -6984,6 +6984,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         bool child_exit_observed = false;
+        DWORD final_snapshot_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         while (open_pipe_count)
         {
 #if BUSTER_INCLUDE_TESTS
@@ -6994,6 +6995,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
 #endif
             bool made_progress = false;
+            bool read_error = false;
 
             for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
             {
@@ -7002,9 +7004,21 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 {
                     continue;
                 }
+                bool draining_final_snapshot = child_exit_observed;
+                DWORD snapshot_remaining = final_snapshot_remaining[stream];
+                if (draining_final_snapshot && !snapshot_remaining)
+                {
+                    CloseHandle(read_pipe);
+                    read_pipes[stream] = 0;
+                    open_pipe_count -= 1;
+                    made_progress = true;
+                    continue;
+                }
 
                 // ReadFile on an anonymous pipe blocks, so only read bytes
-                // PeekNamedPipe reports as available.
+                // PeekNamedPipe reports as available. Once the leader exits,
+                // reads are additionally capped by the one-time per-stream
+                // snapshot so descendant writes cannot extend the drain.
                 DWORD available_byte_count = 0;
                 if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
                 {
@@ -7012,6 +7026,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     if (os_error.v != ERROR_BROKEN_PIPE)
                     {
                         string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                        read_error = true;
                     }
                     CloseHandle(read_pipe);
                     read_pipes[stream] = 0;
@@ -7023,49 +7038,91 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     u8 buffer[16 * 1024];
                     DWORD read_byte_count = 0;
                     DWORD requested_byte_count = available_byte_count < sizeof(buffer) ? available_byte_count : (DWORD)sizeof(buffer);
+                    if (draining_final_snapshot && snapshot_remaining < requested_byte_count)
+                    {
+                        requested_byte_count = snapshot_remaining;
+                    }
                     if (ReadFile(read_pipe, buffer, requested_byte_count, &read_byte_count, 0) && read_byte_count)
                     {
                         pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, read_byte_count);
                         made_progress = true;
+                        if (draining_final_snapshot)
+                        {
+                            final_snapshot_remaining[stream] -= read_byte_count;
+                            if (!final_snapshot_remaining[stream])
+                            {
+                                CloseHandle(read_pipe);
+                                read_pipes[stream] = 0;
+                                open_pipe_count -= 1;
+                            }
+                        }
                     }
+                    else
+                    {
+                        // Leave the snapshot count unchanged on a failed or
+                        // unexpected zero-byte read; it is not terminal EOF.
+                        read_error = true;
+                    }
+                }
+                else if (draining_final_snapshot)
+                {
+                    // The fixed snapshot still has bytes, so an empty peek
+                    // cannot complete it successfully.
+                    read_error = true;
                 }
             }
 
-            // Every nonterminal bounded pass observes the leader and
-            // services a finite deadline, even when output was readable.
+            // Every ordinary nonterminal pass observes a finite deadline,
+            // even when output was readable. After the first signaled poll,
+            // freeze the unread bytes once and finish that bounded snapshot.
             DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
 #if BUSTER_INCLUDE_TESTS
             os_process_wait_windows_test_scan_end(made_progress);
             os_process_wait_windows_test_child_poll(process_wait == WAIT_OBJECT_0);
 #endif
-            if (process_wait == WAIT_OBJECT_0)
+            if (process_wait == WAIT_OBJECT_0 && !child_exit_observed)
             {
-                if (child_exit_observed && !made_progress)
+                child_exit_observed = true;
+                for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
                 {
-                    // The leader was already known to have exited before this
-                    // complete empty scan. A descendant may retain an
-                    // inherited writer; close it only after preserving this
-                    // final snapshot of the buffered bytes.
-                    for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                    HANDLE read_pipe = read_pipes[stream];
+                    if (!read_pipe)
                     {
-                        if (read_pipes[stream])
+                        continue;
+                    }
+                    DWORD available_byte_count = 0;
+                    if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
+                    {
+                        OsError os_error = os_get_last_error();
+                        if (os_error.v != ERROR_BROKEN_PIPE)
                         {
-                            CloseHandle(read_pipes[stream]);
+                            string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                            read_error = true;
+                        }
+                        CloseHandle(read_pipe);
+                        read_pipes[stream] = 0;
+                        open_pipe_count -= 1;
+                        made_progress = true;
+                    }
+                    else
+                    {
+                        final_snapshot_remaining[stream] = available_byte_count;
+                        if (!available_byte_count)
+                        {
+                            CloseHandle(read_pipe);
                             read_pipes[stream] = 0;
                             open_pipe_count -= 1;
+                            made_progress = true;
                         }
                     }
-                    break;
-                }
-                if (!child_exit_observed)
-                {
-                    // The leader may have written between the scan above and
-                    // this observation. Perform another full scan before
-                    // considering closure of an inherited writer.
-                    child_exit_observed = true;
                 }
             }
-            if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+
+            if (child_exit_observed && !open_pipe_count && !read_error)
+            {
+                break;
+            }
+            if (deadline && (!child_exit_observed || read_error) && !os_process_deadline_milliseconds(deadline, 1))
             {
                 timed_out = true;
                 break;

@@ -249,13 +249,16 @@ failure, caller reuse, platform deadline cleanup and POSIX flag cancellation.
 Mobile retains production compilation and existing collector coverage; these
 desktop process fixtures do not claim mobile process execution.
 
-On Windows, each captured-pipe pass reads at most one available 16 KiB block per
-stream and polls the leader. Finite deadlines are checked after every
-nonterminal bounded pass, even when bytes keep arriving. After first observing
-leader exit, the waiter performs another bounded drain pass to retain final
-buffered bytes. It closes inherited writers after a later empty pass and a
-repeated signaled poll. A zero timeout still means wait forever. The storage-I/O
-and scheduling caveat above remains in force.
+On Windows, each ordinary captured-pipe pass reads at most one available
+16 KiB block per stream, polls the leader, and checks a finite deadline even
+when bytes keep arriving. On the first signaled poll, the waiter freezes the
+remaining available byte count for each open stream. It drains only those
+snapshotted bytes, at most 16 KiB per stream per pass, decrementing by successful
+read counts and closing each reader as soon as its count reaches zero. Later
+descendant writes cannot replenish the snapshot or prolong capture. Since the
+leader has exited, successful draining of this finite snapshot completes before
+deadline expiry is considered. Zero timeout still means wait forever. The
+storage-I/O and scheduling caveat above remains in force.
 
 For retained stream lengths `R_s`, the collector allocates exactly
 `N = sum(ceil(R_s / 16384))` chunk headers and payload blocks. With `R` total
