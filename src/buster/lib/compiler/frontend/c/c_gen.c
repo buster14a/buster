@@ -33,10 +33,11 @@
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
 // replay).
-// c_ir_root_conditional refuses a body range that holds no `?` through the
-// per-body token prefix table c_ir_token_prefix_build, before its scan or,
-// under -fc-ast-pilot, before the tree's records when the range is non-empty
-// (#3924). The same table lets c_ir_lower_expression_core_step skip a control
+// Without a tree, c_ir_root_conditional refuses a body range that holds no
+// `?` through the per-body token prefix table c_ir_token_prefix_build, before
+// its scan; with one, c_ir_tree_root_conditional refuses a non-empty such
+// range before its records (c_ir_tree_root_conditional_records, #3924). The
+// same table lets c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_range_may_prepare_control), a call prepass
 // (c_ir_range_may_prepare_calls) or a postfix probe
 // (c_ir_range_may_hold_update) that cannot find anything.
@@ -4877,12 +4878,21 @@ BUSTER_C_INTERNAL const u8 c_ir_token_prefix_classes[C_PUNCTUATOR_COUNT] = {
 
 BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
 
+// Kept out of line where inlining measurably changed a hot caller's code
+// (#3924): the prefix build, inlined into whichever caller reaches it first,
+// and the tree's records path behind c_ir_tree_root_conditional's refusal.
+#if BUSTER_COMPILER_MSVC
+#define C_IR_NOINLINE __declspec(noinline)
+#else
+#define C_IR_NOINLINE __attribute__((noinline))
+#endif
+
 // Fill the body's token prefix table in one pass. A close returns to the group
 // its open sat in, which is the group recorded at the open's own gap, so the
 // table is its own group stack. On a body whose delimiters do not nest
 // properly the groups are meaningless, and c_ir_range_balanced never reads
 // them there.
-BUSTER_C_INTERNAL void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
+BUSTER_C_INTERNAL C_IR_NOINLINE void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
 {
     CIrTokenPrefix* prefix = builder->token_prefix;
     CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
@@ -38877,37 +38887,29 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuil
 
 // Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
 // tree when lowering has one for this body (c_ir_tree_root_conditional), else
-// by the token scan. A non-empty body range that holds no `?` is refused in
-// O(1) first, with or without a tree: the scan can only answer true at a `?`
-// inside the range, and 93% of the self-host's calls hold none (#3102, #3467,
-// #3924). An empty range keeps the tree's answer, a fallback to the scan.
-// Inline, so the refusal costs no call frame and the scan stays out of line.
+// by the token scan. Without a tree, a body range that holds no `?` is refused
+// in O(1) first: the scan can only answer true at a `?` inside the range, and
+// 93% of the self-host's calls hold none (#3102, #3467). Inline, so the
+// refusal costs no call frame and the scan stays out of line.
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
                                                              u32* colon, u32* expression_end)
 {
     bool result = false;
-    if (builder->tree_conditionals && (start >= end || c_ir_range_may_hold_question(builder, start, end)))
+    if (builder->tree_conditionals)
     {
         result = c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end);
     }
-    else if (!builder->tree_conditionals && c_ir_range_may_hold_question(builder, start, end))
+    else if (c_ir_range_may_hold_question(builder, start, end))
     {
         result = c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
     }
+#if BUSTER_REFERENCE_CHECKS
     else
     {
-        // A non-empty body range with no `?` is the records' negative
-        // (c_ir_tree_root_conditional), so the pilot's statistics count it
-        // as one.
-        if (builder->tree_conditionals && builder->ast_lower_statistics)
-        {
-            builder->ast_lower_statistics->negatives += 1;
-        }
-#if BUSTER_REFERENCE_CHECKS
         u32 reference[4];
         BUSTER_CHECK(!c_ir_root_conditional_scan(builder, start, end, &reference[0], &reference[1], &reference[2], &reference[3]));
-#endif
     }
+#endif
     return result;
 }
 
@@ -41460,8 +41462,11 @@ BUSTER_C_INTERNAL CIrTreeConditionals const* c_ir_tree_conditionals_find(CIrTree
     return low < index->body_count && index->braces[low] == brace ? index->bodies + low : 0;
 }
 
-BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                                    u32* expression_end)
+// The records' answer for any range, with its statistics: the unit's `?`
+// tokens decide a range holding none, and a record starting at the stripped
+// range's first token decides one that is a conditional.
+BUSTER_C_INTERNAL C_IR_NOINLINE bool c_ir_tree_root_conditional_records(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start,
+                                                                        u32* question, u32* colon, u32* expression_end)
 {
     CIrTreeConditionals const* tree = builder->tree_conditionals;
     CIrTreeRootVerdict verdict = C_IR_TREE_ROOT_UNKNOWN;
@@ -41540,6 +41545,33 @@ BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u3
         builder->ast_lower_statistics->answers += verdict == C_IR_TREE_ROOT_TRUE;
         builder->ast_lower_statistics->negatives += verdict == C_IR_TREE_ROOT_FALSE;
         builder->ast_lower_statistics->fallbacks += verdict == C_IR_TREE_ROOT_UNKNOWN;
+    }
+    return result;
+}
+
+// The body's `?` count refuses a non-empty body range with no `?` in O(1)
+// (#3924). That is the records' negative: every tree `?` is a `?` token, so the
+// records' search finds none there, and the statistics count it as one. Only
+// a range that may hold a `?` pays for the records' frame and search, which
+// cost about 86 Ir a call on the self-host.
+BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
+{
+    bool result = false;
+    if (start < end && !c_ir_range_may_hold_question(builder, start, end))
+    {
+        if (builder->ast_lower_statistics)
+        {
+            builder->ast_lower_statistics->negatives += 1;
+        }
+#if BUSTER_REFERENCE_CHECKS
+        u32 reference[4];
+        BUSTER_CHECK(!c_ir_root_conditional_scan(builder, start, end, &reference[0], &reference[1], &reference[2], &reference[3]));
+#endif
+    }
+    else
+    {
+        result = c_ir_tree_root_conditional_records(builder, start, end, expression_start, question, colon, expression_end);
     }
     return result;
 }
