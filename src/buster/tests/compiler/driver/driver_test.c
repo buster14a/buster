@@ -1153,6 +1153,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     bool extension_input_cleanup = false;
     String8 llvm_default_output = string_format_z(arena, S8("{S8}.bc"), target_output_stem);
     bool llvm_default_output_cleanup = false;
+    bool multi_bitcode_output_cleanup = false;
     String8 source = S8("int main(void) { return 0; }\n");
     String8 source_bytes = source;
     String8 target = S8("x86_64-unknown-linux-gnu");
@@ -1271,6 +1272,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
                                           later_bitcode_input_stats.kind == OS_FILE_KIND_MISSING))
         {
             llvm_default_output_cleanup = true;
+            multi_bitcode_output_cleanup = true;
             if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)) &&
                                               file_write(multi_input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)) &&
                                               file_write(multi_bitcode_output, BUSTER_SLICE_TO_BYTE_SLICE(later_bitcode_source))))
@@ -1490,7 +1492,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
 #endif
     }
     String8 cleanup_paths[] = {input, forced_include, object, hard_link, symlink_path, forced_search_header,
-                                forced_search_input, multi_input, multi_output, multi_bitcode_output, assembly_input, assembly_c_input,
+                                forced_search_input, multi_input, multi_output, assembly_input, assembly_c_input,
                                 assembly_header, wasm_default_output, spirv_default_output, ebpf_default_output};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cleanup_paths); index += 1)
     {
@@ -1514,6 +1516,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         if (bitcode_cleanup_stats.valid && bitcode_cleanup_stats.kind != OS_FILE_KIND_MISSING)
         {
             BUSTER_TEST(arguments, os_file_delete(llvm_default_output));
+        }
+    }
+    if (multi_bitcode_output_cleanup)
+    {
+        FileStats multi_bitcode_cleanup_stats = os_file_replacement_target_stats(multi_bitcode_output);
+        if (multi_bitcode_cleanup_stats.valid && multi_bitcode_cleanup_stats.kind != OS_FILE_KIND_MISSING)
+        {
+            BUSTER_TEST(arguments, os_file_delete(multi_bitcode_output));
         }
     }
     FileStats forced_search_directory_stats = os_path_followed_stats(forced_search_directory);
