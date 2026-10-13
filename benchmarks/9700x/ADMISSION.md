@@ -171,6 +171,11 @@ landed, against its baseline (its first parent, or a range baseline; see
   trusted code, so there is no author gate: everything that lands is measured,
   bot-authored catch-up pull requests included. A queue merge's second parent
   and pull request number are recorded for the report (`0` for a direct push).
+- When the range since the baseline's actual measurement is proven to change
+  only reviewed prose, `authorize-compiler` reports it unchanged, `compare` is
+  not allocated, and `publish-compiler` completes the check as `neutral`
+  **Not measured** (#3923; contract, rollback and limits in
+  [compiler-main-unchanged-skip.md](../../docs/compiler-main-unchanged-skip.md)).
 - `compare` (the 9700X, no token capability) checks out `main`'s `tools` and the
   commit with its history but no blobs (`filter: blob:none`), without
   persisted credentials, verifies the baseline is on the commit's first-parent
