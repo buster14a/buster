@@ -225,7 +225,7 @@
 //   c_ast_types_initializer_begin, _end,         the per-initializer entry points
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
-//   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_types_span                             span rules (c_ast_span_rule)
 //   c_ast_types_probe_fails,                      bit-field widths of operands
 //   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
@@ -681,14 +681,6 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE CAstSpanInput c_ast_types_span_input(CAstTypeB
 {
     return (CAstSpanInput){.ast = body->ast, .tokens = body->tokens, .matches_plus_one = body->matches, .first = body->first,
                            .end = body->end, .token_total = body->token_total, .base = body->begin};
-}
-
-// The span of the node at `relative`, widened over every balanced pair of
-// parentheses that wraps it exactly.
-BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relative, u32* first_out, u32* end_out)
-{
-    CAstSpanInput input = c_ast_types_span_input(body);
-    c_ast_span_expand(&input, relative, first_out, end_out);
 }
 
 // Computes [first, end) for one expression node. Returns false when the span
