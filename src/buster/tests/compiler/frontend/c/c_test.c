@@ -45890,7 +45890,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
                 command[command_count++] = body_types_path;
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
                     temporary.arena, (SliceString8){.pointer = command, .length = command_count});
-                invocation.reject_machine_fallback = true;
+                invocation.reject_machine_fallback = mode != 0;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("storage-half body types form={u32} mode={u32}: {S8}"),
@@ -45936,7 +45936,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
                     command[command_count++] = invalid_path;
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
                         temporary.arena, (SliceString8){.pointer = command, .length = command_count});
-                    invocation.reject_machine_fallback = true;
+                    invocation.reject_machine_fallback = mode != 0;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("storage-half invalid bound {u32} form={u32} mode={u32} was accepted"),
