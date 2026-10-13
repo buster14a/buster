@@ -234,6 +234,16 @@ BUSTER_GLOBAL_LOCAL int cm_publication_tests(void)
 BUSTER_GLOBAL_LOCAL int cm_self_test(void)
 {
     int failures = cm_inventory_tests() + cm_publication_tests();
+    failures += cm_test_check(cm_http_status("gh: Not Found (HTTP 404)\n") == 404, "GitHub API absent response");
+    failures += cm_test_check(cm_http_status("gh: HTTP 404\n") == 404, "redirected expired log blob is absent");
+    failures += cm_test_check(cm_http_status("notice\ngh: HTTP 404\r\n") == 404, "redirected status line after notice");
+    failures += cm_test_check(cm_http_status("gh: Forbidden (HTTP 403)\n") == 403, "permission failure is not absence");
+    failures += cm_test_check(cm_http_status("gh: HTTP 500\n") == 500, "server failure remains a transport failure");
+    failures += cm_test_check(cm_http_status("gh: timeout\n") == 0, "unknown transport remains unknown");
+    failures += cm_test_check(cm_http_status("gh: HTTP 4040\n") == 0 && cm_http_status("gh: HTTP 40\n") == 0,
+        "malformed status cannot become absence");
+    failures += cm_test_check(cm_http_status("upstream payload gh: HTTP 404\n") == 0,
+        "only standalone redirected status lines are recognized");
     const char *valid[] = {"{}", "[]", "{\"a\":[1,true,false,null,\"a\\n\\u20ac\\ud83d\\ude00\"]}", "0", "-1.25e+2"};
     const char *invalid[] = {"", "{\"a\":1,\"a\":2}", "[1,]", "{\"a\":}", "{\"a\":1,}", "[01]", "[NaN]",
         "[Infinity]", "[1e]", "\"\\u0000\"", "\"\\ud800\"", "\"\\udc00\"", "{}{}", "\"bad\nstring\""};
