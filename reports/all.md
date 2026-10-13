@@ -51,8 +51,8 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 48 | 48 | [series](series-a5c935d7b52c9992.md) |
 | watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 109 | [series](series-913f439ad1b303c4.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 11 | 11 | [series](series-a5c500ec04fb6ce0.md) |
-| Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-949519260b5e186d.md) |
-| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 11 | [series](series-310307db3edca5aa.md) |
+| Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 6 | 6 | [series](series-949519260b5e186d.md) |
+| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 12 | [series](series-310307db3edca5aa.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/zealous-lamport-96goyg | 0 | 1 | [series](series-e989209efe54b1ab.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/zealous-lamport-96goyg | 1 | 1 | [series](series-68faea1d88b1f468.md) |
 | recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 15 | [series](series-e37dd0b70ac27893.md) |
@@ -88,13 +88,13 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/exciting-mendel-gvousz | 0 | 1 | [series](series-20a16576a3228a8f.md) |
 | Pages validation and artifact /  | unknown OS / unknown CPU | pull&#95;request / claude/exciting-mendel-gvousz | 0 | 1 | [series](series-7c29e3e35cf05356.md) |
 | Deploy GitHub Pages /  | unknown OS / unknown CPU | pull&#95;request / claude/exciting-mendel-gvousz | 0 | 1 | [series](series-75c55bfcb3f43ccd.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 30 | 30 | [series](series-20369cc20c6b6e85.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 31 | 31 | [series](series-20369cc20c6b6e85.md) |
 | Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 9 | [series](series-b56548f49e022eb1.md) |
 | Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 6 | 6 | [series](series-dfba54a0e1caaff7.md) |
 | Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 14 | [series](series-e460ad260f8a45e8.md) |
 | Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 14 | [series](series-f666f9001ca74394.md) |
 | Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 2 | 2 | [series](series-8169e4dc42526fed.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 6 | 6 | [series](series-0571bc9f9540bac0.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 7 | 7 | [series](series-0571bc9f9540bac0.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/wizardly-newton-1dz1d9 | 0 | 1 | [series](series-ee8dd394ad8f8493.md) |
 | Main CI reuse decision /  | unknown OS / unknown CPU | pull&#95;request / claude/wizardly-newton-1dz1d9 | 0 | 1 | [series](series-a68509af8b0f68cc.md) |
 | Workflow lint / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-e0b54834ad97f3da.md) |
