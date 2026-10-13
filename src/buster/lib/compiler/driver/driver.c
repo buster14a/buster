@@ -11124,6 +11124,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
         result.c_ast.lower.fallbacks += unit.c_ast.lower.fallbacks;
         result.c_ast.lower.trees_built += unit.c_ast.lower.trees_built;
+        result.c_ast.lower.tree_rejections += unit.c_ast.lower.tree_rejections;
         result.c_ast.lower.tree_nodes += unit.c_ast.lower.tree_nodes;
         result.c_ast.lower.tree_bytes += unit.c_ast.lower.tree_bytes;
         result.c_ast.lower.span_nodes += unit.c_ast.lower.span_nodes;

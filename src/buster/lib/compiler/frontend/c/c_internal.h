@@ -234,6 +234,7 @@ BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN u32 c_symbol_find(const CSymbolTable* table, String8 name);
+BUSTER_C_EXTERN CSymbolTable* c_symbol_table_standalone(Arena* arena);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                 CDeclaration* declaration, CTypeId inherited_base);

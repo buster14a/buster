@@ -1305,13 +1305,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_uninterned(UnitTestArguments* argu
             CPreprocessResult changed = preprocess;
             changed.tokens = stripped;
             CAstResult other = c_ast_build(temporary.arena, changed, (CAstOptions){0});
-            BUSTER_TEST(arguments, reference.complete && other.complete);
-            if (reference.complete && other.complete)
+            // A hand-built stream with no symbol table at all: the builder
+            // interns into a table of its own (c_symbol_table_standalone).
+            CPreprocessResult tableless = changed;
+            tableless.symbols = 0;
+            CAstResult standalone = c_ast_build(temporary.arena, tableless, (CAstOptions){0});
+            BUSTER_TEST(arguments, reference.complete && other.complete && standalone.complete);
+            if (reference.complete && other.complete && standalone.complete)
             {
                 BUSTER_TEST(arguments, c_ast_validate(&other.ast) == C_AST_NODE_INVALID);
-                BUSTER_STRING_TEST(arguments, c_ast_dump(temporary.arena, &reference.ast, preprocess, reference.ast.root),
-                                   c_ast_dump(temporary.arena, &other.ast, changed, other.ast.root));
+                BUSTER_TEST(arguments, c_ast_validate(&standalone.ast) == C_AST_NODE_INVALID);
+                String8 expected = c_ast_dump(temporary.arena, &reference.ast, preprocess, reference.ast.root);
+                BUSTER_STRING_TEST(arguments, expected, c_ast_dump(temporary.arena, &other.ast, changed, other.ast.root));
+                BUSTER_STRING_TEST(arguments, expected, c_ast_dump(temporary.arena, &standalone.ast, tableless, standalone.ast.root));
             }
+            c_ast_release(&standalone.ast);
             c_ast_release(&other.ast);
             c_ast_release(&reference.ast);
         }
@@ -5329,15 +5337,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* argumen
         c_ast_release(&built.ast);
         c_test_scratch_end(temporary);
     }
-    // Without a tree lowering keeps no table and counts nothing.
+    // Without a caller's tree lowering builds the unit's own (GitHub #3102
+    // step 1), so the table answers just the same.
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(int a) { if (a) return 1; return 0; }"), C_PREPROCESS_DIALECT_GNU17);
         CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
         CAstExtentStatistics statistics = {0};
+        CAstLowerStatistics lower = {0};
         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("extent, no tree"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){.syntax_tree_extent_statistics = &statistics});
-        BUSTER_TEST(arguments, lowered.program && statistics.bodies == 0 && statistics.answers == 0);
+                                                            (CIRLowerOptions){.syntax_tree_extent_statistics = &statistics,
+                                                                              .ast_lower_statistics = &lower});
+        BUSTER_TEST_RAW(arguments,
+                        lowered.program && statistics.bodies == 1 && lower.trees_built == 1 && lower.tree_rejections == 0 && lower.tree_nodes != 0 &&
+                            lower.tree_bytes != 0 && lower.span_nodes != 0 && lower.span_bytes != 0,
+                        string_format(temporary.arena, S8("extent, no tree: program={u32} bodies={u64} trees={u64} rejections={u64} nodes={u64} spans={u64}"),
+                                      (u32)(lowered.program != 0), statistics.bodies, lower.trees_built, lower.tree_rejections, lower.tree_nodes,
+                                      lower.span_nodes));
         BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_NONE), S8("none")));
         BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_INPUT), S8("input")));
         BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_ANCHOR), S8("anchor")));

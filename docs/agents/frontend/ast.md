@@ -242,9 +242,22 @@ lowers from nodes and facts.
   When the caller passes none, `c_lower_to_ir_tree_run` (`c_gen.c`) builds
   the implicit tree from the final token stream with `c_ast_build`, keeps it
   for the whole lowering call and releases it on the same thread before
-  returning. A unit the builder rejects fails with the builder's one
-  structured diagnostic and is not lowered. `-fsyntax-only` does not lower,
-  so it builds no tree.
+  returning. `-fsyntax-only` does not lower, so it builds no tree.
+  - A tree that cannot be reserved (`C_DIAGNOSTIC_SOURCE_TOO_LARGE`) fails the
+    unit with the builder's diagnostic. So does an extent table or span table
+    that cannot be reserved.
+  - A unit whose syntax the builder rejects lowers without a tree, keeping
+    lowering's own diagnostics, and is counted in `tree_rejections`. These are
+    inputs semantic analysis accepts and lowering diagnoses, such as
+    `[1 ... 2 ... 3]` designators and stray initializer separators. Step 3
+    makes the tree mandatory for lowering, so it must first have the builder
+    or analysis diagnose them.
+  - A hand-built stream with no symbol table no longer refuses the build: the
+    builder interns into a table of its own (`c_symbol_table_standalone`), in
+    its phase arena, whose ids no consumer compares with another table's.
+  - The builder reads `__fp16`, ARM's storage-only half, as a type word
+    (`C_AST_WORD_FP16`), as the parser does. The tree's specifier readers do
+    not treat it as a primitive, so they hand it to the type machine.
 - **Token spans.** `c_ast_spans_build` gives every node the span
   [first, end) defined by `c_ast_span_rule`, which is also the
   [typer](#tree-expression-typer)'s rule; there is one statement of it. It
@@ -265,9 +278,9 @@ lowers from nodes and facts.
   dependency, not this one's.
 - **Counts.** `CAstLowerStatistics` records the trees lowering built
   (`trees_built`, `tree_nodes`, `tree_bytes`) and the span facts
-  (`span_nodes`, `span_bytes`). `-v` prints them on every compile as
-  `C_AST_RETAINED trees_built=<> tree_nodes=<> tree_bytes=<> span_nodes=<>
-  span_bytes=<>`.
+  (`span_nodes`, `span_bytes`), and the rejections above (`tree_rejections`).
+  `-v` prints them on every compile as `C_AST_RETAINED trees_built=<>
+  tree_rejections=<> tree_nodes=<> tree_bytes=<> span_nodes=<> span_bytes=<>`.
 
 Retained bytes are measured and reported, not budgeted per slice. The
 end-to-end measurement waits until lowering is complete (step 5).

@@ -45272,17 +45272,20 @@ BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CPre
 {
     CIrSyntaxSpans* result = 0;
     bool wanted = ast && ast->node_count && matches_plus_one && preprocess->token_count < UINT32_MAX;
-    Arena* arena = wanted ? c_frontend_arena_create((ArenaCreation){0}, C_FRONTEND_RESERVATION_LOWERING) : 0;
-    u64 position = arena ? arena->position : 0;
-    bool fits = arena &&
-                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrSyntaxSpans), 1, BUSTER_ALIGN_OF(CIrSyntaxSpans)) &&
-                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(u32), 3 * (u64)ast->node_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(u32), (u64)preprocess->token_count + 1, BUSTER_ALIGN_OF(u32));
-    if (arena && !fits)
-    {
-        arena_destroy(arena, 1);
-    }
-    else if (arena)
+    // The arena is reserved at exactly what the four columns need, so it
+    // always holds them; only the reservation itself can fail.
+    u64 position = arena_minimum_position;
+    u64 reservation = 0;
+    bool sized = wanted &&
+                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(CIrSyntaxSpans), 1, BUSTER_ALIGN_OF(CIrSyntaxSpans)) &&
+                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), 3 * (u64)ast->node_count, BUSTER_ALIGN_OF(u32)) &&
+                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), (u64)preprocess->token_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                 align_forward_checked(position + 4 * 64, BUSTER_KB(64), &reservation);
+    Arena* arena = sized ? c_frontend_arena_create((ArenaCreation){.reserved_size = reservation, .initial_size = BUSTER_KB(64),
+                                                                   .flags = {.no_pool = true}},
+                                                   C_FRONTEND_RESERVATION_LOWERING)
+                         : 0;
+    if (arena)
     {
         result = arena_allocate(arena, CIrSyntaxSpans, 1);
         *result = (CIrSyntaxSpans){.arena = arena};
@@ -66114,6 +66117,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     CIrStatementExtents* statement_extents = c_ir_statement_extents_create(options.syntax_tree);
     CIrSyntaxSpans* syntax_spans = c_ir_syntax_spans_create(options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
                                                             options.ast_lower_statistics);
+    // A tree whose extent table or spans could not be reserved fails the unit,
+    // as any other lowering reservation does.
+    bool tree_reserved = !options.syntax_tree || (statement_extents && (syntax_spans || !stream_matching_delimiters_plus_one));
+    if (!tree_reserved)
+    {
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+            .message = S8("could not reserve the C lowering syntax tree tables"),
+            .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
+            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        };
+        if (statement_extents)
+        {
+            arena_destroy(statement_extents->arena, 1);
+        }
+        if (syntax_spans)
+        {
+            arena_destroy(syntax_spans->arena, 1);
+        }
+        arena_destroy(lowering_arena, 1);
+        result.program = 0;
+        return result;
+    }
     bool reservation_failed = false;
     CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
     // Counting a definition's locals by scanning every entity per function is
@@ -67068,8 +67093,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
 // Lowering reads the unit's syntax tree (GitHub #3102 step 1). A caller that
 // built one passes it; otherwise this builds it from the final token stream,
 // keeps it for the whole lowering call and releases it on this thread before
-// returning. A unit the builder rejects fails with the builder's structured
-// diagnostic and is not lowered, so no unit lowers without its tree.
+// returning. A tree the builder cannot reserve (C_DIAGNOSTIC_SOURCE_TOO_LARGE)
+// fails the unit with the builder's diagnostic. A unit whose syntax the
+// builder rejects lowers without a tree and keeps lowering's own diagnostics
+// (CAstLowerStatistics.tree_rejections): those are inputs semantic analysis
+// accepts and lowering diagnoses, such as `[1 ... 2 ... 3]` designators and
+// stray initializer separators. Step 3 makes the tree mandatory, which first
+// needs the builder or analysis to diagnose them.
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse,
                                                         Target target, CIRLowerOptions options, u64 query_reservation_limit,
                                                         u64 function_reservation_limit)
@@ -67080,22 +67110,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 so
     if (!options.syntax_tree && arena && !parse.diagnostic_count && parse.analysis_complete)
     {
         CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+        CAstLowerStatistics* statistics = options.ast_lower_statistics;
         if (built.complete)
         {
             owned = built.ast;
             options.syntax_tree = &owned;
-            if (options.ast_lower_statistics)
+            if (statistics)
             {
-                options.ast_lower_statistics->trees_built += 1;
-                options.ast_lower_statistics->tree_nodes += built.statistics.node_count;
-                options.ast_lower_statistics->tree_bytes += built.statistics.retained_bytes;
+                statistics->trees_built += 1;
+                statistics->tree_nodes += built.statistics.node_count;
+                statistics->tree_bytes += built.statistics.retained_bytes;
             }
         }
-        else
+        else if (built.diagnostic_count && built.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE)
         {
             result.diagnostics = built.diagnostics;
             result.diagnostic_count = built.diagnostic_count;
             lower = false;
+        }
+        else if (statistics)
+        {
+            statistics->tree_rejections += 1;
         }
     }
     if (lower)
