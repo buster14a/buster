@@ -4515,4 +4515,23 @@ The base is main `56b6fca3`, which the candidate branches from. The budgets:
   requested. The report-only main comparison runs after the merge, and Zen 5
   validation stays incomplete (#2761).
 
+The hosted census is
+[`2026-10-13T092848Z`](../../performance-audits/2026-10-13T092848Z.md),
+diagnostic only:
+- **The predicates are negative; no code ships.** With all five gates, the
+  default path rose by 21.6 M Ir. The two new columns cost +40.9 M in
+  `c_ir_token_prefix_build`, and the inline gates cost about 32 M in their
+  callers, against about 47 M of scans saved. A per-token column is paid for
+  every body token, so it does not pay for these predicates.
+- **The pilot's `?` gate ships.** `c_ir_root_conditional` stays as on main:
+  any change to that inline function moved `c_ir_lower_expression_step` by
+  about +13 M. Instead `c_ir_tree_root_conditional` is a small gate. It
+  refuses a non-empty body range with no `?` and counts it as the records'
+  negative. Only the 61,998 ranges that may hold a `?` reach
+  `c_ir_tree_root_conditional_records`. C against B is −38.6 M Ir (−0.17%)
+  and D against A is +1.3 M (+0.005%).
+- **Correctness.** The objects are byte-identical across the arms and on the
+  `tests/**/*.c` corpus, and the `-v` pilot statistics are unchanged.
+- Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
