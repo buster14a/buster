@@ -20,8 +20,8 @@ how many there are, so the three GOT relocations stay three
 | ELF type | Kind | Bytes before the field | Vocabulary |
 |---|---|---|---|
 | 9 `R_X86_64_GOTPCREL` | `X86_64_GOTPCREL` | promises nothing | never decoded; the link fails by symbol unless a real GOT slot exists |
-| 41 `R_X86_64_GOTPCRELX` | `X86_64_GOTPCRELX` | unprefixed `8b /r` | one exact six-byte RIP-relative `MOV r32`, field at offset 2 |
-| 42 `R_X86_64_REX_GOTPCRELX` | `X86_64_REX_GOTPCRELX` | one REX then `8b /r` | one exact seven-byte RIP-relative `MOV r32/r64`, field at offset 3 |
+| 41 `R_X86_64_GOTPCRELX` | `X86_64_GOTPCRELX` | opcode and ModRM | every row with no REX prefix |
+| 42 `R_X86_64_REX_GOTPCRELX` | `X86_64_REX_GOTPCRELX` | one REX prefix more | every REX-prefixed row |
 | 43 `R_X86_64_CODE_4_GOTPCRELX` | `X86_64_CODE_4_GOTPCRELX` | REX2, opcode and ModRM | MOV, TEST and ALU rows using r16-r31 |
 
 Collapsing `41` and `42` makes `8b 05` and `48 8b 05` the same site, and the
