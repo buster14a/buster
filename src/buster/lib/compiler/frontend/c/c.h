@@ -1030,6 +1030,9 @@ struct CType
     // C flexible-array rule. Anonymous aggregates promote their names;
     // named aggregate members contribute one without promoting their fields.
     u8 effective_named_member_count;
+    // Set after every nested definition in this aggregate's source range has
+    // settled, so a zero count distinguishes a finalized empty shape.
+    bool effective_named_member_count_final;
 };
 
 typedef struct CMember CMember;

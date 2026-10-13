@@ -2041,58 +2041,29 @@ BUSTER_C_INTERNAL bool c_parse_type_is_flexible_array_member(CParseResult* resul
     return array->element_type.value < result->type_count;
 }
 
+BUSTER_C_INTERNAL CTypeId c_parse_flexible_array_unqualified_type(CParseResult const* result, CTypeId type_id)
+{
+    bool valid = type_id.value < result->type_count;
+    u32 remaining = result->type_count;
+    while (valid && remaining && result->types[type_id.value].has_unqualified_type)
+    {
+        type_id = result->types[type_id.value].unqualified_type;
+        valid = type_id.value < result->type_count;
+        remaining -= 1;
+    }
+    if (valid && result->types[type_id.value].has_unqualified_type)
+    {
+        valid = false;
+    }
+    return valid ? type_id : C_TYPE_ID_INVALID;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* result, CPreprocessResult const* preprocess, CType* aggregate)
 {
     if (!result || !aggregate)
     {
         return;
     }
-    // C11/C17 anonymous structure and union members promote their named
-    // descendants into the containing aggregate. Publish the count once at
-    // completion so both the parser's layout query and IR mapping use the
-    // same rule. The MSVC target has a broader dialect fact for declarator-
-    // less named tags; keep its established direct-member rule unchanged.
-    u32 named_member_count = 0;
-    bool promote_anonymous_members = preprocess && preprocess->target.os != OPERATING_SYSTEM_WINDOWS;
-    for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
-    {
-        CMember* member = result->members + aggregate->member_start + member_index;
-        if (member->name.length)
-        {
-            if (named_member_count < UINT8_MAX)
-            {
-                named_member_count += 1;
-            }
-            continue;
-        }
-        if (!promote_anonymous_members || member->is_bit_field || member->type.value >= result->type_count)
-        {
-            continue;
-        }
-        CTypeId promoted_type_id = member->type;
-        for (u32 qualification_depth = 0; qualification_depth < result->type_count; qualification_depth += 1)
-        {
-            if (promoted_type_id.value >= result->type_count)
-            {
-                break;
-            }
-            CType* promoted_type = result->types + promoted_type_id.value;
-            if (promoted_type->has_unqualified_type)
-            {
-                promoted_type_id = promoted_type->unqualified_type;
-                continue;
-            }
-            if (promoted_type->is_complete &&
-                (promoted_type->kind == C_TYPE_STRUCT || promoted_type->kind == C_TYPE_UNION))
-            {
-                u32 promoted_count = promoted_type->effective_named_member_count;
-                u32 remaining = UINT8_MAX - named_member_count;
-                named_member_count += BUSTER_MIN(promoted_count, remaining);
-            }
-            break;
-        }
-    }
-    aggregate->effective_named_member_count = (u8)named_member_count;
     for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
     {
         CMember* member = result->members + aggregate->member_start + member_index;
@@ -2123,6 +2094,255 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
         }
     }
 }
+
+BUSTER_C_INTERNAL void c_parse_flexible_array_member_count_publish(CParseResult* result, CPreprocessResult const* preprocess, CType* aggregate)
+{
+    u32 named_member_count = 0;
+    bool promote_anonymous_members = preprocess && preprocess->target.os != OPERATING_SYSTEM_WINDOWS;
+    for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
+    {
+        CMember* member = result->members + aggregate->member_start + member_index;
+        if (member->name.length)
+        {
+            if (named_member_count < UINT8_MAX)
+            {
+                named_member_count += 1;
+            }
+            continue;
+        }
+        if (!promote_anonymous_members || member->is_bit_field || member->type.value >= result->type_count)
+        {
+            continue;
+        }
+        CTypeId promoted_type_id = c_parse_flexible_array_unqualified_type(result, member->type);
+        if (promoted_type_id.value >= result->type_count)
+        {
+            continue;
+        }
+        CType* promoted_type = result->types + promoted_type_id.value;
+        if (promoted_type->is_complete && promoted_type->effective_named_member_count_final &&
+            (promoted_type->kind == C_TYPE_STRUCT || promoted_type->kind == C_TYPE_UNION))
+        {
+            u32 promoted_count = promoted_type->effective_named_member_count;
+            u32 remaining = UINT8_MAX - named_member_count;
+            named_member_count += BUSTER_MIN(promoted_count, remaining);
+        }
+    }
+    aggregate->effective_named_member_count = (u8)named_member_count;
+    aggregate->effective_named_member_count_final = true;
+    c_parse_validate_flexible_array_members(result, preprocess, aggregate);
+}
+
+// Each definition's type-row range is settled once, after its pending nested
+// bodies finish. This postorder walk publishes anonymous descendants before
+// their parents, while already-final rows are leaves, so later definitions do
+// not rescan the translation unit's type table.
+BUSTER_C_INTERNAL void c_parse_finalize_flexible_array_members(CTypeParseMachine* machine, CParseResult* result,
+                                                               CPreprocessResult const* preprocess, CTypeId root,
+                                                               u32 definition_type_start, u64* work_count_out)
+{
+    u64 work_count = 0;
+    Arena* temporary_arena = 0;
+    u64 temporary_mark = 0;
+    CParsePromotedMemberWork* stack = 0;
+    u32* visited = 0;
+    u32 capacity = 0;
+    u32 generation = 0;
+    bool use_machine_workspace = machine && result && result->type_count && machine->promoted_member_work && machine->promoted_member_visited &&
+                                machine->promoted_member_capacity >= result->type_count;
+    if (use_machine_workspace)
+    {
+        stack = machine->promoted_member_work;
+        visited = machine->promoted_member_visited;
+        capacity = machine->promoted_member_capacity;
+        machine->promoted_member_generation += 1;
+        if (!machine->promoted_member_generation)
+        {
+            memset(visited, 0, sizeof(*visited) * capacity);
+            machine->promoted_member_generation = 1;
+        }
+        generation = machine->promoted_member_generation;
+    }
+    else if (machine && machine->scratch_arena && result && result->type_count)
+    {
+        temporary_arena = machine->scratch_arena;
+        temporary_mark = temporary_arena->position;
+        capacity = result->type_count;
+        stack = arena_allocate(temporary_arena, CParsePromotedMemberWork, capacity);
+        visited = arena_allocate_zeroed(temporary_arena, u32, capacity);
+        generation = 1;
+    }
+    bool available = machine && result && preprocess && result->type_count && stack && visited && capacity >= result->type_count;
+    if (available)
+    {
+        u32 type_count = result->type_count;
+        u32 candidate_start = BUSTER_MIN(definition_type_start, type_count);
+        u64 candidate_count = (u64)type_count - candidate_start + 1;
+        for (u64 candidate_index = 0; candidate_index < candidate_count && !machine->failed; candidate_index += 1)
+        {
+            CTypeId candidate = candidate_index
+                ? (CTypeId){.value = candidate_start + (u32)candidate_index - 1}
+                : root;
+            work_count += 1;
+            candidate = c_parse_flexible_array_unqualified_type(result, candidate);
+            if (candidate.value >= type_count)
+            {
+                continue;
+            }
+            CType* candidate_type = result->types + candidate.value;
+            if (!candidate_type->is_complete || candidate_type->effective_named_member_count_final ||
+                (candidate_type->kind != C_TYPE_STRUCT && candidate_type->kind != C_TYPE_UNION) || visited[candidate.value] == generation)
+            {
+                continue;
+            }
+            u32 stack_count = 1;
+            visited[candidate.value] = generation;
+            stack[0] = (CParsePromotedMemberWork){.type = candidate};
+            work_count += 1;
+            while (stack_count && !machine->failed)
+            {
+                CParsePromotedMemberWork* top = stack + stack_count - 1;
+                CType* aggregate = result->types + top->type.value;
+                bool descended = false;
+                bool promote_anonymous_members = preprocess->target.os != OPERATING_SYSTEM_WINDOWS;
+                while (promote_anonymous_members && top->root_field < aggregate->member_count)
+                {
+                    u32 member_index = top->root_field++;
+                    work_count += 1;
+                    CMember* member = result->members + aggregate->member_start + member_index;
+                    if (member->name.length || member->is_bit_field || member->type.value >= type_count)
+                    {
+                        continue;
+                    }
+                    CTypeId child_id = c_parse_flexible_array_unqualified_type(result, member->type);
+                    if (child_id.value >= type_count)
+                    {
+                        continue;
+                    }
+                    CType* child = result->types + child_id.value;
+                    if (!child->is_complete || child->effective_named_member_count_final ||
+                        (child->kind != C_TYPE_STRUCT && child->kind != C_TYPE_UNION))
+                    {
+                        continue;
+                    }
+                    if (visited[child_id.value] == generation)
+                    {
+                        machine->failed = true;
+                        break;
+                    }
+                    BUSTER_VALIDATE(stack_count < capacity);
+                    visited[child_id.value] = generation;
+                    stack[stack_count++] = (CParsePromotedMemberWork){.type = child_id};
+                    work_count += 1;
+                    descended = true;
+                    break;
+                }
+                if (!descended && !machine->failed)
+                {
+                    work_count += (u64)aggregate->member_count * 2;
+                    c_parse_flexible_array_member_count_publish(result, preprocess, aggregate);
+                    stack_count -= 1;
+                }
+            }
+        }
+    }
+    else if (machine)
+    {
+        machine->failed = true;
+    }
+    if (temporary_arena)
+    {
+        arena_set_position(temporary_arena, temporary_mark);
+    }
+    if (work_count_out)
+    {
+        *work_count_out = work_count;
+    }
+}
+
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_flexible_array_postorder_work(Arena* arena)
+{
+    enum
+    {
+        DEEP_COUNT = 32,
+        WIDE_COUNT = 32,
+        WIDE_ROOT = DEEP_COUNT,
+        WIDE_FIRST = WIDE_ROOT + 1,
+        INTEGER_TYPE = WIDE_FIRST + WIDE_COUNT,
+        TYPE_COUNT = INTEGER_TYPE + 1,
+    };
+    CType types[TYPE_COUNT] = {0};
+    CMember members[DEEP_COUNT * 2 + WIDE_COUNT + WIDE_COUNT] = {0};
+    CParsePromotedMemberWork work[TYPE_COUNT] = {0};
+    u32 visited[TYPE_COUNT] = {0};
+    u32 member_count = 0;
+    for (u32 index = 0; index < DEEP_COUNT; index += 1)
+    {
+        CType* type = types + index;
+        type->kind = C_TYPE_STRUCT;
+        type->is_complete = true;
+        type->member_start = member_count;
+        if (index + 1 < DEEP_COUNT)
+        {
+            type->member_count = 2;
+            members[member_count++] = (CMember){.type = {.value = index + 1}};
+            members[member_count++] = (CMember){.name = {.length = 1}, .type = {.value = INTEGER_TYPE}};
+        }
+        else
+        {
+            type->member_count = 1;
+            members[member_count++] = (CMember){.name = {.length = 1}, .type = {.value = INTEGER_TYPE}};
+        }
+    }
+    types[WIDE_ROOT] = (CType){
+        .kind = C_TYPE_STRUCT,
+        .is_complete = true,
+        .member_start = member_count,
+        .member_count = WIDE_COUNT,
+    };
+    for (u32 index = 0; index < WIDE_COUNT; index += 1)
+    {
+        members[member_count++] = (CMember){.type = {.value = WIDE_FIRST + index}};
+        types[WIDE_FIRST + index] = (CType){
+            .kind = C_TYPE_STRUCT,
+            .is_complete = true,
+            .member_start = member_count,
+            .member_count = 1,
+        };
+        members[member_count++] = (CMember){.name = {.length = 1}, .type = {.value = INTEGER_TYPE}};
+    }
+    types[INTEGER_TYPE].kind = C_TYPE_INT;
+    CParseResult result = {
+        .types = types,
+        .type_count = TYPE_COUNT,
+        .members = members,
+        .member_count = member_count,
+    };
+    CPreprocessResult preprocess = {.target.os = OPERATING_SYSTEM_LINUX};
+    CTypeParseMachine machine = {
+        .promoted_member_work = work,
+        .promoted_member_visited = visited,
+        .promoted_member_capacity = TYPE_COUNT,
+        .scratch_arena = arena,
+    };
+    u64 work_count = 0;
+    c_parse_finalize_flexible_array_members(&machine, &result, &preprocess, (CTypeId){.value = 0}, 0, &work_count);
+    u64 work_bound = (u64)TYPE_COUNT * 2 + (u64)member_count * 3 + 1;
+    bool valid = !machine.failed && types[0].effective_named_member_count == DEEP_COUNT &&
+                 types[WIDE_ROOT].effective_named_member_count == WIDE_COUNT && work_count <= work_bound;
+    for (u32 type_index = 0; type_index < TYPE_COUNT; type_index += 1)
+    {
+        if (types[type_index].kind == C_TYPE_STRUCT)
+        {
+            valid &= types[type_index].effective_named_member_count_final;
+        }
+    }
+    return valid;
+}
+#endif
+
 
 BUSTER_C_SHARED bool c_vector_type_layout(Target target, u64 element_size, u32 logical_byte_size, u64* element_count_out,
                                           u64* storage_size_out, u32* alignment_out)
@@ -13850,11 +14070,25 @@ BUSTER_C_INTERNAL bool c_parse_type_rows_equal(CType const* x, CType const* y)
            x->parameter_start == y->parameter_start && x->parameter_count == y->parameter_count && x->member_start == y->member_start &&
            x->member_count == y->member_count && x->enum_member_start == y->enum_member_start && x->enum_member_count == y->enum_member_count &&
            x->definition_start == y->definition_start && x->definition_token_count == y->definition_token_count &&
-           x->vector_byte_size == y->vector_byte_size && x->kind == y->kind && x->is_const == y->is_const && x->is_volatile == y->is_volatile &&
-           x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic && x->is_complete == y->is_complete &&
-           x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
+           x->vector_byte_size == y->vector_byte_size && x->effective_named_member_count == y->effective_named_member_count &&
+           x->effective_named_member_count_final == y->effective_named_member_count_final && x->kind == y->kind && x->is_const == y->is_const &&
+           x->is_volatile == y->is_volatile && x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic &&
+           x->is_complete == y->is_complete && x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
            x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
 }
+
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_parse_type_replay_effective_member_count(void)
+{
+    CType original = {.effective_named_member_count = 1, .effective_named_member_count_final = true};
+    CType changed_count = original;
+    changed_count.effective_named_member_count = 2;
+    CType changed_finality = original;
+    changed_finality.effective_named_member_count_final = false;
+    return !c_parse_type_rows_equal(&original, &changed_count) && !c_parse_type_rows_equal(&original, &changed_finality);
+}
+#endif
 
 // The copy c_parse_add_qualified_type would append for `base` and
 // `qualifiers` (const and volatile, as the member step passes them), and
@@ -19006,7 +19240,6 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
     }
     completed->member_count = result->member_count - completed->member_start;
     completed->is_complete = true;
-    c_parse_validate_flexible_array_members(result, frame->preprocess, completed);
     while (frame->pending_index < result->type_count)
     {
         CTypeId pending_id = {.value = frame->pending_index++};
@@ -19040,6 +19273,8 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         }
         return;
     }
+    c_parse_finalize_flexible_array_members(machine, result, frame->preprocess, frame->original_type_id,
+                                             frame->definition_type_start, 0);
     u32 completion_index = frame->close + 1;
     CTypeId completion_type = c_parse_apply_trailing_qualifiers(result, *frame->preprocess, frame->type, &completion_index, frame->end);
     c_type_parse_frame_complete(machine, completion_type, completion_index, true);
