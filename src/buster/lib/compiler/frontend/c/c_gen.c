@@ -22688,17 +22688,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         : string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
             ? 2
             : 1;
-    // eBPF has no floating point or libm to import, and Wasm64 lowers no
-    // long double; refuse those calls instead of emitting an import the
-    // target cannot satisfy (#1394).
+    // eBPF has no floating point or libm to import, and Wasm32/Wasm64 lower
+    // no long double; refuse those calls instead of emitting an import the
+    // target cannot satisfy (#1394, #3317).
     bool libm_refused = libm.arity && (builder->target.cpu_arch == CPU_ARCH_BPFEL ||
-                                       (builder->target.cpu_arch == CPU_ARCH_WASM64 && libm.argument_kind == C_TYPE_LONG_DOUBLE));
+                                       !c_semantic_math_long_double_builtin_supported_on_target(builder->target, link_name));
     if (libm_refused)
     {
-        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"), link_name,
-                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF") : S8("Wasm64"),
-                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
-                                                                                            : S8("the target lowers no long double"));
+        String8 target_name = builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF")
+                             : builder->target.cpu_arch == CPU_ARCH_WASM32 ? S8("Wasm32")
+                             : builder->target.cpu_arch == CPU_ARCH_WASM64 ? S8("Wasm64")
+                             : cpu_arch_to_string_os(builder->target.cpu_arch);
+        String8 reason = builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
+                                                                    : S8("the target lowers no long double");
+        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"),
+                                                 link_name, target_name, reason);
     }
     if (argument_count != expected_count || libm_refused)
     {

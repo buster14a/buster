@@ -26116,7 +26116,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     UnitTestResult result = {0};
     u32 native_targets = (1U << CPU_ARCH_X86_64) | (1U << CPU_ARCH_AARCH64);
     u32 floating_targets = native_targets | (1U << CPU_ARCH_WASM64);
-    u32 all_targets = floating_targets | (1U << CPU_ARCH_BPFEL);
+    u32 all_targets = floating_targets | (1U << CPU_ARCH_WASM32) | (1U << CPU_ARCH_BPFEL);
     typedef struct CBuiltinQueryCase CBuiltinQueryCase;
     struct CBuiltinQueryCase
     {
@@ -26243,7 +26243,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_clrsb"), all_targets},
         {S8("__builtin_clrsbl"), all_targets},
         {S8("__builtin_clrsbll"), all_targets},
-        {S8("__builtin_fabsl"), all_targets},
+        {S8("__builtin_infl"), native_targets},
+        {S8("__builtin_nanl"), native_targets},
+        {S8("__builtin_huge_vall"), native_targets},
+        {S8("__builtin_signbitl"), native_targets},
+        {S8("__builtin_fabsl"), native_targets},
         {S8("__builtin_bswap16"), all_targets},
         {S8("__builtin_bswap32"), all_targets},
         {S8("__builtin_bswap64"), all_targets},
@@ -26252,18 +26256,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_parityll"), all_targets},
         {S8("__builtin_copysign"), all_targets},
         {S8("__builtin_copysignf"), all_targets},
-        {S8("__builtin_copysignl"), all_targets},
+        {S8("__builtin_copysignl"), native_targets},
         {S8("__builtin_bswap128"), 0},
         {S8("__builtin_parityl_extra"), 0},
         {S8("__builtin_fmax"), all_targets},
         {S8("__builtin_fmaxf"), all_targets},
-        {S8("__builtin_fmaxl"), all_targets},
+        {S8("__builtin_fmaxl"), native_targets},
         {S8("__builtin_fmin"), all_targets},
         {S8("__builtin_fminf"), all_targets},
-        {S8("__builtin_fminl"), all_targets},
+        {S8("__builtin_fminl"), native_targets},
         {S8("__builtin_powi"), all_targets},
         {S8("__builtin_powif"), all_targets},
-        {S8("__builtin_powil"), all_targets},
+        {S8("__builtin_powil"), native_targets},
         {S8("__builtin_trunc"), floating_targets},
         {S8("__builtin_truncf"), floating_targets},
         {S8("__builtin_truncl"), native_targets},
@@ -26326,6 +26330,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
         {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING},
+        {.cpu_arch = CPU_ARCH_WASM32, .os = OPERATING_SYSTEM_WASI},
         {.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX},
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
@@ -26352,6 +26357,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             c_test_scratch_end(temporary);
         }
     }
+    // Explicit long-double math spellings are unavailable on Wasm32, Wasm64 and
+    // eBPF. Check each registered spelling through semantic validation, which
+    // must name the builtin and target before any argument reaches IR lowering.
+    typedef struct CLongDoubleMathCall CLongDoubleMathCall;
+    struct CLongDoubleMathCall
+    {
+        String8 name;
+        String8 arguments;
+    };
+    CLongDoubleMathCall long_double_calls[] = {
+        {S8("__builtin_fabsl"), S8("x")},
+        {S8("__builtin_fmaxl"), S8("x, y")},
+        {S8("__builtin_fminl"), S8("x, y")},
+        {S8("__builtin_powil"), S8("x, 2")},
+        {S8("__builtin_copysignl"), S8("x, y")},
+        {S8("__builtin_signbitl"), S8("x")},
+        {S8("__builtin_infl"), S8("")},
+        {S8("__builtin_huge_vall"), S8("")},
+        {S8("__builtin_nanl"), S8("\"\"")},
+        {S8("__builtin_truncl"), S8("x")},
+        {S8("__builtin_rintl"), S8("x")},
+        {S8("__builtin_nearbyintl"), S8("x")},
+        {S8("__builtin_fmal"), S8("x, y, z")},
+        {S8("__builtin_ldexpl"), S8("x, 2")},
+        {S8("__builtin_lroundl"), S8("x")},
+        {S8("__builtin_llroundl"), S8("x")},
+    };
+    typedef struct CLongDoubleUnsupportedTarget CLongDoubleUnsupportedTarget;
+    struct CLongDoubleUnsupportedTarget
+    {
+        Target target;
+        String8 name;
+    };
+    CLongDoubleUnsupportedTarget unsupported_targets[] = {
+        {{.cpu_arch = CPU_ARCH_WASM32, .os = OPERATING_SYSTEM_WASI}, S8("Wasm32")},
+        {{.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING}, S8("Wasm64")},
+        {{.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX}, S8("eBPF")},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(unsupported_targets); target_index += 1)
+    {
+        CLongDoubleUnsupportedTarget target_row = unsupported_targets[target_index];
+        for (u32 call_index = 0; call_index < BUSTER_ARRAY_LENGTH(long_double_calls); call_index += 1)
+        {
+            CLongDoubleMathCall call = long_double_calls[call_index];
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena,
+                S8("void long_double_builtin_probe(long double x, long double y, long double z) { (void){S8}({S8}); }\n"),
+                call.name, call.arguments);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_row.target});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            String8 expected = string_format(temporary.arena,
+                S8("'{S8}' is not supported on {S8}: the target lowers no long double"), call.name, target_row.name);
+            bool diagnosed = parse.diagnostic_count == 1 &&
+                parse.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                string_equal(parse.diagnostics[0].message, expected);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && diagnosed,
+                string_format(temporary.arena, S8("{S8} on {S8}: {S8}"), call.name, target_row.name,
+                    parse.diagnostic_count ? parse.diagnostics[0].message : S8("no diagnostic")));
+            c_test_scratch_end(temporary);
+        }
+    }
+
     // The ffs family converts to int/long/long long and returns int. Lower it
     // through canonical integer operations on both frontend SSA paths rather
     // than leaving an unresolved helper call for Android headers.
@@ -52668,11 +52735,10 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_generic_float_builtins_libm_source = S8
 
 // The libm rounding, fma and ldexp builtins (#1394) lower to runtime libm
 // imports. Prove, per target and without running anything, that a translation
-// unit calling all 21 spellings lowers to certified, valid canonical IR whose
-// import symbols carry the target's own long double and `long` types, and that
-// the native object writers accept it. eBPF has no floating point and Wasm64 no
-// long double, so those calls are refused with a diagnostic and __has_builtin
-// answers 0 there.
+// unit calling the supported spellings lowers to certified, valid canonical IR
+// whose import symbols carry the target's own long double and `long` types,
+// and that the native object writers accept it. eBPF has no floating point;
+// Wasm32 and Wasm64 lower no long double.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_libm_rounding_builtins_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -52718,7 +52784,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_libm_rounding_builtins_lowering(UnitTe
         CLibmTarget row = targets[target_index];
         bool bpf = row.target.cpu_arch == CPU_ARCH_BPFEL;
         bool wasm = row.target.cpu_arch == CPU_ARCH_WASM64;
-        u32 variant_count = wasm ? 2 : 3;
+        u32 variant_count = wasm || bpf ? 2 : 3;
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         // One function per floating type; each makes the seven calls.
@@ -52838,15 +52904,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_libm_rounding_builtins_lowering(UnitTe
         }
         c_test_scratch_end(temporary);
     }
-    // The Wasm64 refusal of the long double variants, and the eBPF one of
-    // every variant, are diagnostics rather than silent imports.
+    // Wasm32 and Wasm64 reject their long-double calls during semantic validation;
+    // the lowerer retains the same refusal for callers that bypass that gate.
+    Target wasm_targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM32, .os = OPERATING_SYSTEM_WASI},
+        {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    String8 wasm_names[] = {S8("Wasm32"), S8("Wasm64")};
+    for (u32 wasm_index = 0; wasm_index < BUSTER_ARRAY_LENGTH(wasm_targets); wasm_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 source = S8("double f(double x) { return (double)__builtin_truncl((long double)x); }\n");
-        Target wasm = {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
-        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = wasm});
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = wasm_targets[wasm_index]});
         CParseResult parse = c_parse(temporary.arena, preprocess);
-        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("wasm-truncl.c"), preprocess, parse, wasm);
+        String8 expected = string_format(temporary.arena,
+            S8("'__builtin_truncl' is not supported on {S8}: the target lowers no long double"), wasm_names[wasm_index]);
+        bool diagnosed = preprocess.diagnostic_count == 0 && parse.diagnostic_count == 1 &&
+            parse.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+            string_equal(parse.diagnostics[0].message, expected);
+        BUSTER_TEST(arguments, diagnosed);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("wasm-truncl.c"), preprocess, parse, wasm_targets[wasm_index]);
         BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified);
         c_test_scratch_end(temporary);
     }

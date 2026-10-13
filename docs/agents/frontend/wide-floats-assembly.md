@@ -63,7 +63,10 @@ arithmetic comparison or libm import. The registered embedded driver fixture
 executes explicit images, integer conversion and exactly-once calls in both
 frontend forms, FAST and QUALITY and O0/O2 without `-lm`. Arity and
 non-arithmetic/vector operands are diagnosed before lowering. `fabsl` remains
-separately tracked.
+separately tracked. Explicit long-double math builtins are available on
+x86-64/AArch64 only: the shared target capability query makes their
+`__has_builtin` result match semantic call rejection on Wasm32, Wasm64, eBPF
+and other unsupported routes, before arguments reach IR lowering.
 
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary

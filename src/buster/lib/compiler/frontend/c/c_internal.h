@@ -853,6 +853,7 @@ typedef struct CMathLibmShape
 
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
+BUSTER_C_EXTERN bool c_semantic_math_long_double_builtin_supported_on_target(Target target, String8 name);
 
 // The constant-valued special-float math builtins: positive infinity, or the
 // default quiet NaN of a `nan*("")` call, in the floating type `kind` names.

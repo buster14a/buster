@@ -41471,7 +41471,18 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             count += 1;
             argument = limit + 1;
         }
-        for (u32 argument = 0; argument < count && argument < BUSTER_ARRAY_LENGTH(starts); argument += 1)
+        String8 unsupported_math_message = {0};
+        if (builtin == C_SYMBOL_BUILTIN_MATH &&
+            !c_semantic_math_long_double_builtin_supported_on_target(preprocess.target, name))
+        {
+            String8 target_name = cpu_arch_to_string_os(preprocess.target.cpu_arch);
+            if (preprocess.target.cpu_arch == CPU_ARCH_WASM32) target_name = S8("Wasm32");
+            else if (preprocess.target.cpu_arch == CPU_ARCH_WASM64) target_name = S8("Wasm64");
+            else if (preprocess.target.cpu_arch == CPU_ARCH_BPFEL) target_name = S8("eBPF");
+            unsupported_math_message = c_parse_message(result->arena,
+                S8("'{S8}' is not supported on {S8}: the target lowers no long double"), name, target_name);
+        }
+        for (u32 argument = 0; !unsupported_math_message.length && argument < count && argument < BUSTER_ARRAY_LENGTH(starts); argument += 1)
         {
             if ((builtin == C_SYMBOL_BUILTIN_VA_ARG && argument == 1) || string_equal(name, S8("__builtin_types_compatible_p"))) continue;
             CTypeId type = C_TYPE_ID_INVALID;
@@ -41531,8 +41542,9 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         // `minimum = maximum = N` arms' shared value, which rejected every
         // fixed-arity builtin (#1301); a single comparison has no pair to fuse.
         bool arity_mismatch = count - minimum > maximum - minimum;
-        String8 message = arity_mismatch ? S8("could not prepare C calls") : (String8){0};
-        u32 location = close;
+        String8 message = unsupported_math_message.length ? unsupported_math_message
+                          : arity_mismatch ? S8("could not prepare C calls") : (String8){0};
+        u32 location = unsupported_math_message.length ? index : close;
         if (fabs_builtin)
         {
             if (count != 1)
