@@ -43,6 +43,7 @@
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   tools/android_packages.c                    concurrent Android package batches
 //   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
 //   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
@@ -176,6 +177,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_BINARY_COVERAGE_INVENTORY,
     BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_TEST_UNITS_PARTITIONED,
+    BUILD_COMMAND_ANDROID_PACKAGES,
     BUILD_COMMAND_COUNT,
 } BuildCommand;
 
@@ -352,12 +354,14 @@ typedef enum BuildArgument
     BUILD_ARGUMENT_NO_LTO,
     BUILD_ARGUMENT_NO_OPTIMIZE,
     BUILD_ARGUMENT_NO_SANITIZE,
+    BUILD_ARGUMENT_NO_THREAD_SANITIZE,
     BUILD_ARGUMENT_NO_TIME_TRACE,
     BUILD_ARGUMENT_OPTIMIZE,
     BUILD_ARGUMENT_QUIET,
     BUILD_ARGUMENT_SANITIZE,
     BUILD_ARGUMENT_TARGET,
     BUILD_ARGUMENT_TARGET_SHORT,
+    BUILD_ARGUMENT_THREAD_SANITIZE,
     BUILD_ARGUMENT_TIME_TRACE,
     BUILD_ARGUMENT_VERBOSE,
     BUILD_ARGUMENT_VERBOSE_SHORT,
@@ -398,12 +402,14 @@ BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_NO_LTO] = S8_INITIALIZER("--no-lto"),
     [BUILD_ARGUMENT_NO_OPTIMIZE] = S8_INITIALIZER("--no-optimize"),
     [BUILD_ARGUMENT_NO_SANITIZE] = S8_INITIALIZER("--no-sanitize"),
+    [BUILD_ARGUMENT_NO_THREAD_SANITIZE] = S8_INITIALIZER("--no-tsan"),
     [BUILD_ARGUMENT_NO_TIME_TRACE] = S8_INITIALIZER("--no-time-trace"),
     [BUILD_ARGUMENT_OPTIMIZE] = S8_INITIALIZER("--optimize"),
     [BUILD_ARGUMENT_QUIET] = S8_INITIALIZER("--quiet"),
     [BUILD_ARGUMENT_SANITIZE] = S8_INITIALIZER("--sanitize"),
     [BUILD_ARGUMENT_TARGET] = S8_INITIALIZER("--target"),
     [BUILD_ARGUMENT_TARGET_SHORT] = S8_INITIALIZER("-t"),
+    [BUILD_ARGUMENT_THREAD_SANITIZE] = S8_INITIALIZER("--tsan"),
     [BUILD_ARGUMENT_TIME_TRACE] = S8_INITIALIZER("--time-trace"),
     [BUILD_ARGUMENT_VERBOSE] = S8_INITIALIZER("--verbose"),
     [BUILD_ARGUMENT_VERBOSE_SHORT] = S8_INITIALIZER("-v"),
@@ -641,6 +647,8 @@ struct Generate
     BuildCompiler compiler;
     u32 fuzz_available : 1;
     u32 sanitize : 1;
+    // ThreadSanitizer tree (#3949); exclusive with the ASan/UBSan `sanitize`.
+    u32 thread_sanitize : 1;
     u32 ci : 1;
     u32 optimize : 1;
     u32 link_libc : 1;
@@ -2078,6 +2086,7 @@ BUSTER_GLOBAL_LOCAL void generate_command_add(Arena* arena, BuildStep* step, Gen
     String8 instrument = cmake_flag(arena, S8("BUSTER_INSTRUMENT"), generate.instrument);
     String8 fuzz_available = cmake_flag(arena, S8("BUSTER_FUZZ_AVAILABLE"), generate.fuzz_available);
     String8 sanitize = cmake_flag(arena, S8("BUSTER_SANITIZE"), generate.sanitize);
+    String8 thread_sanitize = cmake_flag(arena, S8("BUSTER_THREAD_SANITIZE"), generate.thread_sanitize);
     String8 include_tests = cmake_flag(arena, S8("BUSTER_INCLUDE_TESTS"), generate.include_tests);
     String8 link_libc = cmake_flag(arena, S8("BUSTER_LINK_LIBC"), generate.link_libc);
     String8 check_optional_warnings = cmake_flag(arena, S8("BUSTER_CHECK_OPTIONAL_WARNINGS"), generate.check_optional_warnings);
@@ -2113,6 +2122,7 @@ BUSTER_GLOBAL_LOCAL void generate_command_add(Arena* arena, BuildStep* step, Gen
     os_argument_builder_append(b, cc);
     os_argument_builder_append(b, fuzz_available);
     os_argument_builder_append(b, sanitize);
+    os_argument_builder_append(b, thread_sanitize);
     os_argument_builder_append(b, linker_argument);
 
     os_argument_builder_append(b, lto);
@@ -2833,6 +2843,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_is_canonical(Generate generate, C
     }
 
     bool result = generate.compiler == BUILD_COMPILER_CLANG && !generate.cc_set && !generate.linker_set && !generate.config_set && !generate.sanitize &&
+                  !generate.thread_sanitize &&
                   generate.link_libc && !generate.time_trace && !generate.instrument &&
                   !generate.lto && generate.include_tests && !generate.check_optional_warnings && !generate.developer_targets && valid_arguments &&
                   options.optimize_set && options.optimize && string_equal(cmake_build_config(options), S8("Release"));
@@ -18893,6 +18904,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
         S8("tests/basic_c_x86_64_i128_stack_abi.c"),
         S8("tests/basic_c_float_abi.c"),
         S8("tests/basic_c_vector_register_pressure.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/basic_c_wide_vector_joins.c"),
         S8("tests/basic_c_machine_alias.c"),
         S8("tests/basic_c_fast_ra_cfg.c"),
     };
@@ -19297,6 +19309,9 @@ BUSTER_GLOBAL_LOCAL QuickjsCommonFlags quickjs_common_flags(Arena* arena, String
 
 BUSTER_GLOBAL_LOCAL void quickjs_append_common_flags(OsArgumentBuilder* builder, QuickjsCommonFlags flags)
 {
+    // Upstream uses the host compiler GNU dialect, including bare asm in
+    // cpu_pause. Select it for both compilers instead of inheriting ISO mode.
+    os_argument_builder_append(builder, S8("-std=gnu17"));
     os_argument_builder_append(builder, flags.include);
     os_argument_builder_append(builder, S8("-D_GNU_SOURCE"));
     os_argument_builder_append(builder, flags.version);
@@ -24898,6 +24913,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out accepted a non-Clang producer\n"));
         return PROCESS_RESULT_FAILED;
     }
+    Generate thread_sanitized = canonical;
+    thread_sanitized.thread_sanitize = 1;
+    if (build_artifact_fanout_is_canonical(thread_sanitized, release))
+    {
+        string_print(S8("error: artifact fan-out accepted a ThreadSanitizer producer\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     CmakeBuildOptions debug = release;
     debug.config = S8("Debug");
     debug.optimize = 0;
@@ -25627,6 +25649,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_ANDROID_PACKAGES:
         case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
@@ -25684,6 +25707,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_BINARY_COVERAGE_INVENTORY, .owns_arguments = true},
+        {.command = BUILD_COMMAND_ANDROID_PACKAGES, .owns_arguments = true},
         {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
         {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
@@ -39906,6 +39930,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/ci_no_code.c"
 #include "tools/external_projects.c"
 #include "tools/ci_unit_tests.c"
+#include "tools/android_packages.c"
 #include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
@@ -39992,6 +40017,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BINARY_COVERAGE_INVENTORY] = S8_INITIALIZER("binary_coverage_inventory"),
         [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
         [BUILD_COMMAND_TEST_UNITS_PARTITIONED] = S8_INITIALIZER("test_units_partitioned"),
+        [BUILD_COMMAND_ANDROID_PACKAGES] = S8_INITIALIZER("android_packages"),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_command_names) == BUILD_COMMAND_COUNT);
@@ -40084,6 +40110,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
                 result = bootstrap_process_owner_main(arena, owned_arguments, command == BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST); break;
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_ANDROID_PACKAGES: result = android_packages_main(arena, owned_arguments); break;
             case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
             case BUILD_COMMAND_COMPILER_EVIDENCE: result = compiler_evidence_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
@@ -40750,6 +40777,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_ARGUMENT_FUZZ:
         case BUILD_ARGUMENT_OPTIMIZE:
         case BUILD_ARGUMENT_SANITIZE:
+        case BUILD_ARGUMENT_THREAD_SANITIZE:
         case BUILD_ARGUMENT_LTO:
         case BUILD_ARGUMENT_TIME_TRACE:
         case BUILD_ARGUMENT_INSTRUMENT:
@@ -40789,6 +40817,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
                     break;
                 case BUILD_ARGUMENT_SANITIZE:
                     generate.sanitize = value;
+                    break;
+                case BUILD_ARGUMENT_THREAD_SANITIZE:
+                    generate.thread_sanitize = value;
                     break;
                 case BUILD_ARGUMENT_LTO:
                     generate.lto = value;
@@ -40831,6 +40862,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_ARGUMENT_NO_FUZZ:
         case BUILD_ARGUMENT_NO_OPTIMIZE:
         case BUILD_ARGUMENT_NO_SANITIZE:
+        case BUILD_ARGUMENT_NO_THREAD_SANITIZE:
         case BUILD_ARGUMENT_NO_LTO:
         case BUILD_ARGUMENT_NO_TIME_TRACE:
         case BUILD_ARGUMENT_NO_INSTRUMENT:
@@ -40869,6 +40901,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
                     break;
                 case BUILD_ARGUMENT_NO_SANITIZE:
                     generate.sanitize = false;
+                    break;
+                case BUILD_ARGUMENT_NO_THREAD_SANITIZE:
+                    generate.thread_sanitize = false;
                     break;
                 case BUILD_ARGUMENT_NO_LTO:
                     generate.lto = false;
@@ -41034,6 +41069,14 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         (string_equal(matrix_shard, S8("release")) || string_equal(matrix_shard, S8("combinations"))))
     {
         result = build_compiler_discovery_self_test(arena);
+    }
+    // ThreadSanitizer owns a separate tree (#3949): its runtime cannot share a
+    // process with ASan, and neither MSVC, Zig nor Windows ships it.
+    if (result == PROCESS_RESULT_SUCCESS && command == BUILD_COMMAND_GENERATE && generate.thread_sanitize &&
+        (generate.sanitize || BUSTER_WINDOWS || generate.compiler == BUILD_COMPILER_CL || generate.compiler == BUILD_COMPILER_ZIG))
+    {
+        string_print(S8("error: --tsan needs a separate tree without --sanitize, built by Clang or GCC on a non-Windows host\n"));
+        result = PROCESS_RESULT_FAILED;
     }
     bool requested_gcc = command == BUILD_COMMAND_GENERATE && string_equal(generate.cc, S8("gcc"));
     if (result == PROCESS_RESULT_SUCCESS && (requested_gcc || (combination_matrix && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64))))
@@ -41331,6 +41374,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_ANDROID_PACKAGES:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:

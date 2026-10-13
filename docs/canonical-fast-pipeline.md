@@ -520,13 +520,28 @@ What the data show:
   hosted run-to-run range. Neither is established here.
 
 Interning is therefore the cheaper way to obtain most of the constant reuse,
-with less memory and without the spill growth. Both stay opt-in. Adopting
-either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
-peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
-measures both flags on the 9700X; its method is in
-[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
-expect today's default, so enabling interning by default would also update
-those expectations.
+with less memory and without the spill growth. The fixed report-only profile
+`profile: constant-reuse-acceptance-v1` measures both flags on the 9700X; its
+method is in [benchmarking.md](agents/benchmarking.md).
+
+### Zen 5 measurement (9700X)
+
+The profile ran on main `446f742e`, check
+[115128610735](https://github.com/buster14a/buster/runs/115128610735). It used
+one binary on the `-g0` unity `-c` self-host compile, with 20 ABBA pairs per
+cell. Ratios are B (flag) over A (default):
+
+| Flag | Wall [95% CI] | Retired instructions | Peak RSS | Code bytes |
+| --- | --- | --- | --- | --- |
+| `-fcanonical-intern-constants` | 0.9932 [0.9912, 0.9954] | 0.9868 | −1.81% | −1.62% |
+| `-fcanonical-fast-cse` | 1.0024 [1.0007, 1.0034] | 0.9957 | −0.47% | −1.96% |
+
+Both flags left diagnostics identical to the default. Interning is a
+detectable compile-time win, while the late table is a detectable cost that
+buys 0.34 points more code reduction. Interning is the only adoption candidate
+under the throughput priority. Both stay opt-in until the owner decides on
+#3011. Enabling interning by default would also update the C frontend's
+row-capacity, codegen-shape and CSE-count tests, which expect today's default.
 
 ## Tests
 
@@ -583,7 +598,9 @@ embedders start with the conservative interposition policy.
 Mandatory candidates can contain
 multiple blocks, local storage, ordinary calls and aggregate returns.
 The iterative mandatory-call graph processes callees before callers and
-rejects cycles. Dynamic stack lifetime operations, computed labels,
+rejects cycles. Caller-owned computed-goto label values and destinations retain
+their IDs across a splice; computed labels inside the callee remain refused
+until their provenance has a cloning contract (#3995). Dynamic stack lifetime operations, callee-owned computed labels,
 variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
 Unsupported candidates remain calls when optional and diagnose when mandatory.
 Arguments are evaluated once before the splice. Expansion remaps canonical
@@ -594,10 +611,10 @@ information; the debug model does not gain inline call-stack records.
 
 Positive decimal limits are configurable through
 `-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
-`-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
-`-fcanonical-inline-module-growth=N` (default: the larger of 4096 copied rows
+`-fcanonical-inline-function-growth=N` (optional default 2048 copied rows per caller),
+`-fcanonical-inline-module-growth=N` (optional default: the larger of 4096 copied rows
 and 1/32 of the module's lowered canonical instruction rows), and
-`-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+`-fcanonical-inline-call-sites=N` (optional default 64 sites per caller).
 The fixed 4096-row module default stopped optional expansion of the unity
 self-host source after 243 sites, because callers are visited in module
 order; per-caller limits refused only 54 further sites once the module limit
@@ -625,20 +642,37 @@ memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are ne
 dropped. `-fcanonical-inline-caller-growth-shift=N` and
 `IrInlineOptions.caller_growth_shift` override the shift (a zero API field
 selects the default, 32 or more keeps every planned site).
-The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
-headroom for larger mandatory checked-arithmetic expansions; the module, work
-and storage guards still independently bound expansion.
-Zero numeric fields in embedding options normalize to those defaults.
-Mandatory calls are processed before optional tiny candidates across the module;
-both phases share the same row-growth, call-site and per-caller limits. Mandatory
-planning and splicing share one module-wide work and retained-storage budget.
+The optional caller default is twice the 64-site times 16-row tiny-body budget.
+Required intrinsic wrappers can exceed both optional row caps (the RAD AVX-512
+probe copies 6318 rows), so zero function/module row and call-site limits leave
+required expansion to the independent work and storage guards. Explicit
+row/site limits cap both phases and still produce a source-mapped refusal.
+Zero row/site limits remain zero in embedding options across modules;
+other zero numeric fields normalize to their named defaults.
+Mandatory calls are processed before optional tiny candidates across the module.
+Their growth and sites count against any subsequent optional allowance.
+Mandatory graph planning retains its module-wide work and scratch bounds.
+Required splicing bounds work and retained storage per caller: independent
+consumers cannot exhaust one shared allowance. Its fixed expansion allowances
+are 4 Mi work units and 16 MiB, plus one input-proportional relocation of the
+caller's existing tables and local/debug snapshots, computed before planning
+sites. This permits large existing callers without granting unbounded repeated
+expansion. Planning scratch remains bounded at 16 MiB, and copied rows retain
+the independent 4 Mi module-wide ceiling.
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
 work totals let the first few large callers starve every later one. Optional
 expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
-rescanning every instruction to build reverse edges. Planning storage includes
+rescanning every instruction to build reverse edges. That scan skips a
+function whose producer opcode summary records no `CALL`
+(`IR_OPCODE_SUMMARY_TRACKED`) and streams the dense rows of the rest. Planning
+classifies every call row with one byte of per-symbol callee facts
+(`ir_inline_plan_facts`: required, `noinline`, linkage-allowed, tiny leaf),
+filled once per pass, instead of re-deriving the symbol and callee predicates
+at every site. The table adds one byte per symbol to the planning scratch
+charge; work charges and statistics are unchanged. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
 chains directly, so no full caller compaction is required. Each caller has one

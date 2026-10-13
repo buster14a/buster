@@ -56,8 +56,9 @@ Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
 artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
 with the strict sampling_archive reader and verified by the trusted native
 `./build.sh compiler_evidence verify` under the identity this publisher
-authorized (verify_evidence_bundle); the receipt's evidence_bundle must name
-the verified manifest (evidence_bundle_problems). An artifact with neither is
+authorized (verify_evidence_bundle); a pull snapshot-v1 receipt's route selects
+the snapshot inventory (#3211). The receipt's evidence_bundle must name the
+verified inventory and manifest (evidence_bundle_problems). An artifact with neither is
 legacy-unsealed: its outcome stands and its raw bytes are reported unverified.
 Anything else fails closed.
 
@@ -98,7 +99,7 @@ from inline_acceptance import metrics as inline_metrics, validate_documents as v
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
-from compiler_receipt import EVIDENCE_INVENTORY, EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity
+from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
@@ -751,11 +752,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
                         reasons.append("the self-host inline leg is valid only in pull mode")
-                    inline_record = receipt.get("inline_acceptance")
+                    # The #48 inline leg is selected by presence, not freshness, so it runs beside this one.
                     if any(receipt.get(key) is not None for key in
                            ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
                             "frontend_selector", "wild_linker", "link_tls", "constant_reuse_acceptance")) or \
-                            (isinstance(inline_record, dict) and inline_record.get("requested") is True) or \
                             "scaling_profile" in receipt:
                         reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
                                        "scaling leg included")
@@ -780,19 +780,25 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     return conclusion, title, reasons
 
 
-def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str) -> dict:
+def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str,
+                           receipt: dict | None = None) -> dict:
     """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
 
     {"state": "legacy-unsealed"} when read_evidence found neither control file; {"state": "verified",
     "members", "payload_bytes", "manifest_sha256"} when `compiler_evidence verify` reproduces the sealed
     manifest from the extracted bytes; otherwise {"state": "refused", "reason"}. The identity comes from
-    the authorized expected identity and admitted profiles, never from the receipt.
+    the authorized expected identity and admitted profiles, never from the receipt; only a snapshot-v1
+    receipt's route lines (its declared policy and owned-phase count) come from it, and validate_closure
+    binds that policy to its closure records, so a receipt cannot select the weaker ordinary inventory
+    for a snapshot attempt (#3211).
     """
     import tempfile
     result: dict = {"state": "legacy-unsealed"}
     if "sealed_files" in throughput:
         files = throughput.get("sealed_files")
-        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile},
+        route = {key: receipt[key] for key in ("preparation_policy", "closure", "phase_ownership")
+                 if isinstance(receipt, dict) and key in receipt}
+        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile, **route},
                                      request_attempt)
         result = {"state": "refused", "reason": throughput.get("sealed_problem") or "sealed evidence archive is unreadable"}
         if isinstance(files, dict) and not identity:
@@ -820,7 +826,7 @@ def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dic
                 if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
                         fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
                         re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
-                    result = {"state": "verified", "members": int(fields["members"]),
+                    result = {"state": "verified", "inventory": evidence_inventory(route), "members": int(fields["members"]),
                               "payload_bytes": int(fields["payload_bytes"]), "manifest_sha256": fields["manifest_sha256"]}
                 else:
                     result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
@@ -838,7 +844,7 @@ def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
             problems.append("receipt names sealed raw evidence that the artifact does not carry")
     elif bundle.get("state") != "verified":
         problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
-    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != EVIDENCE_INVENTORY or \
+    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != bundle.get("inventory") or \
             any(claimed.get(key) != bundle.get(key) for key in ("manifest_sha256", "members", "payload_bytes")):
         problems.append("receipt evidence_bundle does not name the verified sealed manifest")
     return problems
@@ -851,7 +857,7 @@ def evidence_bundle_note(bundle: dict) -> str:
         note = ("raw evidence: legacy-unsealed (no v1 manifest or seal, #2918); the outcome stands but its "
                 "retained raw bytes are unverified")
     elif bundle.get("state") == "verified":
-        note = (f"raw evidence: sealed {EVIDENCE_INVENTORY} verified natively, {bundle['members']} members, "
+        note = (f"raw evidence: sealed {bundle['inventory']} verified natively, {bundle['members']} members, "
                 f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}")
     return note
 
@@ -1435,6 +1441,28 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                     closure_files[operation] = archive.read(info)
                 throughput["closure"] = closure_files
+            # A non-owned pull snapshot-v1 attempt's native phase population (#3211): validate_closure
+            # replays every declared phase's five retained members, as for the owned routes.
+            ownership = receipt.get("phase_ownership") if isinstance(receipt, dict) and not problem else None
+            if isinstance(ownership, dict):
+                owned: dict = {}
+                phases = ownership.get("phases")
+                for phase in phases if isinstance(phases, list) else []:
+                    name = phase.get("file") if isinstance(phase, dict) else None
+                    if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+                        problem = "native phase population is ambiguous"
+                        break
+                    infos = {label: members.get("owned-phases/" + name + suffix) for label, suffix in
+                             (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"), ("stderr", ".stderr"),
+                              ("bootstrap", ".bootstrap.complete"))}
+                    if any(info is None or info.file_size > MEMBER_LIMIT for info in infos.values()):
+                        problem = f"required native phase evidence owned-phases/{name} missing or oversized"
+                        break
+                    owned[name] = {label: archive.read(info) for label, info in infos.items()}
+                throughput.setdefault("closure", {})["owned_phases"] = owned
+                corpus_raw = {key: members.get(f"throughput/{key}.json") for key in ("summary", "metadata")}
+                if all(info is not None and info.file_size <= MEMBER_LIMIT for info in corpus_raw.values()):
+                    throughput["closure"]["owned_throughput"] = {key: archive.read(info) for key, info in corpus_raw.items()}
             receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
             if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
                 bundle: dict = {}
@@ -4595,9 +4623,50 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
             "control_failures": controls, "authenticated_attempt_history": history, "problems": []}
 
 
+PREPARATION_FAILURE_TAIL_BYTES = 512
+
+
+def preparation_failure_problems(files: dict[str, bytes]) -> list[str]:
+    """Diagnostics only (#3960): name the retained failed controller phase.
+
+    Reads the artifact's raw controller.tsv, preparation.tsv and the failed
+    phase's stderr log as data. Never raises and never changes the packet
+    state, qualification or publication refusal."""
+    def clean(raw: bytes) -> str:
+        return "".join(chr(byte) if 32 <= byte <= 126 else " " if byte in (9, 10, 13) else "?" for byte in raw)
+    problems = []
+    try:
+        rows = sampling_tsv(files.get("controller.tsv", b""), True)
+    except (ValueError, UnicodeError, TypeError):
+        rows = None
+        problems.append("controller phase table is missing or malformed in the retained artifact")
+    for row in (rows or [])[:32]:
+        if row.get("state") != "failed":
+            continue
+        stem = f"controller-{row.get('stage')}-{row.get('phase')}"
+        error = files.get(stem + ".stderr.log", b"")
+        error = error if isinstance(error, bytes) else b""
+        problems.append(("failed controller phase " + " ".join(
+            f"{key}={clean(str(row.get(key, '')).encode('ascii', 'replace'))}" for key in
+            ("stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled")) +
+            f" stderr_bytes={len(error)} stderr_tail=\"" +
+            clean(error[-PREPARATION_FAILURE_TAIL_BYTES:]).replace('"', "?") + "\"")[:1000])
+    try:
+        terminal = sampling_tsv(files.get("preparation.tsv", b""))
+    except (ValueError, UnicodeError, TypeError):
+        terminal = None
+        problems.append("worker preparation.tsv is missing or malformed in the retained artifact")
+    if terminal is not None and terminal.get("process_state") != "complete":
+        problems.append(("worker preparation.tsv " + " ".join(
+            f"{key}={clean(str(terminal[key]).encode('ascii', 'replace'))}" for key in
+            ("process_state", "reason", "cleanup_proven", "tools_before", "tools_after", "exported")
+            if key in terminal))[:1000])
+    return problems
+
+
 def preparation_publish(environment: dict) -> int:
     api, authority = preparation_authority(environment)
-    files, artifact = {}, {}
+    files, artifact, diagnostics = {}, {}, []
     result = {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "incomplete",
               "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
               "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
@@ -4605,11 +4674,13 @@ def preparation_publish(environment: dict) -> int:
     try:
         files, artifact = preparation_read_artifact(api, authority)
         if environment.get("BQ_PREPARATION_RESULT") != "success":
+            diagnostics = preparation_failure_problems(files)
             raise ValueError("preparation physical job is failed, cancelled, skipped or unavailable")
         result = preparation_validate(api, authority, files)
     except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
             urllib.error.URLError, TimeoutError) as error:
         result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["problems"].extend(diagnostics)
         result["accounting"] = preparation_observed_costs(api, authority, files)
         result["authenticated_attempt_history"] = list(authority["history"]) + [{
             "phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
@@ -6062,7 +6133,7 @@ def main() -> int:
                 # that names another request run, or none, cannot name a sealed bundle and refuses it.
                 request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
                     titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
-                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt)
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt, receipt)
                 if evidence_bundle_note(evidence_bundle):
                     notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):

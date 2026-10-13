@@ -92,7 +92,7 @@ Run from the repository root. Configure a fresh tree once, then build it:
 **`generate` deletes and recreates its selected build directory.** Never run it
 alongside a build, self-host, benchmark, or harness using that directory. On an
 existing configured tree, use `build` for incremental work. `--sanitize`,
-`--fuzz`, `--lto`, `--ci`, `--time-trace`, `--instrument`, and `--cc` belong to
+`--tsan`, `--fuzz`, `--lto`, `--ci`, `--time-trace`, `--instrument`, and `--cc` belong to
 `generate`, not `build`. On Windows use `./build.ps1` with the same arguments.
 
 | Change or goal | Validation from the repository root |
@@ -102,6 +102,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Growing production or build code | Commit, then `./build.sh source_size --base "$(git merge-base origin/main HEAD)"`; past 32 KiB, acknowledge per [source-size policy](docs/source-size.md). |
 | Allocator, ABI, or backend changes | `./build.sh test_mode_matrix --config Release`; cover `fast` and `quality` as applicable. |
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
+| Lane-parallel or shared-initialization changes | In a separate tree: `./build.sh generate --tsan --build-directory build/tsan`, then `./build.sh build --build-directory build/tsan --config Release -t test_tsan`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
 | External compatibility work | Read the [harness index](docs/agents/compatibility.md); use its pristine pinned inputs and affected harness. |
 | Documentation only | Check commands against their implementation, `python3 tools/check_markdown_links.py`, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. Raw audit evidence is byte-exact and [exempt from the whitespace check](docs/agents/benchmarking.md#performance-audit-notes); audit prose is not. |
