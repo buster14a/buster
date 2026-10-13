@@ -205,13 +205,18 @@ files and logs only; it excludes the upstream checkout, generated objects and
 binaries. No full-build route is added to PR, merge-group, branch-push or manual
 events.
 
-The configured harness-command ceiling is 131 minutes: two sides with four
-900-second stages each, plus at most 660 seconds for its probes and
-preparation. This is an upper bound for those commands, not a measured runtime.
-The source checkout and artifact upload also consume the existing Linux
-portfolio job's unchanged 360-minute limit; FFmpeg is appended after all current
-projects. Run 38428249840 took 31 minutes 49 seconds and retained a 3,290,671,945
-byte artifact, but its functional-admission stage failed; that run does not
+The four stages on each of two sides have a configured 900-second child
+deadline, and probes and preparation add at most 660 seconds. Their command
+ceiling is 131 minutes. The pristine-input check runs before and after the
+harness; each check has six Git child commands with 600-second deadlines, adding
+up to 120 minutes. The configured child-deadline sum is therefore 251 minutes.
+This is the sum of limits, not a measured runtime; spawn and cleanup work, file
+operations, checkout/verification, and artifact upload are outside that sum.
+The existing Linux portfolio job keeps its unchanged 360-minute limit, and
+FFmpeg remains after all current projects. The 251-minute sum does not establish
+available headroom after those earlier stages. Run 38428249840 took 31 minutes 49 seconds and retained a
+3,290,671,945 byte artifact, but its functional-admission stage failed; that run
+does not
 establish a green end-to-end receipt or guaranteed headroom. No existing
 watchdog is raised. The original #4050 acceptance remains pending until the
 pristine pinned H.264 translation units complete with reviewed time/RSS evidence

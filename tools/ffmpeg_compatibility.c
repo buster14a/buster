@@ -332,7 +332,7 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_target_action_status_complete(FfmpegTargetAction
                   !status.launch_failed && !status.timed_out && !status.output_truncated &&
                   !status.capture_failed && !status.cleanup_failed && status.elapsed_us != 0 &&
                   status.cpu_status == PROCESS_RESOURCE_OBSERVED && status.memory_status == PROCESS_RESOURCE_OBSERVED &&
-                  !status.cpu_error && !status.memory_error;
+                  status.peak_memory_bytes != 0 && !status.cpu_error && !status.memory_error;
     return result;
 }
 

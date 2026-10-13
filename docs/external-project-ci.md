@@ -102,13 +102,18 @@ Buster first-party license; that decision remains unselected under
 ## FFmpeg cost and acceptance limits
 
 The existing Linux x86-64 job stays at its 360-minute limit and keeps every
-current project stage before FFmpeg. The bounded FFmpeg harness commands have a configured ceiling of two sides
-times four 900-second stages, plus at most 660 seconds for probes and harness
-preparation: 7,860 seconds, or 131 minutes. This is an upper bound for those
-commands, not an observed runtime. Source checkout and artifact upload also
-consume the same job budget. No existing watchdog or job deadline is raised. Since FFmpeg runs last, earlier project stages keep their current order;
-if the shared job reaches its fixed deadline first, the FFmpeg receipt remains
-incomplete and the portfolio must fail.
+current project stage before FFmpeg. FFmpeg's four stages on each of two sides
+have 900-second child deadlines, and its probes and preparation add at most 660
+seconds, for a 131-minute command ceiling. The pristine-input checks run before
+and after the harness; each runs six Git child commands with 600-second
+deadlines, adding 120 minutes. The configured child-deadline sum is 251 minutes.
+It sums limits, not observed runtime. Spawn and cleanup work, file operations,
+checkout/verification, and artifact upload are outside that sum and use the
+same job budget. This ceiling does not establish headroom after earlier
+portfolio stages. No existing watchdog or job deadline is raised. Since FFmpeg
+runs last, earlier project stages keep their current order; if the shared job
+reaches its fixed deadline first, the FFmpeg receipt remains incomplete and the
+portfolio must fail.
 
 Run 38428249840 completed its listed Linux project stages in 31 minutes 49
 seconds and retained a 3,290,671,945-byte artifact, but its later functional

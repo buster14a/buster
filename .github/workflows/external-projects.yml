@@ -814,8 +814,8 @@ jobs:
             build/ffmpeg-portable/*.status
             build/ffmpeg-portable/reference/config.h
             build/ffmpeg-portable/reference/config_components.h
-            build/ffmpeg-portable/reference/config.mak
-            build/ffmpeg-portable/reference/config.log
+            build/ffmpeg-portable/reference/ffbuild/config.mak
+            build/ffmpeg-portable/reference/ffbuild/config.log
             build/ffmpeg-portable/reference/fate-counts.tsv
             build/ffmpeg-portable/reference/*.argv
             build/ffmpeg-portable/reference/*.stdout
@@ -823,8 +823,8 @@ jobs:
             build/ffmpeg-portable/reference/*.status
             build/ffmpeg-portable/buster/config.h
             build/ffmpeg-portable/buster/config_components.h
-            build/ffmpeg-portable/buster/config.mak
-            build/ffmpeg-portable/buster/config.log
+            build/ffmpeg-portable/buster/ffbuild/config.mak
+            build/ffmpeg-portable/buster/ffbuild/config.log
             build/ffmpeg-portable/buster/fate-counts.tsv
             build/ffmpeg-portable/buster/*.argv
             build/ffmpeg-portable/buster/*.stdout

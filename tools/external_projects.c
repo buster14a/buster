@@ -18,6 +18,7 @@ typedef enum ExternalProject
 
 // The userspace verifier is defined later in build.c's unity include order.
 BUSTER_GLOBAL_LOCAL ProcessResult userspace_input_self_test(Arena* arena);
+BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 arguments, String8 driver_argument);
 
 BUSTER_GLOBAL_LOCAL String8 external_project_names[] = {
     S8_INITIALIZER("cjson"), S8_INITIALIZER("zlib"), S8_INITIALIZER("stb"),
