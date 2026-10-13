@@ -9,8 +9,8 @@ reports `owned-by-release-shard` without executing the suite again.
 python3 tests/bootstrap_wrapper_test.py -v
 # Bash platforms; use python rather than python3 on Windows.
 python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v
-# Windows CI runs the same behavior methods through two-case scheduling.
-python tools/bootstrap_wrapper_cases.py --jobs 2
+# Windows CI runs the same behavior methods through four-case scheduling.
+python tools/bootstrap_wrapper_cases.py --jobs 4
 # Serial control with identical instrumentation and assertions.
 python tools/bootstrap_wrapper_cases.py --jobs 1
 # Lifecycle/admission controls, executed by workflow_tools in Release.
@@ -76,7 +76,10 @@ logs and environment outputs; each retains its 120-second deadline measured
 from its own launch and its existing ten-second cleanup deadline. This bounds
 PowerShell startup pressure while the other two suite lanes compile their
 fixtures. A timed-out owner remains a failure and does not suppress later
-controls. Cleanup attempts every registered child even if one cleanup fails,
+controls. The plan admits the four probes that pass the vendor shell (24-39 s
+each on hosted AArch64) before the sub-second early failures, so the fixed
+batches no longer pair each slow probe with a fast one (#3912). Cleanup
+attempts every registered child even if one cleanup fails,
 then propagates that error. `VS_PROBE_START`/`VS_PROBE_END` records retain slot,
 case, outcome and duration. Host-independent scheduling controls cover the
 owner limit, complete inventory after timeout, launch failure, cleanup failure
@@ -104,8 +107,11 @@ provider/directory rejection, UTF8 export bytes and all original failure cases.
 
 ## Bounded independent cases (#2034)
 
-Windows admits two independent behavior cases through one persistent worker
-gang. Each original test instance owns a temporary repository, cache, environment
+Windows admits four independent behavior cases (`MAX_JOBS`) through one
+persistent worker gang. On hosted Windows AArch64 every PowerShell wrapper
+launch costs about 22.6 s, and the six-writer case's 35 s launches match six
+CPU-bound launches over four CPUs; two lanes left half the runner idle for
+the step's 218 s of cases (#3912). Each original test instance owns a temporary repository, cache, environment
 dictionary, fake compiler log, outputs and child owners. Cold/warm, invalidation,
 corrupt/incomplete-entry and failure sequences stay ordered inside their method.
 Assertions and shell selection stay in the unchanged, ledger-pinned test module.
@@ -201,6 +207,20 @@ execution refuses to start without it. Native `fixture` modes supply silent,
 partial, repeated and late drain records for the caller controls on every
 host, and `selftest` checks on Windows that a live non-member process is
 neither admitted, waited on, nor terminated.
+
+`WorkflowSetupTests` in `tools/matrix_shard_test.py` replays both step bodies.
+Six replays used to rerun this identical native command, about 19–23 s each on
+hosted Windows, so the suite grew from 38 s to about 178 s and sat on the
+critical Windows release path (#3912). The class now runs the step's exact
+`bootstrap_process_owner_test` once, on a copy of its source closure, under the
+120-second Windows child deadline. The replays' 30-second deadline left about
+7 s of margin for this command alone; run beside the other suite lanes on a
+slower hosted x86-64 runner, the single run exceeded it. Each replay substitutes only that invocation with
+the verified output; the step still tees, parses and exports it, and the fixture
+suites require the exported helper path. A changed invocation runs for real. A
+changed driver, Clang or closure requalifies before the next replay, and a
+missing, corrupt or stale record fails the replay. The real steps still qualify
+the helper on every release lane.
 
 Unix uses isolated process groups. Direct children retain the ten-second cleanup
 deadline. Workers finish before

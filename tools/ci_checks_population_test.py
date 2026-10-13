@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import pickle
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -158,11 +160,28 @@ class PopulationEpochTests(unittest.TestCase):
             patch = mock.patch.object(owner, name, value)
             patch.start()
             cls.addClassCleanup(patch.stop)
+        # The 36-attempt campaign is deterministic and root-relative: build it
+        # once, then give each test a private copy of its files and state (#3912).
+        template = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(template.cleanup)
+        builder = cls.__new__(cls)
+        builder.root = Path(template.name)
+        builder.build_campaign()
+        cls.campaign_template = (builder.root, pickle.dumps((builder.catalogue, builder.declaration, builder.campaign,
+                                                             builder.observations)))
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.origin = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        self.fixed_inventory = False
+        template_root, state = self.campaign_template
+        shutil.copytree(template_root, self.root, dirs_exist_ok=True)
+        # One pickle keeps the declaration aliased into the campaign.
+        self.catalogue, self.declaration, self.campaign, self.observations = pickle.loads(state)
+
+    def build_campaign(self):
         self.catalogue = json.loads(CATALOGUE.read_text(encoding="utf-8"))
         self.origin = datetime(2026, 10, 1, tzinfo=timezone.utc)
         prepared = population.prepare(self.root / "declaration.json")

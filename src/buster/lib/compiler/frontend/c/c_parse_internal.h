@@ -293,8 +293,6 @@ enum
     C_TEST_PARSE_NESTING_SCOPE_LEVELS,
     C_TEST_PARSE_NESTING_STATEMENT_END_STEPS,
     C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS,
-    // Scopes c_parse_lookup_entity_at_symbol probed.
-    C_TEST_PARSE_NESTING_LOOKUP_AT_SCOPES,
     C_TEST_PARSE_NESTING_STATEMENT_EXPRESSION_TAILS,
     C_TEST_PARSE_NESTING_SLOTS,
 };
@@ -347,6 +345,81 @@ struct CTestPromotedMemberWorkspace
     bool released;
 };
 BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name);
+
+// The default-off comparison of semantic and lowering answers for
+// scalar-integer `sizeof` expression operands (GitHub #2531, slice 2). While
+// set on the calling thread, semantic analysis keeps a CSizeofOperandType row
+// per answered operand (CParseResult.sizeof_operand_types) and lowering
+// compares every `sizeof` size it settles against the rows for the same
+// keyword: its size always, and its signedness where lowering's answer
+// carries an integer type. Rows of different producers for one keyword are
+// compared with each other too. Output is unchanged: nothing reads the rows
+// but the comparison. Paths: the C_IR_QUERY_FRAME_SIZEOF resolver and the
+// body's prediction fallback after it.
+enum
+{
+    C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER,
+    C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION,
+    C_TEST_SIZEOF_HANDOFF_PATHS,
+    C_TEST_SIZEOF_HANDOFF_AGREE = 0,
+    C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH,
+    // The sizes agree but lowering's integer type has the other signedness.
+    C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH,
+    // The resolver gave no answer for an operand with a row; the body may
+    // still settle it through the prediction path.
+    C_TEST_SIZEOF_HANDOFF_DECLINED,
+    // A lowering answer for a `sizeof` keyword with no row in its scope.
+    C_TEST_SIZEOF_HANDOFF_UNMATCHED,
+    C_TEST_SIZEOF_HANDOFF_OUTCOMES,
+    C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT = 16,
+};
+typedef struct CTestSizeofHandoffMismatch CTestSizeofHandoffMismatch;
+struct CTestSizeofHandoffMismatch
+{
+    u32 keyword;
+    u32 operand_end;
+    u64 lowering_size;
+    u8 semantic_size;
+    u8 kind;
+    u8 producer;
+    u8 path;
+    bool semantic_signed;
+    bool lowering_signed;
+};
+typedef struct CTestSizeofHandoff CTestSizeofHandoff;
+struct CTestSizeofHandoff
+{
+    // Rows kept per CSizeofOperandProducer, and their bytes.
+    u64 rows[C_SIZEOF_OPERAND_PRODUCER_COUNT];
+    u64 row_bytes;
+    // An answer for a key its producer already kept: the same answer, or a
+    // different one. A row whose kind or size differs from another
+    // producer's row for the same keyword counts once in conflicts too.
+    u64 repeats;
+    u64 conflicts;
+    // Operand type queries the validation producer made for this comparison
+    // alone, and typed operands outside the scalar-integer population.
+    u64 extra_queries;
+    u64 outside_population;
+    // Compared rows whose producer's scope is not the keyword's innermost
+    // scope (counted per row compared, whatever the outcome).
+    u64 scope_differs;
+    // Agreeing sizes whose signedness was also compared, because lowering's
+    // answer carried an integer type.
+    u64 signedness_compared;
+    // Lowering answers compared, per path and outcome; one per matching row.
+    u64 outcomes[C_TEST_SIZEOF_HANDOFF_PATHS][C_TEST_SIZEOF_HANDOFF_OUTCOMES];
+    CTestSizeofHandoffMismatch first[C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT];
+    u32 first_count;
+};
+BUSTER_F_DECL void c_test_sizeof_handoff_set(bool enabled);
+// A negative control for the comparison: while set, every row a producer in
+// `producer_mask` (bits of CSizeofOperandProducer) keeps has its integer
+// kind's signedness flipped (int becomes unsigned int, unsigned long becomes
+// long), so the sizes still agree and only the kind is wrong.
+BUSTER_F_DECL void c_test_sizeof_handoff_perturb_set(u32 producer_mask);
+// The counts since the last take, which resets them.
+BUSTER_F_DECL CTestSizeofHandoff c_test_sizeof_handoff_take(void);
 
 typedef struct CTestTypeConstantQuery CTestTypeConstantQuery;
 struct CTestTypeConstantQuery

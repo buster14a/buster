@@ -1536,6 +1536,22 @@ BUSTER_F_DECL bool ir_semantic_suppress(bool suppressed);
 // ir_construction.fold_birth_*: whether the row just committed as `id` would
 // already fold under ir_fast_fold's rules. Changes nothing.
 BUSTER_F_DECL void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id);
+// The end-of-body half (ir_construction.fold_net_*, fold_form_*, fold_size_*):
+// a function's committed rows before SSA finish. `uses` counts every reader of
+// each value and `marks` holds per-value census state. Both are zeroed per
+// begin, from a thread-local arena the allocation observer does not see.
+typedef struct IrFoldCensus IrFoldCensus;
+struct IrFoldCensus
+{
+    u32* uses;
+    u8* marks;
+    u32 value_count;
+};
+BUSTER_F_DECL IrFoldCensus ir_construction_fold_census_begin(IrFunction* function);
+// A frontend-held read of `value` outside the rows: a pending SSA store or
+// read replacement. Counts as a use and attributes the value to a store.
+BUSTER_F_DECL void ir_construction_fold_census_hold(IrFoldCensus* census, IrValueId value);
+BUSTER_F_DECL void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, IrFoldCensus* census);
 // One top-level evaluation of source range [start, end) of the token array at
 // `base`; a range any evaluator saw before counts as repeated work.
 BUSTER_F_DECL void ir_semantic_census_range(IrSemanticEvaluator evaluator, void const* base, u32 start, u32 end);

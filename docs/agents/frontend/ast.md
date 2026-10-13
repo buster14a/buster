@@ -1512,7 +1512,8 @@ It depends on two pieces:
   slice 1 landed with the [root-conditional index](#lowering-from-the-tree);
 - a per-body index from an evaluator core's token range to its node, which
   slice 2 owns and which has not landed. The root-conditional index maps
-  only `CONDITIONAL` nodes.
+  only `CONDITIONAL` nodes. The [token-to-node map](#token-to-node-map-for-lowering)
+  census prices that index.
 
 This section consumes both and does not rebuild them.
 
@@ -1714,6 +1715,96 @@ It changes no emission, so its differential compares one ordered list per
 core. Its first implementable revision is the one where slice 2's
 range-to-node index has landed; until then nothing in this section ships.
 
+## Token-to-node map for lowering
+
+**Status: census only.** No map is built. Lowering receives the tree in
+`CIRLowerOptions.syntax_tree`, but its queries arrive as token ranges. Each
+tree slice so far has built its own per-body index:
+- the [root-conditional records](#lowering-from-the-tree);
+- the [extent table](#statement-extents-in-lowering).
+
+This section asks whether one shared map, from a token range to the node
+whose span it is, would let more queries answer from the tree. Its census is
+audit [`2026-10-12T221903Z`](../../performance-audits/2026-10-12T221903Z.md),
+which is hosted and diagnostic only.
+
+**The map's contract.** A range maps to the node whose span it is exactly,
+after balanced outer parentheses are stripped. The span rules are the tree
+typer's (`c_ast_types_span`, `c_ast_types_locate`): a span is widened over
+the parentheses that wrap it exactly. Each node also needs two masks:
+- **The root region:** the `,`, assignment, `?:` and `&&`/`||` operators
+  outside every parenthesis, bracket and brace of the node. These are what
+  the token scans see at depth 0. An assignment in a conditional's second or
+  third operand is dropped, as the scans drop it.
+- **Anywhere:** the same operators anywhere in the subtree. A statement
+  expression, compound literal, initializer list, `_Generic` or a type's
+  `sizeof`/`alignof` makes it opaque, and the query then scans.
+
+The map holds token and node indices only, in a private per-body arena. No
+node id reaches the IR, and the tree is not written.
+
+**Coverage.** On the unity self-host under `-fc-ast-pilot`, the map resolves:
+- 98.2% of `c_ir_root_conditional`'s ranges;
+- 79 to 100% of the root-token predicates (`c_ir_has_root_comma`,
+  `_assignment`, `_question` and `_control_operator`), and 36% of
+  `c_ir_call_argument_separator`'s ranges;
+- every evaluator core, expression and logical frame, and every in-body
+  condition frame (52,607 of 52,629; the other 22 lie outside a body);
+- 44% of `c_ir_group_type_name`'s groups as an exact "no type name": the
+  group's interior is one expression node.
+
+Over about 1.97 M compared answers, the tree agreed with the scan every time.
+The range map does not fit two queries, and two more need facts lowering does
+not have:
+- `c_ir_unevaluated_operand_end` and `c_ir_unary_expression_end` take an
+  open-ended range;
+- `c_ir_query_execute` and the `sizeof` operand typer need C types, which
+  lowering does not keep.
+
+**The three designs.** All are lazy per body.
+
+| Design | Build | Lookup | Memory | Verdict |
+| --- | ---: | ---: | --- | --- |
+| A: dense start chain, built in lowering | 189.5 M Ir over 6,389 bodies, 109 Ir per body node | 48 Ir | at most 0.6 MB, per body | answers every query above; loses to its build |
+| B: sparse table of the nodes whose region holds an operator | 188.6 M | 108 Ir | 2.3 MB for the whole unit | dominated: the same pass, and it cannot prove a negative, which is almost every predicate answer |
+| C: keep the typer's per-body spans and chains for lowering | already paid by the typer's eager pass; masks not measured | about A's | about 34 MB for the whole unit, 4.7% of peak RSS | the only design with no new build; a lifetime change |
+
+**The net for each consumer of A.** Each query pays a lookup on every call,
+plus the scan on a miss:
+
+| Consumer | Net |
+| --- | ---: |
+| The five root-token predicates | ≈ 28.5 M |
+| Type-name negatives | ≈ 8 to 16 M |
+| The root conditional, replacing the records | ≤ 31.8 M |
+
+Together they net about 68 to 76 M, against a 189.5 M build. No single
+consumer clears a 5 M net gate, so nothing was built and no budgets were
+declared.
+
+**What needs no tree.** A per-body token count refuses most predicate ranges
+without a tree:
+- 703,748 calls holding no candidate token cost 71.8 M Ir;
+- after such a gate, the tree's share of the predicates is 9.6 M, less than
+  the map's lookups would cost.
+
+The same table also already counts `?`. Under the pilot,
+`c_ir_root_conditional` skips that count and takes the records' path for
+every call: 79.1 M, against 18.1 M of scan behind the count on the default
+path. Both leads are on the token path and are tracked in
+[#3924](https://github.com/buster14a/buster/issues/3924).
+
+**Recommendation:**
+- Land the token gates first. Their saving belongs to the token path, not
+  to the tree.
+- Build a map only together with [slice 5a](#order-of-slices), the first
+  consumer large enough to carry one, and budget 5a net of the map's build.
+- Prefer design C if the owner accepts about 34 MB kept for the unit. It
+  leaves 5a's ceiling of about 280 M nearly whole. Design A leaves at most
+  about 70 M before the walk's own cost.
+- Do not pursue design B.
+- Zen 5 validation stays incomplete (#2761).
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.
@@ -1768,7 +1859,8 @@ Neither of the last two is planned for the tree. The census found that a
 tree read costs more than it replaces for both; the
 [keyword gate](#statement-keyword-gate-in-lowerings-classification) has the
 numbers. Retiring the row now waits on a token-to-node map, or on dropping the
-walkers as the default.
+walkers as the default. The [map's census](#token-to-node-map-for-lowering)
+finds that a map pays only together with slice 5a.
 
 Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
 plain specifier run of a block declaration, a file-scope declaration, a
@@ -4105,6 +4197,79 @@ the shipped one. Both are diagnostic only. There were two candidates:
   - The classification's ceiling, net of the gate, is under 30 M. A
     first-token table over its 155,771 statements would cost at least about
     62 M at the extent table's per-entry cost.
+- Zen 5 validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+### Type-word test and label proof in lowering's classification
+
+After the [statement-keyword gate](#statement-keyword-gate-in-lowerings-classification),
+two pieces of `c_ir_lower_body_advance`'s first-token classification were
+left open: the type-word test (about 9.0 M Ir) and the label proof (about
+5.7 M). Those figures came from noinline census wrappers, so they include the
+wrappers' own calls.
+
+A throwaway census build of main `7bc92b2d` counted both on the unity
+self-host (`-g0 -c`, default flags, tests-off `-march=x86-64-v3` Release,
+Callgrind):
+- **The type-word test.** 103,554 calls spend 8.05 M Ir in
+  `c_parse_type_word_for_dialect`, about 78 Ir a call, matching the spelling
+  against a ladder of string compares.
+  - The declaration branch makes 98,569 calls. 86,724 are identifiers bound
+    to an entity, 6,990 are predefined symbols, and 6,876 answer true.
+  - The `declaration_statement` test makes 4,985 calls. All are bound
+    identifiers, and none answers true.
+  - `c_parse_type_word_for_dialect_token` answers every one of the 103,554
+    the same way. It reads the interned symbol's `word_bits`, which are
+    computed from the same spelling predicates, and every specifier spelling
+    is interned in the predefined range.
+- **The label proof.** Of 156,929 first tokens, 12 have the shape an
+  identifier followed by `:`. Only those 12 reach the out-of-line proof, and
+  all 12 are labels. The shape test is already inline and needs about two
+  token loads a statement, so there is nothing separate to gate. The
+  dead-code hop after a terminator, in the same function, calls
+  `c_ir_named_label_proven_at` 18,882 times (2.19 M). That is a different
+  question, and it is under the floor below.
+
+These budgets were declared before the measured runs. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at
+`-g -c` for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `7bc92b2d`, which the candidate branches from. The budgets:
+- **Correctness.** Both type-word sites read the token form instead of the
+  spelling. Reference-check builds (Debug and sanitized) compare the two
+  answers for every identifier first token. The `-c` objects (`-g0` and
+  `-g`) must be byte-identical across the four arms. `test_self_host` must
+  keep its fixed point, and `test_all` must pass.
+- **The test (D against A).** `c_ir_lower_body_advance` makes no call to
+  `c_parse_type_word_for_dialect`.
+- **The whole compile.** `-c` (`-g0`) must fall by at least 3 M Ir, both D
+  against A and C against B. Below that floor the result is recorded as
+  negative and no code ships. `-fsyntax-only` runs no lowering, so it is not
+  measured.
+- **The label proof.** A cut is built only if it removes at least 3 M. The
+  census above leaves none, so the result is recorded as negative, with no
+  code.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
+The hosted census is
+[`2026-10-12T220456Z`](../../performance-audits/2026-10-12T220456Z.md),
+diagnostic only:
+- **The type-word test ships on the token path.** Both arms fall by 8.98 M Ir
+  (−0.036% default, −0.039% pilot). `c_ir_lower_body_advance` makes no
+  spelling-ladder call, and the objects are byte-identical across the four
+  arms at `-g0` and `-g`.
+- **The label proof is negative.** No code ships for it.
+- **Leads, unclaimed:** the dead-code hop's proofs (2.19 M) and
+  `c_ir_query_execute`'s 48,392 spelling-ladder calls (4.98 M).
 - Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

@@ -43,6 +43,8 @@ Map (searchable symbols):
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
     THROUGHPUT_HARNESS_FLOOR, HARNESS_ADMISSIONS           base-harness admission (#3714)
     THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE   named historical corpus (#3714)
+    EVIDENCE_INVENTORY, evidence_lab_required, evidence_corpus_required,
+        evidence_identity                                  sealed raw evidence v1 (#2918)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
@@ -62,6 +64,8 @@ Map (searchable symbols):
     WILD_LINKER_PROFILE, validate_wild_linker, wild_linker_population,
         wild_linker_digest                                 host Wild against its comparator (#2761)
     LINK_TLS_PROFILE, validate_link_tls, link_tls_digest   whole-link TLS companion cells (#1915)
+    SELFHOST_INLINE_PROFILE, validate_selfhost_inline,
+        selfhost_inline_digest                             self-built inline-mode base/head pair (#58)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -173,6 +177,61 @@ THROUGHPUT_HISTORICAL_PROFILE = dict(
             "revision's ./build.sh bench_throughput in a detached worktree under the work directory",
     harness_revision=THROUGHPUT_HISTORICAL_HARNESS_REVISION,
     admission=f"pull request merge base predates {THROUGHPUT_HARNESS_FLOOR}")
+# Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md). The producer
+# exports these members as required, writes EVIDENCE_OMISSIONS, and seals the
+# bundle last with the trusted `./build.sh compiler_evidence seal`; the
+# publisher re-derives the same inventory natively with `verify`. The native
+# tables in tools/compiler_evidence.c must stay equal (compiler_test checks).
+EVIDENCE_INVENTORY = "buster-compiler-ordinary-raw-v1"
+EVIDENCE_MANIFEST = "evidence-manifest.tsv"
+EVIDENCE_SEAL = "evidence-seal.txt"
+EVIDENCE_OMISSIONS = "evidence-omissions.json"
+EVIDENCE_OMISSIONS_SCHEMA = "buster-compiler-evidence-omissions-v1"
+EVIDENCE_OMISSION_REASONS = ("excluded-type", "member-limit", "byte-budget", "file-budget", "changed-during-copy",
+                             "read-error")
+EVIDENCE_OMISSION_EXAMPLES = 50
+EVIDENCE_LAB_FIXED = ("compare.json", "summary.json", "pairs.json", "a/lab.json", "b/lab.json", "a/env/env.json")
+EVIDENCE_LAB_LOGS = ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log")
+EVIDENCE_CORPUS_CORE = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl",
+                        "capabilities.jsonl", "complete.txt", "summary.json", "cpuinfo.txt")
+# Identity lines after schema and inventory, in manifest order.
+EVIDENCE_IDENTITY_KEYS = ("repository", "request_run", "request_attempt", "executor_run", "executor_attempt",
+                          "trusted_revision", "baseline_revision", "candidate_revision", "baseline_tree",
+                          "candidate_tree", "lab_profile", "corpus_profile", "corpus_harness_revision")
+
+
+def evidence_lab_required(pairs: int, counters: tuple[bool, bool], metrics: tuple[bool, bool]) -> tuple[str, ...]:
+    """Lab-relative required members for a plan of `pairs` and each variant's declared streams."""
+    required = [*EVIDENCE_LAB_FIXED, *(f"{variant}/{log}" for variant in "ab" for log in EVIDENCE_LAB_LOGS)]
+    for index, variant in enumerate("ab"):
+        for pair in range(1, pairs + 1):
+            required.extend(f"pairs/{pair:04d}-{variant}{suffix}" for suffix, declared in
+                            ((".csv", counters[index]), (".ccmetrics", metrics[index])) if declared)
+    return tuple(required)
+
+
+def evidence_corpus_required(profile: dict) -> tuple[str, ...]:
+    """Corpus-relative required members of an admitted corpus profile."""
+    return (*EVIDENCE_CORPUS_CORE, *(f"inputs/{name}.c" for name in profile["workloads"]))
+
+
+def evidence_identity(receipt: dict, request_attempt: str) -> str:
+    """The trusted identity lines of a receipt's ordinary attempt, or '' when it has none."""
+    identity = receipt.get("identity") if isinstance(receipt, dict) else None
+    profile, corpus = (receipt.get("profile"), receipt.get("throughput_profile")) if isinstance(receipt, dict) else (None, None)
+    text = ""
+    if isinstance(identity, dict) and isinstance(profile, dict) and isinstance(corpus, dict):
+        harness = corpus.get("harness_revision") if corpus.get("name") == THROUGHPUT_HISTORICAL_PROFILE["name"] \
+            else identity.get("base")
+        values = (identity.get("repository"), identity.get("request_run_id"), request_attempt, identity.get("run_id"),
+                  identity.get("run_attempt"), identity.get("trusted_revision"), identity.get("base"),
+                  identity.get("head"), identity.get("base_tree"), identity.get("head_tree"), profile.get("name"),
+                  corpus.get("name"), harness)
+        if all(isinstance(value, str) and value and "\t" not in value and "\n" not in value for value in values):
+            text = "".join(f"{key}\t{value}\n" for key, value in zip(EVIDENCE_IDENTITY_KEYS, values))
+    return text
+
+
 # The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
 # is one `bench_throughput scale` bundle on the candidate binary, with the
 # --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
@@ -645,6 +704,45 @@ LINK_TLS_PROFILE = {
     "decision": "report-only: ratios and intervals are reported and never gate",
     "report_only": True,
 }
+# Issue #58: the Zen 5 route for comparing the compilers each side would
+# self-build with -fcanonical-inline. One fresh exact line in
+# ANALYZER_REQUEST_PATH selects it on the pull-compare route. After each role's
+# Clang Release build, the trusted tools/bench_direct/selfhost_inline_compare.py
+# compiles that role's own unity source once with stage1_command; after the
+# ordinary comparison it times the two stage-1 compilers compiling the frozen
+# merge-base tree with compile_flags, requiring byte-identical outputs, then
+# runs the topdown (Zen 5 metric groups, including the front-end ones) and
+# sampling profile steps for both. Everything is frozen here; changing any
+# value needs a new name. It is report-only.
+SELFHOST_INLINE_REQUEST_LINE = "profile: self-host-inline-compare-v1"
+SELFHOST_INLINE_SCHEMA = "buster-selfhost-inline-compare-v1"
+SELFHOST_INLINE_STAGE1_SCHEMA = "buster-selfhost-inline-stage1-v1"
+SELFHOST_INLINE_HARNESS = "selfhost_inline_compare.py"
+SELFHOST_INLINE_PROFILE = {
+    "name": "self-host-inline-compare-v1",
+    "issue": "#58",
+    "harness": "tools/bench_direct/selfhost_inline_compare.py at the trusted revision, run by compiler_compare",
+    "stage1": "after each role's Clang Release build, with that revision and its build/generated checked out, its ide "
+              "runs stage1_command once (untimed) on the role's own unity source",
+    "stage1_command": ["cc", "-march=native", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                       "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm", "-fcanonical-inline"],
+    "workload": "uarch_lab compare of the baseline (A) and candidate (B) stage-1 compilers compiling the ordinary "
+                "comparison's frozen merge-base tree with uarch_lab's default compile plus compile_flags",
+    "compile_flags": ["-fcanonical-inline"],
+    "pairs": 30,
+    "warmups": 1,
+    "cpu": 2,
+    "order": "ABBA",
+    "min_effect_percent": 0.5,
+    "profile_steps": ["topdown", "sampling"],
+    "correctness": "both stage-1 compilers must produce byte-identical outputs before timing "
+                   "(--require-identical-output), and every timed run must reproduce its reference",
+    "decision": "report-only: paired ratios, PMU counters and profiles are reported and never gate",
+    "report_only": True,
+}
+# The topdown metrics the report lists: Zen 5 front-end groups and the level-1 split.
+SELFHOST_INLINE_FRONTEND = re.compile(r"(?i)frontend|fetch|decod|op_?cache|icache|itlb|dispatch|pipelinel1")
+SELFHOST_INLINE_TOPDOWN_ROWS = 12
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
 SCALING_PROFILE = {
     "name": "scaling-v1",
@@ -1799,6 +1897,106 @@ def validate_link_tls(status: object, summary: object, binaries: object) -> list
     for cell in cells:
         problems.extend(link_tls_cell_statistics(cell)[1])
     return problems
+
+
+def validate_selfhost_inline(stage1: object, result: object, binaries: object) -> list[str]:
+    """Reasons the stage-1 and result documents are not one complete SELFHOST_INLINE_PROFILE run.
+
+    stage1 maps baseline/candidate to selfhost_inline_compare.py's stage1.json; result is its result.json;
+    binaries is the receipt's role -> {"sha256", "revision", ...} record, hashed by compiler_compare itself.
+    The timed uarch_lab documents are checked by selfhost_inline_compare.validate_compare_documents.
+    """
+    label = "self-host inline"
+    profile = SELFHOST_INLINE_PROFILE
+    problems: list[str] = []
+    roles = ("baseline", "candidate")
+    if not isinstance(stage1, dict) or set(stage1) != set(roles):
+        return [f"{label} stage-1 records are missing"]
+    shas: dict = {}
+    for role in roles:
+        record = stage1[role]
+        expected = binaries.get(role) if isinstance(binaries, dict) and isinstance(binaries.get(role), dict) else {}
+        if not isinstance(record, dict) or record.get("schema") != SELFHOST_INLINE_STAGE1_SCHEMA or \
+                record.get("status") != "complete":
+            problems.append(f"{label} {role} stage-1 record is malformed or incomplete")
+            continue
+        if record.get("revision") != expected.get("revision") or not isinstance(expected.get("revision"), str):
+            problems.append(f"{label} {role} stage-1 compiler was not built from the {role} revision")
+        compiler = record.get("compiler") if isinstance(record.get("compiler"), dict) else {}
+        if compiler.get("sha256") != expected.get("sha256") or not isinstance(expected.get("sha256"), str):
+            problems.append(f"{label} {role} stage-1 compiler was not built by the recorded {role} binary")
+        if record.get("command") != profile["stage1_command"]:
+            problems.append(f"{label} {role} stage-1 command is not the frozen command")
+        built = record.get("stage1") if isinstance(record.get("stage1"), dict) else {}
+        if not re.fullmatch("[0-9a-f]{64}", str(built.get("sha256", ""))) or type(built.get("size_bytes")) is not int or \
+                built["size_bytes"] <= 0:
+            problems.append(f"{label} {role} stage-1 compiler identity is malformed")
+        else:
+            shas[role] = built["sha256"]
+    if not isinstance(result, dict):
+        return [*problems, f"{label} result is missing or malformed"]
+    for key, wanted in (("schema", SELFHOST_INLINE_SCHEMA), ("status", "complete"), ("profile", profile["name"])):
+        if result.get(key) != wanted:
+            problems.append(f"{label} result {key} is {result.get(key)!r}, not {wanted!r}")
+    baseline = binaries.get("baseline") if isinstance(binaries, dict) and isinstance(binaries.get("baseline"), dict) else {}
+    if result.get("base_revision") != baseline.get("revision"):
+        problems.append(f"{label} did not time the frozen merge-base tree")
+    if len(shas) == len(roles) and result.get("stage1_compilers") != {role: {"sha256": shas[role]} for role in roles}:
+        problems.append(f"{label} timed compilers are not the recorded stage-1 compilers")
+    return problems
+
+
+def _finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def selfhost_inline_frontend_problems(summary: object) -> list[str]:
+    """Reasons a self-host inline summary lacks usable paired front-end topdown evidence.
+
+    Every topdown row must be well formed; the level-1 front-end-bound metric (a name ending in
+    frontend_bound, as uarch_lab's dominant_category reads it) must be present with finite values for
+    both compilers; and no front-end row may carry a value for only one of them. Other groups (cache,
+    backend) are reported but never stand in for it, because step_topdown marks the step ok even when a
+    group fails or is unavailable."""
+    label = "self-host inline"
+    profile = summary.get("profile") if isinstance(summary, dict) and isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = topdown.get("metrics")
+    if topdown.get("status") != "ok" or not isinstance(rows, list) or not rows:
+        return [f"{label} topdown metrics are missing"]
+    problems: list[str] = []
+    if any(not isinstance(row, dict) or not isinstance(row.get("group"), str) or not isinstance(row.get("metric"), str)
+           for row in rows):
+        problems.append(f"{label} topdown has a malformed metric row")
+        rows = [row for row in rows if isinstance(row, dict)]
+    frontend = [row for row in rows if SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    if not any(str(row.get("metric", "")).lower().endswith("frontend_bound") and _finite_number(row.get("a")) and
+               _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown lacks a paired level-1 frontend_bound metric")
+    if any(_finite_number(row.get("a")) != _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown has a front-end metric measured for only one compiler")
+    return problems
+
+
+def selfhost_inline_digest(summary: object) -> dict | None:
+    """The reported rows of a self-host inline uarch summary: paired metrics, code bytes, front-end topdown."""
+    if not isinstance(summary, dict) or not isinstance(summary.get("metrics"), dict):
+        return None
+    metrics = {}
+    for key in ("wall", "task_clock", "instructions", "cycles", "ipc", "branch_misses", "peak_rss"):
+        row = summary["metrics"].get(key) if isinstance(summary["metrics"].get(key), dict) else {}
+        metrics[key] = {name: row.get(name) for name in ("a_median", "b_median", "ratio", "ci_low", "ci_high", "outcome")}
+    code = summary.get("code_bytes") if isinstance(summary.get("code_bytes"), dict) else {}
+    profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = [row for row in topdown.get("metrics") or [] if isinstance(row, dict) and
+            SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    return {"metrics": metrics, "code_bytes": {name: code.get(name) for name in ("a_value", "b_value", "ratio")},
+            "frontend": [{name: row.get(name) for name in ("group", "metric", "unit", "a", "b", "relative_change_percent")}
+                         for row in rows[:SELFHOST_INLINE_TOPDOWN_ROWS]],
+            "outputs_identical": summary.get("outputs_identical"), "verdict": verdict.get("text"),
+            "warnings": [item for item in summary.get("warnings") or [] if isinstance(item, str)]}
 
 
 def _shell_quote(text: str) -> str:
@@ -4487,6 +4685,7 @@ INVENTORY_LEGS = {
         "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
         "wild-linker": ("tool:wild_linker_bench.c",),
         "link-tls": ("tool:link_tls_bench.py",),
+        "self-host-inline": ("uarch_lab:compare@self-host-inline-compare",),
         "historical-corpus": ("build:bench_throughput@throughput-corpus-historical",),
     },
 }
@@ -4495,7 +4694,8 @@ INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pil
                             "constant-reuse": "constant_reuse_acceptance",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
-                            "wild-linker": "wild_linker", "link-tls": "link_tls"}
+                            "wild-linker": "wild_linker", "link-tls": "link_tls",
+                            "self-host-inline": "selfhost_inline"}
 
 
 def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
@@ -4907,6 +5107,39 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 profile["pairs"]))
         if link_tls.get("exit") not in (None, 0):
             lines.append(f"TLS companion link harness exit: {link_tls.get('exit')}.")
+    selfhost = receipt.get("selfhost_inline") if isinstance(receipt, dict) else None
+    if isinstance(selfhost, dict) and selfhost.get("requested"):
+        profile = SELFHOST_INLINE_PROFILE
+        digest = selfhost.get("digest") if isinstance(selfhost.get("digest"), dict) else {}
+        lines += ["", f"Self-built inline-mode compilers ({profile['name']}): {selfhost.get('status', 'NA')} (each "
+                  "side's stage-1 compiler built with `-fcanonical-inline`, both compiling the merge-base tree with it, "
+                  f"byte-identical outputs required, {profile['pairs']} ABBA pairs on CPU {profile['cpu']} plus "
+                  "topdown and sampling; report-only).", "",
+                  "| Metric | Base | Head | Head / base [95% CI] |", "| --- | ---: | ---: | ---: |"]
+        metrics = digest.get("metrics") if isinstance(digest.get("metrics"), dict) else {}
+        for key in ("wall", "task_clock", "instructions", "cycles", "ipc", "branch_misses", "peak_rss"):
+            row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
+            values = [row.get(name) for name in ("a_median", "b_median", "ratio")]
+            interval = [row.get(name) for name in ("ci_low", "ci_high")]
+            lines.append("| %s | %s | %s | %s |" % (
+                key, *("%.6g" % value if _finite_positive(value) else "NA" for value in values[:2]),
+                ("%.4f" % values[2] if _finite_positive(values[2]) else "NA") +
+                (" [%.4f, %.4f]" % tuple(interval) if all(_finite_positive(value) for value in interval) else "")))
+        code = digest.get("code_bytes") if isinstance(digest.get("code_bytes"), dict) else {}
+        if all(_finite_positive(code.get(name)) for name in ("a_value", "b_value", "ratio")):
+            lines.append("| code bytes | %d | %d | %.4f |" % (code["a_value"], code["b_value"], code["ratio"]))
+        frontend = digest.get("frontend") if isinstance(digest.get("frontend"), list) else []
+        if frontend:
+            lines += ["", "| Front-end topdown metric | Base | Head | Change |", "| --- | ---: | ---: | ---: |"]
+            for row in frontend:
+                row = row if isinstance(row, dict) else {}
+                change = row.get("relative_change_percent")
+                lines.append("| %s %s | %s | %s | %s |" % (
+                    row.get("group", "NA"), row.get("metric", "NA"),
+                    *("%.6g" % row[key] if isinstance(row.get(key), (int, float)) else "NA" for key in ("a", "b")),
+                    "%+.2f%%" % change if isinstance(change, (int, float)) else "NA"))
+        if selfhost.get("exit") not in (None, 0):
+            lines.append(f"Self-built inline-mode harness exit: {selfhost.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

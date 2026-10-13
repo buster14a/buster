@@ -164,6 +164,7 @@ BUSTER_C_EXTERN u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsi
 BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
+BUSTER_C_EXTERN bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // GNU `_Alignof(object)` answers the object's alignment, which its alignment
 // records raise; a record may itself spell `_Alignof(object)`, so each layout
@@ -775,12 +776,19 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
     C_SYMBOL_BUILTIN_ABSOLUTE_VALUE,
+    C_SYMBOL_BUILTIN_SOURCE_LINE,
+    C_SYMBOL_BUILTIN_SOURCE_FILE,
+    C_SYMBOL_BUILTIN_SOURCE_FUNCTION,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
+BUSTER_C_EXTERN bool c_semantic_source_location_builtin(CSymbolBuiltin builtin);
+BUSTER_C_EXTERN u32 c_semantic_source_line(CPreprocessResult const* preprocess, u32 token_index);
+BUSTER_C_EXTERN String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index);
+BUSTER_C_EXTERN CTypeId c_semantic_source_name_type(CParseResult* result, Target target);
 
 typedef enum CIntegerTransformOperation
 {
@@ -1222,6 +1230,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_VENDOR_TYPE,
     C_TYPE_PARSE_STAGE_VENDOR_TYPE_SUFFIX,
     C_TYPE_PARSE_STAGE_VENDOR_OPERAND,
+    C_TYPE_PARSE_STAGE_ATOMIC_OBJECT,
     C_TYPE_PARSE_STAGE_FINISH,
     C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
@@ -1815,6 +1824,17 @@ BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResu
 typedef struct CAstTypePending CAstTypePending;
 
 #if BUSTER_INCLUDE_TESTS
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, c_parse.c).
+// Lowering asks whether it is on before it does any work for it, then reports
+// each `sizeof` size it settles (or its resolver's refusal) for one keyword
+// token, with the signedness of its integer type when it had one (`typed`):
+// `path` is a C_TEST_SIZEOF_HANDOFF_PATH_* value.
+BUSTER_C_EXTERN bool c_sizeof_handoff_enabled(void);
+BUSTER_C_EXTERN void c_sizeof_handoff_compare(CParseResult* result, CPreprocessResult const* preprocess, u32 keyword, bool answered, u64 size,
+                                              bool typed, bool lowering_signed, u32 path);
+#endif
+
+#if BUSTER_INCLUDE_TESTS
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
 // without the tree and compared. The mark records the model's table sizes
 // before that run.
@@ -2003,6 +2023,33 @@ struct CIrAtomicBuiltinSpelling
 
 BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling);
+
+// What an atomic builtin call answers: nothing, a _Bool flag, or the
+// unqualified, non-atomic type of the object its first argument points to.
+// Lowering's strict operand walk and the parser's expression typer both read
+// it, so `sizeof` and `__typeof__` agree.
+typedef enum CSemanticAtomicResult
+{
+    C_SEMANTIC_ATOMIC_RESULT_INVALID,
+    C_SEMANTIC_ATOMIC_RESULT_VOID,
+    C_SEMANTIC_ATOMIC_RESULT_FLAG,
+    C_SEMANTIC_ATOMIC_RESULT_OBJECT,
+} CSemanticAtomicResult;
+
+BUSTER_C_EXTERN CSemanticAtomicResult c_semantic_atomic_builtin_result(CIrAtomicBuiltinSpelling spelling);
+
+// The C types a library builtin's standard prototype is spelled in.
+typedef enum CIrLibraryValue
+{
+    C_IR_LIBRARY_VALUE_VOID_POINTER,
+    C_IR_LIBRARY_VALUE_CHAR_POINTER,
+    C_IR_LIBRARY_VALUE_INT,
+    C_IR_LIBRARY_VALUE_SIZE,
+} CIrLibraryValue;
+
+// The result of a `__builtin_mem*`/`__builtin_str*` library-shaped builtin,
+// or false when the name is not one.
+BUSTER_C_EXTERN bool c_semantic_memory_builtin_result(String8 name, CIrLibraryValue* value_out);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_literal_kind(Target target, u64 const* limits, String8 spelling, u64 value);
 BUSTER_C_EXTERN bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out, String8* message, u32* location);
 
