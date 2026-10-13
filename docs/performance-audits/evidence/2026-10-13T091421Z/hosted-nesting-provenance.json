@@ -1,0 +1,15 @@
+{
+  "binary_sha256": {
+    "baseline": "02f281b8dae1c0625dea798251cdd705ab588cbf158967e22fbb343ed96e9b55",
+    "candidate": "02f281b8dae1c0625dea798251cdd705ab588cbf158967e22fbb343ed96e9b55"
+  },
+  "suite": "nesting",
+  "warmups": 1,
+  "repetitions": 11,
+  "cpu": 2,
+  "affinity": [
+    2
+  ],
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "complete": true
+}

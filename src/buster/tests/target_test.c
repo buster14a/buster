@@ -1823,6 +1823,11 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(feature_names[feature_index].feature), feature_names[feature_index].name);
     }
     BUSTER_TEST(arguments, target_cpu_feature_names_are_sorted());
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("rdtscp")) == TARGET_CPU_FEATURE_X86_RDTSCP);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("bmi")) == TARGET_CPU_FEATURE_X86_BMI1);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("rdtscp")) == TARGET_CPU_FEATURE_NONE);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_BASELINE),
+                                                         TARGET_CPU_FEATURE_X86_RDTSCP));
     BUSTER_TEST(arguments, sizeof(TargetCpuFeatures) == TARGET_CPU_FEATURE_WORD_COUNT * sizeof(u64));
     BUSTER_TEST(arguments, TARGET_CPU_FEATURE_BIT_CAPACITY >= 256);
     TargetCpuFeatures second_word_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SVM);
@@ -2008,6 +2013,17 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     };
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_x86_aarch64_feature));
 #if BUSTER_CPU_ARCH_X86_64
+    X86_64CpuFeatureInput rdtscp_cpuid = {.maximum_extended_leaf = UINT32_C(0x80000001),
+                                        .extended_basic = {.edx = UINT32_C(0x08000000)}};
+    BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(rdtscp_cpuid),
+                                                        TARGET_CPU_FEATURE_X86_RDTSCP));
+    rdtscp_cpuid.maximum_extended_leaf = UINT32_C(0x80000000);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(rdtscp_cpuid),
+                                                         TARGET_CPU_FEATURE_X86_RDTSCP));
+    rdtscp_cpuid.maximum_extended_leaf = UINT32_C(0x80000001);
+    rdtscp_cpuid.extended_basic.edx = 0;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(rdtscp_cpuid),
+                                                         TARGET_CPU_FEATURE_X86_RDTSCP));
     X86_64CpuFeatureInput full_cpuid = {
         .maximum_basic_leaf = 0x29,
         .maximum_extended_leaf = 0x8000001f,

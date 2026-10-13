@@ -76,7 +76,7 @@ reporting net host cost, plus immutable-binary A/A and same-source build/root
 controls. Retain every attempt, including failures; do not claim equivalence
 from unchanged flags or one noisy timing.
 
-The controlled native entry point is `compiler_closure qualify ROOT OUTPUT BASE BASE_TREE HEAD HEAD_TREE TRUSTED_LAB PYTHON`. The admission layer supplies all pinned identities, the approved host, and the outer 90-minute reservation. This command refuses other processors. Both arms validate the original private checkout before either mutates it. The fixed order is legacy A/B and immutable A/A, snapshot A/B and immutable A/A, then cross-build baseline A/A. Each series retains the existing ten-minute lab settings, CPU 2, one warmup, the complete native CI corpus with twenty pairs per round and two warmups, and BASE/BASE labels for A/A. It never retries or reduces a population. Same-source controls require identical compiler output.
+The controlled native entry point is `compiler_closure qualify ROOT OUTPUT BASE BASE_TREE HEAD HEAD_TREE TRUSTED_LAB PYTHON`. The admission layer supplies all pinned identities, the approved host, and the outer 90-minute reservation. This command refuses other processors. An absolute canonical `PYTHON`, such as the native controller's verified `python_path`, is used as given. Only a bare name resolves through `PATH`. A non-canonical, relative or missing interpreter is refused with a one-line error before `OUTPUT` is created (#3966). Both arms validate the original private checkout before either mutates it. The fixed order is legacy A/B and immutable A/A, snapshot A/B and immutable A/A, then cross-build baseline A/A. Each series retains the existing ten-minute lab settings, CPU 2, one warmup, the complete native CI corpus with twenty pairs per round and two warmups, and BASE/BASE labels for A/A. It never retries or reduces a population. Same-source controls require identical compiler output.
 
 Each arm resets the same absolute private checkout and bootstrap cache before its first baseline build. The raw closure remains complete. A separate workload identity excludes file times, historical cache paths, and intermediate object bytes only for comparison between arms; it includes every source byte, generated compiler input, configured compiler/linker/resource identity, CMake/Ninja inputs, baseline bootstrap configuration and executable, and the native corpus executable. Both arms must match this workload identity, harness, bootstrap producer, and candidate compiler before snapshot measurements start.
 
@@ -86,7 +86,15 @@ Every experimental child starts in a fresh OS-owned process group. The native ow
 
 Each arm configures with `build.sh generate --cc clang --no-include-tests -- -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-fork`. Linux `generate` selects mold, whose default `--fork` leaves each finished link child to the phase subreaper; on CMake 3.29+ every try-compile and `ide` link then counts as an escaped descendant (#3372). `--no-fork` keeps the same linker and byte-identical output, so the descendant rule stays strict without exempting the linker.
 
-`harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt.
+Every snapshot/restore/verify receipt and its `COMPILER_CLOSURE` log line name
+the first failed step in `failed_step` (`-` when complete) with the `errno`
+observed right after it. Park and return renames report the `os_file_replace`
+error, so a SNAPSHOT on another filesystem fails at `park-build` with `EXDEV`
+(18 on Linux). Identity and content refusals such as `manifest-digest` record 0;
+for compound inventory steps the errno is the last OS error seen and only the
+step name is authoritative (#3390).
+
+`harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt. A sealed pull attempt also makes them, and its owned-phase population, required members of its raw bundle ([snapshot route](compiler-evidence-v1.md#snapshot-route), #2918).
 
 The staged implementation is reviewed and validated on hosted CI first. Trusted request/dispatch support is integrated separately, then the admitted physical preparation controls run on the 9700X. Only matching controls and a reduction in complete measured preparation cost permit a separate default-activation change. Until that activation is reviewed and admitted, ordinary comparisons use legacy-rebuild and this issue remains open for physical qualification.
 

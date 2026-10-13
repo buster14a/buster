@@ -52,6 +52,7 @@ struct RecordLayoutTarget
 };
 
 #include <buster/tests/compiler/frontend/c/record_layout_corpus.generated.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 BUSTER_GLOBAL_LOCAL ObjectSymbol* record_layout_test_symbol(ObjectFile* object, String8 name)
 {
@@ -133,11 +134,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_clang_corpus(UnitTestArgum
                 arguments->show(arguments, S8("record layout: {S8} did not compile the corpus: {S8}\n"), target.target, compiled.diagnostic);
             }
             os_file_delete(object_path);
-            scratch_end(compile_temporary);
+            c_test_scratch_end(compile_temporary);
         }
         os_file_delete(source_path);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -207,7 +208,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArg
                                 cases[index].witness_size);
             }
             BUSTER_TEST(arguments, holds && !control_holds);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;

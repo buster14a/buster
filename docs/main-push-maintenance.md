@@ -23,7 +23,10 @@ replace an older pending invocation.
 Exact groups permit jobs to start out of order, so
 `tools/main_push_maintenance.py` supplies an explicit predecessor barrier. Before
 a push mutates shared state, it lists earlier push runs of the same workflow and
-waits for the same maintenance job in each run to finish. It does not wait for
+waits for the same maintenance job in each run to finish. Discovery is owned by
+`tools/main_push_inventory.c`; the existing Python adapter transports API reads
+and invokes the unchanged maintenance actions. This is a bounded migration slice
+under #2467, not a new Python controller. It does not wait for
 unrelated jobs in those workflows.
 
 This gives the sequence a single writer order without trusting GitHub
@@ -50,8 +53,40 @@ success.
 
 The native-retirement workflow also pins the SHA-256 of
 `tools/main_push_maintenance.py` and verifies it from the exact combined tree.
-Changing the helper without changing that trusted workflow fails the policy
+The pin also covers the native discovery source and its shared JSON parser.
+Changing any of these inputs without changing that trusted workflow fails the policy
 job; changing both is classified through the existing trusted bootstrap path.
+
+## Bounded discovery (#3412)
+
+The native helper requests each potentially nonterminal status independently:
+`queued`, `in_progress`, `waiting`, `pending`, and `requested`. There is no
+creation-date cutoff: an old pending run remains visible despite newer completed
+history. Runs can move between status buckets; duplicate identities across buckets
+are joined conservatively and the newest attempt is retained. The existing two
+clear observations remain required before publication; API reads are observations,
+not an atomic lifecycle snapshot.
+
+Every filtered inventory must supply an integer `total_count`, exact page
+cardinality and unique run/job IDs within each inventory. A changing count,
+malformed page, missing metadata or an inventory above the API's 1,000-result
+filtered-search ceiling fails closed. Exactly 1,000 relevant rows are complete
+only after ten full pages with that declared count; completed history never enters
+these queries. Requests remain bounded to 200 per discovery pass and ten pages
+per inventory, with the enclosing wait deadline applied to the existing HTTP
+reader. Direct single-pass callers have a 60-second discovery budget. A transport
+without a deadline hook retains its existing per-GET bound and can overrun the
+pass deadline by at most that final read.
+
+Target jobs are read for the run's exact attempt and the run is reread afterwards.
+An absent target or inherited job from an earlier attempt remains blocking while
+the run is active. A terminal run can be released; an attempt change keeps the
+barrier closed. Unrelated unfinished jobs do not block a completed current-attempt
+target.
+
+Successor discovery includes `head_sha` in the workflow/event/main-branch query.
+Every returned identity is independently checked for the required head, event,
+branch and strictly higher run number. No unrelated recent run proves supersession.
 
 ## Failure and evidence contract
 
@@ -70,6 +105,10 @@ The helper retains `main-push-maintenance.json`:
 - a superseded push records event/current SHAs and its successor;
 - a current run records the exact action revision;
 - ordering records every predecessor run it waited for;
+- a discovery/reconciliation/action exception records a failed phase, action-attempt
+  flag, run ID/attempt, event SHA, workflow/action and safe query/page accounting.
+  Unknown current-main identity is null, and an unattempted action is never reported
+  as a successful refresh. API response bodies and credentials are not retained;
 - an obsolete merge-conflict attempt remains under `attempt/`, while only a
   current or genuinely failed attempt is promoted to the artifact root and job
   summary.
@@ -120,13 +159,19 @@ Regressions: `SupersededPushTests` in
 
 ## Validation
 
-The focused regression is:
+The focused hosted regression compiles the native discovery tool first:
 
 ```sh
+clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
+tools/main_push_inventory --self-test
 python3 -B tools/main_push_maintenance_test.py -v
 ```
 
 It covers three rapid main revisions, queued jobs that have not materialized,
 waiting only for the relevant predecessor job, exact successor identity,
 mid-action movement, stable evidence promotion, generic failure preservation,
-and the event-specific workflow policy.
+and the event-specific workflow policy. Native synthetic controls cover completed
+histories of 999, 1,000 and more than 1,000 runs, all five active states, missing
+target metadata, rerun attempts, terminal transitions, exact filtered pagination
+and malformed/incomplete inventories. The hosted workflow also runs the native
+controls under GCC ASan/UBSan. Local agent execution is not required.

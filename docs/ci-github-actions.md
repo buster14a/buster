@@ -125,13 +125,14 @@ census boundary.
 
 ## Desktop and lint scheduling
 
-Ordinary pull requests, tags and manual runs schedule desktop shards without
-waiting for full workflow lint. The only desktop prerequisites are the
-main-only reuse decision and the merge-group-only lint job; both are root jobs
-and skip outside their own events. Native remains independent of desktop/lint.
-Main pushes still wait for their exact-SHA reuse decision.
+No event schedules desktop shards behind full workflow lint. The only desktop
+prerequisites are the main-only reuse decision and the trusted no-code plan;
+native has the same prerequisites. Main pushes still wait for their exact-SHA
+reuse decision.
 
-Merge groups retain the full lint preflight before desktop execution. The two
+Merge groups run the full lint beside desktop rather than before it (#3912):
+the lint preflight held every desktop shard for about two minutes, while a lint
+failure still fails the group through `CI complete`. The two
 mutually exclusive lint jobs have equivalent explicit steps, enforced by a
 policy regression, so every event executes the same full lint workload once.
 The pinned actionlint and action-pin scanner do not support steps-list aliases. The executing job retains the
@@ -669,7 +670,11 @@ retention/recovery, statistical policy and outstanding live acceptance.
 ## No-code classification and staged admission (#3107)
 
 The native build driver exposes `ci_no_code --repo PATH --base SHA --head SHA
---tested SHA --policy SHA --event pull_request|merge_group`. Its deterministic
+--tested SHA --policy SHA --event pull_request|merge_group|main_push`. The
+`main_push` event is the automatic MAIN compiler benchmark exemption, with its
+own `buster-ci-main-unchanged-v1` record and contract in
+[compiler-main-unchanged-skip.md](compiler-main-unchanged-skip.md) (#3923);
+it does not change PR, merge-group or main-push CI policy. Its deterministic
 `buster-ci-no-code-v1` record distinguishes `no-code` from `full`; it is a
 classification decision, never execution or coverage evidence. The PR head,
 event base, actual tested merge and independently trusted policy are separate

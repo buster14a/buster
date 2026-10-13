@@ -1,23 +1,28 @@
+/*
+ * AArch64 alias projection: encode and decode Arm alias spellings through
+ * their canonical target forms.
+ *
+ * Ownership: the alias public API (aarch64_alias_projection.h) and the
+ * condition/preference program evaluator over the generated alias rows.
+ * Field helpers shared with the SIMD bindings come from
+ * aarch64_simd_semantics_internal.h; canonical forms are found with
+ * buster_aarch64_canonical_form_by_digest.
+ *
+ * Map:
+ * - alias_row_generated, alias_row_for_form: generated row access.
+ * - alias_find_field, alias_assign_field, alias_pack_word: field packing.
+ * - alias_program_*, alias_eval_program: condition/preference programs.
+ * - buster_a64_alias_encode, buster_a64_alias_decode_row,
+ *   buster_a64_alias_decode: public projection.
+ * - buster_a64_alias_validate: generated-catalog invariants.
+ */
+
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.h>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics_internal.h>
+#include <buster/lib/string.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-alias-projection.generated.h>
 
-static bool alias_string_equal(String8 left, String8 right)
-{
-    if (left.length != right.length)
-    {
-        return false;
-    }
-    for (u64 index = 0; index < left.length; index += 1)
-    {
-        if (left.pointer[index] != right.pointer[index])
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-static String8 alias_generated_string(u32 offset, u32 length)
+BUSTER_GLOBAL_LOCAL String8 alias_generated_string(u32 offset, u32 length)
 {
     String8 result;
     if (offset >= BUSTER_A64_ALIAS_PROJECTION_STRING_POOL_SIZE || length > BUSTER_A64_ALIAS_PROJECTION_STRING_POOL_SIZE - offset)
@@ -32,7 +37,7 @@ static String8 alias_generated_string(u32 offset, u32 length)
     return result;
 }
 
-static bool alias_row_generated(u32 ordinal, BusterA64AliasGeneratedRow const** result)
+BUSTER_GLOBAL_LOCAL bool alias_row_generated(u32 ordinal, BusterA64AliasGeneratedRow const** result)
 {
     if (!result || ordinal >= BUSTER_A64_ALIAS_PROJECTION_ALIAS_COUNT)
     {
@@ -55,13 +60,13 @@ static bool alias_row_generated(u32 ordinal, BusterA64AliasGeneratedRow const** 
     return true;
 }
 
-static bool alias_form(u32 form_id, BusterA64SemanticForm* result)
+BUSTER_GLOBAL_LOCAL bool alias_form(u32 form_id, BusterA64SemanticForm* result)
 {
     return result && buster_a64_semantic_form(form_id, result) && result->kind == BUSTER_A64_SEMANTIC_FORM_ALIAS &&
            result->status == BUSTER_A64_SEMANTIC_STATUS_DEFINED;
 }
 
-static bool alias_row_for_form(u32 form_id, u32* ordinal, BusterA64AliasGeneratedRow const** result)
+BUSTER_GLOBAL_LOCAL bool alias_row_for_form(u32 form_id, u32* ordinal, BusterA64AliasGeneratedRow const** result)
 {
     if (ordinal && result)
     {
@@ -80,23 +85,7 @@ static bool alias_row_for_form(u32 form_id, u32* ordinal, BusterA64AliasGenerate
     return false;
 }
 
-static bool alias_field_local(BusterA64SemanticForm form, u32 field_id, u32* local)
-{
-    bool result;
-    if (!local || field_id < form.field_first || field_id >= form.field_first + form.field_count)
-    {
-        result = false;
-    }
-    else
-    {
-        *local = field_id - form.field_first;
-        result = true;
-    }
-
-    return result;
-}
-
-static bool alias_field_name_equal(BusterA64SemanticString left, String8 right)
+BUSTER_GLOBAL_LOCAL bool alias_field_name_equal(BusterA64SemanticString left, String8 right)
 {
     if (left.length != right.length)
     {
@@ -112,7 +101,7 @@ static bool alias_field_name_equal(BusterA64SemanticString left, String8 right)
     return true;
 }
 
-static bool alias_find_field(BusterA64SemanticForm form, String8 name, u32* local)
+BUSTER_GLOBAL_LOCAL bool alias_find_field(BusterA64SemanticForm form, String8 name, u32* local)
 {
     if (local)
     {
@@ -130,7 +119,7 @@ static bool alias_find_field(BusterA64SemanticForm form, String8 name, u32* loca
     return false;
 }
 
-static u32 alias_width_mask(u32 width)
+BUSTER_GLOBAL_LOCAL u32 alias_width_mask(u32 width)
 {
     u32 result;
     if (width >= 32)
@@ -149,7 +138,7 @@ static u32 alias_width_mask(u32 width)
     return result;
 }
 
-static bool alias_field_value_from_word(BusterA64SemanticForm form, u32 local, u32 word, u32* value)
+BUSTER_GLOBAL_LOCAL bool alias_field_value_from_word(BusterA64SemanticForm form, u32 local, u32 word, u32* value)
 {
     if (!value || local >= form.field_count)
     {
@@ -175,30 +164,7 @@ static bool alias_field_value_from_word(BusterA64SemanticForm form, u32 local, u
     return true;
 }
 
-static bool alias_canonical_index(u64 source_digest, u32* index, BusterAarch64CanonicalFormInfo* result)
-{
-    if (!index)
-    {
-        return false;
-    }
-    u32 matches = 0;
-    BusterAarch64CanonicalFormInfo candidate = {0};
-    for (u32 form_index = 0; form_index < buster_aarch64_canonical_form_count(); form_index += 1)
-    {
-        if (buster_aarch64_canonical_form(form_index, &candidate) && candidate.arm_row_digest == source_digest)
-        {
-            matches += 1;
-            *index = form_index;
-            if (result)
-            {
-                *result = candidate;
-            }
-        }
-    }
-    return matches == 1;
-}
-
-static bool alias_assign_field(BusterA64SemanticForm form, u32 local, u32 value, u32* fields, u64* assigned)
+BUSTER_GLOBAL_LOCAL bool alias_assign_field(BusterA64SemanticForm form, u32 local, u32 value, u32* fields, u64* assigned)
 {
     if (!fields || !assigned || local >= form.field_count)
     {
@@ -219,7 +185,7 @@ static bool alias_assign_field(BusterA64SemanticForm form, u32 local, u32 value,
     return true;
 }
 
-static bool alias_value_uint(BusterA64SemanticVMValue value, u32* result)
+BUSTER_GLOBAL_LOCAL bool alias_value_uint(BusterA64SemanticVMValue value, u32* result)
 {
     if (!result)
     {
@@ -251,7 +217,7 @@ static bool alias_value_uint(BusterA64SemanticVMValue value, u32* result)
     }
 }
 
-static bool alias_operand_value_supported(BusterA64SemanticOperand operand, BusterA64SemanticVMValue value)
+BUSTER_GLOBAL_LOCAL bool alias_operand_value_supported(BusterA64SemanticOperand operand, BusterA64SemanticVMValue value)
 {
     if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID || operand.transform_count != 0 || operand.field_index_count == 0 || operand.field_index_count > 1)
     {
@@ -307,7 +273,7 @@ static bool alias_operand_value_supported(BusterA64SemanticOperand operand, Bust
     }
 }
 
-static bool alias_target_valid(Target target)
+BUSTER_GLOBAL_LOCAL bool alias_target_valid(Target target)
 {
     bool result;
     if (target.cpu_arch != CPU_ARCH_AARCH64 || !target_cpu_features_are_valid(target))
@@ -326,14 +292,14 @@ static bool alias_target_valid(Target target)
     return result;
 }
 
-static bool alias_target_word_matches(Target target, u32 canonical_index, u64 target_digest, u32 word)
+BUSTER_GLOBAL_LOCAL bool alias_target_word_matches(Target target, u32 canonical_index, u64 target_digest, u32 word)
 {
     BusterAarch64CanonicalDecodeResult canonical = {0};
     return buster_aarch64_canonical_decode(target, word, &canonical) == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
            canonical.form_index == canonical_index && canonical.arm_row_digest == target_digest;
 }
 
-static bool alias_gpr_value_allowed(BusterA64SemanticOperand operand, u32 value, BusterA64SemanticVMValue *result)
+BUSTER_GLOBAL_LOCAL bool alias_gpr_value_allowed(BusterA64SemanticOperand operand, u32 value, BusterA64SemanticVMValue* result)
 {
     if (!result || (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER && operand.kind != BUSTER_A64_SEMANTIC_OPERAND_MEMORY_BASE) || value > 31)
     {
@@ -350,7 +316,7 @@ static bool alias_gpr_value_allowed(BusterA64SemanticOperand operand, u32 value,
     return result->kind != BUSTER_A64_SEMANTIC_VM_VALUE_INVALID;
 }
 
-static bool alias_pack_word(BusterA64SemanticForm form, u32 const* fields, u64 assigned, u32* word)
+BUSTER_GLOBAL_LOCAL bool alias_pack_word(BusterA64SemanticForm form, u32 const* fields, u64 assigned, u32* word)
 {
     if (!fields || !word)
     {
@@ -394,7 +360,7 @@ static bool alias_pack_word(BusterA64SemanticForm form, u32 const* fields, u64 a
     return true;
 }
 
-static bool alias_pattern(String8 token, u32* value, u32* mask)
+BUSTER_GLOBAL_LOCAL bool alias_pattern(String8 token, u32* value, u32* mask)
 {
     if (!value || !mask || token.length == 0 || token.length > 32)
     {
@@ -422,8 +388,8 @@ static bool alias_pattern(String8 token, u32* value, u32* mask)
     return true;
 }
 
-static bool alias_token_value(BusterA64SemanticForm alias_form, BusterA64SemanticForm target_form, u32 const* alias_fields, u32 const* target_fields,
-                              String8 token, u32* value, u32* mask)
+BUSTER_GLOBAL_LOCAL bool alias_token_value(BusterA64SemanticForm alias_form, BusterA64SemanticForm target_form, u32 const* alias_fields,
+                                           u32 const* target_fields, String8 token, u32* value, u32* mask)
 {
     if (value && mask && token.pointer)
     {
@@ -459,7 +425,7 @@ static bool alias_token_value(BusterA64SemanticForm alias_form, BusterA64Semanti
          * decoder has already validated those constraints before predicate
          * evaluation; expose the only bounded constraint symbol used by the
          * executable alias subset as its fixed zero value. */
-        if (alias_string_equal(token, S8("A")))
+        if (string_equal(token, S8("A")))
         {
             *value = 0;
             *mask = 1;
@@ -470,7 +436,7 @@ static bool alias_token_value(BusterA64SemanticForm alias_form, BusterA64Semanti
     return false;
 }
 
-static bool alias_program_token(u32 form_id, bool preference, u32 index, char8* storage, u32 capacity, String8* result)
+BUSTER_GLOBAL_LOCAL bool alias_program_token(u32 form_id, bool preference, u32 index, char8* storage, u32 capacity, String8* result)
 {
     if (!storage || !result || capacity == 0)
     {
@@ -498,10 +464,9 @@ static bool alias_program_token(u32 form_id, bool preference, u32 index, char8* 
  * separate from evaluation ensures that an unsupported OR/function expression
  * can never be reported as supported just because one branch happened to
  * evaluate true for a particular word. */
-static bool alias_program_atom_tokens(u32 form_id, bool preference, u32 index, u32 token_count,
-                                      char8* lhs_storage, char8* operator_storage, char8* rhs_storage,
-                                      char8* brace_storage, char8* close_storage, String8* lhs, String8* operator,
-                                      String8* rhs, u32* atom_length)
+BUSTER_GLOBAL_LOCAL bool alias_program_atom_tokens(u32 form_id, bool preference, u32 index, u32 token_count, char8* lhs_storage, char8* operator_storage,
+                                                   char8* rhs_storage, char8* brace_storage, char8* close_storage, String8* lhs, String8* operator,
+                                                   String8 * rhs, u32* atom_length)
 {
     if (!lhs_storage || !operator_storage || !rhs_storage || !brace_storage || !close_storage || !lhs || !operator || !rhs || !atom_length)
     {
@@ -511,15 +476,14 @@ static bool alias_program_atom_tokens(u32 form_id, bool preference, u32 index, u
     if (index + 3 <= token_count && alias_program_token(form_id, preference, index, lhs_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, lhs) &&
         alias_program_token(form_id, preference, index + 1, operator_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, operator) &&
         alias_program_token(form_id, preference, index + 2, rhs_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, rhs) &&
-        (alias_string_equal(*operator, S8("==")) || alias_string_equal(*operator, S8("!="))))
+        (string_equal(*operator, S8("==")) || string_equal(*operator, S8("!="))))
     {
         *atom_length = 3;
         return true;
     }
-    if (index + 5 > token_count ||
-        !alias_program_token(form_id, preference, index, lhs_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, lhs) ||
+    if (index + 5 > token_count || !alias_program_token(form_id, preference, index, lhs_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, lhs) ||
         !alias_program_token(form_id, preference, index + 1, operator_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, operator) ||
-        !alias_string_equal(*operator, S8("IN")))
+        !string_equal(*operator, S8("IN")))
     {
         return false;
     }
@@ -527,7 +491,7 @@ static bool alias_program_atom_tokens(u32 form_id, bool preference, u32 index, u
     if (!alias_program_token(form_id, preference, index + 2, brace_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, &brace) ||
         !alias_program_token(form_id, preference, index + 3, rhs_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, rhs) ||
         !alias_program_token(form_id, preference, index + 4, close_storage, BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS, &close) ||
-        !alias_string_equal(brace, S8("{")) || !alias_string_equal(close, S8("}")))
+        !string_equal(brace, S8("{")) || !string_equal(close, S8("}")))
     {
         return false;
     }
@@ -535,7 +499,7 @@ static bool alias_program_atom_tokens(u32 form_id, bool preference, u32 index, u
     return alias_pattern(*rhs, &(u32){0}, &(u32){0});
 }
 
-static bool alias_program_syntax_supported(u32 form_id, bool preference)
+BUSTER_GLOBAL_LOCAL bool alias_program_syntax_supported(u32 form_id, bool preference)
 {
     BusterA64SemanticForm alias_semantic_form = {0};
     BusterA64SemanticAlias alias = {0};
@@ -554,7 +518,7 @@ static bool alias_program_syntax_supported(u32 form_id, bool preference)
         if (token_count == 1)
         {
             return alias_program_token(form_id, preference, 0, token_storage, sizeof(token_storage), &token) &&
-                   (alias_string_equal(token, S8("Unconditionally")) || alias_string_equal(token, S8("Never")));
+                   (string_equal(token, S8("Unconditionally")) || string_equal(token, S8("Never")));
         }
         u32 index = 0;
         while (index < token_count)
@@ -572,10 +536,10 @@ static bool alias_program_syntax_supported(u32 form_id, bool preference)
                 return false;
             }
             u32 value = 0, mask = 0, local = 0;
-            bool lhs_supported = alias_pattern(lhs, &value, &mask) || alias_find_field(alias_semantic_form, lhs, &local) || alias_find_field(target_form, lhs, &local) ||
-                                 alias_string_equal(lhs, S8("A"));
-            bool rhs_supported = alias_pattern(rhs, &value, &mask) || alias_find_field(alias_semantic_form, rhs, &local) || alias_find_field(target_form, rhs, &local) ||
-                                 alias_string_equal(rhs, S8("A"));
+            bool lhs_supported = alias_pattern(lhs, &value, &mask) || alias_find_field(alias_semantic_form, lhs, &local) ||
+                                 alias_find_field(target_form, lhs, &local) || string_equal(lhs, S8("A"));
+            bool rhs_supported = alias_pattern(rhs, &value, &mask) || alias_find_field(alias_semantic_form, rhs, &local) ||
+                                 alias_find_field(target_form, rhs, &local) || string_equal(rhs, S8("A"));
             if (!lhs_supported || !rhs_supported)
             {
                 return false;
@@ -585,7 +549,7 @@ static bool alias_program_syntax_supported(u32 form_id, bool preference)
             {
                 return true;
             }
-            if (!alias_program_token(form_id, preference, index, token_storage, sizeof(token_storage), &token) || !alias_string_equal(token, S8("&&")))
+            if (!alias_program_token(form_id, preference, index, token_storage, sizeof(token_storage), &token) || !string_equal(token, S8("&&")))
             {
                 return false;
             }
@@ -596,7 +560,7 @@ static bool alias_program_syntax_supported(u32 form_id, bool preference)
     return false;
 }
 
-static bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* supported, bool* result)
+BUSTER_GLOBAL_LOCAL bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* supported, bool* result)
 {
     if (!supported || !result)
     {
@@ -622,7 +586,7 @@ static bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* sup
         u32 target_values[BUSTER_A64_ALIAS_MAX_FIELDS] = {0};
         u32 target_canonical_index = 0;
         if (alias_semantic_form.field_count > BUSTER_A64_ALIAS_MAX_FIELDS || target_form.field_count > BUSTER_A64_ALIAS_MAX_FIELDS ||
-            !alias_canonical_index(info.target_source_digest, &target_canonical_index, 0) ||
+            !buster_aarch64_canonical_form_by_digest(info.target_source_digest, &target_canonical_index, 0) ||
             !buster_aarch64_canonical_raw_decode(target_canonical_index, word, target_values, target_form.field_count))
         {
             return false;
@@ -650,7 +614,7 @@ static bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* sup
                 return false;
             }
             *supported = true;
-            *result = alias_string_equal(token, S8("Unconditionally"));
+            *result = string_equal(token, S8("Unconditionally"));
             return true;
         }
         bool expression = true;
@@ -676,9 +640,9 @@ static bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* sup
                 return false;
             }
             bool equal = ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0 && ((lhs_mask & rhs_mask) != 0);
-            bool atom_result = alias_string_equal(operator, S8("==")) ? equal :
-                               alias_string_equal(operator, S8("!=")) ? !equal :
-                               ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0;
+            bool atom_result = string_equal(operator, S8("=="))   ? equal
+                               : string_equal(operator, S8("!=")) ? !equal
+                                                                  : ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0;
             expression = expression && atom_result;
             index += atom_length;
             if (index == token_count)
@@ -688,7 +652,7 @@ static bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* sup
             char8 conjunction_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
             String8 conjunction = {0};
             if (!alias_program_token(form_id, preference, index, conjunction_storage, sizeof(conjunction_storage), &conjunction) ||
-                !alias_string_equal(conjunction, S8("&&")))
+                !string_equal(conjunction, S8("&&")))
             {
                 return false;
             }
@@ -767,7 +731,7 @@ bool buster_a64_alias_find(String8 id, u32 ordinal, u32* alias_form_id)
         for (u32 index = 0; index < BUSTER_A64_ALIAS_PROJECTION_ALIAS_COUNT; index += 1)
         {
             BusterA64AliasRowInfo row = {0};
-            if (buster_a64_alias_row(index, &row) && alias_string_equal(row.alias_id, id))
+            if (buster_a64_alias_row(index, &row) && string_equal(row.alias_id, id))
             {
                 if (seen == ordinal)
                 {
@@ -819,7 +783,7 @@ BusterA64AliasStatus buster_a64_alias_encode(Target target, BusterA64AliasInstru
         BusterA64SemanticOperand operand = {0};
         u32 field_id = 0, local = 0, value = 0;
         if (!buster_a64_semantic_operand(form.operand_first + index, &operand) || !alias_operand_value_supported(operand, instruction->operands[index]) ||
-            !buster_a64_semantic_operand_field_index(operand.id, 0, &field_id) || !alias_field_local(form, field_id, &local) ||
+            !buster_a64_semantic_operand_field_index(operand.id, 0, &field_id) || !buster_a64_simd_field_local(form, field_id, &local) ||
             !alias_value_uint(instruction->operands[index], &value) || !alias_assign_field(form, local, value, alias_fields, &assigned))
         {
             return BUSTER_A64_ALIAS_STATUS_UNSUPPORTED;
@@ -833,7 +797,7 @@ BusterA64AliasStatus buster_a64_alias_encode(Target target, BusterA64AliasInstru
     BusterA64SemanticForm target_form = {0};
     u32 target_canonical_index = 0;
     if (!buster_a64_semantic_form(info.target_form_id, &target_form) || target_form.kind != BUSTER_A64_SEMANTIC_FORM_CANONICAL ||
-        !alias_canonical_index(info.target_source_digest, &target_canonical_index, 0) ||
+        !buster_aarch64_canonical_form_by_digest(info.target_source_digest, &target_canonical_index, 0) ||
         !buster_aarch64_canonical_raw_decode(target_canonical_index, candidate, alias_fields, target_form.field_count) ||
         !alias_target_word_matches(target, target_canonical_index, info.target_source_digest, candidate))
     {
@@ -876,7 +840,7 @@ BusterA64AliasStatus buster_a64_alias_decode_row(Target target, u32 alias_form_i
     }
     u32 target_fields[BUSTER_A64_ALIAS_MAX_FIELDS] = {0};
     u32 target_canonical_index = 0;
-    if (!alias_canonical_index(info.target_source_digest, &target_canonical_index, 0) ||
+    if (!buster_aarch64_canonical_form_by_digest(info.target_source_digest, &target_canonical_index, 0) ||
         !buster_aarch64_canonical_raw_decode(target_canonical_index, word, target_fields, target_form.field_count) ||
         !alias_target_word_matches(target, target_canonical_index, info.target_source_digest, word))
     {
@@ -918,7 +882,7 @@ BusterA64AliasStatus buster_a64_alias_decode_row(Target target, u32 alias_form_i
         BusterA64SemanticOperand operand = {0};
         u32 field_id = 0, local = 0, value = 0;
         if (!buster_a64_semantic_operand(form.operand_first + index, &operand) || operand.transform_count != 0 || operand.field_index_count != 1 ||
-            !buster_a64_semantic_operand_field_index(operand.id, 0, &field_id) || !alias_field_local(form, field_id, &local) ||
+            !buster_a64_semantic_operand_field_index(operand.id, 0, &field_id) || !buster_a64_simd_field_local(form, field_id, &local) ||
             !alias_field_value_from_word(form, local, word, &value))
         {
             return BUSTER_A64_ALIAS_STATUS_UNSUPPORTED;

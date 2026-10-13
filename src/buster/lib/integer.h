@@ -36,6 +36,14 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE bool align_forward_c
     return valid;
 }
 
+// Checked target+addend arithmetic shared by every relocation writer. The
+// addend is signed even when the address is unsigned; malformed objects must
+// fail before a patch is committed, so never rely on unsigned wraparound.
+// u64_add_s64_checked rejects a result outside u64 and
+// s32_from_u64_add_s64_checked one outside s32. Both return false for a null
+// output and leave `*result` untouched on false.
+BUSTER_F_DECL bool u64_add_s64_checked(u64 address, s64 addend, u64* result);
+BUSTER_F_DECL bool s32_from_u64_add_s64_checked(u64 address, s64 addend, s32* result);
 BUSTER_F_DECL u64 align_forward(u64 n, u64 a);
 BUSTER_F_DECL bool is_aligned(u64 n, u64 alignment);
 BUSTER_F_DECL u64 next_power_of_two(u64 n);

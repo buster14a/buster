@@ -84,76 +84,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_pool_tests(UnitTestArguments* argument
         IrPublishedCfg const* cfg = function.published_cfg;
         if (BUSTER_REQUIRE(arguments, cfg != 0))
         {
-            BUSTER_TEST(arguments, !cfg->operand_pool && !cfg->target_pool && !cfg->immediate_pool);
-            BUSTER_TEST(arguments, !cfg->operand_count && !cfg->target_count && !cfg->immediate_count);
             BUSTER_TEST(arguments, cfg->allocated_bytes == base_allocated_bytes);
         }
         scratch_end(temporary);
     }
 
-    for (u32 scattered_pool = 0; scattered_pool < 4; scattered_pool += 1)
+    // Shapes: adjacent, ascending with a gap, overlapping, descending. Only
+    // the last two may alias, so only they are copied into fresh slices.
+    u32 first_offsets[] = {0, 0, 0, 3};
+    u32 second_offsets[] = {2, 3, 1, 0};
+    for (u32 kind = 0; kind < 3; kind += 1)
     {
-        TemporalArena temporary = arena_begin_temporal(arguments->arena);
-        IrValueId operands[] = {{.value = 10}, {.value = 11}, {.value = 12}, {.value = 13}, {.value = 13}};
-        IrBlockId targets[] = {{.value = 20}, {.value = 21}, {.value = 22}, {.value = 23}, {.value = 23}};
-        u64 immediates[] = {30, 31, 32, 33, 33};
-        IrInstruction rows[3] = {0};
-        IrBlock block = {0};
-        IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
-        if (scattered_pool == 0)
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(first_offsets); shape += 1)
         {
-            operands[2].value = 99;
-            operands[3].value = 12;
-        }
-        else if (scattered_pool == 1)
-        {
-            targets[2].value = 99;
-            targets[3].value = 22;
-        }
-        else if (scattered_pool == 2)
-        {
-            immediates[2] = 99;
-            immediates[3] = 32;
-        }
-        rows[0].operands = operands;
-        rows[0].operand_count = 2;
-        rows[0].targets = targets;
-        rows[0].target_count = 2;
-        rows[0].immediates = immediates;
-        rows[0].immediate_count = 2;
-        rows[1].operands = operands + (scattered_pool == 0 ? 3 : 2);
-        rows[1].operand_count = 2;
-        rows[1].targets = targets + (scattered_pool == 1 ? 3 : 2);
-        rows[1].target_count = 2;
-        rows[1].immediates = immediates + (scattered_pool == 2 ? 3 : 2);
-        rows[1].immediate_count = 2;
-        BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
-        IrPublishedCfg const* cfg = function.published_cfg;
-        if (BUSTER_REQUIRE(arguments, cfg != 0))
-        {
-            u64 expected_allocated_bytes = base_allocated_bytes;
-            expected_allocated_bytes += scattered_pool == 0 ? 4 * sizeof(IrValueId) : 0;
-            expected_allocated_bytes += scattered_pool == 1 ? 4 * sizeof(IrBlockId) : 0;
-            expected_allocated_bytes += scattered_pool == 2 ? 4 * sizeof(u64) : 0;
-            BUSTER_TEST(arguments, cfg->operand_count == 4 && cfg->target_count == 4 && cfg->immediate_count == 4);
-            BUSTER_TEST(arguments, cfg->allocated_bytes == expected_allocated_bytes);
-            BUSTER_TEST(arguments, (cfg->operand_pool == operands) == (scattered_pool != 0));
-            BUSTER_TEST(arguments, (cfg->target_pool == targets) == (scattered_pool != 1));
-            BUSTER_TEST(arguments, (cfg->immediate_pool == immediates) == (scattered_pool != 2));
-            BUSTER_TEST(arguments, rows[0].operands == cfg->operand_pool);
-            BUSTER_TEST(arguments, rows[0].targets == cfg->target_pool);
-            BUSTER_TEST(arguments, rows[0].immediates == cfg->immediate_pool);
-            BUSTER_TEST(arguments, rows[1].operands == cfg->operand_pool + 2);
-            BUSTER_TEST(arguments, rows[1].targets == cfg->target_pool + 2);
-            BUSTER_TEST(arguments, rows[1].immediates == cfg->immediate_pool + 2);
-            for (u32 index = 0; index < 4; index += 1)
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            IrValueId operands[] = {{.value = 10}, {.value = 11}, {.value = 12}, {.value = 13}, {.value = 14}};
+            IrBlockId targets[] = {{.value = 20}, {.value = 21}, {.value = 22}, {.value = 23}, {.value = 24}};
+            u64 immediates[] = {30, 31, 32, 33, 34};
+            IrInstruction rows[3] = {0};
+            IrBlock block = {0};
+            IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
+            u32 first[3] = {0, 0, 0};
+            u32 second[3] = {2, 2, 2};
+            first[kind] = first_offsets[shape];
+            second[kind] = second_offsets[shape];
+            rows[0].operands = operands + first[0];
+            rows[0].operand_count = 2;
+            rows[0].targets = targets + first[1];
+            rows[0].target_count = 2;
+            rows[0].immediates = immediates + first[2];
+            rows[0].immediate_count = 2;
+            rows[1].operands = operands + second[0];
+            rows[1].operand_count = 2;
+            rows[1].targets = targets + second[1];
+            rows[1].target_count = 2;
+            rows[1].immediates = immediates + second[2];
+            rows[1].immediate_count = 2;
+            BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+            IrPublishedCfg const* cfg = function.published_cfg;
+            if (BUSTER_REQUIRE(arguments, cfg != 0))
             {
-                BUSTER_TEST(arguments, cfg->operand_pool[index].value == 10 + index);
-                BUSTER_TEST(arguments, cfg->target_pool[index].value == 20 + index);
-                BUSTER_TEST(arguments, cfg->immediate_pool[index] == 30 + index);
+                bool copied = shape >= 2;
+                u64 copied_bytes = kind == 0 ? 4 * sizeof(IrValueId) : kind == 1 ? 4 * sizeof(IrBlockId) : 4 * sizeof(u64);
+                BUSTER_TEST(arguments, cfg->allocated_bytes == base_allocated_bytes + (copied ? copied_bytes : 0));
+                BUSTER_TEST(arguments, (rows[0].operands == operands + first[0]) == (kind != 0 || !copied));
+                BUSTER_TEST(arguments, (rows[0].targets == targets + first[1]) == (kind != 1 || !copied));
+                BUSTER_TEST(arguments, (rows[0].immediates == immediates + first[2]) == (kind != 2 || !copied));
+                if (copied)
+                {
+                    BUSTER_TEST(arguments, kind != 0 || rows[1].operands == rows[0].operands + 2);
+                    BUSTER_TEST(arguments, kind != 1 || rows[1].targets == rows[0].targets + 2);
+                    BUSTER_TEST(arguments, kind != 2 || rows[1].immediates == rows[0].immediates + 2);
+                }
+                for (u32 index = 0; index < 2; index += 1)
+                {
+                    BUSTER_TEST(arguments, rows[0].operands[index].value == 10 + first[0] + index);
+                    BUSTER_TEST(arguments, rows[1].operands[index].value == 10 + second[0] + index);
+                    BUSTER_TEST(arguments, rows[0].targets[index].value == 20 + first[1] + index);
+                    BUSTER_TEST(arguments, rows[1].targets[index].value == 20 + second[1] + index);
+                    BUSTER_TEST(arguments, rows[0].immediates[index] == 30 + first[2] + index);
+                    BUSTER_TEST(arguments, rows[1].immediates[index] == 30 + second[2] + index);
+                }
             }
+            scratch_end(temporary);
         }
-        scratch_end(temporary);
     }
 
     for (u32 missing_pool = 0; missing_pool < 3; missing_pool += 1)
@@ -191,10 +185,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_pool_tests(UnitTestArguments* argument
         IrPublishedCfg const* cfg = function.published_cfg;
         if (BUSTER_REQUIRE(arguments, cfg != 0))
         {
-            BUSTER_TEST(arguments, cfg->target_count == UINT16_MAX && cfg->immediate_count == UINT16_MAX);
-            BUSTER_TEST(arguments, cfg->target_pool == targets && cfg->immediate_pool == immediates);
-            BUSTER_TEST(arguments, cfg->target_pool[0].value == 41 && cfg->target_pool[UINT16_MAX - 1].value == 42);
-            BUSTER_TEST(arguments, cfg->immediate_pool[0] == 51 && cfg->immediate_pool[UINT16_MAX - 1] == 52);
+            BUSTER_TEST(arguments, rows[0].targets == targets && rows[0].immediates == immediates);
+            BUSTER_TEST(arguments, rows[0].targets[0].value == 41 && rows[0].targets[UINT16_MAX - 1].value == 42);
+            BUSTER_TEST(arguments, rows[0].immediates[0] == 51 && rows[0].immediates[UINT16_MAX - 1] == 52);
             BUSTER_TEST(arguments, cfg->allocated_bytes == base_allocated_bytes);
         }
         scratch_end(temporary);
@@ -240,18 +233,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
     function.extras = extras;
     BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
     IrPublishedCfg const* cfg = function.published_cfg;
-    BUSTER_TEST(arguments, cfg && cfg->instruction_remap && cfg->instruction_count == 5);
-    if (cfg && cfg->instruction_remap)
+    BUSTER_TEST(arguments, cfg && cfg->instruction_count == 5);
+    if (cfg)
     {
         // The 1->3->2->1 cycle distinguishes the old-to-new map from its
         // inverse. Operand slices deliberately overlap before publication.
         u32 expected_remap[] = {0, 3, 1, 2, 4};
         u32 expected_rows[] = {0, 2, 3, 1, 4};
-        BUSTER_TEST(arguments, cfg->operand_count == 9 && cfg->operand_pool != shared_operands);
+        BUSTER_TEST(arguments, rows[0].operands != shared_operands);
         for (u32 index = 0; index < 5; index += 1)
         {
             u32 old = expected_rows[index];
-            BUSTER_TEST(arguments, cfg->instruction_remap[index].value == expected_remap[index]);
             BUSTER_TEST(arguments, values[index].definition.value == expected_remap[index]);
             BUSTER_TEST(arguments, rows[index].result.value == old);
             BUSTER_TEST(arguments, rows[index].symbol.value == old + 10);
@@ -283,7 +275,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
         rows[3].operands[0].value = 4;
         BUSTER_TEST(arguments, rows[0].operands[1].value == 1 && shared_operands[1].value == 1);
         BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
-        BUSTER_TEST(arguments, function.published_cfg && !function.published_cfg->instruction_remap);
+        BUSTER_TEST(arguments, function.published_cfg && values[1].definition.value == 3 && rows[3].result.value == 1);
         BUSTER_TEST(arguments, rows[3].operands[0].value == 4 && rows[0].operands[1].value == 1);
     }
     scratch_end(temporary);

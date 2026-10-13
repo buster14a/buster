@@ -1406,7 +1406,10 @@ run_one_bundle() {
     echo "iOS ${label} console evidence: $console_log"
     tee "$console_log" >/dev/null <"$active_launch_pipe_dir/console" &
     active_launch_reader_pid=$!
-    SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE=1 "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
+    # Preserve fixture/operation attribution when a hosted run exhausts its
+    # launch budget (#3585); simctl requires CHILD_ forwarding into the app.
+    SIMCTL_CHILD_BUSTER_TEST_FIXTURE_TIMING=all \
+        SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE=1 "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
         xcrun simctl launch --console-pty "$udid" "$bundle_id" test --verbose=1 --ci=1 \
         >"$active_launch_pipe_dir/console" 2>&1 &
     launch_stream_pid=$!

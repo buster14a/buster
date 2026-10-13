@@ -239,22 +239,26 @@ class HelperBehaviorTests(unittest.TestCase):
             FAKE_VSWHERE_STATUS="0",
             FAKE_CLANG_TARGET="x86_64-pc-windows-msvc",
         )
+        # The four probes that pass the vendor shell take 24-39 s each on hosted
+        # AArch64 and the early failures under a second; batches end with their
+        # slower member, so the slow probes are admitted together first (#3912).
         plan = {
             "combination": (vswhere, {}, (
                 "-LlvmBin '<llvm_bin>' -GithubEnv '<github_env>' "
                 "-Require cl, clang, gcc, zig -ClangArch x86_64")),
             "msvc": (vswhere, {"FAKE_CLANG_TARGET": "wrong-target"}, ""),
+            "wrong clang target": (vswhere, *cls.FAILURES["wrong clang target"]),
+            "relative filesystem": (Path(vswhere.name), {
+                "FAKE_PS_LOCATION": str(cls.root),
+                "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
+                "PATH": environment["PATH"] + ";caf\u00e9-fixture",
+            }, "-GithubEnv 'relative-env'"),
             "missing vswhere": (cls.root / "missing-vswhere.cmd", {}, ""),
         }
         for name, (overrides, arguments) in cls.FAILURES.items():
-            plan[name] = (vswhere, overrides, arguments)
+            plan.setdefault(name, (vswhere, overrides, arguments))
         plan["vswhere directory"] = (cls.root / "vs", {}, "")
         plan["vswhere provider"] = ("Env:FAKE_VS_PATH", {}, "")
-        plan["relative filesystem"] = (Path(vswhere.name), {
-            "FAKE_PS_LOCATION": str(cls.root),
-            "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
-            "PATH": environment["PATH"] + ";caf\u00e9-fixture",
-        }, "-GithubEnv 'relative-env'")
         cls.probes = {}
         # Registered before the first launch and run before the fixture
         # directory is removed, so an early failure never leaks a child.

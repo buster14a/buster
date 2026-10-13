@@ -473,6 +473,9 @@ captures (#2741).
   perf record -F 999 -g --call-graph fp -o "$session_root/release.data" -- ./build/Release/ide bench
   ```
 
+  For test-generated image lifetime during captures, see
+  [profiling image retention](testing.md#profiling-image-retention).
+
   The ordinary local default includes tests, which enables
   `BUSTER_IR_TRANSFORM_CHECKS` in Release. Keep tests-on, sanitized,
   instrumented and explicit transform-verification builds identified as
@@ -521,7 +524,14 @@ captures (#2741).
   routes below cover the stage-1 self-host compile and, as profile
   `throughput-corpus-v2`, the default `bench_throughput` corpus under both
   retained FAST and QUALITY modes on the same
-  two binaries; the publisher re-checks the corpus's own summary and metadata
+  two binaries. A base revision whose history lacks
+  `compiler_receipt.THROUGHPUT_HARNESS_FLOOR` still runs the retired none and
+  mir-stack modes under `--mode all`. On the pull route hosted authorization
+  turns it away before dispatch with an explicit unsupported check, and the
+  non-owned host routes re-derive that refusal before any build or lab
+  (#3714). Only the named `throughput-corpus-historical-v1` recipe measures
+  such a base: the pinned `afe67cbe` harness on the v2 arguments and
+  population, discharging its own inventory row. The publisher re-checks the corpus's own summary and metadata
   and binds its compiler hashes to the measured binaries. A corpus exit 1
   (confirmed regression) with a complete exported report is a measured,
   report-only result on both the main and pull-request routes, so a regressing
@@ -552,7 +562,14 @@ captures (#2741).
   model, architecture) is not `available`, when it names another CPU or
   architecture than the 9700X's x86-64, when its model differs from the
   receipt's observed CPU, or when its run, attempt or job is not the attempt
-  being published. Optional facts keep the collector's own `unknown` or
+  being published. Sealed raw evidence for this route (#2918) follows
+  [compiler-evidence-v1.md](../compiler-evidence-v1.md): an ordinary attempt
+  seals its lab and corpus last, and the publisher verifies the seal natively.
+  A pull `snapshot-v1` attempt also seals its closure records and owned-phase
+  population.
+  An artifact without a seal is `legacy-unsealed`, and its raw bytes are
+  reported unverified.
+  Optional facts keep the collector's own `unknown` or
   `unavailable` status in the published check and are never filled in. Only
   publication-only recovery may lack it, and only when the bench workflow at
   the original run's authenticated revision has no record retention step
@@ -603,9 +620,14 @@ captures (#2741).
   plus one maintained report comment on the commit (#2804). The linked
   Actions `compare` job supplies live preparation/measurement state; a queued
   custom check does not prove that the physical job has not started. During merge bursts only
-  the newest pending commit is measured; the others' checks read
-  **Not measured** and name the range comparison that covers their change.
-  A range result does not isolate one commit. See the
+  the newest pending commit is measured; displaced commits remain
+  **Not measured**. Native recovery reports verified pre-execution pending
+  replacement as neutral, retaining the native cancellation and its exact
+  attempt. It claims no successor result or range coverage from a request
+  alone. A validated range result does not isolate one commit. A range since the last actual
+  measurement that changes only reviewed prose is completed as neutral
+  **Not measured** without allocating the 9700X
+  ([unchanged-input skip](../compiler-main-unchanged-skip.md), #3923). See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An explicitly requested owner experiment can compare a pull request head
   with its merge base before merging by adding a fresh request line to
@@ -615,7 +637,12 @@ captures (#2741).
   These ordinary compiler A/B paths run no profile steps and no A/A. The
   separately versioned [sampling qualification](../compiler-main-sampling.md)
   route (#3212) is staged disabled; its explicitly admitted, predeclared research
-  controls do not change either immutable ordinary profile. `native-retirement-performance-v1` remains blocked,
+  controls do not change either immutable ordinary profile. The single
+  [MAIN routing switch](../compiler-main-profile-routing-v1.md) stays
+  `disabled` until a reviewed certificate qualifies `compiler-main-40pairs-v1`;
+  it can route only the authenticated automatic post-merge comparison, keeps
+  the full FAST/QUALITY corpus, and rolls back to `compiler-compare-v1`.
+  Explicit pull-request and acceptance requests keep their requested profiles. `native-retirement-performance-v1` remains blocked,
   and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
   removed (#2741; tag `bench-service-final` retains them). Use the local
   trusted capture methods above for ad-hoc profiling. Historical audit notes retain
@@ -974,6 +1001,32 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `compiler_publish.py` re-validates every raw cell document, the tree probe
    and the recomputed verdict on the 9700X evidence.
 
+   **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
+   fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
+   same every-parent freshness rule. It cannot be combined with an analyzer
+   profile, the ast-pilot profile, or the other opt-in legs it excludes in
+   `compiler_compare.py`. It runs beside issue #48's inline profile, whose
+   exact line in the request history selects it in every pull compare.
+   `constant_reuse_acceptance.py` runs
+   it after the tests-off candidate build, on the same frozen candidate-HEAD
+   tree. It times the one candidate binary as both A (default) and B with
+   `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity
+   `-c` compile. The `intern` cell passes `-fcanonical-intern-constants` to B
+   and the `cse` cell passes `-fcanonical-fast-cse`. Each cell is 20 ABBA
+   pairs after one warmup on CPU 2 with fresh copies. It records:
+   - wall time with its 95% CI;
+   - retired instructions when perf can count them (NA needs a recorded
+     reason);
+   - peak RSS;
+   - executable-section code bytes of each object.
+
+   A's and B's diagnostics must be identical. Their objects differ by design.
+   The profile is report-only and has no verdict, and it accepts no request
+   flags, pair counts or compiler arguments. `compiler_publish.py`
+   re-validates every raw cell document on the 9700X evidence. The flags and
+   their hosted census are described in
+   [the canonical FAST pipeline guide](../canonical-fast-pipeline.md).
+
    **Issue #2761 opt-in real-source throughput profile.** The same route
    accepts one fresh exact line `profile: throughput-real-source-v1`, selected
    by the same every-parent freshness rule; it cannot be combined with an
@@ -1210,6 +1263,289 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    therefore stays inside the unchanged 90-minute
    `compare-pull` job next to the roughly 14-minute ordinary comparison. No
    job timeout changed.
+
+   **Issue #2676 opt-in deep-nesting leg.** The same route accepts one fresh
+   exact line `profile: frontend-nesting-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:benchmark_frontend_scaling.py@frontend-nesting`. It cannot be
+   combined with any other opt-in profile; both the harness and the
+   publisher refuse the combination. After the corpus leg,
+   `measure_frontend_nesting` runs the merge base's
+   `tools/benchmark_frontend_scaling.py --suite nesting --warmups 1
+   --repetitions 11 --cpu 2` from the base checkout on `ide-base` and
+   `ide-cand`. Each of the eleven families in `NESTING_FAMILIES` is one
+   function whose statements nest 2,000, 8,000 and 32,000 levels deep, timed
+   with `-fsyntax-only` and `-c`. Each depth is four times the last, so a
+   term growing with the square of the depth shows as a sixteenfold step.
+   The 68 cells alternate the order of the binaries, and any `-c` object
+   that differs between them fails the run.
+
+   `compiler_publish.py` re-validates the receipt's `frontend_nesting`
+   record against `frontend_nesting/provenance.json` and `results.json`
+   (`validate_frontend_nesting`, sharing `frontend_scaling_problems` with
+   the frontend-selector leg). It refuses a tool exit other than 0, binary
+   hashes that are not the measured binaries, an observed CPU other than the
+   Ryzen 7 9700X, affinity other than CPU 2, a population that is not exactly
+   the 68 profile cells with eleven samples per binary, a reported median its
+   samples do not give, an object cell without its identical-object hash, and
+   a frozen profile or cell digest that changed. Every timing is report-only.
+
+   Cost: on a hosted 4-vCPU 2.1 GHz Xeon (diagnostic, not Zen 5), the whole
+   leg took 190 s and exported 196 KB. Its 20-minute timeout keeps it inside
+   the unchanged 90-minute `compare-pull` job next to the roughly 14-minute
+   ordinary comparison. No job timeout changed.
+
+   **Issue #2761 opt-in host Wild linker leg.** The same route accepts one
+   fresh exact line `profile: wild-linker-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:wild_linker_bench.c` (#2645). It cannot be combined with an analyzer,
+   real-source, ast-pilot, production, compiler-probes or frontend-selector
+   profile.
+   `measure_wild_linker` runs it after the corpus leg:
+   - **Linkers.** It finds the host's installed Wild with `command -v wild`
+     and never downloads a linker. The comparator is the audit's, mold
+     (`command -v mold`). Only when mold is not installed at all does it
+     fall back to the host's default `ld`, which must report a GNU ld
+     version. The check then states the substitution. Wild must report its
+     own identity, `Wild <version> (compatible with GNU linkers)`, which is
+     what `Args::linker_identity` prints at wild `e9a9b0cb`. `<version>` is
+     any form `wild/build.rs` writes: a release version, a merge-base hash,
+     `<release> <hash>-modified`, or `<release> non-git-build`, which is what
+     a distribution package such as the 9700X host's reports. Each linker's
+     `command -v` path, resolved path, first `--version` line and SHA-256
+     (before and after the leg) go into the receipt. A missing Wild, a
+     missing comparator, a silent `--version`, or a `mold` that is not
+     mold fails the leg with that reason. A `mold` that is not mold never
+     falls back.
+   - **Inputs.** It links the head's own `ide` objects, not a frozen
+     external set. In an isolated shared clone of the head,
+     `./build.sh generate --cc clang --linker DEFAULT --no-include-tests
+     --no-fuzz --no-sanitize --no-lto` with debug information and frame
+     pointers configures the audit's `build-wild-unity` and
+     `build-wild-separate` trees. It then builds Release unity, Debug
+     (always non-unity) and Release separate. The reasons: no input has to
+     be stored or fetched onto the host, the evidence belongs to the revision
+     under review, and a Buster change that alters what the linkers see is
+     measured. Every object and archive is hashed before timing and must be
+     unchanged at the end. The receipt records each manifest's hash. The
+     input steps share one 20-minute deadline.
+   - **Harness.** The trusted revision's `tools/wild_linker_acceptance.c
+     --link-only` (built with `clang -std=c11 -O2 -Wall -Wextra -Werror
+     -Wpedantic`) reuses `wild_linker_bench.c`'s process capture, `wait4`
+     timing, seeded order and paired bootstrap. It runs under
+     `taskset -c 2,3,4,5`, four distinct physical cores, so the
+     default-thread cells are not reduced to one CPU. For each of the
+     audit's direct cells (`ide-debug`, `ide-unity-release`,
+     `ide-separate-release`), it takes the last `ninja -t commands ide`
+     step, drops any linker selection, and has Clang print the direct Wild
+     argv (`-###`). It appends `--no-gc-sections` and the fixed benchmark
+     build ID `0x2645…`. Wild adds `--no-fork --icf=none`. The comparator
+     replaces only the executable and adds its own equivalents: mold the
+     same two options, GNU ld none, because it neither forks nor folds code.
+   - **Sampling.** Frozen before the run. Per cell, there are 2 warmups and
+     then 21 seeded (2645) randomized AB/BA pairs at default threads, and
+     again with `--threads=1` (GNU ld is single-threaded and adds nothing).
+     `ide-debug` also has 9 A/A pairs per linker. There is no adaptive
+     stopping: any failed link stops the harness without a ranking. Each
+     linker's output is then linked again and must be byte-identical, and
+     must compile a probe.
+
+   `compiler_publish.py` re-validates the receipt's `wild_linker` record
+   against the evidence under `wild_linker/` (`validate_wild_linker`). It
+   refuses:
+   - a harness or input-build exit other than 0;
+   - an observed CPU other than the Ryzen 7 9700X, or a harness affinity
+     other than CPUs 2-5;
+   - a Wild whose `--version` is not Wild's own identity, a Wild output
+     whose `.comment` does not carry that same identity as
+     `Linker: <identity>`, or a comparator output that carries it with or
+     without that prefix. Wild writes `Linker: <identity>` into every
+     executable it links by default, so another linker installed as `wild`
+     is refused
+     even when it imitates the version line. `compiler_compare` reads each
+     saved output's `.comment` itself, and only after checking that its
+     hash is the one the harness recorded;
+   - a linker without an absolute path, a version or a SHA-256, a linker
+     whose hash changed during the leg, an unsupported comparator kind, an
+     unrecorded or false substitution, or Wild and comparator being the same
+     executable;
+   - an input manifest that differs from the receipt's hash;
+   - a population that is not exactly the eight comparisons in the seeded
+     order. The generator is replayed in Python, each with every warmup and
+     pair linked successfully;
+   - a cell whose retained Wild argv (`<cell>-argv.txt`) is not exactly
+     Clang's form, one double-quoted word per argument drawn from
+     `[A-Za-z0-9_./+=,:@%-]`, or does not start with the recorded Wild,
+     write `<config>/ide`, follow the frozen Clang link grammar, and take
+     every relative object
+     and archive from that cell's hashed input manifest. System startup
+     objects must come from `/usr` or `/lib`, and nothing else may come from
+     the build root. The grammar (`WILD_ARGV_FLAGS`, `WILD_ARGV_OPERANDS`)
+     admits only Clang's own flags, `-z`/`-m`/`-dynamic-linker`/`-o` with
+     admitted operands, `-L` system directories, plain `-l` names, CMake's
+     `--dependency-file=CMakeFiles/ide.dir/<config>/link.d` for the cell's
+     own configuration, and object or archive operands. It refuses response files (`@file`, which
+     Wild expands recursively), linker scripts, plugins and any other option
+     that would read an input the manifest does not hash. Each relative
+     operand, each manifest path and the build root must already be canonical,
+     with no `..`, `.` or empty component, and must lie inside the cell's
+     tree, so a traversal cannot hide behind a matching raw string;
+   - a timed, validated or repeated link command that is not exactly the
+     command rebuilt from that argv's admitted tokens and the frozen options.
+     No other input, linker or shell text can run, even in a packet that
+     rewrites its argv and commands together;
+   - a failed byte-identity, probe or manifest check;
+   - a summary median, paired ratio or bootstrap interval that the raw
+     samples do not give. The report's cells are re-derived from `raw.csv`;
+   - a frozen profile, identity record or cell digest that changed.
+
+   Every timing is report-only.
+
+   Cost: on a hosted 4-vCPU 2.3 GHz Xeon (diagnostic, not Zen 5), the input
+   steps took 281 s and the harness 24 s. That run used an `ld.lld`
+   stand-in named `wild`, because Wild is not installed there, and GNU ld
+   as the substituted comparator. The evidence was 3.4 MB. The input
+   deadline (20 minutes) and the harness timeout (15 minutes) together
+   keep the leg inside the unchanged 90-minute `compare-pull` job next to the
+   roughly 14-minute ordinary comparison. No job timeout changed.
+
+   Licenses. Each one is verified for the version named here. A host
+   linker of another version records its own version string, and its
+   license is unverified until it is checked against that version's
+   source.
+   - **Wild 0.10.0:** `MIT OR Apache-2.0`
+     ([Cargo.toml at `e9a9b0cb`](https://github.com/wild-linker/wild/blob/e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6/Cargo.toml)).
+   - **mold 2.42.1:** `MIT`
+     ([LICENSE at `9b376bc6`](https://github.com/rui314/mold/blob/9b376bc6a9899d4a16b41777de1f013989459fbc/LICENSE)).
+   - **GNU ld 2.42 (substitution only):** `GPL-3.0-or-later`
+     ([`ld/ldmain.c` header at tag `binutils-2_42`](https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=ld/ldmain.c;hb=refs/tags/binutils-2_42)).
+
+   Buster invokes all three as external executables. None is vendored,
+   linked into Buster or redistributed.
+
+   **Issue #1915 opt-in TLS companion link leg.** The same route accepts one
+   fresh exact line `profile: link-tls-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:link_tls_bench.py`, and the whole-link measurement of the x86-64 ELF
+   TLS companion lookup that #2247 indexed. It cannot be combined with an
+   analyzer, real-source, ast-pilot, production, compiler-probes,
+   frontend-selector or wild-linker profile. `measure_link_tls` runs the
+   trusted revision's `tools/link_tls_bench.py` after the corpus leg, on the
+   same two `ide` binaries:
+   - **Inputs.** It writes the profile's generated sources and builds them
+     with the host's `clang` and `ar`: `main.o`, which calls `sum_all` twice
+     and prints both sums; `tls:N` objects whose `sum_all` reads and
+     increments N global `__thread long` variables (two general-dynamic
+     sites each) at N = 1024, 4096 and 16384, with `-O0 -fPIC -g0`; a
+     `-fno-plt` variant and a one-member archive of the largest; and a
+     no-TLS control of 4096 globals and functions. The summary records every
+     input's SHA-256 and both tools' version lines.
+   - **Correctness first.** Each binary links every cell once with
+     `ide cc {-no-pie|-pie} main.o INPUT -o IMAGE`. Both images must be
+     byte-identical, exit 0 and print the cell's frozen output, which follows
+     from the source (`LinkTlsTest` checks the arithmetic). A cell that fails
+     is not timed.
+   - **Sampling.** Frozen before the run: per cell, 2 warmups alternating
+     baseline and candidate, then 20 pairs, baseline first on even pairs and
+     candidate first on odd ones. Each timed link is a fresh
+     `taskset -c 2 ide ...` process. Its wall time runs from spawn to a
+     blocking `wait4`, which also gives its own user plus system CPU time. A
+     timed wait with polling would quantize short links. There is no adaptive
+     stopping.
+
+   `compiler_publish.py` re-validates the receipt's `link_tls` record against
+   `link_tls/summary.json` (`validate_link_tls`). It refuses:
+   - a harness exit other than 0, or a summary that is not complete;
+   - measured binaries that are not the receipt's baseline and candidate, or
+     that are the same binary;
+   - an input set that is not the frozen one with a SHA-256 for each, or an
+     unrecorded clang or ar;
+   - cells that are not the frozen cells, in order, with their frozen
+     arguments;
+   - images that differ between the binaries, fail, or print anything but the
+     frozen output;
+   - a warmup or pair population that is not exact, in the fixed order, with
+     every link exiting 0 and a positive integer wall time within the
+     60-second invocation timeout;
+   - receipt cells that the raw samples do not give. Each cell's median pair
+     ratio and its distribution-free 95% interval are re-derived.
+
+   Every timing is report-only. On a pull request the merge base is the
+   baseline. To measure a change that has already landed, the owner opens a
+   draft whose head restores the earlier behavior, so the ratio reads
+   inverted.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon (diagnostic, not Zen 5), against a
+   pre-#2247 baseline whose scan dominates, the whole leg took 248 s and its
+   evidence was 68 KB. Its 20-minute timeout keeps it inside the unchanged
+   90-minute `compare-pull` job next to the roughly 14-minute ordinary
+   comparison. No job timeout changed.
+
+   **Issue #58 opt-in self-built inline-mode leg.** The same route accepts
+   one fresh exact line `profile: self-host-inline-compare-v1`, selected by
+   the same every-parent freshness rule. It is the Zen 5 route for
+   `uarch_lab:compare@self-host-inline-compare`, the compilers each side
+   would self-build with `-fcanonical-inline`. The #48 profile above times
+   one head against itself, inliner off against on; this one times base
+   against head, both with the inliner on. It cannot be combined with any
+   other opt-in profile, the scaling leg included; both the harness and the
+   publisher refuse the combination. The #48 `canonical-inline-self-host-v1`
+   leg is the exception: `inline_acceptance_requested` selects it whenever its
+   line is anywhere in the request file, as it has been on main since #48, so
+   it runs beside this leg (its 12-pair stages add a few minutes). The
+   trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
+   two parts:
+   - **Stage 1, untimed.** Right after each role's Clang Release build, with
+     that revision and its `build/generated` still checked out,
+     `build_selfhost_inline_stage1` runs the role's `ide` once with the
+     profile's `stage1_command`: the unity source with `-fcanonical-inline`.
+     It refuses a checkout that is not the role's revision, and inputs or a
+     compiler that change during the build. Each `stage1.json` records the
+     building compiler's SHA-256 and the stage-1 compiler's.
+   - **Timed comparison.** After the corpus leg, on the ordinary comparison's
+     frozen merge-base tree, `measure_selfhost_inline` runs
+     `uarch_lab.py compare` on the two stage-1 compilers with fixed
+     arguments: `--pairs 30 --warmups 1 --cpu 2 --profile-steps
+     topdown,sampling --require-identical-output --min-effect 0.5 --
+     -fcanonical-inline`. The outputs must be byte-identical before anything
+     is timed. Topdown runs each Zen 5 metric group (PipelineL1 and L2,
+     branch, decoder and op-cache, cache and TLB) for both compilers, and
+     the report lists the front-end rows. Sampling adds per-symbol movers.
+
+   `compiler_publish.py` re-validates the receipt's `selfhost_inline` record
+   against the seven exported documents under `selfhost_inline/`
+   (`validate_selfhost_inline` and
+   `selfhost_inline_compare.validate_compare_documents`). It refuses:
+   - a stage-1 record not built from its role's revision by the receipt's
+     binary with the frozen command;
+   - a result that did not time those stage-1 compilers on the merge-base
+     tree;
+   - a run that is not 30 complete deterministic fresh-copy ABBA pairs with
+     the fixed flags, CPU, floor and profile steps;
+   - outputs that differ, or a prepare, timed, topdown or sampling step that
+     did not complete;
+   - missing wall-time intervals, unavailable hardware counters, or missing
+     instruction, cycle or branch-miss counts;
+   - front-end evidence that is not usable (`selfhost_inline_frontend_problems`):
+     a malformed topdown row, no level-1 `frontend_bound` metric with finite
+     values for both compilers, or a front-end row measured for only one.
+     The topdown step is marked ok even when a group fails or is
+     unavailable, so cache or backend rows never stand in for it;
+   - a receipt digest that the exported summary does not give.
+
+   Every value is report-only. On a pull request the merge base is the
+   baseline; for #58 a draft head carries one selector variant against the
+   production selector.
+
+   Cost is an estimate (no hosted host has perf, and no Zen 5 group count is
+   on record). Each stage-1 build took 4.7 s with the Clang-built compiler on
+   a hosted Xeon, and one self-built compile took about 19 s there; the 9700X
+   compiles the same source with a Clang-built compiler in about 1.5 s. That
+   puts a self-built compile near 5 s, and 30 pairs, both profiles and their
+   multiplexed metric re-runs near 220 compiles, about 25 to 30 minutes. Its
+   45-minute leg timeout keeps it inside the unchanged 90-minute
+   `compare-pull` job. No job timeout changed; record the first receipt's
+   `selfhost_inline_seconds` before relying on the estimate.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits

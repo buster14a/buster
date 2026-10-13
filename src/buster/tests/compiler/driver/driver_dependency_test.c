@@ -216,6 +216,79 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_dependency_test_compile
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_target_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    // Measure the real parser's retained allocations, including response-file
+    // expansion. A 16x population must not retain 256x target prefixes.
+    for (u32 response = 0; response < 2; response += 1)
+    {
+        for (u32 mode = 0; mode < 3; mode += 1)
+        {
+            u64 small_bytes = 0;
+            for (u32 scale = 0; scale < 2; scale += 1)
+            {
+                TemporalArena temporary = arena_begin_temporal(arena);
+                u32 target_count = scale ? 2048 : 128;
+                String8* command = arena_allocate(arena, String8, 3 + 2 * target_count);
+                String8* expected_parts = arena_allocate(arena, String8, 2 * target_count - 1);
+                String8* response_parts = arena_allocate(arena, String8, target_count + 1);
+                command[0] = S8("-c");
+                command[1] = S8("-MMD");
+                command[2] = S8("tests/basic_c_multi_main.c");
+                response_parts[0] = S8("-c -MMD tests/basic_c_multi_main.c\n");
+                u32 expected_count = 0;
+                for (u32 index = 0; index < target_count; index += 1)
+                {
+                    bool quoted = mode == 1 || (mode == 2 && (index & 1));
+                    command[3 + index * 2] = quoted ? S8("-MQ") : S8("-MT");
+                    command[4 + index * 2] = S8("target $name#.o");
+                    response_parts[index + 1] = quoted ? S8("-MQ 'target $name#.o'\n") : S8("-MT 'target $name#.o'\n");
+                    if (index)
+                    {
+                        expected_parts[expected_count++] = S8(" ");
+                    }
+                    expected_parts[expected_count++] = quoted ? S8("target\\ $$name\\#.o") : S8("target $name#.o");
+                }
+                String8 expected = string_join_arena(arena, (SliceString8){.pointer = expected_parts, .length = expected_count}, false);
+                SliceString8 input = {.pointer = command, .length = 3 + 2 * target_count};
+                String8 response_argument = {0};
+                if (response)
+                {
+                    String8 path = buster_test_temporary_path(arena, S8("buster-dependency-targets"), S8(".rsp"));
+                    String8 text = string_join_arena(arena, (SliceString8){.pointer = response_parts, .length = target_count + 1}, false);
+                    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+                    response_argument = string_format(arena, S8("@{S8}"), path);
+                    input = (SliceString8){.pointer = &response_argument, .length = 1};
+                }
+                u64 start = arena->position;
+                CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, input);
+                u64 retained = arena->position - start;
+                BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+                BUSTER_STRING_TEST(arguments, parsed.dependency_targets, expected);
+                // Includes all argument-indexed arrays, quoting and expansion;
+                // the old prefix join exceeds this bound at 2,048 targets.
+                BUSTER_TEST_RAW(arguments, retained <= 4096 * (u64)target_count + 65536,
+                                string_format(arena, S8("response={u32} mode={u32} targets={u32} retained={u64}"),
+                                              response, mode, target_count, retained));
+                if (!scale)
+                {
+                    small_bytes = retained;
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, retained <= 16 * small_bytes + 65536,
+                                    string_format(arena, S8("response={u32} mode={u32} small={u64} large={u64}"),
+                                                  response, mode, small_bytes, retained));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -237,6 +310,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
         CompilerDriverInvocation parsed = compiler_driver_parse_arguments(
             arena, (SliceString8){.pointer = accepted[index], .length = accepted_lengths[index]});
         BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.dependency_file);
+    }
+    String8 target_cases[][11] = {
+        {S8("-c"), S8("-MD"), input, S8("-MT"), S8("")},
+        {S8("-c"), S8("-MD"), input, S8("-MQ"), S8("")},
+        {S8("-c"), S8("-MD"), input, S8("-MT"), S8(""), S8("-MQ"), S8(""), S8("-MTraw")},
+        {S8("-c"), S8("-MD"), input, S8("-MTraw$#"), S8("-MQ"), S8("q\\ \t$#"), S8("-MTraw$#"), S8("-MQ"), S8("")},
+        {S8("-c"), S8("-MD"), input, S8("-MQ"), S8("line\nbreak")},
+    };
+    u32 target_case_lengths[] = {5, 5, 8, 9, 5};
+    String8 target_case_expected[] = {S8(""), S8(""), S8("  raw"), S8("raw$# q\\\\\\ \\\t$$\\# raw$# "), S8("line\nbreak")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cases); index += 1)
+    {
+        CompilerDriverInvocation parsed = compiler_driver_parse_arguments(
+            arena, (SliceString8){.pointer = target_cases[index], .length = target_case_lengths[index]});
+        BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+        BUSTER_TEST(arguments, parsed.dependency_targets.pointer != 0);
+        BUSTER_STRING_TEST(arguments, parsed.dependency_targets, target_case_expected[index]);
     }
     String8 unsupported[] = {S8("-M"), S8("-MM"), S8("-MG")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported); index += 1)
@@ -671,6 +761,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     file_map_unmap(line_break_dep);
 #endif
 
+    scratch_end(temporary);
+    return result;
+}
+
+/* #3676: late system directories must not shadow user or default headers.
+   Literal header values observe actual lookup; MD/MMD observes classification. */
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_idirafter(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 missing[] = {S8("-E"), S8("source.c"), S8("-idirafter")};
+    CompilerDriverInvocation refused = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing));
+    BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(refused.diagnostic, S8("missing argument after -idirafter")));
+
+    String8 gpu[] = {S8("-c"), S8("-x"), S8("cuda"), S8("--target=nvptx64-nvidia-cuda"),
+                     S8("-idirafter"), S8("late"), S8("source.cu")};
+    CompilerDriverInvocation gpu_refused = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu));
+    BUSTER_TEST(arguments, gpu_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(gpu_refused.diagnostic, S8("-idirafter")));
+
+    String8 root = buster_test_temporary_path(arena, S8("buster-idirafter"), S8(""));
+    String8 user = string_format_z(arena, S8("{S8}/user"), root);
+    String8 system = string_format_z(arena, S8("{S8}/system"), root);
+    String8 sdk = string_format_z(arena, S8("{S8}/sdk"), root);
+    String8 sdk_usr = string_format_z(arena, S8("{S8}/usr"), sdk);
+    String8 defaults = string_format_z(arena, S8("{S8}/include"), sdk_usr);
+    String8 after[] = {string_format_z(arena, S8("{S8}/after-first"), root),
+                       string_format_z(arena, S8("{S8}/after-second"), root)};
+    String8 directories[] = {root, user, system, sdk, sdk_usr, defaults, after[0], after[1]};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(directories); index += 1)
+        os_make_directory(directories[index]);
+    String8 header_directories[] = {user, system, defaults, after[0], after[1]};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(header_directories); index += 1)
+    {
+        String8 path = string_format_z(arena, S8("{S8}/buster_idirafter_order.h"), header_directories[index]);
+        String8 text = string_format(arena, S8("#undef HEADER_VALUE\n#define HEADER_VALUE {u32}\n"), index + 1);
+        BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    }
+    String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
+    String8 source_text = S8("#include \"buster_idirafter_order.h\"\nint quoted = HEADER_VALUE;\n"
+                            "#include <buster_idirafter_order.h>\nint angled = HEADER_VALUE;\n");
+    BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text)));
+    // Put after options first: option placement must not alter class ordering.
+    // Cases remove each earlier search class; the final case reverses late roots.
+    u32 expected[] = {1, 2, 3, 4, 4, 5};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(expected); variant += 1)
+    {
+        TemporalArena attempt = arena_begin_temporal(arena);
+        String8 command[18];
+        u32 count = 0;
+        command[count++] = S8("-E");
+        command[count++] = S8("--target=x86_64-unknown-linux-gnu");
+        command[count++] = S8("-idirafter");
+        command[count++] = after[variant == 5];
+        command[count++] = string_format(arena, S8("-idirafter{S8}"), after[variant != 5]);
+        command[count++] = S8("--sysroot");
+        command[count++] = sdk;
+        if (variant >= 3)
+            command[count++] = variant == 4 ? S8("-nostdlibinc") : S8("-nostdinc");
+        if (variant <= 1)
+        {
+            command[count++] = S8("-isystem");
+            command[count++] = system;
+        }
+        if (variant == 0)
+        {
+            command[count++] = S8("-I");
+            command[count++] = user;
+        }
+        command[count++] = source;
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count});
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.system_include_path_count >= 2);
+        if (invocation.system_include_path_count >= 2)
+        {
+            u32 end = invocation.system_include_path_count;
+            BUSTER_STRING_TEST(arguments, invocation.system_include_paths[end - 2], after[variant == 5]);
+            BUSTER_STRING_TEST(arguments, invocation.system_include_paths[end - 1], after[variant != 5]);
+        }
+        CompilerDriverResult preprocessed = compiler_driver_execute_invocation(arena, invocation);
+        BUSTER_TEST_RAW(arguments, preprocessed.error == COMPILER_DRIVER_ERROR_NONE, preprocessed.diagnostic);
+        BUSTER_TEST(arguments, compiler_driver_test_string_contains(
+                                   preprocessed.output, string_format(arena, S8("int quoted = {u32};"), expected[variant])));
+        BUSTER_TEST(arguments, compiler_driver_test_string_contains(
+                                   preprocessed.output, string_format(arena, S8("int angled = {u32};"), expected[variant])));
+        scratch_end(attempt);
+    }
+
+    // Quoted lookup still starts in the including file's own directory.
+    String8 local_header = string_format_z(arena, S8("{S8}/buster_idirafter_order.h"), root);
+    BUSTER_TEST(arguments, file_write(local_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("#undef HEADER_VALUE\n#define HEADER_VALUE 7\n"))));
+    String8 local_command[] = {S8("-E"), S8("-nostdinc"), S8("-idirafter"), after[0], source};
+    CompilerDriverResult local = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_command)));
+    BUSTER_TEST_RAW(arguments, local.error == COMPILER_DRIVER_ERROR_NONE, local.diagnostic);
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(local.output, S8("int quoted = 7;")));
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(local.output, S8("int angled = 4;")));
+
+    // include_next traverses explicit system -> default system -> after system.
+    String8 chain_directories[] = {system, defaults, after[0]};
+    String8 chain_text[] = {S8("#define CHAIN_SYSTEM 1\n#include_next <buster_idirafter_chain.h>\n"),
+                           S8("#define CHAIN_DEFAULT 2\n#include_next <buster_idirafter_chain.h>\n"),
+                           S8("#define CHAIN_AFTER 3\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(chain_directories); index += 1)
+    {
+        String8 path = string_format_z(arena, S8("{S8}/buster_idirafter_chain.h"), chain_directories[index]);
+        BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(chain_text[index])));
+    }
+    String8 chain_source = string_format_z(arena, S8("{S8}/chain.c"), root);
+    BUSTER_TEST(arguments, file_write(chain_source, BUSTER_SLICE_TO_BYTE_SLICE(
+                                      S8("#include <buster_idirafter_chain.h>\nint chain = CHAIN_SYSTEM + CHAIN_DEFAULT + CHAIN_AFTER;\n"))));
+    String8 chain_command[] = {S8("-E"), S8("--target=x86_64-unknown-linux-gnu"), S8("--sysroot"), sdk,
+                               S8("-idirafter"), after[0], S8("-isystem"), system, chain_source};
+    CompilerDriverResult chain = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(chain_command)));
+    BUSTER_TEST_RAW(arguments, chain.error == COMPILER_DRIVER_ERROR_NONE, chain.diagnostic);
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(chain.output, S8("int chain = 1 + 2 + 3;")));
+
+    // A header found through -idirafter is system-owned: MD retains it and
+    // MMD omits it. Compile only the angle include, independent of local_header.
+    String8 dependency_source = string_format_z(arena, S8("{S8}/dependency.c"), root);
+    String8 object = string_format_z(arena, S8("{S8}/dependency.o"), root);
+    String8 depfile = string_format_z(arena, S8("{S8}/dependency.d"), root);
+    String8 late_header = string_format_z(arena, S8("{S8}/buster_idirafter_order.h"), after[0]);
+    BUSTER_TEST(arguments, file_write(dependency_source, BUSTER_SLICE_TO_BYTE_SLICE(
+                                      S8("#include <buster_idirafter_order.h>\nint dependency = HEADER_VALUE;\n"))));
+    for (u32 mode = 0; mode < 2; mode += 1)
+    {
+        TemporalArena attempt = arena_begin_temporal(arena);
+        String8 command[] = {S8("-c"), S8("-nostdinc"), string_format(arena, S8("-idirafter{S8}"), after[0]),
+                             mode ? S8("-MMD") : S8("-MD"), S8("-MF"), depfile, S8("-o"), object, dependency_source};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+        CompilerDriverDependencyTestRule rule = {0};
+        bool parsed = compiler_driver_dependency_test_parse_rule(arena, depfile, &rule);
+        BUSTER_TEST(arguments, parsed && rule.prerequisite_count == (mode ? 1u : 2u));
+        if (rule.prerequisite_count)
+            BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.prerequisites[0], dependency_source));
+        if (!mode && rule.prerequisite_count == 2)
+            BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.prerequisites[1], late_header));
+        scratch_end(attempt);
+    }
     scratch_end(temporary);
     return result;
 }
