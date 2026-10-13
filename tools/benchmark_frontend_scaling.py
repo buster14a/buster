@@ -6,11 +6,15 @@ Outputs remain under build/frontend-scaling unless --out overrides the path.
 CPU and wall times are observations, never test thresholds. Object cases require
 byte-identical output from both compilers. Linux/macOS resource accounting is
 used so unrelated compiler workers do not inflate the child CPU measurements.
+--cpu pins this process and every compiler child to one CPU; provenance.json
+records that affinity and the observed CPU model, and gains "complete": true
+only after every case and the final compiler identity check succeeded.
 """
 
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import resource
 import statistics
@@ -33,6 +37,19 @@ def fresh_binding_source(count):
     return "int main(void) {\n" + "".join(f"extern int fresh_{index}(void);\n" for index in range(count)) + "return 0;\n}\n"
 
 
+def observed_cpu_model():
+    """The kernel-reported CPU model name, or "NA"."""
+    model = "NA"
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                model = line.partition(":")[2].strip()
+                break
+    except OSError:
+        pass
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
@@ -41,11 +58,16 @@ def main():
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--suite", choices=["legacy", "bindings", "all"], default="legacy")
     parser.add_argument("--warmups", type=int, default=0)
+    parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
     if args.warmups < 0:
         parser.error("--warmups must be nonnegative")
+    if args.cpu is not None:
+        if not hasattr(os, "sched_setaffinity"):
+            parser.error("--cpu needs CPU affinity, which this host lacks")
+        os.sched_setaffinity(0, {args.cpu})
     args.out.mkdir(parents=True, exist_ok=True)
     compilers = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
     cases = [("small", "int f(int x) { return x * 3 + 1; }\n", 1, ["syntax", "object"])]
@@ -63,10 +85,13 @@ def main():
         for count in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536]:
             cases.append(("fresh-bindings", fresh_binding_source(count), count, ["syntax", "object"]))
     binary_hashes = {label: hashlib.sha256(path.read_bytes()).hexdigest() for label, path in compilers.items()}
-    (args.out / "provenance.json").write_text(json.dumps({
+    provenance = {
         "binary_sha256": binary_hashes, "suite": args.suite,
-        "warmups": args.warmups, "repetitions": args.repetitions,
-    }, indent=2) + "\n")
+        "warmups": args.warmups, "repetitions": args.repetitions, "cpu": args.cpu,
+        "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+        "cpu_model": observed_cpu_model(), "complete": False,
+    }
+    (args.out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     records = []
     for kind, source, count, modes in cases:
         path = (args.out / f"{kind}-{count}.c").resolve()
@@ -113,6 +138,8 @@ def main():
     for label, compiler in compilers.items():
         if hashlib.sha256(compiler.read_bytes()).hexdigest() != binary_hashes[label]:
             raise SystemExit(f"compiler changed during measurement: {compiler}")
+    provenance["complete"] = True
+    (args.out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
 
 
 if __name__ == "__main__":

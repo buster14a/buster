@@ -1,0 +1,9 @@
+{"shape": "same", "n": 250, "seconds": 0.0341, "exit": 0, "error": ""}
+{"shape": "distinct", "n": 250, "seconds": 0.03301, "exit": 0, "error": ""}
+{"shape": "compound", "n": 250, "seconds": 0.04037, "exit": 0, "error": ""}
+{"shape": "same", "n": 500, "seconds": 0.2105, "exit": 0, "error": ""}
+{"shape": "distinct", "n": 500, "seconds": 0.21444, "exit": 0, "error": ""}
+{"shape": "compound", "n": 500, "seconds": 0.2585, "exit": 0, "error": ""}
+{"shape": "same", "n": 1000, "seconds": 1.6503, "exit": 0, "error": ""}
+{"shape": "distinct", "n": 1000, "seconds": 1.57743, "exit": 0, "error": ""}
+{"shape": "compound", "n": 1000, "seconds": 1.96267, "exit": 0, "error": ""}

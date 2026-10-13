@@ -19,8 +19,11 @@ building one instruction permutation, then publishes these immutable slices:
 - Predecessor slices contain edge indices sorted by source block ID.
 - Parameters are grouped by block; argument `i` on an edge supplies parameter
   `i` of its destination.
-- Variable operands, targets and immediates occupy shared pools. Already
-  contiguous pools are reused, including shared promotion's operand pool.
+- No two rows' operand, target or immediate slices alias. Slices that ascend
+  without overlap in row order stay where construction put them, gaps
+  included. Only a kind whose ascent fails, such as one overlapping or
+  descending slice, is copied into fresh dense storage. No consumer reads the
+  slices as one pool, so publication publishes no pool pointer.
 
 Repeated conditional/switch/computed-goto destinations collapse to one edge.
 Parameter-free destinations are included even if their builder omitted its
@@ -29,14 +32,21 @@ sorted predecessor slice without searching parameter incoming lists.
 Construction transposes ordered builder incoming columns once, with linear
 work in blocks, terminator targets, parameters and incoming values.
 
-When instruction order changes, `instruction_remap` is the one explicit map
-from prepublication IDs to published IDs. The row permutation is in place;
+When instruction order changes, publication builds one scratch map from
+prepublication IDs to published IDs. The row permutation is in place;
 canonical source rows move with it, value definitions are remapped, and sparse
-instruction extras are remapped and sorted again. Block, value, local, symbol
+instruction extras are remapped and sorted again. The map is not retained: no
+consumer reads prepublication IDs afterwards. Block, value, local, symbol
 and label IDs remain stable. Computed-goto address identity and relocation
 ownership therefore do not change. The declared entry remains independent of
 numeric block order, and backend layout still emits it first where required.
 The authoritative instruction row remains 64 bytes.
+
+The block-ID order of spans is load-bearing, not cosmetic. The published-shape
+validator, the DWARF definition-to-end ranges, and linear row scans in the
+Wasm, eBPF and LLVM backends depend on it. Audit
+[`2026-10-12T214222Z`](performance-audits/2026-10-12T214222Z.md) lists them.
+They are why spans keep block-ID order.
 
 Native selectors, native canonical emission, Wasm, eBPF and LLVM consume the
 same instruction spans and dense parameter/argument arrays. Both selectors'
@@ -45,7 +55,8 @@ removed. Selected machine IR still owns its graph: AArch64 legalization can
 split canonical blocks and i128 joins expand a value into two registers. That
 is a target lowering result, not a duplicate canonical CFG.
 
-Publication clears every per-instruction `next` and every builder
+Publication clears every per-instruction `next`, in the same pass that
+permutes rows, and every builder
 parameter/predecessor first/last pointer. The linked construction graph is no
 longer retained as a second authoritative representation. Its arena allocations
 become unreachable; arena high-water memory is reclaimed when the translation
@@ -57,6 +68,8 @@ mutable links from the published slices, then clears the publication pointer.
 Call it **before** mutating published rows or CFG/value identities, and reacquire
 builder pointers afterward. Old construction-node pointers are stale. Builder
 appends and shared-promotion entry perform this transition automatically.
+Every value, block and row append calls it, so its published test is inline in
+`ir.h` and only an actual reopen calls `ir_function_reopen_cfg`.
 Uncertified preparation validates the current representation; passing false is
 not a replacement for reopening construction before a topology mutation.
 Repeated unchanged preparation reuses its publication without reconstruction.
@@ -69,8 +82,7 @@ slices after finalization and preserves its construction path beforehand.
 
 `allocated_bytes` reports new persistent allocation performed by this
 publication, excluding reused pools, original builder storage, arena padding
-and temporary scratch. Pool counts and instruction-remap presence describe the
-additional retained data. The existing optional `CFG_*` counters describe
+and temporary scratch; it includes any slices copied to break aliasing. The existing optional `CFG_*` counters describe
 publication work; `CFG_COPY_SOURCES` counts actual machine copy translation.
 These counts are not compiler throughput results.
 

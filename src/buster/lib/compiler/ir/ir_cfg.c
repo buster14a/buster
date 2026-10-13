@@ -2,14 +2,15 @@
 // ir_function_publish_cfg transposes ordered builder incoming columns once
 // into edge argument rows. Native selection and direct emitters consume these
 // immutable slices through ir_function_cfg_edge without rebuilding a CFG.
-// Instruction spans use one explicit remap and an in-place row permutation;
+// Instruction spans use one scratch remap and an in-place row permutation;
 // source/extras/definitions follow it. Value/block/label IDs and relocation
-// ownership remain stable. Operand pools reuse contiguous construction data.
+// ownership remain stable. ir_cfg_separate_operand_slices copies only operand,
+// target or immediate slices that may alias another row's.
 // Publication is the one termination check every producer passes: each tail
 // must be a terminator (ir_instruction_is_terminator) and no terminator may
 // have a successor in its chain.
 
-void ir_function_invalidate_cfg(IrFunction* function)
+void ir_function_reopen_cfg(IrFunction* function)
 {
     if (function && function->published_cfg)
     {
@@ -150,18 +151,24 @@ BUSTER_CT_CHECK(sizeof(((IrInstruction*)0)->immediate_count) == sizeof(u16));
 BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND <= UINT64_MAX / sizeof(IrBlockId));
 BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND <= UINT64_MAX / sizeof(u64));
 
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunction* function, IrPublishedCfg* cfg)
+// Rows may share or overlap construction slices. A slice that starts at or
+// after the previous row's slice end, in row order, cannot alias an earlier
+// one, so ascending slices stay in place even with gaps between them. Only a
+// kind whose ascent fails is copied into fresh disjoint storage, so an in-place
+// edit after ir_function_invalidate_cfg cannot reach another row. No consumer
+// reads the slices as one pool.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_separate_operand_slices(Arena* arena, IrFunction* function, IrPublishedCfg* cfg)
 {
     IrValidationResult result = ir_validation_ok();
-    IrValueId* first_operand = 0;
-    IrValueId* operand_end = 0;
-    IrBlockId* first_target = 0;
-    IrBlockId* target_end = 0;
-    u64* first_immediate = 0;
-    u64* immediate_end = 0;
-    bool operands_contiguous = true;
-    bool targets_contiguous = true;
-    bool immediates_contiguous = true;
+    u64 operand_end = 0;
+    u64 target_end = 0;
+    u64 immediate_end = 0;
+    u64 operand_count = 0;
+    u64 target_count = 0;
+    u64 immediate_count = 0;
+    bool operands_disjoint = true;
+    bool targets_disjoint = true;
+    bool immediates_disjoint = true;
     for (u32 index = 0; index < function->instruction_count && result.error == IR_VALIDATION_NONE; index += 1)
     {
         IrInstruction* row = function->instructions + index;
@@ -173,71 +180,62 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
         {
             if (row->operand_count)
             {
-                operands_contiguous &= !operand_end || operand_end == row->operands;
-                if (!first_operand) first_operand = row->operands;
-                operand_end = row->operands + row->operand_count;
-                cfg->operand_count += row->operand_count;
+                operands_disjoint &= (u64)(uintptr_t)row->operands >= operand_end;
+                operand_end = (u64)(uintptr_t)(row->operands + row->operand_count);
+                operand_count += row->operand_count;
             }
             if (row->target_count)
             {
-                targets_contiguous &= !target_end || target_end == row->targets;
-                if (!first_target) first_target = row->targets;
-                target_end = row->targets + row->target_count;
-                cfg->target_count += row->target_count;
+                targets_disjoint &= (u64)(uintptr_t)row->targets >= target_end;
+                target_end = (u64)(uintptr_t)(row->targets + row->target_count);
+                target_count += row->target_count;
             }
             if (row->immediate_count)
             {
-                immediates_contiguous &= !immediate_end || immediate_end == row->immediates;
-                if (!first_immediate) first_immediate = row->immediates;
-                immediate_end = row->immediates + row->immediate_count;
-                cfg->immediate_count += row->immediate_count;
+                immediates_disjoint &= (u64)(uintptr_t)row->immediates >= immediate_end;
+                immediate_end = (u64)(uintptr_t)(row->immediates + row->immediate_count);
+                immediate_count += row->immediate_count;
             }
             // Operand counts are u32, so their u32-by-u32 total can exceed
             // the byte-size limit. The two u16 counts are bounded at compile
             // time above by instruction_count's u32 representation.
-            if (cfg->operand_count > UINT64_MAX / sizeof(IrValueId))
+            if (operand_count > UINT64_MAX / sizeof(IrValueId))
             {
                 result.error = IR_VALIDATION_INVALID_ID;
             }
         }
     }
-    if (result.error == IR_VALIDATION_NONE)
+    if (result.error == IR_VALIDATION_NONE && (!operands_disjoint || !targets_disjoint || !immediates_disjoint))
     {
-        IrValueId* operands = operands_contiguous ? first_operand : arena_allocate(arena, IrValueId, cfg->operand_count);
-        IrBlockId* targets = targets_contiguous ? first_target : arena_allocate(arena, IrBlockId, cfg->target_count);
-        u64* immediates = immediates_contiguous ? first_immediate : arena_allocate(arena, u64, cfg->immediate_count);
-        cfg->operand_pool = operands;
-        cfg->target_pool = targets;
-        cfg->immediate_pool = immediates;
-        cfg->allocated_bytes += operands_contiguous ? 0 : cfg->operand_count * sizeof(*operands);
-        cfg->allocated_bytes += targets_contiguous ? 0 : cfg->target_count * sizeof(*targets);
-        cfg->allocated_bytes += immediates_contiguous ? 0 : cfg->immediate_count * sizeof(*immediates);
-        if (!operands_contiguous || !targets_contiguous || !immediates_contiguous)
+        IrValueId* operands = operands_disjoint ? 0 : arena_allocate(arena, IrValueId, operand_count);
+        IrBlockId* targets = targets_disjoint ? 0 : arena_allocate(arena, IrBlockId, target_count);
+        u64* immediates = immediates_disjoint ? 0 : arena_allocate(arena, u64, immediate_count);
+        cfg->allocated_bytes += operands_disjoint ? 0 : operand_count * sizeof(*operands);
+        cfg->allocated_bytes += targets_disjoint ? 0 : target_count * sizeof(*targets);
+        cfg->allocated_bytes += immediates_disjoint ? 0 : immediate_count * sizeof(*immediates);
+        u64 operand_cursor = 0;
+        u64 target_cursor = 0;
+        u64 immediate_cursor = 0;
+        for (u32 index = 0; index < function->instruction_count; index += 1)
         {
-            u64 operand_cursor = 0;
-            u64 target_cursor = 0;
-            u64 immediate_cursor = 0;
-            for (u32 index = 0; index < function->instruction_count; index += 1)
+            IrInstruction* row = function->instructions + index;
+            if (operands && row->operand_count)
             {
-                IrInstruction* row = function->instructions + index;
-                if (!operands_contiguous && row->operand_count)
-                {
-                    memcpy(operands + operand_cursor, row->operands, sizeof(*operands) * row->operand_count);
-                    row->operands = operands + operand_cursor;
-                    operand_cursor += row->operand_count;
-                }
-                if (!targets_contiguous && row->target_count)
-                {
-                    memcpy(targets + target_cursor, row->targets, sizeof(*targets) * row->target_count);
-                    row->targets = targets + target_cursor;
-                    target_cursor += row->target_count;
-                }
-                if (!immediates_contiguous && row->immediate_count)
-                {
-                    memcpy(immediates + immediate_cursor, row->immediates, sizeof(*immediates) * row->immediate_count);
-                    row->immediates = immediates + immediate_cursor;
-                    immediate_cursor += row->immediate_count;
-                }
+                memcpy(operands + operand_cursor, row->operands, sizeof(*operands) * row->operand_count);
+                row->operands = operands + operand_cursor;
+                operand_cursor += row->operand_count;
+            }
+            if (targets && row->target_count)
+            {
+                memcpy(targets + target_cursor, row->targets, sizeof(*targets) * row->target_count);
+                row->targets = targets + target_cursor;
+                target_cursor += row->target_count;
+            }
+            if (immediates && row->immediate_count)
+            {
+                memcpy(immediates + immediate_cursor, row->immediates, sizeof(*immediates) * row->immediate_count);
+                row->immediates = immediates + immediate_cursor;
+                immediate_cursor += row->immediate_count;
             }
         }
     }
@@ -315,43 +313,46 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
     }
     if (result.error == IR_VALIDATION_NONE)
     {
-        result = ir_cfg_pool_operands(arena, function, cfg);
+        result = ir_cfg_separate_operand_slices(arena, function, cfg);
     }
     if (result.error == IR_VALIDATION_NONE)
     {
-        if (moved)
+        // One pass both permutes and drops the mutable chain, which stops
+        // existing at publication: consumers use the dense span and explicit
+        // invalidation reconstructs builder links. A row is final once its
+        // index is visited, because every cycle starts at its lowest index.
+        // The old-to-new map stays in scratch: once definitions and extras
+        // follow it below, no consumer reads prepublication IDs.
+        for (u32 index = 0; index < count; index += 1)
         {
-            IrInstructionId* published_remap = arena_allocate(arena, IrInstructionId, count);
-            memcpy(published_remap, remap, sizeof(*remap) * count);
-            cfg->instruction_remap = published_remap;
-            cfg->allocated_bytes += sizeof(*published_remap) * (u64)count;
-            for (u32 index = 0; index < count; index += 1)
+            if (inverse[index] != index)
             {
-                if (inverse[index] != index)
+                IrInstruction saved = function->instructions[index];
+                IrSourceRange source = function->instruction_canonical_sources ? function->instruction_canonical_sources[index] : (IrSourceRange){0};
+                u32 destination = index;
+                u32 from = inverse[destination];
+                while (from != index)
                 {
-                    IrInstruction saved = function->instructions[index];
-                    IrSourceRange source = function->instruction_canonical_sources ? function->instruction_canonical_sources[index] : (IrSourceRange){0};
-                    u32 destination = index;
-                    u32 from = inverse[destination];
-                    while (from != index)
-                    {
-                        function->instructions[destination] = function->instructions[from];
-                        if (function->instruction_canonical_sources)
-                        {
-                            function->instruction_canonical_sources[destination] = function->instruction_canonical_sources[from];
-                        }
-                        inverse[destination] = destination;
-                        destination = from;
-                        from = inverse[destination];
-                    }
-                    function->instructions[destination] = saved;
+                    function->instructions[destination] = function->instructions[from];
                     if (function->instruction_canonical_sources)
                     {
-                        function->instruction_canonical_sources[destination] = source;
+                        function->instruction_canonical_sources[destination] = function->instruction_canonical_sources[from];
                     }
                     inverse[destination] = destination;
+                    destination = from;
+                    from = inverse[destination];
                 }
+                function->instructions[destination] = saved;
+                if (function->instruction_canonical_sources)
+                {
+                    function->instruction_canonical_sources[destination] = source;
+                }
+                inverse[destination] = destination;
             }
+            function->instructions[index].next = IR_INSTRUCTION_ID_INVALID;
+        }
+        if (moved)
+        {
             for (u32 value = 0; value < function->value_count; value += 1)
             {
                 IrInstructionId* definition = &function->values[value].definition;
@@ -368,13 +369,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
             IrCfgBlock* published = blocks + index;
             block->first_instruction.value = published->instruction_count ? published->first_instruction : IR_ID_UNDERLYING_INVALID;
             block->last_instruction.value = published->instruction_count ? published->first_instruction + published->instruction_count - 1 : IR_ID_UNDERLYING_INVALID;
-            // The mutable chain stops existing at publication. Consumers use
-            // the dense span; explicit invalidation reconstructs builder links.
-            for (u32 offset = 0; offset < published->instruction_count; offset += 1)
-            {
-                u32 row = published->first_instruction + offset;
-                function->instructions[row].next = IR_INSTRUCTION_ID_INVALID;
-            }
         }
         cfg->instruction_count = count;
     }

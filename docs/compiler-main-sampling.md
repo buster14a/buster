@@ -39,6 +39,11 @@ assign the physical job.
 
 The hosted authorizer reads exact GitHub source/request/attempt records and
 all prior campaign attempts, then the native admission policy validates them.
+A prior request's owning pull may be open, merged, or closed unmerged (#3955).
+GitHub hides a closed-unmerged pull from the commit's associated pulls. The
+authorizer then looks it up by the request's head ref, then requires exactly
+one closed-unmerged owner pull whose commit list contains the request commit.
+The owner, head and base provenance checks apply unchanged.
 Seven bounded data records reach the tokenless physical job. Measurement code
 is checked out at the reviewed frozen harness revision; current trusted
 workflow policy and its allowlist are separate identities. The native worker
@@ -50,7 +55,13 @@ The committed acquisition plan fixes common guarded source controls, actual
 source and storage paths, toolchain policy and the frozen harness/protocol.
 For plan bytes `P`, `campaign = SHA256(P)` and the native preparation output is
 `store_root/campaign/prepared`. Source and storage roots stay outside the
-Actions workspace and temporary cleanup tree. The baseline closure remains
+Actions workspace and temporary cleanup tree. Because the closure snapshot
+parks the baseline build by rename and the ledger lives under `store_root`, the
+controller refuses before any claim unless `store_root` is an existing
+directory owned and writable by the runner user, on the same device
+(`st_dev`) as `source_root`'s parent (#3390). Every refusal before the claim,
+in the public entry, the owner or the owned worker, prints an `error:` line
+naming its reason to the job log. The baseline closure remains
 at its exact original root; later packets verify its source/generated files,
 configuration, tools and immutable binaries before and after measurement.
 

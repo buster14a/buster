@@ -28,14 +28,14 @@ unset BUSTER_ANDROID_TEST_TIMEOUT_SECONDS
 unset BUSTER_ANDROID_DEBUG_TEST_TIMEOUT_SECONDS
 unset BUSTER_ANDROID_RELEASE_TEST_TIMEOUT_SECONDS
 unset BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT
-assert_policy Debug 180 40
+assert_policy Debug 240 40
 assert_policy Release 60 40
 assert_policy standalone 180 40
 
 BUSTER_ANDROID_DEBUG_TEST_TIMEOUT_SECONDS=90 assert_policy Debug 90 40
 BUSTER_ANDROID_RELEASE_TEST_TIMEOUT_SECONDS=45 assert_policy Release 45 40
 BUSTER_ANDROID_DEBUG_TEST_TIMEOUT_SECONDS=90 assert_policy Release 60 40
-BUSTER_ANDROID_RELEASE_TEST_TIMEOUT_SECONDS=45 assert_policy Debug 180 40
+BUSTER_ANDROID_RELEASE_TEST_TIMEOUT_SECONDS=45 assert_policy Debug 240 40
 
 BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=12 \
     BUSTER_ANDROID_DEBUG_TEST_TIMEOUT_SECONDS=90 \
@@ -45,29 +45,34 @@ BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=12 \
     BUSTER_ANDROID_DEBUG_TEST_TIMEOUT_SECONDS=90 \
     BUSTER_ANDROID_RELEASE_TEST_TIMEOUT_SECONDS=45 \
     assert_policy Release 12 40
-BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT=35 assert_policy Debug 180 35
+BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT=35 assert_policy Debug 240 35
 
-# Keep the baseline arithmetic executable: ordinary 1.5x hosted variance must
-# remain inside both defaults, while the old green Debug run must be thin under
-# the new warning margin.
-debug_baseline_seconds=42
-release_baseline_seconds=18
-debug_slow_seconds=$((debug_baseline_seconds * 3 / 2))
-release_slow_seconds=$((release_baseline_seconds * 3 / 2))
-if (( debug_slow_seconds >= 180 )); then
-    echo "error: Debug 1.5x baseline no longer fits its watchdog" >&2
+# #3258: the exact-source fast Debug payload took 75s; completed modules
+# slowed by 2.55x on the failed host. Round up to 2.6x for watchdog sizing.
+# This 195s projection is diagnostic, not an observed completed slow run.
+debug_baseline_seconds=75
+debug_slow_seconds=$((debug_baseline_seconds * 26 / 10))
+release_slow_seconds=52
+buster_android_payload_deadline_policy Debug
+debug_deadline_seconds=$android_payload_timeout_seconds
+warning_seconds=$((debug_deadline_seconds * android_payload_headroom_warning_percent / 100))
+if (( debug_deadline_seconds != debug_baseline_seconds * 16 / 5 ||
+      debug_slow_seconds <= 180 || debug_slow_seconds >= debug_deadline_seconds )); then
+    echo "error: measured Debug host variance does not fit the sized watchdog" >&2
     exit 1
 fi
-if (( release_slow_seconds >= 60 )); then
-    echo "error: Release 1.5x baseline no longer fits its watchdog" >&2
+if (( debug_deadline_seconds - debug_slow_seconds >= warning_seconds )); then
+    echo "error: projected slow Debug payload would not warn" >&2
     exit 1
 fi
-old_debug_deadline_seconds=60
-old_debug_elapsed_seconds=42
-old_debug_headroom_seconds=$((old_debug_deadline_seconds - old_debug_elapsed_seconds))
-warning_seconds=$((old_debug_deadline_seconds * 40 / 100))
-if (( old_debug_headroom_seconds >= warning_seconds )); then
-    echo "error: the recorded thin Debug baseline would not warn" >&2
+buster_android_payload_deadline_policy Release
+if (( release_slow_seconds >= android_payload_timeout_seconds )); then
+    echo "error: recorded slow Release payload no longer fits its watchdog" >&2
+    exit 1
+fi
+warning_seconds=$((android_payload_timeout_seconds * android_payload_headroom_warning_percent / 100))
+if (( android_payload_timeout_seconds - release_slow_seconds >= warning_seconds )); then
+    echo "error: recorded slow Release payload would not warn" >&2
     exit 1
 fi
 
@@ -170,9 +175,9 @@ run_batch_policy_case() {
     fi
 }
 
-run_batch_policy_case defaults "Debug Release" $'Debug 180 40\nRelease 60 40'
+run_batch_policy_case defaults "Debug Release" $'Debug 240 40\nRelease 60 40'
 run_batch_policy_case override "Release" 'Release 12 35' 12 35
-if ! grep -qF 'ANDROID_DEADLINE_POLICY config=Debug timeout_seconds=180 headroom_warning_percent=40' "$test_root/defaults.out" ||
+if ! grep -qF 'ANDROID_DEADLINE_POLICY config=Debug timeout_seconds=240 headroom_warning_percent=40' "$test_root/defaults.out" ||
    ! grep -qF 'ANDROID_DEADLINE_POLICY config=Release timeout_seconds=60 headroom_warning_percent=40' "$test_root/defaults.out" ||
    ! grep -qF 'ANDROID_DEADLINE_POLICY config=Release timeout_seconds=12 headroom_warning_percent=35' "$test_root/override.out"; then
     echo "error: Android batch policy diagnostics are incomplete" >&2

@@ -430,6 +430,12 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
+    [MACHINE_A64_TLS_DESCRIPTOR] = {
+        // Use the existing conservative call boundary: live values survive
+        // X0/X1/LR and flags, and descriptor resolution can touch loader state.
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
     [MACHINE_X64_SWITCH] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_BLOCK},
@@ -1571,6 +1577,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_CVT_F16_TO_F64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 88,
     [MACHINE_A64_CVT_F32_TO_F16] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 89,
     [MACHINE_A64_CVT_F64_TO_F16] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 90,
+    [MACHINE_A64_TLS_DESCRIPTOR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 91,
     [MACHINE_X64_KMOV_FROM_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 50,
     [MACHINE_X64_KMOV_TO_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 51,
     [MACHINE_X64_KMOV] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 52,
@@ -2909,8 +2916,11 @@ BUSTER_GLOBAL_LOCAL u32 machine_debug_wide_slot(u32 key, u32 mask)
     return ((key * UINT32_C(2654435761)) >> 8) & mask;
 }
 
+// `wide_count` is the caller's count of LOCAL/ARGUMENT results whose canonical
+// local is at or past local_count, gathered in its place pass, so the table is
+// sized before the one scan below fills it alongside the local stores.
 BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* function, MachineFunction* machine_function,
-                                                    IrValueId const* local_places, MachineDebugFacts* facts)
+                                                    IrValueId const* local_places, u32 wide_count, MachineDebugFacts* facts)
 {
     facts->origin_count = function->value_count;
     facts->origins = arena_allocate(arena, MachineDebugOrigin, facts->origin_count ? facts->origin_count : 1u);
@@ -2933,22 +2943,11 @@ BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* fun
     facts->argument_count = function->debug_local_count;
     facts->argument_results = arena_allocate(arena, IrValueId, facts->argument_count ? facts->argument_count : 1u);
     memset(facts->argument_results, 0xff, sizeof(IrValueId) * (u64)(facts->argument_count ? facts->argument_count : 1u));
-    u32 wide_count = 0;
     IrCfgBlock const* entry = function->published_cfg && function->published_cfg->blocks && function->entry.value < function->published_cfg->block_count
                                   ? function->published_cfg->blocks + function->entry.value
                                   : 0;
     u64 entry_end = entry ? (u64)entry->first_instruction + entry->instruction_count : 0;
     bool entry_range_valid = entry && entry_end <= function->instruction_count;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        IrInstruction const* instruction = function->instructions + instruction_index;
-        bool in_entry = entry_range_valid && instruction_index >= entry->first_instruction && instruction_index < entry_end;
-        machine_debug_facts_record_instruction_local_stores(arena, function, local_places, facts, 0, instruction, instruction_index,
-                                                             function->entry.value, in_entry);
-        wide_count += (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
-                      instruction->result.value < function->value_count && instruction->canonical_local.value >= function->local_count &&
-                      instruction->canonical_local.value != IR_ID_UNDERLYING_INVALID;
-    }
     u32 wide_slots = 8u;
     while (wide_slots / 2u < wide_count && wide_slots < (1u << 30))
     {
@@ -2962,6 +2961,9 @@ BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* fun
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction const* instruction = function->instructions + instruction_index;
+        bool in_entry = entry_range_valid && instruction_index >= entry->first_instruction && instruction_index < entry_end;
+        machine_debug_facts_record_instruction_local_stores(arena, function, local_places, facts, 0, instruction, instruction_index,
+                                                             function->entry.value, in_entry);
         if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < function->value_count && instruction->immediate_count &&
             instruction->immediates && instruction->immediates[0] < facts->argument_count &&
             facts->argument_results[instruction->immediates[0]].value == IR_ID_UNDERLYING_INVALID)
@@ -3584,6 +3586,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         u32 debug_count = ir_function->debug_local_count;
         IrValueId* local_places = arena_allocate(scratch.arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
         memset(local_places, 0xff, sizeof(*local_places) * (u64)ir_function->local_count);
+        u32 wide_count = 0;
         for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
         {
             IrInstruction* instruction = ir_function->instructions + instruction_index;
@@ -3592,9 +3595,13 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
             {
                 local_places[instruction->canonical_local.value] = instruction->result;
             }
+            wide_count += (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
+                          instruction->result.value < ir_function->value_count &&
+                          instruction->canonical_local.value >= ir_function->local_count &&
+                          instruction->canonical_local.value != IR_ID_UNDERLYING_INVALID;
         }
         MachineDebugFacts facts = {0};
-        machine_debug_facts_build(scratch.arena, ir_function, machine_function, local_places, &facts);
+        machine_debug_facts_build(scratch.arena, ir_function, machine_function, local_places, wide_count, &facts);
 
         IrValueId* debug_places = arena_allocate(scratch.arena, IrValueId, debug_count);
         memset(debug_places, 0xff, sizeof(*debug_places) * (u64)debug_count);
@@ -4701,6 +4708,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         case MACHINE_X64_TLS_DARWIN:
         case MACHINE_A64_TLS_WINDOWS:
         case MACHINE_A64_TLS_DARWIN:
+        case MACHINE_A64_TLS_DESCRIPTOR:
         case MACHINE_A64_CALL_DIRECT:
         case MACHINE_A64_LEA_SYMBOL:
         case MACHINE_A64_LEA_TLS:
@@ -5881,6 +5889,7 @@ MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* p
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         machine_x64_signature_plans_prepare(arena, program, module);
+        module->x64_vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_U8);
     }
     return module;
 }

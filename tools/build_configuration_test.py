@@ -15,6 +15,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CMAKE = shutil.which("cmake")
+NINJA = shutil.which("ninja")
 CLANG = shutil.which("clang")
 PROJECT_CONFIGURE_TIMEOUT_SECONDS = 90
 
@@ -117,6 +118,7 @@ endif()
                     self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_project_call_handles_optional_apple_architectures(self):
+        self.assertIsNotNone(NINJA, "ninja is required for the project configure fixture")
         cmake = (ROOT / "CMakeLists.txt").read_text()
         start = cmake.index("include(cmake/TargetArchitecture.cmake)")
         end = cmake.index("\nset(C_COMPILER_GNU OFF)", start)
@@ -149,7 +151,9 @@ set(CMAKE_CROSSCOMPILING OFF)
 {caller}
 message("selected=${{CMAKE_SYSTEM_PROCESSOR}} cross=${{BUSTER_CROSS_COMPILE}}")
 ''')
+                    # LANGUAGES NONE tests policy without platform-default generator discovery (#2199).
                     result = subprocess.run([CMAKE, "--warn-uninitialized", "-Werror=dev",
+                                             "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={Path(NINJA).as_posix()}",
                                              "-S", str(source), "-B", str(source / "build")],
                                             capture_output=True, text=True, timeout=PROJECT_CONFIGURE_TIMEOUT_SECONDS)
                     if diagnostic:

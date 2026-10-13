@@ -11,7 +11,10 @@
 // written against it must degrade to serial — a one-lane gang and
 // BUSTER_SINGLE_THREADED builds run the identical path. Lazily built
 // globals state BUSTER_CHECK_SERIAL_INITIALIZATION() and are filled by
-// their module's prewarm entry point before lanes run.
+// their module's prewarm entry point before lanes run, unless each entry is
+// filled through a once-claim (once_claim_u8, over the plain-object
+// atomic_u8_load_acquire family), which any thread may take; lane_release
+// joins a parked gang when a later serial prewarm is still needed.
 
 #include <buster/lib/base.h>
 
@@ -426,6 +429,7 @@ BUSTER_F_DECL OsDirectoryCreateResult os_make_directory(String8 path);
 // umask). Existing names are reported as collisions without claiming ownership.
 BUSTER_F_DECL OsDirectoryCreateResult os_make_directory_exclusive(String8 path);
 // Creates one owner-only directory or accepts an existing directory.
+// Empty, null and embedded-NUL paths fail without attempting creation.
 BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 
 BUSTER_F_DECL bool os_file_delete(String8 path);
@@ -610,6 +614,65 @@ BUSTER_F_DECL u64 atomic_u64_increment(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_decrement(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_add(AtomicU64* address, u64 addend);
 
+// Atomic access to plain, unqualified objects, for state that a lane may
+// publish into an existing table without changing its element type: the
+// once-claim bytes below and the x86 caches they guard. An acquire load and a
+// release store are ordinary moves on x86-64, and the unity build inlines
+// them (BUSTER_SHARED_INLINE), so a published-entry test costs what the plain
+// load it replaces did. Every accessor of such an object goes
+// through these, because a plain access racing an atomic one is still a data
+// race. Single-threaded builds compile them to plain accesses.
+BUSTER_F_DECL u8 atomic_u8_load_acquire(u8 const* address);
+BUSTER_F_DECL void atomic_u8_store_release(u8* address, u8 value);
+// Stores `desired` and answers true when the byte held `expected`; acquire
+// and release either way, so a winner sees what earlier publishers wrote.
+BUSTER_F_DECL bool atomic_u8_compare_exchange(u8* address, u8 expected, u8 desired);
+BUSTER_F_DECL u16 atomic_u16_load_acquire(u16 const* address);
+BUSTER_F_DECL void atomic_u16_store_release(u16* address, u16 value);
+// Relaxed: for a value whose every writer stores the same bits and whose
+// visibility a separate acquire/release pair already orders.
+BUSTER_F_DECL u16 atomic_u16_load_relaxed(u16 const* address);
+BUSTER_F_DECL void atomic_u16_store_relaxed(u16* address, u16 value);
+BUSTER_F_DECL bool atomic_u16_compare_exchange(u16* address, u16 expected, u16 desired);
+// Returns the value held before the addition, which wraps.
+BUSTER_F_DECL u16 atomic_u16_add(u16* address, u16 addend);
+BUSTER_F_DECL u32 atomic_u32_add(u32* address, u32 addend);
+BUSTER_F_DECL u32 atomic_u32_load_acquire(u32 const* address);
+BUSTER_F_DECL u64 atomic_u64_load_acquire_plain(u64 const* address);
+// Sets `bits` with release ordering and returns the previous word.
+BUSTER_F_DECL u64 atomic_u64_or_release_plain(u64* address, u64 bits);
+
+// Once-claims: filling one entry of a lazily built table from any thread.
+//
+// The entry's state is a byte (or a u16 that already doubles as the entry's
+// value) holding a pending code, a busy code, or any final code. Readers test
+// the state with an acquire load and use the entry only once it is final.
+// A filler calls once_claim_*: the thread whose compare-exchange moves the
+// state from pending to busy gets true, fills only that entry's storage, and
+// ends the claim with once_publish_*, a release store of the final code
+// (or of the pending code, which abandons the claim for a later retry). Every
+// other caller waits for the state to stop being busy and gets false, so it
+// reads whatever the winner published. There is no lock on the read path and
+// no callback; a claim is a byte.
+//
+// A filler may claim further entries while it holds one -- a form's facts
+// read its operand views -- so claims carry a level, and a thread may only
+// claim strictly below the innermost claim it holds. Every waiter therefore
+// waits on a claim whose holder can only wait on lower levels, and no cycle
+// exists. The check is always compiled in, beside the one that catches a
+// thread waiting on a claim it holds itself: either would otherwise hang
+// instead of failing.
+BUSTER_F_DECL bool once_claim_u8(u8* state, u8 pending, u8 busy, u32 level);
+BUSTER_F_DECL void once_publish_u8(u8* state, u8 value);
+BUSTER_F_DECL void once_wait_u8(u8 const* state, u8 busy);
+BUSTER_F_DECL bool once_claim_u16(u16* state, u16 pending, u16 busy, u32 level);
+BUSTER_F_DECL void once_publish_u16(u16* state, u16 value);
+BUSTER_F_DECL void once_wait_u16(u16 const* state, u16 busy);
+#if BUSTER_INCLUDE_TESTS
+// Claims the calling thread holds, so a test can prove a fill left none open.
+BUSTER_F_DECL u32 once_claim_depth(void);
+#endif
+
 typedef enum ProgramFlag
 {
     PROGRAM_FLAG_VERBOSE,
@@ -760,8 +823,19 @@ BUSTER_F_DECL bool os_commit_diagnose(void* address, u64 size, ProtectionFlags p
                                      OsCommitFailureContext* failure_context);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
 BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
+// Requests transparent huge pages for a reserved range. Advisory on every
+// target: refusal leaves the range usable. Explicit advice can increase RSS
+// and cause synchronous compaction even under an existing `always` policy.
+// It is a no-op where the target has no such facility.
+BUSTER_F_DECL void os_advise_huge_pages(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
+// Releases the physical pages wholly inside [address, address + size) that a
+// caller has abandoned within a live, committed mapping: no other pointer may
+// read them as data again. The range stays mapped and writable with undefined
+// contents, so an arena may later reuse it. Returns the bytes advised; zero
+// when no complete page lies inside the range or the platform refuses.
+BUSTER_F_DECL u64 os_discard(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 BUSTER_F_DECL bool os_flush_instruction_cache(void* address, u64 size);
 // Selects write (false) or execute (true) access for MAP_JIT mappings on the
@@ -822,6 +896,11 @@ BUSTER_F_DECL LaneRange lane_range(u64 item_count);
 // context is saved and restored. Nested gangs retain the old independent-gang
 // behavior so an outer lane can safely narrow and invoke another lane region.
 BUSTER_F_DECL void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument);
+// Joins the calling context's parked resident workers, if any; the next
+// lane_run recreates them. Parked workers are live threads, so a caller must
+// release them before serial initialization (BUSTER_CHECK_SERIAL_INITIALIZATION).
+// Only outside an active lane region. A no-op in single-threaded builds.
+BUSTER_F_DECL void lane_release(void);
 
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
 BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);

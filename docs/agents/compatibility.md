@@ -25,8 +25,10 @@ directory and removes the compiler and in-progress outputs.
 | QuickJS and Test262 | [QuickJS](compatibility/quickjs.md) |
 | Git (Linux x86-64 opt-in build census) | [Git](compatibility/git.md) |
 | musl | [musl](compatibility/musl.md) |
+| musl + BusyBox (Linux diagnostic userspace) | [musl + BusyBox](compatibility/busybox.md) |
 | libc-test through the musl harness | [libc-test](compatibility/libc-test.md), after [musl](compatibility/musl.md) |
 | CPython | [CPython](compatibility/cpython.md) |
+| QEMU (opt-in Linux x86-64 TCG census) | [QEMU](compatibility/qemu.md) |
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
 | curl/libcurl (Linux x86-64 blocker census) | [curl/libcurl](compatibility/curl.md) |
 | OpenSSL build/test qualification intake | [OpenSSL](compatibility/openssl.md) |

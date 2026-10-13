@@ -41,10 +41,16 @@ Map (searchable symbols):
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
+    THROUGHPUT_HARNESS_FLOOR, HARNESS_ADMISSIONS           base-harness admission (#3714)
+    THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE   named historical corpus (#3714)
+    EVIDENCE_INVENTORY, evidence_lab_required, evidence_corpus_required,
+        evidence_identity                                  sealed raw evidence v1 (#2918)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
+    CONSTANT_REUSE_ACCEPTANCE_PROFILE,
+        validate_constant_reuse_acceptance                 issue #3011 constant-reuse flag pairs
     THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
@@ -53,6 +59,13 @@ Map (searchable symbols):
         compiler_probes_digest                             FAST RA and line-mark probes (#2761)
     INVENTORY_LEGS, inventory_leg_record, covered_inventory_rows,
         render_inventory_coverage                          inventory rows each validated leg discharged (#2761)
+    FRONTEND_SELECTOR_PROFILE, validate_frontend_selector, selection_medians,
+        frontend_selector_digest                           frontend and selector probes (#2761)
+    WILD_LINKER_PROFILE, validate_wild_linker, wild_linker_population,
+        wild_linker_digest                                 host Wild against its comparator (#2761)
+    LINK_TLS_PROFILE, validate_link_tls, link_tls_digest   whole-link TLS companion cells (#1915)
+    SELFHOST_INLINE_PROFILE, validate_selfhost_inline,
+        selfhost_inline_digest                             self-built inline-mode base/head pair (#58)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -64,7 +77,9 @@ import json
 import csv
 import hashlib
 import math
+import os
 import re
+import shlex
 import statistics
 from pathlib import Path
 
@@ -134,6 +149,89 @@ THROUGHPUT_PROFILE = {
     "warmups": 2,
     "cpu": 2,
 }
+# Admission floor for THROUGHPUT_PROFILE's base-revision harness (#3714). Before
+# this commit, `bench_throughput run --mode all` also selected the retired none
+# and mir-stack allocators, so a base without it runs 24 cells at alpha
+# 0.01/48 and can never satisfy the 12-cell v2 population. compiler_compare
+# rejects such a base before any build or lab, as an unsupported historical
+# harness; this is a necessary condition only, and classify_throughput stays
+# the full check of the exported corpus.
+THROUGHPUT_HARNESS_FLOOR = "293132e418cb2449b36e3b92ae38aaa487813e43"
+# The pull route's three corpus dispositions, decided by hosted authorization
+# before dispatch and re-derived by compiler_compare on the host (#3714).
+HARNESS_ADMISSIONS = ("admitted", "historical", "unsupported")
+# The named historical corpus recipe (#3714), frozen per name like PROFILE. A
+# pull request whose merge base predates THROUGHPUT_HARNESS_FLOOR selects it
+# with one fresh exact request line; it is refused for any other base. The
+# corpus then runs from tools/throughput at the pinned main revision, built by
+# that revision's own `./build.sh bench_throughput` in a detached worktree under --work,
+# on the same two binaries and with the v2 arguments and FAST/QUALITY
+# population, so classify_throughput applies unchanged. The pin is the base of
+# main's c6201a26 comparison, whose v2 corpus the current consumer accepted on
+# the 9700X (run 38227553632). Changing any value needs a new name.
+THROUGHPUT_HISTORICAL_REQUEST_LINE = "profile: throughput-corpus-historical-v1"
+THROUGHPUT_HISTORICAL_HARNESS_REVISION = "afe67cbebcb257e7fe130a8eccdd5ff08a79b555"
+THROUGHPUT_HISTORICAL_PROFILE = dict(
+    THROUGHPUT_PROFILE, name="throughput-corpus-historical-v1",
+    harness=f"tools/throughput at pinned main revision {THROUGHPUT_HISTORICAL_HARNESS_REVISION}, built and run by that "
+            "revision's ./build.sh bench_throughput in a detached worktree under the work directory",
+    harness_revision=THROUGHPUT_HISTORICAL_HARNESS_REVISION,
+    admission=f"pull request merge base predates {THROUGHPUT_HARNESS_FLOOR}")
+# Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md). The producer
+# exports these members as required, writes EVIDENCE_OMISSIONS, and seals the
+# bundle last with the trusted `./build.sh compiler_evidence seal`; the
+# publisher re-derives the same inventory natively with `verify`. The native
+# tables in tools/compiler_evidence.c must stay equal (compiler_test checks).
+EVIDENCE_INVENTORY = "buster-compiler-ordinary-raw-v1"
+EVIDENCE_MANIFEST = "evidence-manifest.tsv"
+EVIDENCE_SEAL = "evidence-seal.txt"
+EVIDENCE_OMISSIONS = "evidence-omissions.json"
+EVIDENCE_OMISSIONS_SCHEMA = "buster-compiler-evidence-omissions-v1"
+EVIDENCE_OMISSION_REASONS = ("excluded-type", "member-limit", "byte-budget", "file-budget", "changed-during-copy",
+                             "read-error")
+EVIDENCE_OMISSION_EXAMPLES = 50
+EVIDENCE_LAB_FIXED = ("compare.json", "summary.json", "pairs.json", "a/lab.json", "b/lab.json", "a/env/env.json")
+EVIDENCE_LAB_LOGS = ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log")
+EVIDENCE_CORPUS_CORE = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl",
+                        "capabilities.jsonl", "complete.txt", "summary.json", "cpuinfo.txt")
+# Identity lines after schema and inventory, in manifest order.
+EVIDENCE_IDENTITY_KEYS = ("repository", "request_run", "request_attempt", "executor_run", "executor_attempt",
+                          "trusted_revision", "baseline_revision", "candidate_revision", "baseline_tree",
+                          "candidate_tree", "lab_profile", "corpus_profile", "corpus_harness_revision")
+
+
+def evidence_lab_required(pairs: int, counters: tuple[bool, bool], metrics: tuple[bool, bool]) -> tuple[str, ...]:
+    """Lab-relative required members for a plan of `pairs` and each variant's declared streams."""
+    required = [*EVIDENCE_LAB_FIXED, *(f"{variant}/{log}" for variant in "ab" for log in EVIDENCE_LAB_LOGS)]
+    for index, variant in enumerate("ab"):
+        for pair in range(1, pairs + 1):
+            required.extend(f"pairs/{pair:04d}-{variant}{suffix}" for suffix, declared in
+                            ((".csv", counters[index]), (".ccmetrics", metrics[index])) if declared)
+    return tuple(required)
+
+
+def evidence_corpus_required(profile: dict) -> tuple[str, ...]:
+    """Corpus-relative required members of an admitted corpus profile."""
+    return (*EVIDENCE_CORPUS_CORE, *(f"inputs/{name}.c" for name in profile["workloads"]))
+
+
+def evidence_identity(receipt: dict, request_attempt: str) -> str:
+    """The trusted identity lines of a receipt's ordinary attempt, or '' when it has none."""
+    identity = receipt.get("identity") if isinstance(receipt, dict) else None
+    profile, corpus = (receipt.get("profile"), receipt.get("throughput_profile")) if isinstance(receipt, dict) else (None, None)
+    text = ""
+    if isinstance(identity, dict) and isinstance(profile, dict) and isinstance(corpus, dict):
+        harness = corpus.get("harness_revision") if corpus.get("name") == THROUGHPUT_HISTORICAL_PROFILE["name"] \
+            else identity.get("base")
+        values = (identity.get("repository"), identity.get("request_run_id"), request_attempt, identity.get("run_id"),
+                  identity.get("run_attempt"), identity.get("trusted_revision"), identity.get("base"),
+                  identity.get("head"), identity.get("base_tree"), identity.get("head_tree"), profile.get("name"),
+                  corpus.get("name"), harness)
+        if all(isinstance(value, str) and value and "\t" not in value and "\n" not in value for value in values):
+            text = "".join(f"{key}\t{value}\n" for key, value in zip(EVIDENCE_IDENTITY_KEYS, values))
+    return text
+
+
 # The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
 # is one `bench_throughput scale` bundle on the candidate binary, with the
 # --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
@@ -186,6 +284,31 @@ AST_PILOT_ACCEPTANCE_PROFILE = {
 # every cell: B's median peak RSS above A's by at most retained bytes times
 # (1 + rss_slack).
 AST_PILOT_BUDGET = {"syntax_only_min_gain": 0.01, "rss_slack": 0.05}
+# Issue #3011: the opt-in constant-reuse arms on the pull-compare route. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
+# frozen candidate binary on the same -g0 unity object compile, A default and
+# B passing that cell's flag; the flags, cells, pair and warm-up counts are
+# frozen here and nothing in the request can change them. B's object differs
+# from A's by design; diagnostics must not. It is report-only.
+CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE = "profile: constant-reuse-acceptance-v1"
+CONSTANT_REUSE_ACCEPTANCE_SCHEMA = "buster-constant-reuse-acceptance-v1"
+CONSTANT_REUSE_COMPILE = AST_PILOT_COMPILE + ["-c"]
+CONSTANT_REUSE_CELLS = {"intern": "-fcanonical-intern-constants", "cse": "-fcanonical-fast-cse"}
+CONSTANT_REUSE_ACCEPTANCE_PROFILE = {
+    "name": "constant-reuse-acceptance-v1",
+    "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers, -g0, -c, no link",
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": "default; the cell's flag omitted", "b": "the cell's one opt-in flag"},
+    "cells": dict(CONSTANT_REUSE_CELLS),
+    "pairs": 20,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
+    "correctness": "identical stdout/stderr in every run of both cells; B's object differs from A's by design",
+    "report_only": True,
+}
 # Issue #2761: the Zen 5 route for real-source throughput. One fresh exact line
 # in ANALYZER_REQUEST_PATH selects it on the pull-compare route. After the
 # corpus leg, the base revision's `bench_throughput run --real-source` times
@@ -381,6 +504,245 @@ COMPILER_PROBES_PROFILE = {
     "decision": "report-only: ratios and intervals are reported and never gate",
     "report_only": True,
 }
+# Issue #2761: the Zen 5 route for frontend and selector claims. One fresh
+# exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare route.
+# After the corpus leg, the base revision's tools/benchmark_frontend_scaling.py
+# and tools/selection_benchmark.py run on the matched baseline/candidate
+# binaries, then the harness itself runs `ide bench` in alternating fresh
+# processes of both binaries from the base checkout. Arguments, populations and
+# the pinned CPU are frozen here; changing any value needs a new name. It is
+# report-only: every timing is reported and never gates, but each tool's own
+# correctness check (identical objects, identical work counts) must hold.
+FRONTEND_SELECTOR_REQUEST_LINE = "profile: frontend-selector-v1"
+FRONTEND_SELECTOR_SCHEMA = "buster-frontend-selector-v1"
+# benchmark_frontend_scaling.py --suite all: (kind, counts, modes) in run order.
+FRONTEND_SCALING_CASES = (
+    ("small", (1,), ("syntax", "object")),
+    *((order, (count,), ("syntax", "object")) for count in (8192, 16384, 32768)
+      for order in ("positional", "ascending", "descending", "range")),
+    ("scopes", (512, 1024, 2048, 4096, 8192), ("syntax",)),
+    ("deep-scopes", (16, 64, 256), ("syntax",)),
+    ("fresh-bindings", (0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536), ("syntax", "object")),
+)
+SELECTION_WORK_FIELDS = ("functions", "fallback_functions", "ir_instructions", "mir_instructions")
+# Every count is captured as 1 to 19 digits, so int() never sees a token past Python's
+# integer-string conversion limit; a longer token simply leaves the line unparsed.
+IDE_BENCH = re.compile(r"BENCH_C_FRONTEND path=(\S+) iterations=([0-9]{1,19}) bytes=([0-9]{1,19}) "
+                       r"min_ns=([0-9]{1,19}) median_ns=([0-9]{1,19}) throughput_mb_s=([0-9]{1,19})")
+FRONTEND_SELECTOR_PROFILE = {
+    "name": "frontend-selector-v1",
+    "harness": "tools/benchmark_frontend_scaling.py and tools/selection_benchmark.py at the base revision; "
+               "`ide bench` driven by compiler_compare from the base checkout",
+    "cpu": 2,
+    "frontend_scaling": {
+        "workload": "--suite all: generated pointer tables, scopes, deep scopes and fresh bindings; "
+                    "-fsyntax-only and -c cells, fresh process per sample",
+        "arguments": ["--suite", "all", "--warmups", "1", "--repetitions", "11", "--cpu", "2"],
+        "suite": "all", "warmups": 1, "repetitions": 11,
+        "correctness": "byte-identical -c objects from both binaries; unchanged sources and binaries",
+    },
+    "selection": {
+        "workload": "the tool's three generated workloads: bench-select replay plus fresh-process -O2 -c "
+                    "under both register allocators, programs executed once and failure paths checked",
+        "arguments": ["--samples", "15", "--allocators", "fast", "quality", "--check", "--cpu", "2",
+                      "--timeout", "120", "--build-description", "frontend-selector-v1"],
+        "samples": 15, "allocators": ["fast", "quality"],
+        "workloads": ["many-small.c", "one-large.c", "abi-and-memory.c"],
+        "correctness": "identical target and selected work counts, zero fallback functions and identical object "
+                       "bytes per allocator across every sample of both binaries",
+    },
+    "ide_bench": {
+        "workload": "`ide bench`: preprocess, parse and analyze tests/basic_c_operations.c of the base checkout, "
+                    "one warm-up and 30 timed in-process iterations per run",
+        "source": "tests/basic_c_operations.c", "iterations": 30, "pairs": 20,
+        "pairing": "fresh process per run; pair p runs baseline first when p is even, candidate first when odd",
+        "correctness": "every run exits 0 with exactly one BENCH_C_FRONTEND line for the same source and bytes",
+    },
+    "decision": "report-only: medians are reported and never gate",
+    "report_only": True,
+}
+# Issue #2761: the Zen 5 route for tool:wild_linker_bench.c (#2645). One fresh
+# exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare route. The
+# head's own ide objects are built by clang without LTO in an isolated clone of
+# the head, in the audit's unity and separate trees; the trusted revision's
+# tools/wild_linker_acceptance.c --link-only then times the host's installed
+# Wild against the audit's comparator, mold, on the audit's three direct
+# link-only ide cells under its fixed link policy (2026-10-04T185601Z). Nothing
+# is downloaded: both linkers are found with `command -v`; a host without mold
+# compares against its default `ld` with that kind's own equivalent options.
+# Cells, populations and CPUs are frozen here; changing any value needs a new
+# name. It is report-only, but every link must succeed and repeat byte-identically.
+WILD_LINKER_REQUEST_LINE = "profile: wild-linker-v1"
+WILD_LINKER_SCHEMA = "buster-wild-linker-v1"
+WILD_LINKER_BUILD_ID = "0x2645264526452645264526452645264526452645"
+# kind -> its `command -v` name, how its --version output starts, its options
+# matching Wild's --no-fork --icf=none, and its one-thread option. GNU ld neither
+# forks nor folds identical code and links on one thread, so it adds none.
+WILD_LINKER_COMPARATORS = {
+    "mold": {"command": "mold", "version": "mold ", "policy": "--no-fork --icf=none", "threads1": "--threads=1"},
+    "bfd": {"command": "ld", "version": "GNU ld ", "policy": "", "threads1": ""},
+}
+WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
+# What `wild --version` prints and what Wild writes into its output's .comment by default
+# (Args::linker_identity at wild e9a9b0cb, libwild/src/args.rs). Its version is one of the forms
+# wild/build.rs writes: the Cargo version at a release tag, the origin/main merge-base hash, that
+# version and hash with "-modified", or that version with "non-git-build" (distribution builds,
+# e.g. the 9700X host's "Wild 0.10.0 non-git-build"). Another linker installed as `wild` is
+# refused by both checks.
+WILD_IDENTITY = re.compile(r"Wild (?:[0-9][0-9A-Za-z.+-]*(?: (?:[0-9a-f]{40}-modified|non-git-build))?"
+                           r"|[0-9a-f]{40}) \(compatible with GNU linkers\)\Z")
+# Wild writes that identity into .comment behind this prefix (Layout's `format!("Linker: {}\0", ...)`,
+# libwild/src/layout.rs at e9a9b0cb); run 38255545884 refused the host's genuine output for lacking it.
+WILD_COMMENT_PREFIX = "Linker: "
+WILD_LINKER_LINKERS = ("comparator", "wild")
+# Every token of a retained Wild argv: inert inside double quotes and outside them, so the
+# canonical quoted join is one simple command whatever the shell.
+WILD_ARGV_TOKEN = re.compile(r"[A-Za-z0-9_./+=,:@%-]+\Z")
+# The complete grammar of the arguments after the linker in Clang's printed argv for these
+# cells: flags without operands, options with their admitted operands, system -L directories,
+# plain -l names and object or archive operands. Anything else, notably a response file
+# (`@file`, which Wild expands recursively, args.rs at e9a9b0cb) or an option that loads
+# another file (-T, --script, --plugin, --just-symbols), is refused.
+WILD_ARGV_FLAGS = frozenset({"--hash-style=gnu", "--hash-style=both", "--build-id", "--eh-frame-hdr", "-pie",
+                             "-no-pie", "--as-needed", "--no-as-needed", "--push-state", "--pop-state"})
+WILD_ARGV_OPERANDS = {"-z": frozenset({"relro", "now", "noexecstack"}), "-m": frozenset({"elf_x86_64"}),
+                      "-dynamic-linker": None, "-o": None}
+WILD_ARGV_LIBRARY = re.compile(r"-l[A-Za-z0-9_+.-]+\Z")
+WILD_LINKER_TREE_ARGUMENTS = ["--cc", "clang", "--linker", "DEFAULT", "--no-include-tests", "--no-fuzz", "--no-sanitize",
+                              "--no-lto", "--", "-DBUSTER_DEBUG_INFO=ON", "-DBUSTER_FRAME_POINTERS=ON"]
+WILD_LINKER_PROFILE = {
+    "name": "wild-linker-v1",
+    "harness": "tools/wild_linker_acceptance.c --link-only at the trusted revision, built with clang -std=c11 -O2",
+    "inputs": "the head's own ide objects and archives, clang without LTO, with debug information and frame "
+              "pointers, built once in an isolated clone of the head; system startup files and libraries are the host's",
+    "trees": {"build-wild-unity": [*WILD_LINKER_TREE_ARGUMENTS, "-DBUSTER_UNITY_BUILD=ON"],
+              "build-wild-separate": [*WILD_LINKER_TREE_ARGUMENTS, "-DBUSTER_UNITY_BUILD=OFF"]},
+    "builds": [["build-wild-unity", "Release"], ["build-wild-separate", "Debug"], ["build-wild-separate", "Release"]],
+    "cells": WILD_LINKER_CELLS,
+    "cell_trees": {"ide-debug": ["build-wild-separate", "Debug"], "ide-unity-release": ["build-wild-unity", "Release"],
+                   "ide-separate-release": ["build-wild-separate", "Release"]},
+    "wild": {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1",
+             "identity": "Wild <version> (compatible with GNU linkers), from --version and its output's .comment"},
+    "comparator": "mold, the audit's comparator; the host's default ld (GNU ld) only when mold is absent",
+    "policy": f"Clang's printed Wild argv for each cell, identical for both linkers, plus --no-gc-sections and "
+              f"--build-id={WILD_LINKER_BUILD_ID}; no LTO",
+    "cpus": [2, 3, 4, 5],
+    "seed": 2645, "warmups": 2, "pairs": 21, "control_pairs": 9, "bootstraps": 4001,
+    "sampling": "per cell, 2 warmups then 21 seeded randomized AB/BA pairs at default threads and at one thread; "
+                "9 A/A pairs per linker on ide-debug; fixed populations, no adaptive stopping",
+    "correctness": "every link exits 0; each linker's output links again byte-identically and compiles a probe; "
+                   "the object and archive manifest is unchanged at the end",
+    "decision": "report-only: paired medians are reported and never gate",
+    "report_only": True,
+}
+# Issue #1915: the Zen 5 route for whole-link `ide cc` timing of the x86-64 ELF
+# TLS companion lookup (#2247). One fresh exact line in ANALYZER_REQUEST_PATH
+# selects it on the pull-compare route. After the corpus leg the trusted
+# revision's tools/link_tls_bench.py builds the frozen inputs below with the
+# host's clang and ar, links every cell once with each of the matched
+# baseline/candidate ide binaries, requires byte-identical images that print
+# the frozen output, then times fresh `ide cc` link processes of both binaries
+# as fixed alternating pairs on the pinned CPU. Inputs, cells and populations
+# are frozen here; changing any value needs a new name. It is report-only.
+LINK_TLS_REQUEST_LINE = "profile: link-tls-v1"
+LINK_TLS_SCHEMA = "buster-link-tls-v1"
+LINK_TLS_ROLES = ("baseline", "candidate")
+LINK_TLS_HARNESS = "link_tls_bench.py"
+# A timed sample cannot exceed the per-invocation timeout; bounding it here keeps
+# every median and ratio finite before any float arithmetic.
+LINK_TLS_INVOCATION_TIMEOUT_SECONDS = 60
+LINK_TLS_SAMPLE_LIMIT_NS = LINK_TLS_INVOCATION_TIMEOUT_SECONDS * 1_000_000_000
+_LINK_TLS_OBJECT = ["-O0", "-fPIC", "-g0", "-c"]
+
+
+def _link_tls_sums(variables: int) -> str:
+    """What a linked tls:N image prints: each variable i starts at i and both calls add every one, then increment it."""
+    first = variables * (variables - 1) // 2
+    return f"{first} {first + variables}\n"
+
+
+LINK_TLS_PROFILE = {
+    "name": "link-tls-v1",
+    "issue": "#1915",
+    "harness": "tools/link_tls_bench.py at the trusted revision, run by compiler_compare after the corpus leg on the "
+               "matched baseline/candidate ide binaries",
+    "compiler": "clang",
+    # Source kinds the harness writes: main calls sum_all twice and prints both sums; tls:N defines N global
+    # `__thread long` variables (v_i = i) read and incremented once each by sum_all, so two general-dynamic
+    # TLS sites per variable; plain is the no-TLS control, 4096 globals and 4096 functions summed in a chain.
+    "inputs": {
+        "main.o": {"source": "main", "arguments": ["-O0", "-g0", "-c"]},
+        "m1024.o": {"source": "tls:1024", "arguments": _LINK_TLS_OBJECT},
+        "m4096.o": {"source": "tls:4096", "arguments": _LINK_TLS_OBJECT},
+        "m16384.o": {"source": "tls:16384", "arguments": _LINK_TLS_OBJECT},
+        "n16384.o": {"source": "tls:16384", "arguments": ["-fno-plt", *_LINK_TLS_OBJECT]},
+        "m16384.a": {"archive": ["m16384.o"]},
+        "plain.o": {"source": "plain", "arguments": _LINK_TLS_OBJECT},
+    },
+    "cells": [
+        {"name": "tls-gd-2048", "arguments": ["cc", "-no-pie", "main.o", "m1024.o"], "stdout": _link_tls_sums(1024)},
+        {"name": "tls-gd-8192", "arguments": ["cc", "-no-pie", "main.o", "m4096.o"], "stdout": _link_tls_sums(4096)},
+        {"name": "tls-gd-32768", "arguments": ["cc", "-no-pie", "main.o", "m16384.o"], "stdout": _link_tls_sums(16384)},
+        {"name": "tls-gd-32768-pie", "arguments": ["cc", "-pie", "main.o", "m16384.o"], "stdout": _link_tls_sums(16384)},
+        {"name": "tls-gd-32768-no-plt", "arguments": ["cc", "-no-pie", "main.o", "n16384.o"],
+         "stdout": _link_tls_sums(16384)},
+        {"name": "tls-gd-32768-archive", "arguments": ["cc", "-no-pie", "main.o", "m16384.a"],
+         "stdout": _link_tls_sums(16384)},
+        {"name": "no-tls-control", "arguments": ["cc", "-no-pie", "main.o", "plain.o"], "stdout": "8386560 8386560\n"},
+    ],
+    "warmups": 2,
+    "pairs": 20,
+    "cpu": 2,
+    "order": "warmups alternate baseline, candidate; even pairs run baseline first, odd pairs candidate first",
+    "stopping": "fixed: exactly warmups + pairs invocations per binary and cell, no early stop or extension",
+    "timing": "wall nanoseconds of one fresh `taskset -c CPU ide ARGUMENTS -o OUTPUT` process from spawn to wait, "
+              "with its user plus system CPU; startup, argument parsing, input reads, linking and publication included",
+    "correctness": "each binary links every cell once before timing; both images are byte-identical, exit 0 and "
+                   "print the frozen output, and every timed link exits 0",
+    "statistic": "per pair candidate/baseline wall time; per cell the median pair ratio with a distribution-free "
+                 "95% order-statistic interval",
+    "decision": "report-only: ratios and intervals are reported and never gate",
+    "report_only": True,
+}
+# Issue #58: the Zen 5 route for comparing the compilers each side would
+# self-build with -fcanonical-inline. One fresh exact line in
+# ANALYZER_REQUEST_PATH selects it on the pull-compare route. After each role's
+# Clang Release build, the trusted tools/bench_direct/selfhost_inline_compare.py
+# compiles that role's own unity source once with stage1_command; after the
+# ordinary comparison it times the two stage-1 compilers compiling the frozen
+# merge-base tree with compile_flags, requiring byte-identical outputs, then
+# runs the topdown (Zen 5 metric groups, including the front-end ones) and
+# sampling profile steps for both. Everything is frozen here; changing any
+# value needs a new name. It is report-only.
+SELFHOST_INLINE_REQUEST_LINE = "profile: self-host-inline-compare-v1"
+SELFHOST_INLINE_SCHEMA = "buster-selfhost-inline-compare-v1"
+SELFHOST_INLINE_STAGE1_SCHEMA = "buster-selfhost-inline-stage1-v1"
+SELFHOST_INLINE_HARNESS = "selfhost_inline_compare.py"
+SELFHOST_INLINE_PROFILE = {
+    "name": "self-host-inline-compare-v1",
+    "issue": "#58",
+    "harness": "tools/bench_direct/selfhost_inline_compare.py at the trusted revision, run by compiler_compare",
+    "stage1": "after each role's Clang Release build, with that revision and its build/generated checked out, its ide "
+              "runs stage1_command once (untimed) on the role's own unity source",
+    "stage1_command": ["cc", "-march=native", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                       "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm", "-fcanonical-inline"],
+    "workload": "uarch_lab compare of the baseline (A) and candidate (B) stage-1 compilers compiling the ordinary "
+                "comparison's frozen merge-base tree with uarch_lab's default compile plus compile_flags",
+    "compile_flags": ["-fcanonical-inline"],
+    "pairs": 30,
+    "warmups": 1,
+    "cpu": 2,
+    "order": "ABBA",
+    "min_effect_percent": 0.5,
+    "profile_steps": ["topdown", "sampling"],
+    "correctness": "both stage-1 compilers must produce byte-identical outputs before timing "
+                   "(--require-identical-output), and every timed run must reproduce its reference",
+    "decision": "report-only: paired ratios, PMU counters and profiles are reported and never gate",
+    "report_only": True,
+}
+# The topdown metrics the report lists: Zen 5 front-end groups and the level-1 split.
+SELFHOST_INLINE_FRONTEND = re.compile(r"(?i)frontend|fetch|decod|op_?cache|icache|itlb|dispatch|pipelinel1")
+SELFHOST_INLINE_TOPDOWN_ROWS = 12
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
 SCALING_PROFILE = {
     "name": "scaling-v1",
@@ -528,12 +890,10 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
             if not isinstance(values.get(metric), dict):
                 problems.append(f"issue #48 {stage_name} metric {metric} is missing")
         wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
-        if not all(is_number(wall.get(key)) and math.isfinite(wall[key]) and wall[key] > 0
-                   for key in ("a_median", "b_median", "ratio")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio")):
             problems.append(f"issue #48 {stage_name} wall-time measurements are missing")
         code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
-        if not all(is_number(code.get(key)) and math.isfinite(code[key]) and code[key] > 0
-                   for key in ("a_value", "b_value", "ratio")):
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value", "ratio")):
             problems.append(f"issue #48 {stage_name} executable-section code-byte measurements are missing")
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
         instruction_ratio = instructions.get("ratio")
@@ -541,16 +901,11 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
         if instruction_ratio is None:
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"issue #48 {stage_name} retired-instruction NA has no unavailable-counter reason")
-        elif not is_number(instruction_ratio) or not math.isfinite(instruction_ratio) or instruction_ratio <= 0:
+        elif not _finite_positive(instruction_ratio):
             problems.append(f"issue #48 {stage_name} retired-instruction ratio is invalid")
-        elif not all(is_number(instructions.get(key)) and math.isfinite(instructions[key]) and instructions[key] > 0
-                     for key in ("a_median", "b_median")):
+        elif not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"issue #48 {stage_name} retired-instruction counts are missing")
     return problems
-
-
-def _positive(value: object) -> bool:
-    return is_number(value) and math.isfinite(value) and value > 0
 
 
 def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict) -> dict:
@@ -918,6 +1273,847 @@ def validate_compiler_probes(status: object, summary: object, base: str, head: s
     return problems
 
 
+def frontend_scaling_population() -> list[tuple[str, int, str]]:
+    """(kind, count, mode) of every FRONTEND_SELECTOR_PROFILE frontend-scaling record, in run order."""
+    return [(kind, count, mode) for kind, counts, modes in FRONTEND_SCALING_CASES for count in counts for mode in modes]
+
+
+def ide_bench_fields(line: object) -> dict | None:
+    """The parsed BENCH_C_FRONTEND line, or None when it is not exactly one well-formed line."""
+    match = IDE_BENCH.fullmatch(line) if isinstance(line, str) else None
+    fields = None
+    if match:
+        fields = {"path": match.group(1), **{key: int(match.group(index)) for index, key in
+                                            enumerate(("iterations", "bytes", "min_ns", "median_ns", "throughput_mb_s"), 2)}}
+        if not all(_number(value) for key, value in fields.items() if key != "path"):
+            fields = None
+    return fields
+
+
+def _samples(values: object, count: int, positive: bool) -> bool:
+    return isinstance(values, list) and len(values) == count and \
+        all(_number(value) and (value > 0 if positive else value >= 0) for value in values)
+
+
+def _median(values: object) -> float | None:
+    """The median of a non-empty list of finite numbers, else None; reported medians are re-derived with it."""
+    usable = isinstance(values, list) and values and \
+        all(_number(value) for value in values)
+    return statistics.median(values) if usable else None
+
+
+def _selection_sample(sample: object, allocators: list) -> bool:
+    """Whether one selection_benchmark sample has every typed identity, work count, timing and object field."""
+    metrics = sample.get("selection") if isinstance(sample, dict) and isinstance(sample.get("selection"), dict) else {}
+    built = sample.get("objects") if isinstance(sample, dict) and isinstance(sample.get("objects"), dict) else {}
+    return isinstance(sample, dict) and isinstance(sample.get("target"), str) and bool(sample["target"]) and \
+        all(type(metrics.get(key)) is int and _number(metrics[key]) and metrics[key] >= 0
+            for key in (*SELECTION_WORK_FIELDS, "median_ns")) and \
+        metrics["fallback_functions"] == 0 and \
+        all(metrics[key] > 0 for key in ("functions", "mir_instructions", "median_ns")) and \
+        sorted(built) == sorted(allocators) and \
+        all(isinstance(item, dict) and type(item.get("wall_ns")) is int and _finite_positive(item["wall_ns"]) and
+            isinstance(item.get("sha256"), str) and SHA256.fullmatch(item["sha256"]) is not None
+            for item in built.values())
+
+
+def selection_medians(samples: object, allocators: list) -> dict | None:
+    """Re-derived {selection_median_ns, compile_median_ns} of one binary's samples, or None when any is malformed."""
+    usable = isinstance(samples, list) and samples and all(_selection_sample(sample, allocators) for sample in samples)
+    return {"selection_median_ns": statistics.median(sample["selection"]["median_ns"] for sample in samples),
+            "compile_median_ns": {allocator: statistics.median(sample["objects"][allocator]["wall_ns"] for sample in samples)
+                                  for allocator in allocators}} if usable else None
+
+
+def validate_frontend_selector(scaling_status: object, provenance: object, results: object, selection_status: object,
+                               report: object, bench: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete FRONTEND_SELECTOR_PROFILE run on these binaries and host.
+
+    scaling_status/selection_status are the two tools' exits, provenance/results the frontend-scaling
+    provenance.json and results.json, report the selection report.json, bench the harness's ide-bench.json
+    and binaries the measured baseline/candidate records.
+    """
+    profile = FRONTEND_SELECTOR_PROFILE
+    cpu = profile["cpu"]
+    binaries = binaries if isinstance(binaries, dict) else {}
+    hashes = {role: (binaries.get(role) or {}).get("sha256") if isinstance(binaries.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    problems: list[str] = []
+    if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in hashes.values()):
+        problems.append("frontend-selector measured binaries are not both recorded")
+    # Frontend scaling.
+    label = "frontend scaling"
+    scaling = profile["frontend_scaling"]
+    if type(scaling_status) is not int or scaling_status != 0:
+        problems.append(f"{label} exited {scaling_status!r}, not 0")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    for key, wanted in (("suite", scaling["suite"]), ("warmups", scaling["warmups"]),
+                        ("repetitions", scaling["repetitions"]), ("cpu", cpu), ("affinity", [cpu]), ("complete", True),
+                        ("binary_sha256", hashes)):
+        if type(provenance.get(key)) is not type(wanted) or provenance.get(key) != wanted:
+            problems.append(f"{label} provenance {key} {provenance.get(key)!r} is not {wanted!r}")
+    if not (isinstance(provenance.get("cpu_model"), str) and APPROVED_HOST.search(provenance["cpu_model"])):
+        problems.append(f"{label} observed CPU {provenance.get('cpu_model')!r} is not the approved Zen 5 host "
+                        "(AMD Ryzen 7 9700X)")
+    records = results if isinstance(results, list) else []
+    population = [(row.get("kind"), row.get("count"), row.get("mode")) if isinstance(row, dict) else None for row in records]
+    if population != frontend_scaling_population():
+        problems.append(f"{label} records are not exactly the {len(frontend_scaling_population())} profile cells")
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        name = f"{row.get('kind')}-{row.get('count')}/{row.get('mode')}"
+        compilers = row.get("compilers") if isinstance(row.get("compilers"), dict) else {}
+        if sorted(compilers) != ["baseline", "candidate"] or not all(
+                isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
+                _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
+            problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
+        elif any(item.get(f"{metric}_median") != _median(item[f"{metric}_seconds"])
+                 for item in compilers.values() for metric in ("wall", "cpu")):
+            problems.append(f"{label} cell {name} reports medians its samples do not give")
+        if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
+                                                SHA256.fullmatch(row["object_sha256"])):
+            problems.append(f"{label} cell {name} has no identical-object hash")
+    # Selection.
+    label = "selection benchmark"
+    selection = profile["selection"]
+    if type(selection_status) is not int or selection_status != 0:
+        problems.append(f"{label} exited {selection_status!r}, not 0")
+    report = report if isinstance(report, dict) else {}
+    host = report.get("host") if isinstance(report.get("host"), dict) else {}
+    compilers = report.get("compilers") if isinstance(report.get("compilers"), dict) else {}
+    if report.get("schema_version") != 1 or report.get("build_description") != profile["name"]:
+        problems.append(f"{label} report is not a schema-1 {profile['name']} report")
+    if {role: (compilers.get(role) or {}).get("sha256") if isinstance(compilers.get(role), dict) else None
+            for role in ("baseline", "candidate")} != hashes or sorted(compilers) != ["baseline", "candidate"]:
+        problems.append(f"{label} compilers are not the measured baseline and candidate binaries")
+    if not (isinstance(host.get("cpu"), str) and APPROVED_HOST.search(host["cpu"])):
+        problems.append(f"{label} observed CPU {host.get('cpu')!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X)")
+    if host.get("affinity") != [cpu]:
+        problems.append(f"{label} affinity {host.get('affinity')!r} is not [{cpu}]")
+    workloads = report.get("workloads") if isinstance(report.get("workloads"), list) else []
+    if [Path(row.get("path", "")).name if isinstance(row, dict) and isinstance(row.get("path"), str) else None
+            for row in workloads] != selection["workloads"]:
+        problems.append(f"{label} workloads are not exactly {selection['workloads']!r}")
+    for row in workloads:
+        if not isinstance(row, dict):
+            continue
+        name = Path(str(row.get("path"))).name
+        samples = row.get("samples") if isinstance(row.get("samples"), dict) else {}
+        flat = [sample for role in ("baseline", "candidate") for sample in
+                (samples.get(role) if isinstance(samples.get(role), list) else [])]
+        if sorted(samples) != ["baseline", "candidate"] or any(
+                not isinstance(samples[role], list) or len(samples[role]) != selection["samples"] for role in samples):
+            problems.append(f"{label} workload {name} does not have {selection['samples']} samples per binary")
+        identities, objects = set(), {allocator: set() for allocator in selection["allocators"]}
+        complete = all(_selection_sample(sample, selection["allocators"]) for sample in flat)
+        # Identities and hashes are compared only once every field is typed, so nothing unhashable reaches a set.
+        for sample in flat if complete else []:
+            identities.add((sample["target"], *(sample["selection"][key] for key in SELECTION_WORK_FIELDS)))
+            for allocator, item in sample["objects"].items():
+                objects[allocator].add(item["sha256"])
+        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        if not complete:
+            problems.append(f"{label} workload {name} has a malformed, incomplete or fallback sample")
+        elif any(not isinstance(summary.get(role), dict) or
+                 {key: summary[role].get(key) for key in ("selection_median_ns", "compile_median_ns")} !=
+                 selection_medians(samples.get(role), selection["allocators"]) for role in ("baseline", "candidate")):
+            problems.append(f"{label} workload {name} reports medians its samples do not give")
+        if len(identities) > 1:
+            problems.append(f"{label} workload {name} selected different work or targets across samples")
+        if any(len(found) > 1 for found in objects.values()):
+            problems.append(f"{label} workload {name} produced different objects")
+    # ide bench.
+    label = "ide bench"
+    wanted = profile["ide_bench"]
+    bench = bench if isinstance(bench, dict) else {}
+    if bench.get("schema") != FRONTEND_SELECTOR_SCHEMA or bench.get("cpu") != cpu or bench.get("binaries") != hashes:
+        problems.append(f"{label} record is not a {FRONTEND_SELECTOR_SCHEMA} run on the measured binaries and CPU {cpu}")
+    if not (isinstance(bench.get("cpu_model"), str) and APPROVED_HOST.search(bench["cpu_model"])):
+        problems.append(f"{label} observed CPU {bench.get('cpu_model')!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X)")
+    runs = bench.get("runs") if isinstance(bench.get("runs"), list) else []
+    order = [role for pair in range(wanted["pairs"]) for role in
+             (("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline"))]
+    if [run.get("role") if isinstance(run, dict) else None for run in runs] != order:
+        problems.append(f"{label} runs are not the profile's {len(order)} alternating runs")
+    sizes = set()
+    for index, run in enumerate(runs):
+        fields = ide_bench_fields(run.get("line")) if isinstance(run, dict) else None
+        if not isinstance(run, dict) or run.get("exit") != 0 or fields is None or fields["path"] != wanted["source"] or \
+                fields["iterations"] != wanted["iterations"] or fields["bytes"] <= 0 or \
+                not 0 < fields["min_ns"] <= fields["median_ns"]:
+            problems.append(f"{label} run {index} did not report one complete {wanted['iterations']}-iteration line")
+        else:
+            sizes.add(fields["bytes"])
+    if len(sizes) > 1:
+        problems.append(f"{label} runs measured different source sizes")
+    return problems
+
+
+def frontend_selector_digest(results: object, report: object, bench: object) -> list[dict]:
+    """The report's view: baseline/candidate medians re-derived from the raw samples of every cell, never
+    taken from a tool's own summary fields."""
+    digest = []
+    for row in results if isinstance(results, list) else []:
+        compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
+        values = [_median(compilers[role].get("wall_seconds")) if isinstance(compilers.get(role), dict) else None
+                  for role in ("baseline", "candidate")]
+        if isinstance(row, dict):
+            digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
+                           "unit": "s", "values": values})
+    for row in report.get("workloads", []) if isinstance(report, dict) and isinstance(report.get("workloads"), list) else []:
+        samples = row.get("samples") if isinstance(row, dict) and isinstance(row.get("samples"), dict) else {}
+        name = Path(str(row.get("path"))).name if isinstance(row, dict) else "NA"
+        allocators = FRONTEND_SELECTOR_PROFILE["selection"]["allocators"]
+        roles = [selection_medians(samples.get(role), allocators) or {} for role in ("baseline", "candidate")]
+        digest.append({"name": f"selection {name}", "unit": "ns",
+                       "values": [role.get("selection_median_ns") for role in roles]})
+        for allocator in allocators:
+            digest.append({"name": f"selection {name} -c {allocator}", "unit": "ns",
+                           "values": [role["compile_median_ns"][allocator] if role else None for role in roles]})
+    runs = bench.get("runs") if isinstance(bench, dict) and isinstance(bench.get("runs"), list) else []
+    medians = {"baseline": [], "candidate": []}
+    for run in runs:
+        fields = ide_bench_fields(run.get("line")) if isinstance(run, dict) else None
+        if fields is not None and run.get("role") in ("baseline", "candidate"):
+            medians[run["role"]].append(fields["median_ns"])
+    if runs:
+        digest.append({"name": "ide bench", "unit": "ns",
+                       "values": [statistics.median(medians[role]) if medians[role] else None
+                                  for role in ("baseline", "candidate")]})
+    return digest
+
+
+def wild_linker_population() -> list[tuple[str, int, str, str]]:
+    """(cell, pairs, A linker, B linker) of every WILD_LINKER_PROFILE comparison, in the harness's run order."""
+    profile = WILD_LINKER_PROFILE
+    population = []
+    for cell in profile["cells"]:
+        population += [(f"{cell}-default", profile["pairs"], "comparator", "wild"),
+                       (f"{cell}-threads1", profile["pairs"], "comparator", "wild")]
+        if cell == "ide-debug":
+            population += [("ide-debug-aa-comparator", profile["control_pairs"], "comparator", "comparator"),
+                           ("ide-debug-aa-wild", profile["control_pairs"], "wild", "wild")]
+    return population
+
+
+def wild_linker_bundle_files() -> dict[str, str]:
+    """Bundle key -> the harness output each one reads, relative to the exported wild_linker directory."""
+    files = {"identity": "wild-linker.json", "raw": "raw.csv", "summary": "summary.csv", "commands": "commands.tsv",
+             "affinity": "affinity.txt", "completion": "completion.txt"}
+    for cell in WILD_LINKER_CELLS:
+        files[f"inputs {cell}"] = f"{cell}-inputs.sha256"
+        files[f"argv {cell}"] = f"{cell}-argv.txt"
+        for linker in WILD_LINKER_LINKERS:
+            files[f"output {cell} {linker}"] = f"{cell}-{linker}.output.sha256"
+            files[f"comment {cell} {linker}"] = f"{cell}-{linker}.comment.txt"
+    return files
+
+
+def _xorshift(state: int) -> int:
+    state ^= (state << 13) & 0xFFFFFFFF
+    state ^= state >> 17
+    return state ^ ((state << 5) & 0xFFFFFFFF)
+
+
+def wild_linker_schedule() -> tuple[dict, dict]:
+    """Replay the harness's seeded generator: ({cell: [first variant index per round]}, {cell: state before
+    its bootstrap}), so the run order and every bootstrap interval are re-derived rather than trusted."""
+    state = WILD_LINKER_PROFILE["seed"]
+    orders, bootstrap = {}, {}
+    for cell, pairs, _, _ in wild_linker_population():
+        order = []
+        for _ in range(pairs + WILD_LINKER_PROFILE["warmups"]):
+            state = _xorshift(state)
+            order.append(state & 1)
+        orders[cell] = order
+        bootstrap[cell] = state
+        for _ in range(WILD_LINKER_PROFILE["bootstraps"] * pairs):
+            state = _xorshift(state)
+    return orders, bootstrap
+
+
+def _paired_interval(ratios: list[float], state: int) -> tuple[float, float]:
+    """The harness's report(): 4001 resampled medians from the seeded generator, [100] and [3900] once sorted."""
+    count = len(ratios)
+    boots = []
+    for _ in range(WILD_LINKER_PROFILE["bootstraps"]):
+        sample = []
+        for _ in range(count):
+            state = _xorshift(state)
+            sample.append(ratios[state % count])
+        boots.append(sorted(sample)[count // 2])
+    boots.sort()
+    return boots[100], boots[3900]
+
+
+def _csv_rows(text: object) -> list[dict] | None:
+    try:
+        rows = list(csv.DictReader(text.splitlines())) if isinstance(text, str) else None
+    except csv.Error:
+        rows = None
+    return rows
+
+
+def _close(left: float, right: object) -> bool:
+    """The harness prints %.6f of double arithmetic; a re-derivation from printed samples agrees to 1e-5."""
+    return _number(right) and abs(left - right) <= 1e-5 * max(1.0, abs(left))
+
+
+def wild_linker_cells(raw: object, summary: object) -> tuple[list[dict], list[str]]:
+    """(cells, problems): every comparison re-derived from raw.csv against the frozen population, seeded order
+    and summary.csv; a cell whose samples are incomplete is reported with no values."""
+    problems: list[str] = []
+    rows = _csv_rows(raw)
+    reported = _csv_rows(summary)
+    if rows is None or reported is None:
+        return [], ["wild-linker raw.csv or summary.csv is not CSV"]
+    reported_by_cell = {}
+    for row in reported:
+        if row.get("cell") in reported_by_cell:
+            problems.append(f"wild-linker summary repeats cell {row.get('cell')!r}")
+        reported_by_cell[row.get("cell")] = row
+    population = wild_linker_population()
+    if sorted(reported_by_cell, key=str) != sorted(cell for cell, _, _, _ in population):
+        problems.append("wild-linker summary cells are not exactly the profile's comparisons")
+    orders, states = wild_linker_schedule()
+    warmups = WILD_LINKER_PROFILE["warmups"]
+    cells = []
+    for cell, pairs, first, second in population:
+        timed = [row for row in rows if row.get("cell") == cell]
+        expected = [(variant, str(round_)) for round_, lead in zip(range(-warmups, pairs), orders[cell])
+                    for variant in (("A", "B") if lead == 0 else ("B", "A"))]
+        values = {"A": [], "B": []}
+        complete = [(row.get("variant"), row.get("round")) for row in timed] == expected
+        for row in timed if complete else []:
+            try:
+                wall = float(row["wall_ms"])
+                exit_status = int(row["exit"])
+            except (TypeError, ValueError):
+                wall, exit_status = math.nan, -1
+            if exit_status != 0 or not (math.isfinite(wall) and wall > 0):
+                complete = False
+            elif int(row["round"]) >= 0:
+                values[row["variant"]].append(wall)
+        record = {"name": cell, "pairs": pairs, "linkers": [first, second], "values": [None, None],
+                  "ratio": None, "ci95": [None, None]}
+        if not complete:
+            problems.append(f"wild-linker {cell} is not {warmups} warmups and {pairs} seeded pairs, each linked successfully")
+        else:
+            ratios = [b / a for a, b in zip(values["A"], values["B"])]
+            medians = [sorted(values[key])[pairs // 2] for key in ("A", "B")]
+            ratio = sorted(ratios)[pairs // 2]
+            interval = _paired_interval(ratios, states[cell])
+            row = reported_by_cell.get(cell) or {}
+            try:
+                printed = [float(row.get(key)) for key in ("median_A_ms", "median_B_ms", "median_paired_B_over_A",
+                                                            "ci95_low", "ci95_high")]
+                printed_pairs = int(row.get("n"))
+            except (TypeError, ValueError):
+                printed, printed_pairs = [], None
+            if printed_pairs != pairs or len(printed) != 5 or \
+                    not all(_close(mine, theirs) for mine, theirs in zip([*medians, ratio, *interval], printed)):
+                problems.append(f"wild-linker {cell} summary does not match its raw samples")
+            record.update({"values": medians, "ratio": ratio, "ci95": list(interval)})
+        cells.append(record)
+    return cells, problems
+
+
+def wild_linker_digest(raw: object, summary: object) -> list[dict]:
+    """The report's view of every comparison, re-derived from the raw samples."""
+    return wild_linker_cells(raw, summary)[0]
+
+
+def _unique_pairs(pairs: list) -> dict:
+    """json object hook: a repeated key could hide a second value, so it is malformed."""
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate JSON key")
+    return dict(pairs)
+
+
+def _wild_linker_identity_problems(identity: object, head: str) -> tuple[dict, list[str]]:
+    """(linkers, problems) for the harness-side identity record."""
+    profile = WILD_LINKER_PROFILE
+    identity = identity if isinstance(identity, dict) else {}
+    problems: list[str] = []
+    for key, wanted in (("schema", WILD_LINKER_SCHEMA), ("profile", profile["name"]), ("head", head),
+                        ("cpus", profile["cpus"]), ("exit", 0)):
+        if type(identity.get(key)) is not type(wanted) or identity.get(key) != wanted:
+            problems.append(f"wild-linker record {key} {identity.get(key)!r} is not {wanted!r}")
+    if not (isinstance(identity.get("cpu_model"), str) and APPROVED_HOST.search(identity["cpu_model"])):
+        problems.append(f"wild-linker observed CPU {identity.get('cpu_model')!r} is not the approved Zen 5 host "
+                        "(AMD Ryzen 7 9700X)")
+    linkers = identity.get("linkers") if isinstance(identity.get("linkers"), dict) else {}
+    usable = {}
+    for role in WILD_LINKER_LINKERS:
+        linker = linkers.get(role) if isinstance(linkers.get(role), dict) else {}
+        kind = linker.get("kind")
+        frozen = profile["wild"] if role == "wild" else WILD_LINKER_COMPARATORS.get(kind) if isinstance(kind, str) else None
+        if role == "wild" and kind != "wild":
+            frozen = None
+        version = linker.get("version")
+        if frozen is None:
+            problems.append(f"wild-linker {role} kind {kind!r} is not supported")
+        elif linker.get("command") != frozen["command"] or linker.get("policy") != frozen["policy"] or \
+                linker.get("threads1") != frozen["threads1"]:
+            problems.append(f"wild-linker {role} command or options are not the frozen ones for {kind!r}")
+        elif role == "comparator" and not (isinstance(version, str) and version.startswith(frozen["version"])):
+            problems.append(f"wild-linker comparator version {version!r} is not a {kind} version")
+        elif role == "wild" and not (isinstance(version, str) and WILD_IDENTITY.fullmatch(version)):
+            problems.append(f"wild-linker wild version {version!r} is not Wild's own identity")
+        if role == "comparator" and linker.get("substituted") is not (kind != "mold"):
+            problems.append("wild-linker comparator substitution flag does not match its kind")
+        if not (isinstance(version, str) and version.strip()):
+            problems.append(f"wild-linker {role} has no recorded version output")
+        if not all(isinstance(linker.get(key), str) and linker[key].startswith("/") and "'" not in linker[key] and
+                   '"' not in linker[key] for key in ("path", "realpath")):
+            problems.append(f"wild-linker {role} path is not a recorded absolute path")
+        if not (isinstance(linker.get("sha256"), str) and SHA256.fullmatch(linker["sha256"])) or \
+                linker.get("sha256_after") != linker.get("sha256"):
+            problems.append(f"wild-linker {role} SHA-256 is missing or changed during the leg")
+        usable[role] = linker
+    if usable.get("wild", {}).get("sha256") == usable.get("comparator", {}).get("sha256"):
+        problems.append("wild-linker Wild and its comparator are the same executable")
+    root = identity.get("build_root")
+    if not (isinstance(root, str) and root.startswith("/") and "'" not in root and "\n" not in root and
+            os.path.normpath(root) == root):
+        problems.append(f"wild-linker build root {root!r} is not a recorded absolute path")
+    harness = identity.get("harness") if isinstance(identity.get("harness"), dict) else {}
+    if sorted(harness) != ["wild_linker_acceptance.c", "wild_linker_bench.c"] or \
+            not all(isinstance(value, str) and SHA256.fullmatch(value) for value in harness.values()):
+        problems.append("wild-linker harness sources are not both identified")
+    return usable, problems
+
+
+def validate_wild_linker(status: object, files: object, head: str, expected_identity: object = None) -> list[str]:
+    """Reasons the evidence is not one complete WILD_LINKER_PROFILE run of these linkers on these inputs.
+
+    status is the harness exit; files maps wild_linker_bundle_files() keys to their exported text, and
+    expected_identity, when given, is the receipt's copy of the identity record, which must match the export.
+    """
+    profile = WILD_LINKER_PROFILE
+    files = files if isinstance(files, dict) else {}
+    problems: list[str] = []
+    if type(status) is not int or status != 0:
+        problems.append(f"wild-linker harness exited {status!r}, not 0")
+    missing = [key for key in wild_linker_bundle_files() if not isinstance(files.get(key), str)]
+    if missing:
+        return [*problems, f"wild-linker evidence lacks {', '.join(missing)}"]
+    try:
+        identity = json.loads(files["identity"], object_pairs_hook=_unique_pairs)
+    except ValueError:
+        identity = None
+    if expected_identity is not None and identity != expected_identity:
+        problems.append("wild-linker exported identity record differs from the receipt")
+    linkers, found = _wild_linker_identity_problems(identity, head)
+    problems.extend(found)
+    if files["affinity"] != "affinity=%s\n" % ",".join(str(cpu) for cpu in profile["cpus"]):
+        problems.append(f"wild-linker harness affinity {files['affinity'].strip()!r} is not CPUs {profile['cpus']!r}")
+    if files["completion"] != "link_only=PASS\n":
+        problems.append("wild-linker harness did not record a complete link-only pass")
+    inputs = identity.get("inputs") if isinstance(identity, dict) and isinstance(identity.get("inputs"), dict) else {}
+    for cell in profile["cells"]:
+        manifest = files[f"inputs {cell}"]
+        lines = manifest.splitlines()
+        if not lines or not all(re.fullmatch(r"[0-9a-f]{64}  \S.*", line) for line in lines) or \
+                not any(line.endswith((".o", ".a")) for line in lines):
+            problems.append(f"wild-linker {cell} input manifest is empty or malformed")
+        if inputs.get(cell) != hashlib.sha256(manifest.encode()).hexdigest():
+            problems.append(f"wild-linker {cell} input manifest is not the one the receipt records")
+        for linker in WILD_LINKER_LINKERS:
+            if not SHA256.fullmatch(files[f"output {cell} {linker}"].strip()):
+                problems.append(f"wild-linker {cell} {linker} output has no SHA-256")
+    _, cell_problems = wild_linker_cells(files["raw"], files["summary"])
+    problems.extend(cell_problems)
+    rows = _csv_rows(files["raw"]) or []
+    # Every setup step ran (the harness stops on the first failure); a timed or check row never failed.
+    counts = {"validated-link": 6, "output-identity": 6, "linked-compiler-smoke": 6, "same-linker-repeat": 6,
+              "same-linker-byte-identity": 6, "unchanged-object-manifest": 3, "freeze-object-manifest": 3,
+              "capture-direct-linker": 3}
+    for name, count in counts.items():
+        if [row.get("exit") for row in rows if row.get("cell") == name] != ["0"] * count:
+            problems.append(f"wild-linker {name} did not pass {count} times")
+    root = identity.get("build_root") if isinstance(identity, dict) and isinstance(identity.get("build_root"), str) else ""
+    expected = {}
+    for cell in profile["cells"]:
+        commands, argv_problems = wild_linker_cell_commands(cell, files[f"argv {cell}"], files[f"inputs {cell}"],
+                                                            root, linkers)
+        expected[cell] = commands
+        problems.extend(argv_problems)
+        wild = linkers.get("wild", {}).get("version")
+        comments = {linker: files[f"comment {cell} {linker}"].splitlines() for linker in WILD_LINKER_LINKERS}
+        if not isinstance(wild, str) or WILD_COMMENT_PREFIX + wild not in comments["wild"]:
+            problems.append(f"wild-linker {cell} Wild output does not carry the recorded Wild identity in .comment")
+        if any(WILD_IDENTITY.fullmatch(line.removeprefix(WILD_COMMENT_PREFIX)) for line in comments["comparator"]):
+            problems.append(f"wild-linker {cell} comparator output carries a Wild identity in .comment")
+    # Every timed command, and each validated and repeated link, is exactly the command derived from the
+    # cell's retained argv and the frozen options: no other input, linker or shell text can run.
+    commands = {}
+    for line in files["commands"].splitlines():
+        fields = line.split("\t", 4)
+        if len(fields) == 5:
+            commands[fields[0]] = fields
+    timed = {}
+    for cell in profile["cells"]:
+        timed.update({name: (cell, first, second) for name, _, first, second in wild_linker_population()
+                      if name.startswith(cell + "-")})
+    current = None
+    for row in rows:
+        name = row.get("cell")
+        fields = commands.get(row.get("sequence"))
+        command = fields[4] if fields and fields[1:4] == [name, row.get("variant"), row.get("round")] else None
+        if name in timed and row.get("variant") in ("A", "B"):
+            current, first, second = timed[name]
+            role = first if row["variant"] == "A" else second
+            threads = "threads1" if name.endswith("-threads1") else "default"
+            allowed = {(expected.get(current) or {}).get((role, threads))}
+        elif name in ("validated-link", "same-linker-repeat") and current is not None:
+            allowed = {(expected.get(current) or {}).get((role, "default")) for role in WILD_LINKER_LINKERS}
+        else:
+            continue
+        if command is None or command not in allowed:
+            problems.append(f"wild-linker {name} {row.get('variant')} round {row.get('round')} is not the command "
+                            "derived from the retained argv and the frozen options")
+            break
+    return problems
+
+
+def _link_tls_invocation(value: object) -> int | None:
+    """Wall nanoseconds of one well-formed timed link that exited 0, else None."""
+    result = None
+    if isinstance(value, dict) and set(value) == {"exit", "wall_ns", "cpu_ns"} and type(value["exit"]) is int and \
+            value["exit"] == 0 and type(value["wall_ns"]) is int and 0 < value["wall_ns"] <= LINK_TLS_SAMPLE_LIMIT_NS and \
+            type(value["cpu_ns"]) is int and 0 <= value["cpu_ns"] <= LINK_TLS_SAMPLE_LIMIT_NS:
+        result = value["wall_ns"]
+    return result
+
+
+def link_tls_cell_statistics(cell: object) -> tuple[dict | None, list[str]]:
+    """Re-derive one cell's statistics from its identity record and raw invocations; (statistics, problems)."""
+    profile = LINK_TLS_PROFILE
+    name = cell.get("name") if isinstance(cell, dict) else None
+    label = f"link-tls {name if isinstance(name, str) else '?'}"
+    expected = next((item for item in profile["cells"] if item["name"] == name), None)
+    if expected is None or cell.get("arguments") != expected["arguments"]:
+        return None, [f"{label} is not a cell of the frozen profile"]
+    problems: list[str] = []
+    identity = cell.get("identity")
+    keys = {"exit", "sha256", "size_bytes", "run_exit", "stdout"}
+    if not isinstance(identity, dict) or set(identity) != set(LINK_TLS_ROLES) or \
+            any(not isinstance(identity[role], dict) or set(identity[role]) != keys for role in LINK_TLS_ROLES):
+        problems.append(f"{label} identity record is malformed")
+    else:
+        for role in LINK_TLS_ROLES:
+            record = identity[role]
+            if record["exit"] != 0 or record["run_exit"] != 0 or record["stdout"] != expected["stdout"] or \
+                    not isinstance(record["sha256"], str) or not re.fullmatch("[0-9a-f]{64}", record["sha256"]) or \
+                    type(record["size_bytes"]) is not int or record["size_bytes"] <= 0:
+                problems.append(f"{label} {role} image did not link, run and print the frozen output")
+        if identity["baseline"]["sha256"] != identity["candidate"]["sha256"] or \
+                identity["baseline"]["size_bytes"] != identity["candidate"]["size_bytes"]:
+            problems.append(f"{label} baseline and candidate images are not byte-identical")
+    warmups = cell.get("warmups")
+    if not isinstance(warmups, dict) or set(warmups) != set(LINK_TLS_ROLES) or \
+            any(not isinstance(warmups[role], list) or len(warmups[role]) != profile["warmups"] for role in LINK_TLS_ROLES):
+        problems.append(f"{label} does not have {profile['warmups']} warmups per binary")
+    elif any(_link_tls_invocation(item) is None for role in LINK_TLS_ROLES for item in warmups[role]):
+        problems.append(f"{label} has a failed or malformed warmup")
+    pairs = cell.get("pairs")
+    ratios: list[float] = []
+    walls = {role: [] for role in LINK_TLS_ROLES}
+    if not isinstance(pairs, list) or len(pairs) != profile["pairs"]:
+        problems.append(f"{label} does not have exactly {profile['pairs']} pairs")
+        pairs = []
+    for index, pair in enumerate(pairs):
+        order = ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]
+        if not isinstance(pair, dict) or pair.get("order") != order or set(pair) != {"order", *LINK_TLS_ROLES}:
+            problems.append(f"{label} pair {index} is malformed or out of the fixed order")
+            continue
+        values = {role: _link_tls_invocation(pair[role]) for role in LINK_TLS_ROLES}
+        if values["baseline"] is None or values["candidate"] is None:
+            problems.append(f"{label} pair {index} has a failed or malformed link")
+            continue
+        for role in LINK_TLS_ROLES:
+            walls[role].append(values[role])
+        ratios.append(values["candidate"] / values["baseline"])
+    if problems or len(ratios) != profile["pairs"]:
+        return None, problems
+    low, high = compiler_probes_interval(ratios)
+    return {"name": expected["name"], "baseline_ns": statistics.median(walls["baseline"]),
+            "candidate_ns": statistics.median(walls["candidate"]), "ratio": statistics.median(ratios),
+            "ratio_low": low, "ratio_high": high, "candidate_faster": sum(1 for ratio in ratios if ratio < 1.0),
+            "image_sha256": identity["baseline"]["sha256"]}, []
+
+
+def link_tls_digest(summary: object) -> list[dict]:
+    """The re-derived per-cell statistics of a link-tls summary; malformed cells are left out."""
+    digest = []
+    cells = summary.get("cells") if isinstance(summary, dict) else None
+    for cell in cells if isinstance(cells, list) else []:
+        statistics_value, unused_problems = link_tls_cell_statistics(cell)
+        if statistics_value is not None:
+            digest.append(statistics_value)
+    return digest
+
+
+def validate_link_tls(status: object, summary: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete LINK_TLS_PROFILE run of these binaries.
+
+    status is link_tls_bench.py's exit and summary its summary.json; binaries is the receipt's
+    role -> {"sha256", ...} record of the measured ide binaries, hashed by compiler_compare itself.
+    Every statistic is re-derived from the raw samples; the harness states none.
+    """
+    label = "link-tls"
+    profile = LINK_TLS_PROFILE
+    problems: list[str] = []
+    if type(status) is not int or status != 0:
+        problems.append(f"{label} exited {status!r}, not 0")
+    if not isinstance(summary, dict):
+        return [*problems, f"{label} summary is missing or malformed"]
+    for key, wanted in (("schema", LINK_TLS_SCHEMA), ("profile", profile["name"]), ("cpu", profile["cpu"]),
+                        ("status", "complete"), ("errors", [])):
+        if summary.get(key) != wanted:
+            problems.append(f"{label} summary {key} is {summary.get(key)!r}, not {wanted!r}")
+    hashes = {role: binaries[role].get("sha256") if isinstance(binaries, dict) and isinstance(binaries.get(role), dict)
+              else None for role in LINK_TLS_ROLES}
+    if any(not isinstance(value, str) for value in hashes.values()) or summary.get("binaries") != hashes:
+        problems.append(f"{label} did not measure the recorded baseline and candidate binaries")
+    elif hashes["baseline"] == hashes["candidate"]:
+        problems.append(f"{label} baseline and candidate are the same binary")
+    inputs = summary.get("inputs")
+    if not isinstance(inputs, dict) or set(inputs) != set(profile["inputs"]) or \
+            any(not isinstance(value, str) or not re.fullmatch("[0-9a-f]{64}", value) for value in inputs.values()):
+        problems.append(f"{label} inputs are not the frozen input set, each with its sha256")
+    toolchain = summary.get("toolchain")
+    if not isinstance(toolchain, dict) or set(toolchain) != {"clang", "ar"} or \
+            any(not isinstance(value, str) or not value for value in toolchain.values()):
+        problems.append(f"{label} does not record the clang and ar that built its inputs")
+    cells = summary.get("cells")
+    if not isinstance(cells, list) or [cell.get("name") if isinstance(cell, dict) else None for cell in cells] != \
+            [cell["name"] for cell in profile["cells"]]:
+        problems.append(f"{label} cells are not the frozen cells in order")
+        cells = []
+    for cell in cells:
+        problems.extend(link_tls_cell_statistics(cell)[1])
+    return problems
+
+
+def validate_selfhost_inline(stage1: object, result: object, binaries: object) -> list[str]:
+    """Reasons the stage-1 and result documents are not one complete SELFHOST_INLINE_PROFILE run.
+
+    stage1 maps baseline/candidate to selfhost_inline_compare.py's stage1.json; result is its result.json;
+    binaries is the receipt's role -> {"sha256", "revision", ...} record, hashed by compiler_compare itself.
+    The timed uarch_lab documents are checked by selfhost_inline_compare.validate_compare_documents.
+    """
+    label = "self-host inline"
+    profile = SELFHOST_INLINE_PROFILE
+    problems: list[str] = []
+    roles = ("baseline", "candidate")
+    if not isinstance(stage1, dict) or set(stage1) != set(roles):
+        return [f"{label} stage-1 records are missing"]
+    shas: dict = {}
+    for role in roles:
+        record = stage1[role]
+        expected = binaries.get(role) if isinstance(binaries, dict) and isinstance(binaries.get(role), dict) else {}
+        if not isinstance(record, dict) or record.get("schema") != SELFHOST_INLINE_STAGE1_SCHEMA or \
+                record.get("status") != "complete":
+            problems.append(f"{label} {role} stage-1 record is malformed or incomplete")
+            continue
+        if record.get("revision") != expected.get("revision") or not isinstance(expected.get("revision"), str):
+            problems.append(f"{label} {role} stage-1 compiler was not built from the {role} revision")
+        compiler = record.get("compiler") if isinstance(record.get("compiler"), dict) else {}
+        if compiler.get("sha256") != expected.get("sha256") or not isinstance(expected.get("sha256"), str):
+            problems.append(f"{label} {role} stage-1 compiler was not built by the recorded {role} binary")
+        if record.get("command") != profile["stage1_command"]:
+            problems.append(f"{label} {role} stage-1 command is not the frozen command")
+        built = record.get("stage1") if isinstance(record.get("stage1"), dict) else {}
+        if not re.fullmatch("[0-9a-f]{64}", str(built.get("sha256", ""))) or type(built.get("size_bytes")) is not int or \
+                built["size_bytes"] <= 0:
+            problems.append(f"{label} {role} stage-1 compiler identity is malformed")
+        else:
+            shas[role] = built["sha256"]
+    if not isinstance(result, dict):
+        return [*problems, f"{label} result is missing or malformed"]
+    for key, wanted in (("schema", SELFHOST_INLINE_SCHEMA), ("status", "complete"), ("profile", profile["name"])):
+        if result.get(key) != wanted:
+            problems.append(f"{label} result {key} is {result.get(key)!r}, not {wanted!r}")
+    baseline = binaries.get("baseline") if isinstance(binaries, dict) and isinstance(binaries.get("baseline"), dict) else {}
+    if result.get("base_revision") != baseline.get("revision"):
+        problems.append(f"{label} did not time the frozen merge-base tree")
+    if len(shas) == len(roles) and result.get("stage1_compilers") != {role: {"sha256": shas[role]} for role in roles}:
+        problems.append(f"{label} timed compilers are not the recorded stage-1 compilers")
+    return problems
+
+
+def _finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def selfhost_inline_frontend_problems(summary: object) -> list[str]:
+    """Reasons a self-host inline summary lacks usable paired front-end topdown evidence.
+
+    Every topdown row must be well formed; the level-1 front-end-bound metric (a name ending in
+    frontend_bound, as uarch_lab's dominant_category reads it) must be present with finite values for
+    both compilers; and no front-end row may carry a value for only one of them. Other groups (cache,
+    backend) are reported but never stand in for it, because step_topdown marks the step ok even when a
+    group fails or is unavailable."""
+    label = "self-host inline"
+    profile = summary.get("profile") if isinstance(summary, dict) and isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = topdown.get("metrics")
+    if topdown.get("status") != "ok" or not isinstance(rows, list) or not rows:
+        return [f"{label} topdown metrics are missing"]
+    problems: list[str] = []
+    if any(not isinstance(row, dict) or not isinstance(row.get("group"), str) or not isinstance(row.get("metric"), str)
+           for row in rows):
+        problems.append(f"{label} topdown has a malformed metric row")
+        rows = [row for row in rows if isinstance(row, dict)]
+    frontend = [row for row in rows if SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    if not any(str(row.get("metric", "")).lower().endswith("frontend_bound") and _finite_number(row.get("a")) and
+               _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown lacks a paired level-1 frontend_bound metric")
+    if any(_finite_number(row.get("a")) != _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown has a front-end metric measured for only one compiler")
+    return problems
+
+
+def selfhost_inline_digest(summary: object) -> dict | None:
+    """The reported rows of a self-host inline uarch summary: paired metrics, code bytes, front-end topdown."""
+    if not isinstance(summary, dict) or not isinstance(summary.get("metrics"), dict):
+        return None
+    metrics = {}
+    for key in ("wall", "task_clock", "instructions", "cycles", "ipc", "branch_misses", "peak_rss"):
+        row = summary["metrics"].get(key) if isinstance(summary["metrics"].get(key), dict) else {}
+        metrics[key] = {name: row.get(name) for name in ("a_median", "b_median", "ratio", "ci_low", "ci_high", "outcome")}
+    code = summary.get("code_bytes") if isinstance(summary.get("code_bytes"), dict) else {}
+    profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = [row for row in topdown.get("metrics") or [] if isinstance(row, dict) and
+            SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    return {"metrics": metrics, "code_bytes": {name: code.get(name) for name in ("a_value", "b_value", "ratio")},
+            "frontend": [{name: row.get(name) for name in ("group", "metric", "unit", "a", "b", "relative_change_percent")}
+                         for row in rows[:SELFHOST_INLINE_TOPDOWN_ROWS]],
+            "outputs_identical": summary.get("outputs_identical"), "verdict": verdict.get("text"),
+            "warnings": [item for item in summary.get("warnings") or [] if isinstance(item, str)]}
+
+
+def _shell_quote(text: str) -> str:
+    """The harness's quote(): one single-quoted shell word."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def _system_path(path: str) -> bool:
+    """An absolute path that stays under /usr, /lib, /lib64 or /lib32 once `..` is resolved."""
+    normal = os.path.normpath(path)
+    roots = ("/usr", "/lib", "/lib64", "/lib32")
+    return path.startswith("/") and (normal in roots or normal.startswith(tuple(root + "/" for root in roots)))
+
+
+def _contained(path: str, directory: str) -> bool:
+    """Whether path is already canonical (no `..`, `.` or empty component) and lies strictly inside directory,
+    so a raw-string prefix or membership match cannot hide a traversal out of the cell's tree."""
+    return os.path.normpath(path) == path and os.path.normpath(directory) == directory and \
+        path.startswith(directory + "/")
+
+
+def _wild_argv_grammar_problems(cell: str, arguments: list[str], config: str) -> list[str]:
+    """Reasons the arguments after the linker are not the frozen Clang link grammar (WILD_ARGV_FLAGS and friends)."""
+    problems: list[str] = []
+    index = 0
+    while index < len(arguments) and not problems:
+        token = arguments[index]
+        if token.startswith("@"):
+            problems.append(f"wild-linker {cell} retained argv passes a response file {token!r}, which Wild would "
+                            "expand without it being hashed")
+        elif token in WILD_ARGV_OPERANDS:
+            operand = arguments[index + 1] if index + 1 < len(arguments) else None
+            allowed = WILD_ARGV_OPERANDS[token]
+            if operand is None or (allowed is not None and operand not in allowed) or \
+                    (token == "-dynamic-linker" and not _system_path(operand)) or \
+                    (token == "-o" and operand != f"{config}/ide"):
+                problems.append(f"wild-linker {cell} retained argv gives {token} the unadmitted operand {operand!r}")
+            index += 1
+        elif token == f"--dependency-file=CMakeFiles/ide.dir/{config}/link.d":
+            # CMake's linker-written link dependencies (CMAKE_LINK_DEPENDS_USE_LINKER) name a file in the
+            # target's own directory; cmake 4.4.4 on the 9700X passes it (run 38255545884).
+            pass
+        elif token.startswith("-L"):
+            if not _system_path(token[2:]):
+                problems.append(f"wild-linker {cell} retained argv searches {token[2:]!r}, which is not a system directory")
+        elif token.startswith("-"):
+            if token not in WILD_ARGV_FLAGS and not WILD_ARGV_LIBRARY.fullmatch(token):
+                problems.append(f"wild-linker {cell} retained argv passes the unadmitted option {token!r}")
+        elif not token.endswith((".o", ".a")):
+            problems.append(f"wild-linker {cell} retained argv passes {token!r}, which is not an object or archive")
+        index += 1
+    return problems
+
+
+def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, linkers: dict) -> tuple[dict, list[str]]:
+    """({(role, default|threads1): command}, problems) for one cell, from its retained Wild argv.
+
+    The argv must start with the recorded Wild, write the cell's ide, and take every relative object or
+    archive from the cell's hashed input manifest; system startup objects must come from /usr or /lib.
+    """
+    profile = WILD_LINKER_PROFILE
+    tree, config = profile["cell_trees"][cell]
+    directory = f"{root}/{tree}"
+    problems: list[str] = []
+    wild = linkers.get("wild", {}).get("path")
+    comparator = linkers.get("comparator", {})
+    try:
+        tokens = shlex.split(argv) if "\n" not in argv.rstrip("\n") else None
+    except ValueError:
+        tokens = None
+    argv = argv.rstrip("\n")
+    # The retained argv must be exactly Clang's form, one double-quoted inert word per token; a packet
+    # that appends shell syntax (`; :`) and rewrites its commands to match is refused here, and the
+    # expected commands are rebuilt from the admitted tokens rather than from the raw text.
+    if tokens is not None and (not all(WILD_ARGV_TOKEN.match(token) for token in tokens) or
+                               argv != " ".join(f'"{token}"' for token in tokens)):
+        problems.append(f"wild-linker {cell} retained argv is not one double-quoted shell-inert word per argument")
+        tokens = None
+    argv = " ".join(f'"{token}"' for token in tokens or [])
+    listed = {line[66:] for line in manifest.splitlines() if len(line) > 66}
+    if not tokens or not isinstance(wild, str) or tokens[0] != wild or not argv.startswith(f'"{wild}" '):
+        problems.append(f"wild-linker {cell} retained argv does not start with the recorded Wild")
+        tokens = tokens or []
+    problems.extend(_wild_argv_grammar_problems(cell, tokens[1:], config))
+    outputs = [tokens[index + 1] for index, token in enumerate(tokens[:-1]) if token == "-o"]
+    if outputs != [f"{config}/ide"]:
+        problems.append(f"wild-linker {cell} retained argv does not write {config}/ide")
+    objects = [token for token in tokens[1:] if token.endswith((".o", ".a"))]
+    local = [token for token in objects if not token.startswith("/")]
+    if not local:
+        problems.append(f"wild-linker {cell} retained argv links no object of the head")
+    for token in objects:
+        path = token if token.startswith("/") else f"{directory}/{token}"
+        if token.startswith("/") and ((root and token.startswith(root + "/")) or not _system_path(token)):
+            problems.append(f"wild-linker {cell} links {token!r}, which is neither a hashed input nor a system file")
+            break
+        if not token.startswith("/") and not _contained(path, directory):
+            problems.append(f"wild-linker {cell} links {token!r}, which leaves {tree} once normalised")
+            break
+        if not token.startswith("/") and path not in listed:
+            problems.append(f"wild-linker {cell} links {token!r}, which its input manifest does not hash")
+            break
+    if any(not _contained(path, directory) for path in listed):
+        problems.append(f"wild-linker {cell} input manifest lists files outside {tree}")
+    common = f" --no-gc-sections --build-id={WILD_LINKER_BUILD_ID}"
+    prefix = f"cd {_shell_quote(directory)} && "
+    commands = {}
+    if tokens and isinstance(wild, str) and tokens[0] == wild and isinstance(comparator.get("path"), str):
+        candidate = f"{prefix}{argv}{common} {profile['wild']['policy']}"
+        reference = (f"{prefix}{_shell_quote(comparator['path'])}{argv[len(wild) + 2:]}{common} "
+                     f"{comparator.get('policy')}")
+        commands = {("wild", "default"): candidate, ("wild", "threads1"): f"{candidate} {profile['wild']['threads1']}",
+                    ("comparator", "default"): reference,
+                    ("comparator", "threads1"): f"{reference} {comparator.get('threads1')}"}
+    return commands, problems
+
+
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
     """Validate opt-in #3397 evidence shape and re-derive its budget verdict."""
     label = "issue #3397 ast-pilot receipt"
@@ -946,9 +2142,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
         rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
-        if not all(_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
             problems.append(f"{label} {cell} wall-time measurements are missing")
-        if not all(_positive(rss.get(key)) for key in ("a_median", "b_median")):
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} peak-RSS measurements are missing")
         if instructions is None:
             problems.append(f"{label} {cell} retired-instruction metric is missing")
@@ -956,8 +2152,8 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
             counters = values.get("counter_availability")
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
-        elif not _positive(instructions.get("ratio")) or \
-                not all(_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} retired-instruction counts are invalid")
         for key in ("outputs_identical", "diagnostics_identical"):
             if type(row.get(key)) is not bool:
@@ -965,7 +2161,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         metrics[cell] = values
     tree = summary.get("tree")
     retained = tree.get("retained_bytes") if isinstance(tree, dict) else None
-    if type(retained) is not int or retained <= 0 or not isinstance(tree.get("nodes"), int) or tree["nodes"] <= 0 or \
+    # Bounded first: ast_pilot_budget_verdict multiplies retained bytes by a float.
+    if type(retained) is not int or not _finite_positive(retained) or not isinstance(tree.get("nodes"), int) or \
+            tree["nodes"] <= 0 or \
             tree.get("a_tree_lines") != 0:
         problems.append(f"{label} tree retained bytes are missing, or variant A built a tree")
     if problems:
@@ -974,6 +2172,54 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
                    "diagnostics_identical": all(cells[cell]["diagnostics_identical"] for cell in AST_PILOT_CELLS)}
     if summary.get("verdict") != ast_pilot_budget_verdict(metrics, retained, correctness):
         problems.append(f"{label} verdict differs from the budget recomputed from its metrics")
+    return problems
+
+
+def validate_constant_reuse_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate opt-in #3011 evidence shape: both cells complete, measured and diagnostics-identical."""
+    label = "issue #3011 constant-reuse receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != CONSTANT_REUSE_ACCEPTANCE_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    profile = summary.get("profile")
+    if not isinstance(profile, dict) or set(profile) != set(CONSTANT_REUSE_ACCEPTANCE_PROFILE) | {"source_sha256"} or \
+            any(profile.get(key) != value for key, value in CONSTANT_REUSE_ACCEPTANCE_PROFILE.items()) or \
+            not SHA256.fullmatch(str(profile.get("source_sha256", ""))):
+        problems.append(f"{label} profile does not match the fixed acceptance profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(CONSTANT_REUSE_CELLS):
+        return [*problems, f"{label} does not hold exactly the intern and cse cells"]
+    for cell in CONSTANT_REUSE_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+        code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} peak-RSS measurements are missing")
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value")):
+            problems.append(f"{label} {cell} executable-section code bytes are missing")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        if row.get("diagnostics_identical") is not True:
+            problems.append(f"{label} {cell} diagnostics differ between the default and flagged compiles")
     return problems
 
 
@@ -2917,7 +4163,7 @@ def classify(summary: object, binaries: object, *, expected_profile: str | None 
         value = verdict.get(key)
         if not is_number(value):
             reasons.append(f"wall-time verdict has no numeric {key}")
-        elif not (math.isfinite(value) and value > 0):
+        elif not _finite_positive(value):
             reasons.append(f"wall-time verdict {key} {value!r} is not a finite positive ratio")
         elif wall and wall.get(key) != value:
             reasons.append(f"wall-time verdict {key} {value!r} contradicts the wall metric {wall.get(key)!r}")
@@ -2980,10 +4226,7 @@ def classify_throughput_exit(status: object, summary: object, metadata: object, 
     pairs, rounds = profile["pairs_per_round"], profile["rounds"]
 
     def finite(value: object, *, positive: bool = False) -> bool:
-        try:
-            return type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
-        except OverflowError:
-            return False
+        return _number(value) and (value > 0 if positive else value >= 0)
 
     def integer(value: object, *, positive: bool = False) -> bool:
         return type(value) is int and (value > 0 if positive else value >= 0)
@@ -3171,7 +4414,8 @@ REPORT_METRICS = (("wall", "wall time (harness span)", "s"), ("task_clock", "tas
 
 
 def number(value: object, form: str) -> str:
-    return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
+    # An out-of-range JSON integer renders as NA; a float format would raise OverflowError on it.
+    return form % value if type(value) is float or _number(value) else "NA"
 
 
 def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[str]) -> str:
@@ -3434,15 +4678,24 @@ INVENTORY_LEGS = {
         "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
         "inline": ("uarch_lab:compare@canonical-inline-self-host",),
         "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "constant-reuse": ("uarch_lab:compare@constant-reuse-acceptance",),
         "real-source": ("build:bench_throughput@throughput-real-source",),
         "production-profile": ("build:production_profile",),
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
+        "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
+        "wild-linker": ("tool:wild_linker_bench.c",),
+        "link-tls": ("tool:link_tls_bench.py",),
+        "self-host-inline": ("uarch_lab:compare@self-host-inline-compare",),
+        "historical-corpus": ("build:bench_throughput@throughput-corpus-historical",),
     },
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
 INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
+                            "constant-reuse": "constant_reuse_acceptance",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
-                            "compiler-probes": "compiler_probes"}
+                            "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
+                            "wild-linker": "wild_linker", "link-tls": "link_tls",
+                            "self-host-inline": "selfhost_inline"}
 
 
 def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
@@ -3460,8 +4713,11 @@ def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
         ran, recorded = analyzer, state if analyzer else "not requested"
     elif leg == "self-host":
         ran, recorded = not analyzer, "not requested" if analyzer else state
-    elif leg == "corpus":
-        if analyzer or ("throughput_profile" in receipt and receipt["throughput_profile"] is None):
+    elif leg in ("corpus", "historical-corpus"):
+        # The named historical recipe (#3714) discharges only its own row, never the v2 corpus row.
+        historical = receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE
+        if analyzer or ("throughput_profile" in receipt and receipt["throughput_profile"] is None) or \
+                historical != (leg == "historical-corpus"):
             ran, recorded = False, "not requested"
         elif "throughput_profile" in receipt:
             corpus = receipt.get("throughput") if isinstance(receipt.get("throughput"), dict) else {}
@@ -3618,7 +4874,9 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
         flagged = [f"{row.get('name')}: {row.get('decision')}" for row in cases if isinstance(row, dict)
                    and row.get("decision") != "no substantial regression detected"]
-        lines += ["", f"Throughput corpus `{THROUGHPUT_PROFILE['name']}`: {len(cases)} cases, "
+        named = receipt.get("throughput_profile") if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE \
+            else THROUGHPUT_PROFILE
+        lines += ["", f"Throughput corpus `{named['name']}`: {len(cases)} cases, "
                   f"{corpus.get('confirmed_regressions', 'NA')} confirmed regressions, "
                   f"{corpus.get('inconclusive_cases', 'NA')} inconclusive (report-only)."
                   + (" " + "; ".join(flagged) + "." if flagged else "")]
@@ -3699,6 +4957,30 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   for name, check in checks.items()]
         if ast.get("exit") not in (None, 0):
             lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
+    reuse = receipt.get("constant_reuse_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(reuse, dict) and reuse.get("requested"):
+        reuse_summary = reuse.get("summary") if isinstance(reuse.get("summary"), dict) else {}
+        lines += ["", f"Issue #3011 constant-reuse arms: {reuse.get('status', 'NA')} "
+                  f"({CONSTANT_REUSE_ACCEPTANCE_PROFILE['pairs']} ABBA pairs per cell; report-only).",
+                  "One candidate binary on the -g0 unity object compile: A = default, B passes the cell's flag. "
+                  "Ratios below 1 mean B is lower. Counters may be NA when the host cannot schedule them.", "",
+                  "| Cell (B flag) | Wall B/A [95% CI] | Retired instructions B/A | Peak RSS A / B | Code bytes A / B | Diagnostics identical |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        cells = reuse_summary.get("cells") if isinstance(reuse_summary.get("cells"), dict) else {}
+        for cell, flag in CONSTANT_REUSE_CELLS.items():
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+            code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+            lines.append("| %s (%s) | %s [%s, %s] | %s | %s / %s | %s / %s | %s |" % (
+                cell, flag, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number((values.get("instructions") or {}).get("ratio"), "%.4f"),
+                number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                number(code.get("a_value"), "%.0f"), number(code.get("b_value"), "%.0f"),
+                row.get("diagnostics_identical", "NA")))
+        if reuse.get("exit") not in (None, 0):
+            lines.append(f"Issue #3011 profile exit: {reuse.get('exit')}.")
     real = receipt.get("throughput_real_source") if isinstance(receipt, dict) else None
     if isinstance(real, dict) and real.get("requested"):
         profile = THROUGHPUT_REAL_SOURCE_PROFILE
@@ -3760,6 +5042,104 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 profile["pairs"], "yes" if row.get("outputs_identical") is True else "no"))
         if probes.get("exit") not in (None, 0):
             lines.append(f"Compiler probes exit: {probes.get('exit')}.")
+    selector = receipt.get("frontend_selector") if isinstance(receipt, dict) else None
+    if isinstance(selector, dict) and selector.get("requested"):
+        lines += ["", f"Frontend and selector probes ({FRONTEND_SELECTOR_PROFILE['name']}): {selector.get('status', 'NA')} "
+                  "(benchmark_frontend_scaling.py, selection_benchmark.py and `ide bench` on both binaries; medians; "
+                  "report-only).", "",
+                  "| Cell | Base | Head | Head / base |", "| --- | ---: | ---: | ---: |"]
+        for row in selector.get("cells") if isinstance(selector.get("cells"), list) else []:
+            values = row.get("values") if isinstance(row, dict) and isinstance(row.get("values"), list) else []
+            ok = len(values) == 2 and all(_finite_positive(value) for value in values)
+            scale, unit = (1000.0, "ms") if isinstance(row, dict) and row.get("unit") == "s" else (1e-3, "us")
+            lines.append("| %s | %s | %s | %s |" % (
+                row.get("name") if isinstance(row, dict) else "NA",
+                "%.1f %s" % (values[0] * scale, unit) if ok else "NA", "%.1f %s" % (values[1] * scale, unit) if ok else "NA",
+                "%.4f" % (values[1] / values[0]) if ok else "NA"))
+        exits = selector.get("exits") if isinstance(selector.get("exits"), dict) else {}
+        for key, value in exits.items():
+            if value not in (None, 0):
+                lines.append(f"Frontend-selector {key} exit: {value}.")
+    linker = receipt.get("wild_linker") if isinstance(receipt, dict) else None
+    if isinstance(linker, dict) and linker.get("requested"):
+        linkers = linker.get("linkers") if isinstance(linker.get("linkers"), dict) else {}
+        named = []
+        for role in ("wild", "comparator"):
+            item = linkers.get(role) if isinstance(linkers.get(role), dict) else {}
+            named.append("%s `%s` (%s, `%s`)" % (role, item.get("path", "NA"), item.get("version", "NA"),
+                                                 str(item.get("sha256", "NA"))[:12]))
+        substituted = isinstance(linkers.get("comparator"), dict) and linkers["comparator"].get("substituted") is True
+        lines += ["", f"Host Wild linker ({WILD_LINKER_PROFILE['name']}): {linker.get('status', 'NA')} (direct link-only "
+                  "ide cells on the head's own objects; A = comparator, B = Wild; seeded paired medians with the "
+                  "harness's bootstrap 95% interval; report-only). " + "; ".join(named) + "." +
+                  (" mold is not installed on this host, so the comparator is its default ld." if substituted else ""), "",
+                  "| Cell | Pairs | A median (ms) | B median (ms) | Paired B / A | 95% interval |",
+                  "| --- | ---: | ---: | ---: | ---: | --- |"]
+        for row in linker.get("cells") if isinstance(linker.get("cells"), list) else []:
+            row = row if isinstance(row, dict) else {}
+            values = row.get("values") if isinstance(row.get("values"), list) else []
+            interval = row.get("ci95") if isinstance(row.get("ci95"), list) else []
+            ok = len(values) == 2 and all(_finite_positive(value) for value in values) and _finite_positive(row.get("ratio"))
+            bounds = len(interval) == 2 and all(_finite_positive(value) for value in interval)
+            lines.append("| %s | %s | %s | %s | %s | %s |" % (
+                row.get("name", "NA"), row.get("pairs", "NA"), "%.3f" % values[0] if ok else "NA",
+                "%.3f" % values[1] if ok else "NA", "%.4f" % row["ratio"] if ok else "NA",
+                "[%.4f, %.4f]" % tuple(interval) if bounds else "NA"))
+        for key, title in (("build_exit", "input build"), ("exit", "harness")):
+            if linker.get(key) not in (None, 0):
+                lines.append(f"Wild linker {title} exit: {linker.get(key)}.")
+    link_tls = receipt.get("link_tls") if isinstance(receipt, dict) else None
+    if isinstance(link_tls, dict) and link_tls.get("requested"):
+        profile = LINK_TLS_PROFILE
+        lines += ["", f"TLS companion links ({profile['name']}): {link_tls.get('status', 'NA')} (fresh `ide cc` link "
+                  "processes of both binaries on frozen TLS-heavy inputs, byte-identical images required, "
+                  f"{profile['pairs']} alternating pairs per cell on CPU {profile['cpu']}; report-only).", "",
+                  "| Cell | Base (ms) | Head (ms) | Head / base [95% interval] | Head faster |",
+                  "| --- | ---: | ---: | ---: | ---: |"]
+        for row in link_tls.get("cells") if isinstance(link_tls.get("cells"), list) else []:
+            row = row if isinstance(row, dict) else {}
+            values = [row.get(key) for key in ("baseline_ns", "candidate_ns", "ratio", "ratio_low", "ratio_high")]
+            ok = all(_finite_positive(value) for value in values)
+            lines.append("| %s | %s | %s | %s | %s/%d |" % (
+                row.get("name", "NA"), "%.3f" % (values[0] / 1e6) if ok else "NA",
+                "%.3f" % (values[1] / 1e6) if ok else "NA",
+                "%.4f [%.4f, %.4f]" % tuple(values[2:]) if ok else "NA", row.get("candidate_faster", "NA"),
+                profile["pairs"]))
+        if link_tls.get("exit") not in (None, 0):
+            lines.append(f"TLS companion link harness exit: {link_tls.get('exit')}.")
+    selfhost = receipt.get("selfhost_inline") if isinstance(receipt, dict) else None
+    if isinstance(selfhost, dict) and selfhost.get("requested"):
+        profile = SELFHOST_INLINE_PROFILE
+        digest = selfhost.get("digest") if isinstance(selfhost.get("digest"), dict) else {}
+        lines += ["", f"Self-built inline-mode compilers ({profile['name']}): {selfhost.get('status', 'NA')} (each "
+                  "side's stage-1 compiler built with `-fcanonical-inline`, both compiling the merge-base tree with it, "
+                  f"byte-identical outputs required, {profile['pairs']} ABBA pairs on CPU {profile['cpu']} plus "
+                  "topdown and sampling; report-only).", "",
+                  "| Metric | Base | Head | Head / base [95% CI] |", "| --- | ---: | ---: | ---: |"]
+        metrics = digest.get("metrics") if isinstance(digest.get("metrics"), dict) else {}
+        for key in ("wall", "task_clock", "instructions", "cycles", "ipc", "branch_misses", "peak_rss"):
+            row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
+            values = [row.get(name) for name in ("a_median", "b_median", "ratio")]
+            interval = [row.get(name) for name in ("ci_low", "ci_high")]
+            lines.append("| %s | %s | %s | %s |" % (
+                key, *("%.6g" % value if _finite_positive(value) else "NA" for value in values[:2]),
+                ("%.4f" % values[2] if _finite_positive(values[2]) else "NA") +
+                (" [%.4f, %.4f]" % tuple(interval) if all(_finite_positive(value) for value in interval) else "")))
+        code = digest.get("code_bytes") if isinstance(digest.get("code_bytes"), dict) else {}
+        if all(_finite_positive(code.get(name)) for name in ("a_value", "b_value", "ratio")):
+            lines.append("| code bytes | %d | %d | %.4f |" % (code["a_value"], code["b_value"], code["ratio"]))
+        frontend = digest.get("frontend") if isinstance(digest.get("frontend"), list) else []
+        if frontend:
+            lines += ["", "| Front-end topdown metric | Base | Head | Change |", "| --- | ---: | ---: | ---: |"]
+            for row in frontend:
+                row = row if isinstance(row, dict) else {}
+                change = row.get("relative_change_percent")
+                lines.append("| %s %s | %s | %s | %s |" % (
+                    row.get("group", "NA"), row.get("metric", "NA"),
+                    *("%.6g" % row[key] if isinstance(row.get(key), (int, float)) else "NA" for key in ("a", "b")),
+                    "%+.2f%%" % change if isinstance(change, (int, float)) else "NA"))
+        if selfhost.get("exit") not in (None, 0):
+            lines.append(f"Self-built inline-mode harness exit: {selfhost.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

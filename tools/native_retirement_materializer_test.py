@@ -32,7 +32,7 @@ def canonical_digest(value):
                              separators=(",", ":")).encode("utf-8"))
 
 
-def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False):
+def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False, simd=False):
     """Project only the exact reviewed row versions in private test bytes."""
     rows = data.split(b"\n")
     revisions = (
@@ -45,6 +45,20 @@ def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False
         (b"tests/basic_c_ir_validation_values.c\t",
          b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t3124\t9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080",
          b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t3241\t8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65", aligned),
+    )
+    revisions += (
+        (b"tests/basic_c_predicate_bank.c\t",
+         b"tests/basic_c_predicate_bank.c\tsubject\tsupported-object-zero-fallback\t878\t16c2a225a704db51239cfb34bfbf98a214c1af038ecdad0a8c1ea0d9afbff432",
+         b"tests/basic_c_predicate_bank.c\tsubject\tsupported-object-zero-fallback\t865\ta194061e5e518e7c422cce6aea3af406aa01939297e3479c74098cd4bfd3cc64", simd),
+        (b"tests/basic_c_simd.c\t",
+         b"tests/basic_c_simd.c\tsubject\tsupported-object-zero-fallback\t21232\t51db4771299701fda73a9e33e4c9f00a443ff268edefbc4166f0bd78088bbd91",
+         b"tests/basic_c_simd.c\tsubject\tsupported-object-zero-fallback\t21095\te1971b2465b81fcc4f910fbbfd36afe6874fb5aaaed0b731fe52fc16e8e1ef28", simd),
+        (b"tests/basic_c_simd_translate.c\t",
+         b"tests/basic_c_simd_translate.c\tsubject\tsupported-object-zero-fallback\t7144\t76c1e91820227dcad6fd44a1ed159db4581006f86b6ba673f3834a13b5647d81",
+         b"tests/basic_c_simd_translate.c\tsubject\tsupported-object-zero-fallback\t7130\te283fc4b47513fecd564ebdedf4c2beab9a889fd2673287f522b2248a82859ce", simd),
+        (b"tests/basic_c_vector_register_pressure.c\t",
+         b"tests/basic_c_vector_register_pressure.c\tsubject\tsupported-object-zero-fallback\t8298\t0878f93f336f8e61faf2f5a2e79d6ae7939e2d354378e4aea679d0b12bf1a240",
+         b"tests/basic_c_vector_register_pressure.c\tsubject\tsupported-object-zero-fallback\t8220\te5e71360a03d663cdf20740e3c54efad379801c023101f9fb016827df6d00484", simd),
     )
     for prefix, predecessor, successor, selected in revisions:
         matches = [(index, row) for index, row in enumerate(rows) if row.startswith(prefix)]
@@ -408,7 +422,8 @@ class ArchivedReplayTests(unittest.TestCase):
                        materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
                        materializer.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
                        materializer.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-                       materializer.STACK_CALLER_SUPPORT_CONTRACT_SHA256))
+                       materializer.STACK_CALLER_SUPPORT_CONTRACT_SHA256,
+                       materializer.SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
@@ -525,12 +540,81 @@ class ArchivedReplayTests(unittest.TestCase):
                                                                  self.root)
                 resolve.assert_not_called()
 
+    def test_simd_vocabulary_successor_keeps_exact_fixture_authentication(self):
+        data = (Path(__file__).resolve().parents[1] /
+                "docs/native-retirement-support-v1.tsv").read_bytes()
+        baseline = _reviewed_support_revision(data, mobile=True, aligned=True, stack=True)
+        successor = _reviewed_support_revision(baseline, mobile=True, aligned=True,
+                                              stack=True, simd=True)
+        changed = [(old, new) for old, new in zip(baseline.splitlines(), successor.splitlines())
+                   if old != new]
+        self.assertEqual(len(changed), 4)
+        self.assertEqual(len(successor), 79756)
+        self.assertEqual(successor.count(b"\n"), 560)
+        self.assertEqual([row.split(b"\t")[:3] for row in successor.splitlines()],
+                         [row.split(b"\t")[:3] for row in baseline.splitlines()])
+        for declaration, pin in ((baseline, materializer.STACK_CALLER_SUPPORT_CONTRACT_SHA256),
+                                 (successor, materializer.SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256)):
+            with self.subTest(pin=pin):
+                self.assertEqual(digest(declaration), pin)
+                rows = [row.split(b"\t") for row in declaration.splitlines()
+                        if any(row.startswith(old.split(b"\t")[0] + b"\t") for old, _new in changed)]
+                fixtures = [{"fixture": row[0].decode(), "input_sha256": row[4].decode()}
+                            for row in rows]
+                identities = [(int(row[3]), row[4].decode()) for row in rows]
+                with mock.patch.object(materializer, "_read_no_follow", return_value=declaration), \
+                     mock.patch.object(materializer, "_source_path", return_value=self.fixture), \
+                     mock.patch.object(materializer, "_identity", side_effect=identities):
+                    materializer._verify_archived_fixture_inputs({"fixtures": fixtures}, self.root)
+                bad = copy.deepcopy(fixtures)
+                other = successor if declaration == baseline else baseline
+                other_row = next(row.split(b"\t") for row in other.splitlines()
+                                 if row.startswith(fixtures[0]["fixture"].encode() + b"\t"))
+                bad[0]["input_sha256"] = other_row[4].decode()
+                with mock.patch.object(materializer, "_read_no_follow", return_value=declaration), \
+                     mock.patch.object(materializer, "_source_path", return_value=self.fixture), \
+                     mock.patch.object(materializer, "_identity", return_value=identities[0]), \
+                     self.assertRaisesRegex(materializer.MaterializationError, "authenticated subject"):
+                    materializer._verify_archived_fixture_inputs({"fixtures": bad}, self.root)
+                with mock.patch.object(materializer, "_read_no_follow", return_value=declaration), \
+                     mock.patch.object(materializer, "_source_path", return_value=self.fixture), \
+                     mock.patch.object(materializer, "_identity", return_value=(identities[0][0] + 1, identities[0][1])), \
+                     self.assertRaisesRegex(materializer.MaterializationError, "fixture identity mismatch"):
+                    materializer._verify_archived_fixture_inputs({"fixtures": fixtures}, self.root)
+        # No partial combination of the four reviewed row successors is admitted.
+        invalid = [successor + b"\n", successor[:-1] + b" "]
+        for mask in range(1, 15):
+            partial = baseline
+            for index, (old, new) in enumerate(changed):
+                if mask & (1 << index):
+                    partial = partial.replace(old, new)
+            invalid.append(partial)
+        row = changed[0][1]
+        fields = row.split(b"\t")
+        invalid.extend((successor.replace(row, b"\t".join([*fields[:-1], b"0" * 64])),
+                        successor.replace(row, b"\t".join([*fields[:3], b"99999", fields[4]])),
+                        successor.replace(row, row.replace(b"subject", b"support-file")),
+                        successor.replace(row, row.replace(b"supported-object-zero-fallback", b"dependency-only")),
+                        successor.replace(row + b"\n", b""),
+                        successor.replace(row, row + b"\n" + row)))
+        for declaration in invalid:
+            with self.subTest(invalid=digest(declaration)), \
+                 mock.patch.object(materializer, "_read_no_follow", return_value=declaration), \
+                 mock.patch.object(materializer, "_source_path") as resolve, \
+                 self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
+                materializer._verify_archived_fixture_inputs({"fixtures": []}, self.root)
+            resolve.assert_not_called()
+
     def test_reviewed_support_projection_rejects_unknown_missing_duplicate_rows(self):
         data = _reviewed_support_revision((Path(__file__).resolve().parents[1] /
                                           "docs/native-retirement-support-v1.tsv").read_bytes())
         for prefix in (b"tests/mobile_ci_scripts_test.sh\t",
                        b"tests/basic_c_ir_validation_values.c\t",
-                       b"tests/basic_c_overaligned_stack_caller.c\t"):
+                       b"tests/basic_c_overaligned_stack_caller.c\t",
+                       b"tests/basic_c_predicate_bank.c\t",
+                       b"tests/basic_c_simd.c\t",
+                       b"tests/basic_c_simd_translate.c\t",
+                       b"tests/basic_c_vector_register_pressure.c\t"):
             row = next(line for line in data.splitlines() if line.startswith(prefix))
             fields = row.split(b"\t")
             unknown_hash = b"\t".join([*fields[:-1], b"0" * 64])
