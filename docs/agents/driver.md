@@ -168,6 +168,24 @@ program is released and its arena is destroyed; when the program calls
 Executed test coverage is x86-64 Linux only; shebang execution is not
 implemented.
 
+## Native object text lifetime
+
+After successful canonical code generation, the native C driver calls the
+private `object_from_canonical_codegen_module_borrowed_text` entry. Object
+construction still performs all descriptor, relocation and metadata checks;
+only the generated `.text` allocation and copy are omitted. The completed
+code buffer stays immutable in the TU/result arena through object, assembly
+and link consumers. A single TU retains its arena; the ordered multi-TU
+collector still deep-copies the complete compact object before destroying
+its source arena. Writer relocation patches belong to the writer's output,
+never the shared input. No partial codegen result becomes publishable.
+
+The public `object_from_canonical_codegen_module` remains a supported text
+snapshot operation, not a migration shim. Its other borrowed data and name
+lifetimes are unchanged; an independent text snapshot does not make the whole
+object independent of its program/module. Do not move arena teardown earlier
+or opt another caller into borrowing without proving its final consumer.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
