@@ -4269,6 +4269,16 @@ diagnostic only:
 - **Default path.** −76 Ir on `-fsyntax-only` and +28 Ir on `-c`.
 - **Acceptance.** Zen 5 validation is incomplete (#2761).
 
+The same four arms and budgets were re-taken on main `cc48e7cb`, because the
+default path had changed since `680e16d3`. The re-measurement is audit
+[`2026-10-13T113236Z`](../../performance-audits/2026-10-13T113236Z.md), also
+diagnostic only. Every budget still passes:
+- **Objects.** Byte-identical at `-g0` and `-g` across the four arms.
+- **Counters.** The `-v` counters are identical in B and C.
+- **Ship.** C against B is −6.87 M Ir on `-fsyntax-only` (−0.074%) and on
+  `-c` (−0.030%).
+- **Default path.** −4,417 Ir on both workloads.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
 ### Type-word test and label proof in lowering's classification
