@@ -2372,15 +2372,16 @@ depfile reports failure even if the artifact has already been published.
 
 ## Warning options
 
-The warnings the driver publishes today are the preprocessor's (`#warning`,
-extra tokens after a directive such as `#endif junk`), the GNU obsolete
-`member: value` designator in a strict ISO dialect, and semantic analysis's
-signedness-only pointer conversions (`-Wpointer-sign`, #4051), and signed
+The driver publishes preprocessing warnings (`#warning` and extra tokens after
+a directive such as `#endif junk`) and the GNU obsolete `member: value`
+designator warning in strict ISO dialects. Semantic analysis also publishes
+signedness-only pointer conversions (`-Wpointer-sign`, #4051) and signed
 arithmetic overflow retained by NORMAL/ENUM integer folding (`-Woverflow`,
-#1574). Each belongs to a group (`CompilerDriverWarningGroup`), mapped from
-the diagnostic kind by `compiler_driver_warning_group_of_kind`, and `compiler_driver_publish_c_diagnostics`
-applies one `CompilerDriverWarningPolicy` to them for every input, serial or
-batched, including those whose source was replayed from the source cache.
+#1574). Each warning belongs to a group (`CompilerDriverWarningGroup`), mapped
+from its diagnostic kind by `compiler_driver_warning_group_of_kind`, and
+`compiler_driver_publish_c_diagnostics` applies one
+`CompilerDriverWarningPolicy` to every input, serial or batched, including
+sources replayed from the source cache.
 
 | Group | Spellings | Warning |
 |---|---|---|
@@ -2412,9 +2413,10 @@ a group or the global flag wins:
 
 A promoted warning is published with error severity and the option that
 promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]`,
-`[-Werror=gnu-designator]`, `[-Werror=pointer-sign]` or `[-Werror=overflow]`; a warning without a
-group gets `[-Werror]`). The unit fails with the tokenizer error (the analysis error for semantic
-warnings), so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+`[-Werror=gnu-designator]`, `[-Werror=pointer-sign]` or
+`[-Werror=overflow]`; a warning without a group gets `[-Werror]`). The unit
+fails with the tokenizer error (or the analysis error for semantic warnings),
+so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
 and a batch of several inputs all return failure and write no output; the
 failed-unit rules above decide which later results are discarded. Its record
 in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
@@ -2441,10 +2443,10 @@ folding are outside this warning path.
 
 `-Wpointer-sign` is on by default, as in Clang (GCC enables it only with
 `-Wall` or `-Wpedantic`); `-Woverflow` is also enabled by default, and
-`-Wno-overflow` suppresses that group. `-Wall` is accepted and changes nothing. The driver
-has no `-pedantic-errors` mode, so only `-Werror` and `-Werror=pointer-sign`
-make it an error. The frontend contract (which conversions belong to the class)
-is in [Calls](frontend/calls.md#signedness-only-pointer-conversions--wpointer-sign).
+`-Wno-overflow` suppresses that group. `-Wall` is accepted and changes nothing.
+The driver has no `-pedantic-errors` mode: `-Werror` promotes either group,
+and `-Werror=pointer-sign` or `-Werror=overflow` promotes one individually.
+The frontend contract (which conversions belong to the class) is in [Calls](frontend/calls.md#signedness-only-pointer-conversions--wpointer-sign).
 
 Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
 in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same
