@@ -4351,12 +4351,12 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 bool unresolved_identifier = false;
                 // A cast in the bound changes its value (`(char)300`, `(int)3.9`).
                 // An integer cast wraps its operand in the rewritten tokens below,
-                // so the untyped evaluator keeps the bound; a cast to any other
-                // type, or an operand the evaluator cannot read (a floating
-                // constant), sends the bound to the typed query, which rebuilds
-                // the model it names and so stays off the integer path.
+                // so the untyped evaluator keeps the bound; casts to other types,
+                // unreadable constants, and unparenthesized unary sizeof operands
+                // go to the typed query, which rebuilds the model it names and
+                // stays off the integer path.
                 bool bound_has_cast = false;
-                bool bound_cast_needs_typed = false;
+                bool bound_typed_query_needed = false;
                 // The untyped evaluator wraps a cast's operand but not the
                 // arithmetic after it. It stays exact when the bound only adds
                 // and multiplies non-negative values and the result fits 32
@@ -4453,6 +4453,23 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                 }
                                 close = BUSTER_MIN(operand_end, bound_end);
                             }
+                        }
+                        // The token-size pass cannot size unary-literal
+                        // `sizeof` operands. The operand has no identifier
+                        // dependency; the typed query sees the full bound so
+                        // names elsewhere still receive normal resolution.
+                        bool unary_constant_sizeof_operand = false;
+                        if (bound_word_is_sizeof && !parenthesized && operand_start < bound_end && bound_end - operand_start >= 2)
+                        {
+                            CToken unary_token = preprocess.tokens[operand_start];
+                            CToken constant_token = preprocess.tokens[operand_start + 1];
+                            bool unary_operator = c_token_is_punctuator(&unary_token, C_PUNCTUATOR_PLUS) ||
+                                                  c_token_is_punctuator(&unary_token, C_PUNCTUATOR_MINUS) ||
+                                                  c_token_is_punctuator(&unary_token, C_PUNCTUATOR_EXCLAMATION) ||
+                                                  c_token_is_punctuator(&unary_token, C_PUNCTUATOR_TILDE);
+                            bool constant_literal = constant_token.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                                                    constant_token.kind == C_TOKEN_CHARACTER_LITERAL;
+                            unary_constant_sizeof_operand = unary_operator && constant_literal;
                         }
                         // A bound reads the object bound at its declaration,
                         // including block shadowing, rather than a type name at
@@ -4676,7 +4693,14 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         if (invalid_operand_width) operand_resolved = false;
                         if (!operand_resolved)
                         {
-                            unresolved_identifier = true;
+                            if (unary_constant_sizeof_operand && !invalid_operand_width)
+                            {
+                                bound_typed_query_needed = true;
+                            }
+                            else
+                            {
+                                unresolved_identifier = true;
+                            }
                             break;
                         }
                         bound_tokens[bound_token_count++] =
@@ -4715,7 +4739,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             }
                             else
                             {
-                                bound_cast_needs_typed = true;
+                                bound_typed_query_needed = true;
                             }
                         }
                         else if (cast_bits == 64 && !cast_signed)
@@ -4818,8 +4842,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                           !c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
                 }
-                bound_cast_needs_typed |= (bound_wrap_sensitive || bound_float_cast) && bound_not_monotone;
-                bound_cast_needs_typed |= bound_float_cast && bound_float_literal;
+                bound_typed_query_needed |= (bound_wrap_sensitive || bound_float_cast) && bound_not_monotone;
+                bound_typed_query_needed |= bound_float_cast && bound_float_literal;
                 while (cast_closure_count)
                 {
                     cast_closure_count -= 1;
@@ -4841,7 +4865,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     array_provisional |= !context->machine || !context->machine->inferred_bounds_final;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
-                         (bound_cast_needs_typed
+                         (bound_typed_query_needed
                               ? !c_parse_layout_typed_array_bound(context, bound, &count)
                               : ((!c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
                                   evaluation.diagnostic_count) &&
@@ -4849,7 +4873,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     continue;
                 }
-                else if (!bound_cast_needs_typed && ((bound_wrap_sensitive && count >> 32) || (bound_float_cast && count >> 24)) &&
+                else if (!bound_typed_query_needed && ((bound_wrap_sensitive && count >> 32) || (bound_float_cast && count >> 24)) &&
                          !c_parse_layout_typed_array_bound(context, bound, &count))
                 {
                     continue;
