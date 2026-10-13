@@ -1,0 +1,26 @@
+ir/ir_inline.c: self-line sum dLLd=4488015 dIr=108693109 dD1m=5264039
+      dLLd          dIr       dD1m      A LLd line
+ 2,165,029   50,391,672  2,526,453  2,093,525  1477 events annotated
+ 1,533,853    3,071,518  1,534,267          0   706 IrSymbol* symbol = call->opcode == IR_OPCODE_CALL
+   446,518    1,394,128    614,978      2,525   904 if (call->opcode != IR_OPCODE_CALL) continue;
+   157,957    7,909,765    211,133     14,101  1476 <counts for unidentified lines in src/buster/lib/compiler/ir/ir_inline.c>
+    51,119      311,623     54,931        101   148 IrInstructionId definition = caller->values[call->operands[0].value].definition;
+    49,510      265,940     56,588        824   810 if (block->last_instruction.value < caller->instruction_count)
+    40,795      201,673     44,114         96   145 call->operands[0].value < caller->value_count;
+     5,749      464,835      6,321          0   695 for (u32 row = caller->blocks[block].first_instruction.value;
+     5,626      293,232     15,271          0   709 if (symbol && !symbol->always_inline && !symbol->noinline &&
+     5,135      278,955     41,567          9   159 callee->state == IR_FUNCTION_LOWERED && callee->canonical_type.value == symbol->type.value
+     4,928       15,190      7,523      6,088   672 if (caller->state != IR_FUNCTION_LOWERED) continue;
+     4,183       12,778      4,732          0   684 total_work = caller->block_count;
+     3,865        4,347      3,867        358   832 u64 parameter_work = ir_inline_storage_add(1u, parameter->incoming_count);
+     3,198            0          0     30,705   546 has_required |= program->symbols.symbols[symbol].always_inline;
+     1,705      403,044     21,841          0   181 if (row->opcode == IR_OPCODE_RETURN)
+     1,582    4,607,277      1,594          0   705 IrInstruction* call = caller->instructions + row;
+     1,518      104,660      7,952         60   906 bool required = symbol && symbol->always_inline;
+     1,386      184,341     10,289          0   724 if (callee->block_count == 1 &&
+     1,371    2,091,192     43,855        259   898 planned_next[row] = position;
+       640       36,650      7,975          0   713 ? plan.function_by_symbol[call->symbol.value]
+       458       48,424      5,955          0   935 if (callee->block_count == 1 &&
+       332        7,595      1,414          0   670 u32 caller_index = plan.order[order_index];
+       283          797        434          0   856 u64 function_storage = function_storage_used[caller_index];
+       242      132,970        954          0   814 terminator->next.value == IR_ID_UNDERLYING_INVALID;

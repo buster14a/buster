@@ -122,6 +122,15 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+`build.ps1` imports `Microsoft.PowerShell.Management` and
+`Microsoft.PowerShell.Utility` by name before its first cmdlet. Without that,
+Windows PowerShell 5.1 resolves the first cmdlet from an unloaded module by
+analyzing every module on `PSModulePath`: about 23 s per process with a cold
+module analysis cache, as on hosted Windows ARM64
+([#3979](../ci-bootstrap-wrapper.md#windows-powershell-command-discovery-3979)).
+Keep PowerShell glue to Core and those two modules, or import any other module
+it needs by name.
+
 A cached driver whose recorded dependency was deleted is a normal cache miss:
 the wrapper quietly rejects it and selects another valid entry or rebuilds.
 The warm snapshot also stays quiet if an input disappears after the manifest scan.

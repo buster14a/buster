@@ -170,4 +170,30 @@ BUSTER_F_DECL u64 c_test_preprocess_references_range(CPreprocessResult const* re
 BUSTER_F_DECL u32 c_test_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_F_DECL u32 c_test_symbol_find(CSymbolTable const* table, String8 name);
 BUSTER_F_DECL u32 c_test_symbol_count(CSymbolTable const* table);
+// The spelling id `symbol` names, or empty for 0 and ids past the count.
+BUSTER_F_DECL String8 c_test_symbol_name(CSymbolTable const* table, u32 symbol);
+// Predefined object-like macro texts take a direct tokenizer instead of the
+// lexer when their bytes allow it (c_predefined_text_tokens). `compare` lexes
+// one text into a fresh space and says whether the direct tokens agree with
+// the lexer's, or that the text is left to the lexer.
+typedef enum CTestPredefinedTextResult
+{
+    C_TEST_PREDEFINED_TEXT_LEXED,
+    C_TEST_PREDEFINED_TEXT_AGREES,
+    C_TEST_PREDEFINED_TEXT_DISAGREES,
+} CTestPredefinedTextResult;
+BUSTER_F_DECL CTestPredefinedTextResult c_test_predefined_text_compare(Arena* arena, String8 text);
+// The calling thread's prelude: `force_lexer` lexes every text; `verify`
+// also compares each text as above and counts it until taken.
+typedef struct CTestPredefinedTextCounts CTestPredefinedTextCounts;
+struct CTestPredefinedTextCounts
+{
+    u64 direct;
+    u64 lexed;
+    // Lexed texts that are not string literals.
+    u64 lexed_unquoted;
+    u64 disagreements;
+};
+BUSTER_F_DECL void c_test_predefined_text_mode(bool force_lexer, bool verify);
+BUSTER_F_DECL CTestPredefinedTextCounts c_test_predefined_text_take(void);
 #endif

@@ -57,6 +57,10 @@
 //                                              sidecar consumed by parser
 //                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
+//   c_predefined_text_tokens,                  prelude object-like texts: the
+//   c_macro_define_object_text                 lexer's tokens built directly
+//                                              on their narrow alphabet, the
+//                                              lexer itself for any other text
 //   c_macro_builtin_token                     dynamic builtin spelling and
 //                                              macro-only filename prefix maps
 //   c_semantic_integer_transform_builtin,     fixed unsigned builtin signatures
@@ -6253,19 +6257,200 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
                                   function_like, variadic, 0);
 }
 
+// The prelude defines about 230 object-like macros per x86-64 compile from
+// short constant texts (c_macro_define_object_text). Running each one through
+// translation and the lexer cost more than the rest of its definition, yet
+// the texts use a narrow alphabet: identifiers, preprocessing numbers with
+// their exponent signs, single spaces, and the punctuators `(`, `)` and `-`.
+// On that alphabet the lexer's rules reduce to the scan below, which writes
+// the tokens c_lex_space would emit for the same bytes, at offsets relative
+// to the text. Translation is the identity there (no newline, backslash or
+// `?`), so the spelling is the text plus its terminator. Any other byte, a
+// `.` or `+` outside a number, or `--` returns C_PREDEFINED_TEXT_LEXED and
+// the text is lexed: string literals, comments, `$`, UCNs, other white space
+// and longer punctuators keep their one definition in the lexer.
+// c_test_predefined_text_compare holds the two paths to the same tokens.
+enum
+{
+    C_PREDEFINED_TEXT_DIRECT_LIMIT = 64,
+};
+#define C_PREDEFINED_TEXT_LEXED UINT32_MAX
+
+BUSTER_C_INTERNAL bool c_predefined_text_word(char8 character)
+{
+    return c_ascii_alpha(character) || c_ascii_digit(character) || character == '_';
+}
+
+// The token count, at most text.length, or C_PREDEFINED_TEXT_LEXED.
+BUSTER_C_INTERNAL u32 c_predefined_text_tokens(String8 text, CToken tokens[C_PREDEFINED_TEXT_DIRECT_LIMIT])
+{
+    bool direct = text.length < C_PREDEFINED_TEXT_DIRECT_LIMIT;
+    u32 length = direct ? (u32)text.length : 0;
+    u32 count = 0;
+    u32 cursor = 0;
+    while (direct && cursor < length)
+    {
+        char8 character = text.pointer[cursor];
+        u32 end = cursor + 1;
+        CTokenKind kind = C_TOKEN_PUNCTUATOR;
+        CPunctuator punctuator = C_PUNCTUATOR_NONE;
+        if (c_ascii_alpha(character) || character == '_')
+        {
+            kind = C_TOKEN_IDENTIFIER;
+            while (end < length && c_predefined_text_word(text.pointer[end]))
+            {
+                end += 1;
+            }
+        }
+        else if (c_ascii_digit(character))
+        {
+            kind = C_TOKEN_PREPROCESSING_NUMBER;
+            bool number = true;
+            while (number && end < length)
+            {
+                char8 next = text.pointer[end];
+                char8 previous = text.pointer[end - 1];
+                bool exponent_sign = (next == '+' || next == '-') && (previous == 'e' || previous == 'E' || previous == 'p' || previous == 'P');
+                number = c_predefined_text_word(next) || next == '.' || exponent_sign;
+                end += number;
+            }
+        }
+        else if (character == '(')
+        {
+            punctuator = C_PUNCTUATOR_LEFT_PARENTHESIS;
+        }
+        else if (character == ')')
+        {
+            punctuator = C_PUNCTUATOR_RIGHT_PARENTHESIS;
+        }
+        else if (character == '-' && !(end < length && text.pointer[end] == '-'))
+        {
+            // `->` and `-=` are left to the alphabet check on the next byte.
+            punctuator = C_PUNCTUATOR_MINUS;
+        }
+        else
+        {
+            direct = character == ' ';
+            kind = C_TOKEN_INVALID;
+        }
+        if (kind != C_TOKEN_INVALID)
+        {
+            tokens[count] = (CToken){
+                .offset = cursor,
+                .length = (u16)(end - cursor),
+                .kind = (u8)kind,
+                .punctuator = (u8)punctuator,
+            };
+            count += 1;
+        }
+        cursor = end;
+    }
+    return direct ? count : C_PREDEFINED_TEXT_LEXED;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_predefined_text_force_lexer;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_predefined_text_verify;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestPredefinedTextCounts c_predefined_text_counts;
+
+void c_test_predefined_text_mode(bool force_lexer, bool verify)
+{
+    c_predefined_text_force_lexer = force_lexer;
+    c_predefined_text_verify = verify;
+}
+
+CTestPredefinedTextCounts c_test_predefined_text_take(void)
+{
+    CTestPredefinedTextCounts taken = c_predefined_text_counts;
+    c_predefined_text_counts = (CTestPredefinedTextCounts){0};
+    return taken;
+}
+
+CTestPredefinedTextResult c_test_predefined_text_compare(Arena* arena, String8 text)
+{
+    CToken direct[C_PREDEFINED_TEXT_DIRECT_LIMIT];
+    u32 count = c_predefined_text_tokens(text, direct);
+    CTestPredefinedTextResult result = C_TEST_PREDEFINED_TEXT_LEXED;
+    if (count != C_PREDEFINED_TEXT_LEXED)
+    {
+        CSpellingSpace space = c_space_local(arena, text.length + 1);
+        u64 start = space.used;
+        CLexResult lex = c_lex_space(arena, &space, text, false, C_PREPROCESS_DIALECT_GNU17);
+        bool same = space.base && lex.diagnostic_count == 0 && lex.token_count == (u64)count + 1 && space.used == start + text.length + 1 &&
+                    space.base[start + text.length] == 0 && (!text.length || memcmp(space.base + start, text.pointer, text.length) == 0);
+        for (u32 index = 0; same && index <= count; index += 1)
+        {
+            CToken expected = index < count ? direct[index] : (CToken){.offset = (u32)text.length, .kind = C_TOKEN_END_OF_FILE};
+            expected.offset += (u32)start;
+            CToken lexed = lex.tokens[index];
+            same = lexed.offset == expected.offset && lexed.length == expected.length && lexed.kind == expected.kind &&
+                   lexed.punctuator == expected.punctuator && lexed.symbol == 0 && lex.token_shapes[index] == c_token_shape_from_token(expected);
+        }
+        result = same ? C_TEST_PREDEFINED_TEXT_AGREES : C_TEST_PREDEFINED_TEXT_DISAGREES;
+    }
+    return result;
+}
+#endif
+
 BUSTER_C_INTERNAL void c_macro_define_object_text(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name,
                                                     String8 replacement_text)
 {
-    CLexResult lex = c_lex_space(arena, space, replacement_text, false, C_PREPROCESS_DIALECT_GNU17);
-    c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
-    u32 replacement_count = 0;
-    while (replacement_count < lex.token_count && lex.tokens[replacement_count].kind != C_TOKEN_NEWLINE &&
-           lex.tokens[replacement_count].kind != C_TOKEN_END_OF_FILE)
+    CToken direct_tokens[C_PREDEFINED_TEXT_DIRECT_LIMIT];
+    u32 direct_count = c_predefined_text_tokens(replacement_text, direct_tokens);
+    // The lexer's own capacity check, so a space too full for the text still
+    // reaches the lexer's diagnosis of it.
+    bool direct = direct_count != C_PREDEFINED_TEXT_LEXED && space->used <= UINT32_MAX && replacement_text.length + 1 <= UINT32_MAX - space->used;
+#if BUSTER_INCLUDE_TESTS
+    direct = direct && !c_predefined_text_force_lexer;
+    if (c_predefined_text_verify)
     {
-        replacement_count += 1;
+        CTestPredefinedTextResult compared = c_test_predefined_text_compare(arena, replacement_text);
+        c_predefined_text_counts.direct += direct;
+        c_predefined_text_counts.lexed += !direct;
+        c_predefined_text_counts.lexed_unquoted += !direct && !(replacement_text.length && replacement_text.pointer[0] == '"');
+        c_predefined_text_counts.disagreements += compared == C_TEST_PREDEFINED_TEXT_DISAGREES;
     }
-    CMacro* macro = c_macro_define(arena, lex.spelling_base, symbols, first, last, name, lex.tokens, replacement_count, 0, 0, false, false);
-    macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, lex.tokens, replacement_count);
+#endif
+    CToken* tokens;
+    u32 replacement_count = 0;
+    if (direct)
+    {
+        // The same space bytes and token rows c_lex_space leaves, end marker
+        // included, and the same intern order.
+        u32 length = (u32)replacement_text.length;
+        char8* spelling = c_space_allocate(space, length + 1);
+        if (length)
+        {
+            memcpy(spelling, replacement_text.pointer, length);
+        }
+        spelling[length] = 0;
+        u32 offset = c_space_offset(space, spelling);
+        tokens = arena_allocate(arena, CToken, direct_count + 1);
+        for (u32 index = 0; index < direct_count; index += 1)
+        {
+            tokens[index] = direct_tokens[index];
+            tokens[index].offset += offset;
+        }
+        tokens[direct_count] = (CToken){
+            .offset = offset + length,
+            .kind = C_TOKEN_END_OF_FILE,
+        };
+        replacement_count = direct_count;
+        c_symbols_intern_tokens(symbols, space->base, tokens, 0, replacement_count);
+    }
+    else
+    {
+        CLexResult lex = c_lex_space(arena, space, replacement_text, false, C_PREPROCESS_DIALECT_GNU17);
+        c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
+        while (replacement_count < lex.token_count && lex.tokens[replacement_count].kind != C_TOKEN_NEWLINE &&
+               lex.tokens[replacement_count].kind != C_TOKEN_END_OF_FILE)
+        {
+            replacement_count += 1;
+        }
+        tokens = lex.tokens;
+    }
+    CMacro* macro = c_macro_define(arena, space->base, symbols, first, last, name, tokens, replacement_count, 0, 0, false, false);
+    macro->definition.replacement_space = c_macro_replacement_spaces(arena, space->base, tokens, replacement_count);
 }
 
 BUSTER_C_INTERNAL void c_preprocess_diagnostic_reserve(Arena* arena, CPreprocessResult* result)
@@ -9540,6 +9725,11 @@ u32 c_test_symbol_find(CSymbolTable const* table, String8 name)
 u32 c_test_symbol_count(CSymbolTable const* table)
 {
     return table->count;
+}
+
+String8 c_test_symbol_name(CSymbolTable const* table, u32 symbol)
+{
+    return symbol && symbol <= table->count ? table->names[symbol] : (String8){0};
 }
 
 bool c_test_include_file_table_grow(CIncludeFileTable* table)

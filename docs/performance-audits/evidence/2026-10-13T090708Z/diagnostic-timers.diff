@@ -1,0 +1,276 @@
+diff --git a/src/buster/apps/ide/ide.c b/src/buster/apps/ide/ide.c
+index 426b6fd7..63ba2f8d 100644
+--- a/src/buster/apps/ide/ide.c
++++ b/src/buster/apps/ide/ide.c
+@@ -2242,6 +2242,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
+                              validation.function.value == IR_ID_UNDERLYING_INVALID ? S8("module") : S8("function"),
+                              (u32)validation.error, validation.block.value, validation.instruction.value);
+             }
++            {
++                extern u64 diag_prep_ns[12]; extern u64 diag_inline_validate_ns; extern u64 diag_inl_ns[8]; extern u64 diag_inl_bytes[2];
++                string_print(S8("DIAG_INL reserve_tables_ns={u64} reserve_locals_ns={u64} splice_ns={u64} predecessors_ns={u64} discard_ns={u64} input_validate_ns={u64} promotion_validate_ns={u64} fast_output_validate_ns={u64} inline_minflt={u64} relocated_bytes={u64} discard_calls={u64} screen_ns={u64} caller_plan_ns={u64} graph_ns={u64}\n"),
++                             diag_inl_ns[0], diag_inl_ns[1], diag_inl_ns[2], diag_inl_ns[3], diag_inl_ns[4], diag_prep_ns[7], diag_prep_ns[8], diag_prep_ns[9], diag_prep_ns[10], diag_inl_bytes[0], diag_inl_bytes[1], diag_inl_ns[5], diag_inl_ns[6], diag_inl_ns[7]);
++                string_print(S8("DIAG_PREP inline_ns={u64} inline_validate_ns={u64} promotion_ns={u64} fast_guard_validate_ns={u64} fast_guard_unchecked_ns={u64} fast_ns={u64} publish_ns={u64} scope_ns={u64}\n"),
++                             diag_prep_ns[0], diag_inline_validate_ns, diag_prep_ns[1], diag_prep_ns[2], diag_prep_ns[3], diag_prep_ns[4], diag_prep_ns[5], diag_prep_ns[6]);
++            }
+             string_print(S8("IR_FAST functions={u64} validation_skips={u64} budget_skips={u64} provenance_skips={u64} parameter_budget_hits={u64} "
+                             "scratch_peak_bound={u64} retained_bound={u64} compact_ns={u64} instructions_before={u64} instructions_after={u64}\n"),
+                          measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
+diff --git a/src/buster/lib/compiler/ir/ir_fast.c b/src/buster/lib/compiler/ir/ir_fast.c
+index 3e925325..b84eccbe 100644
+--- a/src/buster/lib/compiler/ir/ir_fast.c
++++ b/src/buster/lib/compiler/ir/ir_fast.c
+@@ -20,6 +20,7 @@
+ // function whose certified input already failed the strict validator.
+ // ir_validate_fast_output likewise excludes only bodies FAST left untouched.
+ #include <buster/lib/time.h>
++#include <sys/resource.h>
+ 
+ String8 ir_fast_pass_name(IrFastPass pass)
+ {
+@@ -1430,6 +1431,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_fast_output(IrProgram* progra
+     return result;
+ }
+ 
++u64 diag_prep_ns[12];
++#define DIAG_T0() TimeDataType diag_t0 = timestamp_take()
++#define DIAG_ADD(k) diag_prep_ns[k] += timestamp_ns_between(diag_t0, timestamp_take())
+ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
+ {
+     IrValidationResult result = ir_validation_ok();
+@@ -1450,7 +1454,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+         if (!input_certified)
+         {
+             IR_CONSTRUCTION_RECORD(PREPARATION_INPUT_VALIDATIONS, 1);
+-            result = ir_validate_canonical_module(program, module);
++            { DIAG_T0(); result = ir_validate_canonical_module(program, module); DIAG_ADD(7); }
+             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
+             validated = result.error == IR_VALIDATION_NONE;
+         }
+@@ -1473,7 +1477,8 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+                 // the next module-wide scan below, which already covers its
+                 // rows (#48); otherwise it too is checked at once.
+                 module->inlining = (IrInlineStatistics){0};
+-                result = ir_inline_module(program, module, program->fast_passes != 0);
++                { struct rusage diag_r0; getrusage(RUSAGE_SELF, &diag_r0); DIAG_T0(); result = ir_inline_module(program, module, program->fast_passes != 0); DIAG_ADD(0);
++                  struct rusage diag_r1; getrusage(RUSAGE_SELF, &diag_r1); diag_prep_ns[10] += (u64)(diag_r1.ru_minflt - diag_r0.ru_minflt); }
+                 if (module->inline_unchecked_count) validated = false;
+             }
+             module->inline_complete = result.error == IR_VALIDATION_NONE;
+@@ -1507,7 +1512,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+                     }
+                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
+                     u64 promoted_before = module->local_promotion.promoted_locals;
+-                    ir_promote_function(program, function, &module->local_promotion);
++                    { DIAG_T0(); ir_promote_function(program, function, &module->local_promotion); DIAG_ADD(1); }
+                     if (attribution && module->local_promotion.promoted_locals != promoted_before)
+                     {
+                         attribution[index] |= IR_PROMOTION_CHANGED;
+@@ -1525,8 +1530,8 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+                 if (checked)
+                 {
+                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
+-                    result = attribution ? ir_validate_promotion_output(program, module, attribution, &excluded)
+-                                         : ir_validate_canonical_module(program, module);
++                    { DIAG_T0(); result = attribution ? ir_validate_promotion_output(program, module, attribution, &excluded)
++                                         : ir_validate_canonical_module(program, module); DIAG_ADD(8); }
+                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
+                 }
+                 validated = checked && result.error == IR_VALIDATION_NONE && !excluded;
+@@ -1546,7 +1551,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+             if (!validated)
+             {
+                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
+-                scope = ir_validate_canonical_scope(program, module);
++                { DIAG_T0(); scope = ir_validate_canonical_scope(program, module); DIAG_ADD(6); }
+             }
+             bool check_output = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
+             u8* declined = 0;
+@@ -1577,7 +1582,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+                     IrValidationResult input = scope;
+                     if (!validated && input.error == IR_VALIDATION_NONE)
+                     {
+-                        input = ir_validate_canonical_function(program, function);
++                        DIAG_T0(); input = ir_validate_canonical_function(program, function); DIAG_ADD(unchecked && unchecked[index] ? 3 : 2);
+                     }
+                     if (input.error != IR_VALIDATION_NONE && unchecked && unchecked[index])
+                     {
+@@ -1611,7 +1616,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+                     else if (result.error == IR_VALIDATION_NONE)
+                     {
+                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
+-                        ir_fast_function(program, function, &cse, &module->fast);
++                        { DIAG_T0(); ir_fast_function(program, function, &cse, &module->fast); DIAG_ADD(4); }
+                     }
+                 }
+             }
+@@ -1620,7 +1625,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+             if (result.error == IR_VALIDATION_NONE && changes && check_output)
+             {
+                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
+-                result = declined ? ir_validate_fast_output(program, module, declined) : ir_validate_canonical_module(program, module);
++                { DIAG_T0(); result = declined ? ir_validate_fast_output(program, module, declined) : ir_validate_canonical_module(program, module); DIAG_ADD(9); }
+                 result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
+             }
+             if (module->fast.decline_count)
+@@ -1637,7 +1642,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
+             if (function->state == IR_FUNCTION_LOWERED)
+             {
+                 IR_CONSTRUCTION_RECORD(PREPARATION_PUBLICATION_FUNCTIONS, 1);
+-                IrValidationResult published = ir_function_publish_cfg(program->arena, function);
++                DIAG_T0(); IrValidationResult published = ir_function_publish_cfg(program->arena, function); DIAG_ADD(5);
+                 if (published.error != IR_VALIDATION_NONE)
+                 {
+                     result = published;
+diff --git a/src/buster/lib/compiler/ir/ir_inline.c b/src/buster/lib/compiler/ir/ir_inline.c
+index b9c5ccb0..e292109f 100644
+--- a/src/buster/lib/compiler/ir/ir_inline.c
++++ b/src/buster/lib/compiler/ir/ir_inline.c
+@@ -107,6 +107,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_work(IrFunction const* caller, u64 add
+ // the whole module, check each function the pass reads (a candidate's caller
+ // and callee) or rewrites (a spliced caller), once per state change: 0 is
+ // unknown, then IR_INLINE_STRICT_VALID or IR_INLINE_STRICT_INVALID.
++u64 diag_inline_validate_ns;
+ #define IR_INLINE_STRICT_VALID 1u
+ #define IR_INLINE_STRICT_INVALID 2u
+ 
+@@ -114,8 +115,10 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_function_strict(IrProgram* program, IrModule*
+ {
+     if (!strict[index])
+     {
++        TimeDataType diag_t0 = timestamp_take();
+         strict[index] = ir_validate_canonical_function(program, module->functions + index).error == IR_VALIDATION_NONE
+                             ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
++        diag_inline_validate_ns += timestamp_ns_between(diag_t0, timestamp_take());
+     }
+     bool result = strict[index] == IR_INLINE_STRICT_VALID;
+     return result;
+@@ -597,10 +600,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                 Arena* arena = planning.arena;
+                 IrInlinePlan plan = {0};
+                 u32 order_count = 0;
++                TimeDataType diag_graph = timestamp_take();
+                 bool plan_ready = has_required
+                                      ? ir_inline_plan_graph(program, module, arena, &plan, IR_FAST_SCRATCH_BUDGET, IR_FAST_WORK_BUDGET, planning_units, &order_count)
+                                      : true;
+                 if (plan_ready && !has_required) ir_inline_plan_optional(program, module, arena, &plan, &order_count);
++                diag_inl_ns[7] += timestamp_ns_between(diag_graph, timestamp_take());
+                 module->inlining.visits = has_required ? plan.work_units : ir_inline_storage_add(planning_units, plan.work_units);
+                 if (!plan_ready)
+                 {
+@@ -681,6 +686,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                     {
+                         // Optional selection bounds work per caller, as FAST
+                         // does; mandatory planning above stays module-wide.
++                        TimeDataType diag_screen = timestamp_take();
+                         total_work = caller->block_count;
+                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, caller->block_count);
+                         bool possible_tiny_call = false;
+@@ -740,6 +746,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                             }
+                         }
+                         total_work = ir_inline_storage_add(total_work, scan_used);
++                        diag_inl_ns[5] += timestamp_ns_between(diag_screen, timestamp_take());
+                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, scan_used);
+                         if (caller_scan_exhausted)
+                         {
+@@ -788,6 +795,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                     }
+                     total_work = ir_inline_storage_add(total_work, caller->block_count);
+                     module->inlining.visits = ir_inline_storage_add(module->inlining.visits, caller->block_count);
++                    TimeDataType diag_plan = timestamp_take();
+                     TemporalArena function_scratch = scratch_begin(&program->arena, 1);
+                     Arena* function_arena = function_scratch.arena;
+                     u32 original_instructions = caller->instruction_count;
+@@ -1379,6 +1387,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                         module_storage = module_storage_before;
+                         total_copies = total_copies_before;
+                     }
++                    diag_inl_ns[6] += timestamp_ns_between(diag_plan, timestamp_take());
+                     bool changed = false;
+                     bool required_splice = false;
+                     if (function_sites != function_sites_used[caller_index])
+@@ -1387,14 +1396,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                         // charged (as geometric growth from the current capacity),
+                         // so no table is reallocated when its final count still
+                         // fits. A splice adds exactly its planned rows.
++                        TimeDataType diag_t1 = timestamp_take();
+                         ir_inline_cfg_reserve_tables(program->arena, caller,
+                             ir_inline_storage_add(caller->block_count, function_projected_blocks),
+                             ir_inline_storage_add(caller->instruction_count, function_projected_instructions),
+                             ir_inline_storage_add(caller->value_count, function_projected_values),
+                             ir_inline_storage_add(caller->extra_count, function_projected_extras), &discard);
++                        diag_inl_ns[0] += timestamp_ns_between(diag_t1, timestamp_take());
+                     }
++                    TimeDataType diag_t2 = timestamp_take();
+                     IrInlineCfgReserve reserve = ir_inline_cfg_reserve(caller, function_projected_locals, function_projected_debug,
+                                                                        function_projected_scopes);
++                    diag_inl_ns[1] += timestamp_ns_between(diag_t2, timestamp_take());
+                     for (u32 block = 0; block < original_blocks && result.error == IR_VALIDATION_NONE; block += 1)
+                     {
+                         for (u32 row = planned_heads[block]; row != IR_INLINE_NONE && result.error == IR_VALIDATION_NONE; row = planned_next[row])
+@@ -1405,8 +1418,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                         IrFunction* callee = callee_index < count ? module->functions + callee_index : 0;
+                         u32 copied = 0;
+                         u32 rows_before = caller->instruction_count;
+-                        if (!callee || !ir_inline_cfg_call(program->arena, program, caller, (IrBlockId){.value = block},
+-                                                           (IrInstructionId){.value = row}, callee, &reserve, void_type, &copied))
++                        TimeDataType diag_t3 = timestamp_take();
++                        bool diag_ok = callee && ir_inline_cfg_call(program->arena, program, caller, (IrBlockId){.value = block},
++                                                           (IrInstructionId){.value = row}, callee, &reserve, void_type, &copied);
++                        diag_inl_ns[2] += timestamp_ns_between(diag_t3, timestamp_take());
++                        if (!diag_ok)
+                         {
+                             result = ir_inline_callsite_error(caller, block, row);
+                         }
+@@ -1428,8 +1444,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                         // here, after its last splice. The stale operand
+                         // population is ignored while operand_total_rows differs from instruction_count; opcode_summary only
+                         // over-approximates, so no full-function remap or compaction is needed here.
++                        TimeDataType diag_t4 = timestamp_take();
+                         ir_inline_cfg_rebuild_predecessors(program->arena, caller);
+                         ir_function_invalidate_cfg(caller);
++                        diag_inl_ns[3] += timestamp_ns_between(diag_t4, timestamp_take());
+                         if (defer_optional_output && !required_splice)
+                         {
+                             // Unknown again: a later read as a callee rechecks it.
+@@ -1443,7 +1461,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
+                         }
+                         else
+                         {
++                            TimeDataType diag_t0 = timestamp_take();
+                             IrValidationResult output = ir_validate_canonical_function(program, caller);
++                            diag_inline_validate_ns += timestamp_ns_between(diag_t0, timestamp_take());
+                             strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
+                             if (output.error != IR_VALIDATION_NONE)
+                             {
+diff --git a/src/buster/lib/compiler/ir/ir_inline_cfg.c b/src/buster/lib/compiler/ir/ir_inline_cfg.c
+index e5899297..73f07c36 100644
+--- a/src/buster/lib/compiler/ir/ir_inline_cfg.c
++++ b/src/buster/lib/compiler/ir/ir_inline_cfg.c
+@@ -60,11 +60,16 @@ struct IrInlineDiscard
+     u64 released_bytes;
+ };
+ 
++u64 diag_inl_ns[8];
++u64 diag_inl_bytes[2];
+ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_discard_flush(IrInlineDiscard* discard, IrInlineDiscardTable table)
+ {
+     if (discard->ends[table] > discard->starts[table])
+     {
++        TimeDataType diag_t0 = timestamp_take();
+         discard->released_bytes += os_discard((void*)discard->starts[table], discard->ends[table] - discard->starts[table]);
++        diag_inl_ns[4] += timestamp_ns_between(diag_t0, timestamp_take());
++        diag_inl_bytes[1] += 1;
+     }
+     discard->starts[table] = 0;
+     discard->ends[table] = 0;
+@@ -101,6 +106,8 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_discard_release(IrInlineDiscard* discard)
+ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* caller, u64 blocks, u64 instructions,
+                                                       u64 values, u64 extras, IrInlineDiscard* discard)
+ {
++    diag_inl_bytes[0] += (u64)caller->block_count * sizeof(IrBlock) + (u64)caller->instruction_count * (sizeof(IrInstruction) + sizeof(IrSourceRange))
++                       + (u64)caller->value_count * sizeof(IrValue) + (u64)caller->extra_count * (sizeof(IrInstructionId) + sizeof(IrInstructionExtra));
+     if (blocks > caller->block_capacity && blocks <= UINT32_MAX)
+     {
+         IrBlock* rows = arena_allocate(arena, IrBlock, blocks);
