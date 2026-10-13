@@ -9904,7 +9904,8 @@ BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPre
         }
         CTypeId element = type;
         while (valid && element.value < result->type_count &&
-               (result->types[element.value].kind == C_TYPE_ARRAY || result->types[element.value].kind == C_TYPE_VECTOR))
+               (result->types[element.value].kind == C_TYPE_ARRAY || result->types[element.value].kind == C_TYPE_VECTOR ||
+                result->types[element.value].kind == C_TYPE_POINTER))
         {
             element = result->types[element.value].element_type;
         }
@@ -24840,6 +24841,153 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* resul
 // Records the use of the identifier at `token_index` as resolving to
 // `entity`, the answer of a lookup of that token in `scope` the caller
 // already made, and diagnoses an unresolved name unless it is predefined.
+// The unresolved storage-only half spelling can still start an abstract
+// type name inside a parenthesized operand. Recognize the qualifier, pointer
+// and array token shape without parsing or mutating the type model, so binding
+// cannot recurse through a nested type query or leave speculative rows behind.
+BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CParseResult* result, CPreprocessResult preprocess,
+                                                             u32 token_index)
+{
+    u32 type_start = token_index;
+    while (type_start > 0)
+    {
+        String8 previous = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_start - 1]);
+        bool qualifier = string_equal(previous, S8("const")) || string_equal(previous, S8("__const")) ||
+            string_equal(previous, S8("__const__")) || string_equal(previous, S8("volatile")) ||
+            string_equal(previous, S8("__volatile")) || string_equal(previous, S8("__volatile__")) ||
+            string_equal(previous, S8("restrict")) || string_equal(previous, S8("__restrict")) ||
+            string_equal(previous, S8("__restrict__"));
+        if (!qualifier) break;
+        type_start -= 1;
+    }
+    u32 open = type_start ? type_start - 1 : UINT32_MAX;
+    u32 close = open < preprocess.token_count &&
+                c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                    ? c_parse_matching_delimiter_indexed(result, preprocess, open)
+                    : UINT32_MAX;
+    bool valid = close < preprocess.token_count && close > token_index;
+    if (valid)
+    {
+        while (valid && token_index + 1 < close)
+        {
+            String8 next = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index + 1]);
+            bool qualifier = string_equal(next, S8("const")) || string_equal(next, S8("__const")) ||
+                string_equal(next, S8("__const__")) || string_equal(next, S8("volatile")) ||
+                string_equal(next, S8("__volatile")) || string_equal(next, S8("__volatile__")) ||
+                string_equal(next, S8("restrict")) || string_equal(next, S8("__restrict")) ||
+                string_equal(next, S8("__restrict__"));
+            if (!qualifier) break;
+            token_index += 1;
+        }
+
+        typedef struct CStorageHalfAbstractDeclaratorFrame CStorageHalfAbstractDeclaratorFrame;
+        struct CStorageHalfAbstractDeclaratorFrame
+        {
+            u32 end;
+            u32 resume;
+            bool required;
+        };
+        u64 mark = scratch->position;
+        u32 capacity = close - token_index;
+        CStorageHalfAbstractDeclaratorFrame* frames = arena_allocate(scratch, CStorageHalfAbstractDeclaratorFrame, capacity);
+        valid = frames != 0;
+        u32 depth = 0;
+        u32 cursor = token_index + 1;
+        u32 end = close;
+        bool required = false;
+        bool saw_declarator = false;
+        bool after_group = false;
+        while (valid)
+        {
+            if (after_group)
+            {
+                while (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 array_close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                    valid = array_close < end;
+                    if (!valid) break;
+                    cursor = array_close + 1;
+                    saw_declarator = true;
+                }
+            }
+            else
+            {
+                while (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_STAR))
+                {
+                    saw_declarator = true;
+                    cursor += 1;
+                    while (cursor < end)
+                    {
+                        String8 next = c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]);
+                        bool qualifier = string_equal(next, S8("const")) || string_equal(next, S8("__const")) ||
+                            string_equal(next, S8("__const__")) || string_equal(next, S8("volatile")) ||
+                            string_equal(next, S8("__volatile")) || string_equal(next, S8("__volatile__")) ||
+                            string_equal(next, S8("restrict")) || string_equal(next, S8("__restrict")) ||
+                            string_equal(next, S8("__restrict__"));
+                        if (!qualifier) break;
+                        cursor += 1;
+                    }
+                }
+                if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    while (valid && cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
+                    {
+                        u32 array_close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                        valid = array_close < end;
+                        if (!valid) break;
+                        cursor = array_close + 1;
+                        saw_declarator = true;
+                    }
+                }
+                else if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 group_open = cursor;
+                    u32 group_close = c_parse_matching_delimiter_indexed(result, preprocess, group_open);
+                    valid = group_close < end && group_close > group_open + 1 && depth < capacity;
+                    if (valid)
+                    {
+                        frames[depth++] = (CStorageHalfAbstractDeclaratorFrame){
+                            .end = end,
+                            .resume = group_close + 1,
+                            .required = required,
+                        };
+                        cursor = group_open + 1;
+                        end = group_close;
+                        required = true;
+                        saw_declarator = false;
+                        after_group = false;
+                        continue;
+                    }
+                }
+            }
+
+            if (valid && cursor == end && (!required || saw_declarator))
+            {
+                if (depth)
+                {
+                    CStorageHalfAbstractDeclaratorFrame frame = frames[--depth];
+                    cursor = frame.resume;
+                    end = frame.end;
+                    required = frame.required;
+                    saw_declarator = true;
+                    after_group = true;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            else
+            {
+                valid = false;
+            }
+        }
+        valid = valid && cursor == close && depth == 0;
+        arena_set_position(scratch, mark);
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index,
                                                       CEntityId entity)
 {
@@ -24898,37 +25046,8 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
             c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index - 2]), S8("__builtin_bit_cast")) &&
             c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_COMMA);
-        bool storage_type_name_group = false;
-        if (string_equal(spelling, S8("__fp16")))
-        {
-            u32 type_start = token_index;
-            u32 type_end = token_index + 1;
-            while (type_start > 0)
-            {
-                String8 previous = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_start - 1]);
-                bool qualifier = string_equal(previous, S8("const")) || string_equal(previous, S8("__const")) ||
-                    string_equal(previous, S8("__const__")) || string_equal(previous, S8("volatile")) ||
-                    string_equal(previous, S8("__volatile")) || string_equal(previous, S8("__volatile__")) ||
-                    string_equal(previous, S8("restrict")) || string_equal(previous, S8("__restrict")) ||
-                    string_equal(previous, S8("__restrict__"));
-                if (!qualifier) break;
-                type_start -= 1;
-            }
-            while (type_end < preprocess.token_count)
-            {
-                String8 next = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_end]);
-                bool qualifier = string_equal(next, S8("const")) || string_equal(next, S8("__const")) ||
-                    string_equal(next, S8("__const__")) || string_equal(next, S8("volatile")) ||
-                    string_equal(next, S8("__volatile")) || string_equal(next, S8("__volatile__")) ||
-                    string_equal(next, S8("restrict")) || string_equal(next, S8("__restrict")) ||
-                    string_equal(next, S8("__restrict__"));
-                if (!qualifier) break;
-                type_end += 1;
-            }
-            storage_type_name_group = type_start > 0 && type_end < preprocess.token_count &&
-                c_token_is_punctuator(&preprocess.tokens[type_start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                c_token_is_punctuator(&preprocess.tokens[type_end], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        }
+        bool storage_type_name_group = string_equal(spelling, S8("__fp16")) &&
+                                      c_parse_storage_half_type_name_group(arena, result, preprocess, token_index);
         predefined_function_name |= storage_type_slot || storage_type_name_group;
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
@@ -42659,46 +42778,120 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
     }
     if (storage_half_token != UINT32_MAX)
     {
+        // This declaration pass runs before function-body sizeof operands are
+        // typed. Restrict graph construction to types rooted in declarations:
+        // malformed edges on those types still fail, while unrelated
+        // provisional expression rows are outside this pass's input graph.
+        u32 capacity = result->type_count ? result->type_count : 1;
+        u32* pending = arena_allocate(machine->scratch_arena, u32, capacity);
+        u8* marked = arena_allocate_zeroed(machine->scratch_arena, u8, capacity);
+        bool valid = pending && marked;
+        u32 reachable_count = 0;
+        for (u32 entity_index = 0; valid && entity_index < result->entity_count; entity_index += 1)
+        {
+            u32 type_index = result->entities[entity_index].type.value;
+            valid = type_index < result->type_count;
+            if (valid && !marked[type_index])
+            {
+                marked[type_index] = 1;
+                pending[reachable_count++] = type_index;
+            }
+        }
+        for (u32 member_index = 0; valid && member_index < result->member_count; member_index += 1)
+        {
+            u32 type_index = result->members[member_index].type.value;
+            valid = type_index < result->type_count;
+            if (valid && !marked[type_index])
+            {
+                marked[type_index] = 1;
+                pending[reachable_count++] = type_index;
+            }
+        }
+        for (u32 cursor = 0; valid && cursor < reachable_count; cursor += 1)
+        {
+            u32 parent_index = pending[cursor];
+            CType parent = result->types[parent_index];
+            if (parent.kind == C_TYPE_VECTOR || parent.kind == C_TYPE_POINTER || parent.kind == C_TYPE_ARRAY)
+            {
+                u32 child = parent.element_type.value;
+                valid = child < result->type_count;
+                if (valid && !marked[child])
+                {
+                    marked[child] = 1;
+                    pending[reachable_count++] = child;
+                }
+            }
+            else if (parent.kind == C_TYPE_FUNCTION)
+            {
+                bool parameters_valid = parent.parameter_start <= result->parameter_count &&
+                    parent.parameter_count <= result->parameter_count - parent.parameter_start;
+                u32 return_type = parent.return_type.value;
+                valid = return_type < result->type_count && parameters_valid;
+                if (valid && !marked[return_type])
+                {
+                    marked[return_type] = 1;
+                    pending[reachable_count++] = return_type;
+                }
+                for (u32 parameter_index = 0; valid && parameter_index < parent.parameter_count; parameter_index += 1)
+                {
+                    CParameter parameter = result->parameters[parent.parameter_start + parameter_index];
+                    u32 child = parameter.type.value;
+                    valid = child < result->type_count;
+                    if (valid && !marked[child])
+                    {
+                        marked[child] = 1;
+                        pending[reachable_count++] = child;
+                    }
+                }
+            }
+            else if (parent.has_unqualified_type)
+            {
+                u32 child = parent.unqualified_type.value;
+                valid = child < result->type_count;
+                if (valid && !marked[child])
+                {
+                    marked[child] = 1;
+                    pending[reachable_count++] = child;
+                }
+            }
+        }
+
+        u32* parent_heads = 0;
+        CTypeStorageHalfParentEdge* parent_edges = 0;
         u64 parent_edge_count = 0;
-        bool valid = result->type_count != 0;
         for (u32 type_index = 0; valid && type_index < result->type_count; type_index += 1)
         {
+            if (!marked[type_index]) continue;
             CType type = result->types[type_index];
             u64 edges = 0;
             if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
             {
-                valid = type.element_type.value < result->type_count;
-                edges += valid ? 1 : 0;
+                edges = 1;
             }
             else if (type.kind == C_TYPE_FUNCTION)
             {
-                valid = type.return_type.value < result->type_count &&
-                    type.parameter_start <= result->parameter_count &&
-                    type.parameter_count <= result->parameter_count - type.parameter_start;
-                edges += valid ? (u64)type.parameter_count + 1 : 0;
+                edges = (u64)type.parameter_count + 1;
             }
             else if (type.has_unqualified_type)
             {
-                valid = type.unqualified_type.value < result->type_count;
-                edges += valid ? 1 : 0;
+                edges = 1;
             }
             valid &= edges <= UINT32_MAX && parent_edge_count <= (u64)UINT32_MAX - edges;
             if (valid) parent_edge_count += edges;
         }
-        if (valid)
+        if (valid && reachable_count)
         {
-            u32* parent_heads = arena_allocate(machine->scratch_arena, u32, result->type_count);
-            CTypeStorageHalfParentEdge* parent_edges = parent_edge_count ?
+            parent_heads = arena_allocate(machine->scratch_arena, u32, result->type_count);
+            parent_edges = parent_edge_count ?
                 arena_allocate(machine->scratch_arena, CTypeStorageHalfParentEdge, (u32)parent_edge_count) : 0;
-            u32* pending = arena_allocate(machine->scratch_arena, u32, result->type_count);
-            u8* marked = arena_allocate_zeroed(machine->scratch_arena, u8, result->type_count);
-            valid = parent_heads && (!parent_edge_count || parent_edges) && pending && marked;
+            valid = parent_heads && (!parent_edge_count || parent_edges);
             if (valid)
             {
                 memset(parent_heads, 0xff, sizeof(*parent_heads) * (u64)result->type_count);
                 u32 edge_cursor = 0;
                 for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
                 {
+                    if (!marked[type_index]) continue;
                     CType type = result->types[type_index];
                     CTypeId children[2] = {C_TYPE_ID_INVALID, C_TYPE_ID_INVALID};
                     u32 child_count = 0;
@@ -42712,11 +42905,12 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                         for (u32 parameter_index = 0; parameter_index < type.parameter_count; parameter_index += 1)
                         {
                             CParameter parameter = result->parameters[type.parameter_start + parameter_index];
-                            CTypeId child = parameter.type;
-                            if (child.value < result->type_count && edge_cursor < parent_edge_count)
+                            u32 child = parameter.type.value;
+                            if (edge_cursor < parent_edge_count)
                             {
-                                parent_edges[edge_cursor] = (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child.value]};
-                                parent_heads[child.value] = edge_cursor++;
+                                parent_edges[edge_cursor] =
+                                    (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child]};
+                                parent_heads[child] = edge_cursor++;
                             }
                             else
                             {
@@ -42730,11 +42924,12 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                     }
                     for (u32 child_index = 0; child_index < child_count; child_index += 1)
                     {
-                        CTypeId child = children[child_index];
-                        if (child.value < result->type_count && edge_cursor < parent_edge_count)
+                        u32 child = children[child_index].value;
+                        if (edge_cursor < parent_edge_count)
                         {
-                            parent_edges[edge_cursor] = (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child.value]};
-                            parent_heads[child.value] = edge_cursor++;
+                            parent_edges[edge_cursor] =
+                                (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child]};
+                            parent_heads[child] = edge_cursor++;
                         }
                         else
                         {
@@ -42743,31 +42938,36 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                     }
                 }
                 valid &= edge_cursor == parent_edge_count;
-                u32 pending_count = 0;
-                for (u32 type_index = 0; valid && type_index < result->type_count; type_index += 1)
-                {
-                    if (result->types[type_index].kind == C_TYPE_FP16_STORAGE)
-                    {
-                        marked[type_index] = 1;
-                        pending[pending_count++] = type_index;
-                    }
-                }
-                valid &= pending_count != 0;
-                for (u32 cursor = 0; valid && parent_edge_count && cursor < pending_count; cursor += 1)
-                {
-                    u32 child = pending[cursor];
-                    for (u32 edge = parent_heads[child]; edge != UINT32_MAX; edge = parent_edges[edge].next)
-                    {
-                        u32 parent = parent_edges[edge].parent;
-                        if (!marked[parent])
-                        {
-                            marked[parent] = 1;
-                            pending[pending_count++] = parent;
-                        }
-                    }
-                }
-                if (valid) storage_half_types = marked;
             }
+        }
+
+        if (valid)
+        {
+            memset(marked, 0, sizeof(*marked) * (u64)result->type_count);
+            u32 storage_half_pending_count = 0;
+            for (u32 cursor = 0; cursor < reachable_count; cursor += 1)
+            {
+                u32 type_index = pending[cursor];
+                if (result->types[type_index].kind == C_TYPE_FP16_STORAGE)
+                {
+                    marked[type_index] = 1;
+                    pending[storage_half_pending_count++] = type_index;
+                }
+            }
+            for (u32 cursor = 0; valid && cursor < storage_half_pending_count; cursor += 1)
+            {
+                u32 child = pending[cursor];
+                for (u32 edge = parent_heads ? parent_heads[child] : UINT32_MAX; edge != UINT32_MAX; edge = parent_edges[edge].next)
+                {
+                    u32 parent = parent_edges[edge].parent;
+                    if (!marked[parent])
+                    {
+                        marked[parent] = 1;
+                        pending[storage_half_pending_count++] = parent;
+                    }
+                }
+            }
+            if (valid) storage_half_types = marked;
         }
         if (!storage_half_types)
         {
