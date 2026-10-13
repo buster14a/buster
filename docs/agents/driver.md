@@ -36,13 +36,16 @@ header path the C preprocessor actually resolved and lexed, including forced
 `-include` names. A match fails with an argument diagnostic before staging or
 replacing the destination, preserving both the input and any existing output
 bytes. This catches direct, symbolic-link, hard-link and case aliases whenever
-the filesystem reports the same identity. Executable link outputs and
+the filesystem reports the same identity. Direct Wasm, SPIR-V and eBPF
+emitters use the same action-aware path selector for checking and publication,
+including their default artifact names. Native executable link outputs and
 `-MF` dependency outputs are checked against each unit's resolved files before
-publication. For multi-input `-c` and `-emit-llvm`, every derived `.o` or
-`.bc` destination is checked against the full positional input set before
-any unit runs, so an earlier output cannot replace a later input. The check
-does not resolve implicit `-lNAME` library searches or compiler-generated
-secondary evidence outputs.
+publication; multi-input links retain each C and preprocessed-assembly unit's
+resolved files until the final output check. For multi-input `-c` and
+`-emit-llvm`, every derived `.o` or `.bc` destination is checked against
+the full positional input set before any unit runs, so an earlier output
+cannot replace a later input. The check does not resolve implicit `-lNAME`
+library searches or compiler-generated secondary evidence outputs.
 
 Publication (`file_publish_checked`, `file_publish_slices_checked` and
 `file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside

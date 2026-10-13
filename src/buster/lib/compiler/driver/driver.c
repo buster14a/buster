@@ -7368,6 +7368,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, 
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* arena, String8 input);
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_target_artifact_output_path(Arena* arena, CompilerDriverInvocation invocation);
 
 // Per-unit measurement scratch for collect_input_metrics. A null pointer is
 // the ordinary compile: every phase boundary tests it once and reads no
@@ -7792,7 +7793,15 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResolvedOutputAlias compiler_driver_resolved_o
     {
         result.output_path = invocation.output_path;
     }
-    if (!result.output_path.length && !suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
+    if (!result.output_path.length && !suppress_object_write &&
+        (invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.action == COMPILER_DRIVER_ACTION_LINK) &&
+        (invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE ||
+         (!invocation.emit_llvm_bitcode &&
+          (compiler_driver_target_is_wasm(invocation.target) || invocation.target.cpu_arch == CPU_ARCH_BPFEL))))
+    {
+        result.output_path = compiler_driver_target_artifact_output_path(arena, invocation);
+    }
+    else if (!result.output_path.length && !suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
     {
         result.output_path = invocation.emit_llvm_bitcode
                                 ? compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0])
@@ -7931,6 +7940,31 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, Stri
                                                       });
 }
 
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_target_artifact_output_path(Arena* arena, CompilerDriverInvocation invocation)
+{
+    String8 output = invocation.output_path;
+    if (!output.length)
+    {
+        if (compiler_driver_target_is_wasm(invocation.target))
+        {
+            output = invocation.action == COMPILER_DRIVER_ACTION_OBJECT
+                         ? compiler_driver_default_wasm_path(arena, invocation.input_paths[0])
+                         : S8("a.wasm");
+        }
+        else if (invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
+        {
+            output = string_format_z(arena, S8("{S8}.spv"), invocation.input_paths[0]);
+        }
+        else if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
+        {
+            output = invocation.action == COMPILER_DRIVER_ACTION_OBJECT
+                         ? compiler_driver_default_object_path(arena, invocation.input_paths[0])
+                         : S8("a.o");
+        }
+    }
+    return output;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
                                                     WasmArtifact artifact, CompilerDriverResult* result)
 {
@@ -7951,10 +7985,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     }
     result->has_wasm = true;
     result->has_wasm64 = artifact.stats.memory64;
-    String8 output = invocation.output_path.length ? invocation.output_path
-                     : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
-                         ? compiler_driver_default_wasm_path(arena, invocation.input_paths[0])
-                         : S8("a.wasm");
+    String8 output = compiler_driver_target_artifact_output_path(arena, invocation);
     if (!compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
     {
         return false;
@@ -7973,8 +8004,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_write_spirv(Arena* arena, CompilerDrive
     }
     else
     {
-        String8 output = invocation.output_path.length ? invocation.output_path
-                          : string_format_z(arena, S8("{S8}.spv"), invocation.input_paths[0]);
+        String8 output = compiler_driver_target_artifact_output_path(arena, invocation);
         if (compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
         {
             result->has_spirv = true;
@@ -8000,10 +8030,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
         return false;
     }
     result->has_ebpf = true;
-    String8 output = invocation.output_path.length ? invocation.output_path
-                     : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
-                         ? compiler_driver_default_object_path(arena, invocation.input_paths[0])
-                         : S8("a.o");
+    String8 output = compiler_driver_target_artifact_output_path(arena, invocation);
     if (!compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
     {
         return false;
@@ -8656,7 +8683,42 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         c_preprocess_release(&preprocess);
         return result;
     }
-    result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length}, metrics);
+    CSourceFileMetrics* retained_lexed_files = 0;
+    u32 retained_lexed_file_count = 0;
+    bool retain_lexed_files = suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT;
+    bool retained_lexed_files_ready = true;
+    if (retain_lexed_files)
+    {
+        CPreprocessDetail const* detail = c_preprocess_detail(preprocess);
+        retained_lexed_file_count = detail->lexed_file_count;
+        if (retained_lexed_file_count)
+        {
+            retained_lexed_files = arena_allocate(arena, CSourceFileMetrics, retained_lexed_file_count);
+            retained_lexed_files_ready = retained_lexed_files != 0;
+            for (u32 index = 0; retained_lexed_files_ready && index < retained_lexed_file_count; index += 1)
+            {
+                retained_lexed_files[index] = detail->lexed_files[index];
+                retained_lexed_files[index].path = string_duplicate_arena(arena, detail->lexed_files[index].path, false);
+                retained_lexed_files_ready = !detail->lexed_files[index].path.length ||
+                                             retained_lexed_files[index].path.pointer != 0;
+            }
+        }
+    }
+    if (!retained_lexed_files_ready)
+    {
+        result.error = COMPILER_DRIVER_ERROR_RESOURCE;
+        result.diagnostic = S8("could not retain preprocessed assembly inputs for link safety");
+    }
+    else
+    {
+        result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess,
+                                                         (String8){.pointer = split, .length = split_length}, metrics);
+        if (retain_lexed_files)
+        {
+            result.lexed_files = retained_lexed_files;
+            result.lexed_file_count = retained_lexed_file_count;
+        }
+    }
     c_preprocess_release(&preprocess);
     return result;
 }

@@ -1116,6 +1116,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     }
     String8 multi_stem = {.pointer = multi_input.pointer + multi_name, .length = multi_extension - multi_name};
     String8 multi_output = string_format_z(arena, S8("{S8}.o"), multi_stem);
+    String8 assembly_directory = os_path_absolute(buster_test_temporary_path(arena, S8("output-input-assembly"), S8("")), false);
+    String8 assembly_input = os_path_absolute(buster_test_temporary_path(arena, S8("output-input-assembly"), S8(".S")), false);
+    String8 assembly_c_input = os_path_absolute(buster_test_temporary_path(arena, S8("output-input-assembly-main"), S8(".c")), false);
+    String8 assembly_header = string_format_z(arena, S8("{S8}/victim.h"), assembly_directory);
+    String8 wasm_default_output = {0};
+    if (input.length >= 2)
+    {
+        wasm_default_output = string_format_z(arena, S8("{S8}.wasm"),
+                                              (String8){.pointer = input.pointer, .length = input.length - 2});
+    }
+    String8 spirv_default_output = string_format_z(arena, S8("{S8}.spv"), input);
+    u64 target_output_name = 0;
+    u64 target_output_extension = input.length;
+    for (u64 index = input.length; index != 0; index -= 1)
+    {
+        char8 byte = input.pointer[index - 1];
+        if (byte == '.' && target_output_extension == input.length)
+        {
+            target_output_extension = index - 1;
+        }
+        if (byte == '/' || byte == '\\')
+        {
+            target_output_name = index;
+            break;
+        }
+    }
+    String8 target_output_stem = input.length
+                                     ? (String8){.pointer = input.pointer + target_output_name,
+                                                 .length = target_output_extension - target_output_name}
+                                     : (String8){0};
+    String8 ebpf_default_output =
+        target_output_stem.length ? string_format_z(arena, S8("{S8}.o"), target_output_stem) : (String8){0};
     String8 source = S8("int main(void) { return 0; }\n");
     String8 source_bytes = source;
     String8 target = S8("x86_64-unknown-linux-gnu");
@@ -1222,28 +1254,105 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, multi_output, (FileReadOptions){0})),
                            invalid_positional_object);
 
+        String8 assembly_text =
+            S8("#include \"victim.h\"\n.text\n.globl collision_assembly\ncollision_assembly:\nret\n");
+        String8 assembly_main = S8("int main(void) { return 0; }\n");
+        String8 assembly_header_bytes = S8("/* preprocessed assembly include */\n");
+        if (BUSTER_REQUIRE(arguments, assembly_directory.length && assembly_input.length && assembly_c_input.length &&
+                                      assembly_header.length && os_make_directory_attempt(assembly_directory) &&
+                                      file_write(assembly_input, BUSTER_SLICE_TO_BYTE_SLICE(assembly_text)) &&
+                                      file_write(assembly_c_input, BUSTER_SLICE_TO_BYTE_SLICE(assembly_main)) &&
+                                      file_write(assembly_header, BUSTER_SLICE_TO_BYTE_SLICE(assembly_header_bytes))))
+        {
+            String8 assembly_link_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-I"),
+                                               assembly_directory, assembly_input, assembly_c_input, S8("-o"), assembly_header};
+            CompilerDriverResult assembly_link_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_link_command)));
+            BUSTER_TEST_RAW(arguments, assembly_link_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                            assembly_link_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(assembly_link_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments,
+                               BYTE_SLICE_TO_STRING(8, file_read(arena, assembly_header, (FileReadOptions){0})),
+                               assembly_header_bytes);
+        }
+
+        String8 output_header_bytes = S8("#define OUTPUT_ALIAS_HEADER 1\n");
+        String8 invalid_target_source = S8("int output_collision_invalid = ;\n");
+        // The source reaches preprocessing but cannot compile; the alias diagnostic proves
+        // the real target-specific default is refused before any backend runs.
+        if (BUSTER_REQUIRE(arguments, wasm_default_output.length &&
+                                      file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_target_source)) &&
+                                      file_write(wasm_default_output, BUSTER_SLICE_TO_BYTE_SLICE(output_header_bytes))))
+        {
+            String8 wasm_default_command[] = {S8("-target"), S8("wasm32-wasip1"), S8("-nostdinc"), S8("-include"),
+                                              wasm_default_output, S8("-c"), input};
+            CompilerDriverResult wasm_default_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm_default_command)));
+            BUSTER_TEST_RAW(arguments, wasm_default_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                            wasm_default_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(wasm_default_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments,
+                               BYTE_SLICE_TO_STRING(8, file_read(arena, wasm_default_output, (FileReadOptions){0})),
+                               output_header_bytes);
+        }
+
+        if (BUSTER_REQUIRE(arguments, spirv_default_output.length &&
+                                      file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_target_source)) &&
+                                      file_write(spirv_default_output, BUSTER_SLICE_TO_BYTE_SLICE(output_header_bytes))))
+        {
+            String8 spirv_default_command[] = {S8("-target"), S8("spirv-vulkan1.2-compute"), S8("-nostdinc"), S8("-include"),
+                                               spirv_default_output, S8("-c"), input};
+            CompilerDriverResult spirv_default_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(spirv_default_command)));
+            BUSTER_TEST_RAW(arguments, spirv_default_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                            spirv_default_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(spirv_default_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments,
+                               BYTE_SLICE_TO_STRING(8, file_read(arena, spirv_default_output, (FileReadOptions){0})),
+                               output_header_bytes);
+        }
+
+        if (BUSTER_REQUIRE(arguments, ebpf_default_output.length &&
+                                      file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_target_source)) &&
+                                      file_write(ebpf_default_output, BUSTER_SLICE_TO_BYTE_SLICE(output_header_bytes))))
+        {
+            String8 ebpf_default_command[] = {S8("-target"), S8("bpfel-unknown-linux"), S8("-nostdinc"), S8("-include"),
+                                              ebpf_default_output, S8("-c"), input};
+            CompilerDriverResult ebpf_default_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ebpf_default_command)));
+            BUSTER_TEST_RAW(arguments, ebpf_default_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                            ebpf_default_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(ebpf_default_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments,
+                               BYTE_SLICE_TO_STRING(8, file_read(arena, ebpf_default_output, (FileReadOptions){0})),
+                               output_header_bytes);
+        }
+
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
         String8 case_alias = {.pointer = arena_allocate(arena, char8, input.length), .length = input.length};
-        memcpy(case_alias.pointer, input.pointer, input.length);
-        for (u64 index = 0; index < case_alias.length; index += 1)
+        if (BUSTER_REQUIRE(arguments, case_alias.pointer != 0))
         {
-            if (case_alias.pointer[index] >= 'a' && case_alias.pointer[index] <= 'z')
+            memcpy(case_alias.pointer, input.pointer, input.length);
+            for (u64 index = 0; index < case_alias.length; index += 1)
             {
-                case_alias.pointer[index] = (char8)(case_alias.pointer[index] - 'a' + 'A');
+                if (case_alias.pointer[index] >= 'a' && case_alias.pointer[index] <= 'z')
+                {
+                    case_alias.pointer[index] = (char8)(case_alias.pointer[index] - 'a' + 'A');
+                }
             }
-        }
-        FileStats input_stats = os_path_followed_stats(input);
-        FileStats case_stats = os_path_followed_stats(case_alias);
-        if (input_stats.valid && case_stats.valid && input_stats.kind != OS_FILE_KIND_MISSING &&
-            input_stats.device == case_stats.device && input_stats.index == case_stats.index)
-        {
-            String8 case_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), input,
-                                      S8("-o"), case_alias};
-            CompilerDriverResult case_refused = compiler_driver_execute_invocation(
-                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(case_command)));
-            BUSTER_TEST_RAW(arguments, case_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, case_refused.diagnostic);
-            BUSTER_TEST(arguments, string_first_sequence(case_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
-            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+            FileStats input_stats = os_path_followed_stats(input);
+            FileStats case_stats = os_path_followed_stats(case_alias);
+            if (input_stats.valid && case_stats.valid && input_stats.kind != OS_FILE_KIND_MISSING &&
+                input_stats.device == case_stats.device && input_stats.index == case_stats.index)
+            {
+                String8 case_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), input,
+                                          S8("-o"), case_alias};
+                CompilerDriverResult case_refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(case_command)));
+                BUSTER_TEST_RAW(arguments, case_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, case_refused.diagnostic);
+                BUSTER_TEST(arguments, string_first_sequence(case_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+            }
         }
 
 #if BUSTER_LINUX || BUSTER_MACOS
@@ -1284,7 +1393,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
 #endif
     }
     String8 cleanup_paths[] = {input, forced_include, object, hard_link, symlink_path, forced_search_header,
-                                forced_search_input, multi_input, multi_output};
+                                forced_search_input, multi_input, multi_output, assembly_input, assembly_c_input,
+                                assembly_header, wasm_default_output, spirv_default_output, ebpf_default_output};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cleanup_paths); index += 1)
     {
         FileStats stats = os_path_followed_stats(cleanup_paths[index]);
@@ -1297,6 +1407,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     if (forced_search_directory_stats.valid && forced_search_directory_stats.kind != OS_FILE_KIND_MISSING)
     {
         BUSTER_TEST(arguments, os_directory_delete(forced_search_directory));
+    }
+    FileStats assembly_directory_stats = os_path_followed_stats(assembly_directory);
+    if (assembly_directory_stats.valid && assembly_directory_stats.kind != OS_FILE_KIND_MISSING)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(assembly_directory));
     }
     arena_set_position(arena, position);
 #else
