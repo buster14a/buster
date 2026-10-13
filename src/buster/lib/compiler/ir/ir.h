@@ -954,7 +954,9 @@ struct IrFastStatistics
 };
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
-// Zero option limits select these defaults; limits count canonical rows/sites.
+// Zero row/site limits select these optional defaults; required calls instead use
+// the work/storage guards. Explicit row limits cap both kinds of expansion.
+// Other zero option limits select defaults; limits count canonical rows/sites.
 // A zero module limit is relative to the module: the larger of
 // IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
 // shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
