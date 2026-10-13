@@ -643,9 +643,14 @@ The block-local CSE experiment (#3011) is selected only by
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
 `-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
-off the construction-time constant interning arm in C lowering (off by
-default, last one wins, independent of `-O` and FAST controls); see
-[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
+off construction-time constant interning in C lowering (on by default, last
+one wins, independent of `-O` and FAST controls); see
+[construction-time constant interning](../canonical-fast-pipeline.md#construction-time-constant-interning-3011).
+`-fcanonical-construction-fold` / `-fno-canonical-construction-fold` turn on
+and off the experimental construction-time fold of integer-constant
+conversions and truth tests in C lowering (off by default, last one wins,
+independent of `-O` and FAST controls); `-v` prints `C_CONSTRUCTION_FOLD`. See
+[opt-in construction-time folding](../canonical-fast-pipeline.md#opt-in-construction-time-folding-3010).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables

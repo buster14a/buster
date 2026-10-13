@@ -41,6 +41,21 @@ receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
 Executable controls cover narrowing, mixed compound operators, comma
 and conditional operands, aggregate/pointer values and single evaluation.
 
+## Constant-expression cast probes
+
+The constant evaluator uses `c_ir_query_group_type_name` for parenthesized
+cast probes, sharing the expression walk's first-token gate and per-opener
+memo. Literal-, number- and expression-led groups avoid a type-name request;
+`sizeof` is a keyword and is rejected by the gate before scope lookup.
+Real type names still use the existing query and suspension path. The memo
+continues to exclude scope-sensitive `typeof` groups and lone unbound
+identifiers, and groups outside a function body have no memo slot.
+
+`c_test_constant_group_cast_probe` fixes initializer values for nested groups,
+parenthesized `sizeof`, built-in and typedef casts, `typeof`, local typedefs
+and object shadowing in both canonical frontend forms. It covers file and
+local static initializers as well as in-body constant queries.
+
 ## Logical constant eligibility
 
 `c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
@@ -128,7 +143,13 @@ walk past N nested `do` loops for each of their N variables needed N^2 slots
 read whose only predecessor lies in such a closed loop it leaves, a loop that
 neither writes nor reads the local, passes to the loop's entry in one step when
 the predecessor's forward links climb to that loop's header (preorder intervals
-of the forward-link forest answer this). Otherwise each of N nested `do`
+of the forward-link forest answer this). The read index and forest are built
+once, lazily, after the ordinary walk spends more steps than the function's
+blocks plus SSA events. Activation is checked between reads; one read visits
+at most every block, so work before activation is bounded by events plus twice
+the blocks. Cheap functions retain only the loop-header facts and write index;
+a refused optional carve leaves the general walk and is not retried (#4029).
+Otherwise each of N nested `do`
 conditions climbed through every inner condition and exit block: N^2 steps
 (#3894). Trivial
 parameters and unused parameter cycles are removed; a replaced parameter hands

@@ -469,6 +469,24 @@ is unimplemented. `c_test_gnu_common_predefined_macros` pins the reference
 spellings for thirteen target triples in GNU17 and C23, plus type/limit
 consistency, GNU89 inline, and PIC/PIE behavior.
 
+The prelude does not lex most of its replacement texts. Texts made only of
+identifiers, preprocessing numbers, single spaces and `(`, `)` or `-` go
+through `c_predefined_text_tokens`, which builds the tokens the lexer would
+emit. It writes the same spelling bytes, the text plus its terminator, and
+interns the identifiers in the same order. Any other text goes through
+`c_lex_space`, as do string literals such as `__DATE__`. Two tests hold the
+paths equal:
+- `c_test_predefined_text_direct_tokens` checks every string of up to four
+  bytes over an alphabet that includes the bytes that must fall back to the
+  lexer.
+- `c_test_predefined_text_prelude_identity` checks each prelude text, and then
+  a whole preprocessed unit with the lexer forced, across targets, dialects
+  and PIC modes.
+
+A new predefined text that falls back to the lexer and is not a string
+literal fails the second test. Widen the direct alphabet, or exempt the text
+there.
+
 `__float128`, `_Float128`, `_Float64x` and `_Float128x` are recognized as builtin
 type words but have no lowering. A declaration that would define something with
 one fails with `unsupported type '<name>'`: file-scope object definitions

@@ -1,0 +1,9 @@
+          Ir        D1m        LLd line  (tiny off, top LL-miss lines)
+  19,029,935  2,187,561  2,093,525  1477 events annotated
+   4,208,754  2,001,501  1,994,991   345 calls_required = candidate->opcode == IR_OPCODE_CALL && candidate->symbol.value < program-
+      49,171     35,756     30,705   546 has_required |= program->symbols.symbols[symbol].always_inline;
+      80,014     35,965     29,166   354 IrSymbol* symbol = call->opcode == IR_OPCODE_CALL
+   2,413,436     20,769     14,101  1476 <counts for unidentified lines in src/buster/lib/compiler/ir/ir_inline.c>
+      15,190      7,595      6,088   672 if (caller->state != IR_FUNCTION_LOWERED) continue;
+      24,688      7,595      5,368   330 if (row->symbol.value < program->symbols.count)
+      22,785      7,595      4,864   337 if (caller->state != IR_FUNCTION_LOWERED) continue;

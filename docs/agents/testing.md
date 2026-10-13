@@ -244,6 +244,16 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   shard. The test file is in the reviewed native-retirement support ledger;
   change its exact byte/hash row through a policy transition.
 
+- `python3 tools/matrix_unit_observation_test.py -v` checks same-binary
+  inventory and test-log receipts with direct and nested partition workers.
+  Ordinary and delayed-success inventory controls keep the production
+  30-second query budget; only the deliberate hanging-query negative control
+  uses a separately compiled 100 ms driver. Positive-control failures print
+  bounded file context and retain complete worker streams, phase journals and
+  observation sidecars under
+  `$RUNNER_TEMP/buster-ci/matrix-unit-observation-failures/` (the system
+  temporary directory replaces `RUNNER_TEMP` locally).
+
 - Test implementations are not registered as modules; add new test pairs under
   `src/buster/tests/`, add
   the implementation to `BUSTER_TEST_SOURCES` and the header to

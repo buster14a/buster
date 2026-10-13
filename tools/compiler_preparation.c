@@ -3,7 +3,8 @@
 // SECONDARY_HEAD SECONDARY_TREE only under snapshot-v1. All three pins are
 // checked before source mutation; one baseline snapshot serves both candidates.
 // Entry points: compiler_closure_prepare_main (prepare) and
-// compiler_closure_qualification_main (qualify). The trusted outer runner owns
+// compiler_closure_qualification_main (qualify), whose PYTHON argument goes
+// through compiler_closure_qualification_python. The trusted outer runner owns
 // process-tree cancellation and the existing 90-minute host cap.
 // Every arm starts from the same private checkout with source/build/cache reset.
 // Route the single preparation command adapter through the shared native phase
@@ -995,6 +996,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_qualification_write(Arena* arena, Stri
     return complete && written;
 }
 
+// The native controller passes the plan's verified absolute interpreter, which
+// is used as given only when canonical. Only a bare name is resolved through
+// PATH; executable_resolve_in_path joins every name to each component (#3966).
+BUSTER_GLOBAL_LOCAL String8 compiler_closure_qualification_python(Arena* arena, String8 argument)
+{
+    String8 result = {0};
+    if (argument.length && argument.pointer[0] == '/')
+    {
+        String8 canonical = os_path_absolute(arena, argument, true);
+        if (string_equal(canonical, argument)) { result = canonical; }
+    }
+    else if (argument.length && string_first_code_unit(argument, '/') == BUSTER_STRING_NO_MATCH)
+    {
+        result = os_path_absolute(arena, executable_resolve_in_path(arena, argument), true);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
@@ -1014,7 +1033,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
         root = os_path_absolute(arena, arguments.pointer[1], true);
         output = os_path_absolute_lexical(arena, arguments.pointer[2], true);
         lab = os_path_absolute(arena, arguments.pointer[7], true);
-        python = os_path_absolute(arena, executable_resolve_in_path(arena, arguments.pointer[8]), true);
+        python = compiler_closure_qualification_python(arena, arguments.pointer[8]);
         String8 output_parent = path_parent(arena, output);
         String8 trusted = path_parent(arena, path_parent(arena, lab));
         struct stat lab_status = {0};
@@ -1038,6 +1057,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
             OsDirectoryCreateResult directory = os_make_directory(output);
             owned = directory.created && !directory.error.v;
         }
+        else { string_print(S8("error: compiler_closure qualify refused its pins or root, output, lab or python path\n")); }
         complete = owned && compiler_closure_qualification_host(arena, output);
         if (complete)
         {
