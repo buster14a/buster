@@ -1,10 +1,63 @@
 # Sealed raw compiler evidence v1 (#2918)
 
-Status: the native verifier and sealer are in the trusted driver. No producer
-seals a bundle yet, and no publisher route requires one. Until the producer
-and publisher land (#2918), every ordinary 9700X compiler artifact is
-`legacy-unsealed`. Its outcome stays as published, but its retained raw bytes
-are unverified, never upgraded.
+Status: the ordinary pull and main routes seal their raw evidence, and their
+publishers verify it natively. Sealing is not yet required. An artifact with
+neither control file is `legacy-unsealed`: its outcome stands, but its
+retained raw bytes are unverified, never upgraded. Requiring v1 on the
+ordinary routes is the next step on #2918.
+
+## Producer and publisher
+
+`compiler_compare.py --request-attempt N` marks an ordinary attempt for
+sealing. That excludes the owned, analyzer and snapshot routes. For such an
+attempt:
+
+- It exports the lab and corpus with this inventory as required.
+- In such an attempt every `export_tree` call, including those of the opt-in
+  legs that run before the lab, exports only required members while its leg
+  runs, and creates
+  a directory only as the ancestor of an exported file. Empty or unexported
+  optional subtrees therefore never use the entry budget.
+- Once every leg's required members are in place, `export_deferred_optional`
+  adds the optional members within what is left. It takes the trees in export
+  order, and each tree's members in bytewise path order. An earlier leg's
+  optional data can never starve a later leg's required members.
+- A leg may still read a member it did not list as required, for example a
+  part exported with no required tuple. In that case `read_exported_json`
+  exports that one member first, within the remaining budget, using the same
+  no-follow walk. Validation therefore never sees a deferred member as
+  missing.
+- The exports stop 6 MiB and 3 entries short of the sealed bounds, so the
+  control files always fit. Entries count directories as well as files, as
+  the verifier does.
+- Every omission is recorded with its fixed reason code.
+
+Once the attempt is measured, the producer writes `evidence-omissions.json`
+and runs the trusted `./build.sh compiler_evidence seal` on the bundle, with
+the receipt's own identity. Only then does it write the final receipt, whose
+`evidence_bundle` names the seal: members, payload bytes, manifest bytes and
+SHA-256, and the omission count. A missing required member, or a refused
+seal, fails the attempt.
+
+`compiler_publish.py` handles each artifact as follows:
+
+- **Neither control file:** the artifact is `legacy-unsealed`. The outcome
+  stands, and the report notes that the raw bytes are unverified.
+- **Manifest or seal present:**
+  1. It reads the whole archive through the strict `sampling_archive` reader
+     and extracts it.
+  2. It runs `./build.sh compiler_evidence verify` under the identity that
+     hosted authorization produced; the receipt's identity is not used.
+  3. A refusal fails the check.
+  4. A verified bundle must match the receipt's `evidence_bundle`.
+- **Publication-only recovery:** it verifies the same way. The request attempt
+  comes from the original bench run's own run-name
+  (`9700X request <run>.<attempt> head <sha>`), and that run must be the
+  authenticated request run. A run-name that names another request run, or no
+  run-name at all, cannot name a sealed bundle, so the bundle is refused.
+
+`publish-pull` bootstraps the driver with the pinned TinyCC, as
+`publish-compiler` does.
 
 ## Scope
 

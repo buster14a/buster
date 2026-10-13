@@ -311,8 +311,8 @@ row ownership remain unchanged; alternative-order predictions are diagnostic.
 ## Isolated module process experiment
 
 The `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`; the CI
-matrix enables it for sanitized Clang trees and native Windows AArch64 Clang
-trees. Their serialized test phases receive
+matrix enables it for every Clang tree, including the unsanitized Release
+artifact-fanout producer (#3912). Their serialized test phases receive
 the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition

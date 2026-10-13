@@ -20,6 +20,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.parse
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -711,6 +712,71 @@ class RecoveryTest(unittest.TestCase):
                 if conclusion == "failure":
                     self.assertIn("machine-specification record", published["markdown"])
                 self.assertEqual(api.writes, [])
+
+    def sealed_recovery(self, *, claim: bool = True, controls: bool = True, unsafe: bool = False, tamper: bool = False,
+                        title: str = f"9700X request 91.1 head {HEAD}") -> tuple[int, dict]:
+        """Recovery of a sealed v1 attempt (#2918) through a stand-in native verify.
+
+        The stand-in verifies only under request attempt 1 and only an untampered bundle.
+        """
+        recorded = RecoveryApi.recorded()
+        if claim:
+            recorded["evidence_bundle"] = {"inventory": compiler_receipt.EVIDENCE_INVENTORY, "state": "sealed",
+                                           "manifest_sha256": "a" * 64, "manifest_bytes": 9, "members": 3,
+                                           "payload_bytes": 4, "omissions": 0}
+        members = {"receipt.json": json.dumps(recorded), "lab/summary.json": json.dumps(summary()), **corpus_members()}
+        if controls:
+            members.update({compiler_receipt.EVIDENCE_MANIFEST: "manifest\n", compiler_receipt.EVIDENCE_SEAL: "seal\n"})
+        if tamper:
+            members["lab/tampered.txt"] = "x"
+        api = RecoveryApi()
+        api.payload = archive(members)
+        if unsafe:
+            stream = io.BytesIO(api.payload)
+            with zipfile.ZipFile(stream, "a") as output:
+                info = zipfile.ZipInfo("lab/run.sh")
+                info.external_attr = 0o100755 << 16
+                output.writestr(info, "#!/bin/sh\n")
+            api.payload = stream.getvalue()
+        original = api.request
+
+        def titled(path: str, data: dict | None = None, method: str = "") -> object:
+            answer = original(path, data, method)
+            if urllib.parse.urlsplit(path).path.startswith("/actions/runs/37486885378") and isinstance(answer, dict) and \
+                    "display_title" in answer:
+                answer = dict(answer, display_title=title)
+            return answer
+
+        script = ("import sys, os\n"
+                  "identity = open(sys.argv[3]).read()\n"
+                  "ok = 'request_attempt\\t1\\n' in identity and not os.path.exists(os.path.join(sys.argv[2], 'lab', 'tampered.txt'))\n"
+                  "print('COMPILER_EVIDENCE_VERIFIED members=3 payload_bytes=4 manifest_sha256=' + 'a' * 64 if ok else\n"
+                  "      'COMPILER_EVIDENCE_REFUSED reason=retained bytes, roles or identity do not reproduce the sealed manifest')\n"
+                  "raise SystemExit(0 if ok else 1)\n")
+        with mock.patch.object(api, "request", titled), \
+                mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", script)):
+            return self.run_recovery(api)
+
+    def test_recovery_verifies_sealed_evidence_under_the_original_request_attempt(self) -> None:
+        code, published = self.sealed_recovery()
+        self.assertEqual((code, published["conclusion"]), (0, "success"), published.get("markdown"))
+        for label, change, expected in (
+                ("altered bytes", {"tamper": True}, "sealed raw evidence refused: native verify exited 1"),
+                ("missing controls", {"controls": False}, "receipt names sealed raw evidence that the artifact does not carry"),
+                ("unsafe archive", {"unsafe": True}, "sealed raw evidence refused: sealed evidence archive refused"),
+                ("another request run", {"title": f"9700X request 92.1 head {HEAD}"},
+                 "the authorized identity cannot name a sealed bundle"),
+                ("no run-name", {"title": "9700X direct workload benchmark"},
+                 "the authorized identity cannot name a sealed bundle")):
+            with self.subTest(label=label):
+                code, published = self.sealed_recovery(**change)
+                self.assertEqual((code, published["conclusion"]), (0, "failure"))
+                self.assertIn(expected, published["markdown"])
+
+    def test_recovery_of_an_unsealed_attempt_is_legacy_unverified(self) -> None:
+        code, published = self.sealed_recovery(claim=False, controls=False)
+        self.assertEqual((code, published["conclusion"]), (0, "success"))
+        self.assertIn("legacy-unsealed", published["markdown"])
 
     def test_recovered_failure_keeps_its_meaning(self) -> None:
         code, published = self.run_recovery(RecoveryApi(compare="failure"))
