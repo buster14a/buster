@@ -23843,6 +23843,19 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuild
     return covered;
 }
 
+// The size and alignment of an unevaluated sizeof/_Alignof operand typed by
+// storage-only __fp16, which has no canonical IR type: the semantic C layout
+// answers, in the same scope a type-identity question uses.
+BUSTER_C_INTERNAL bool c_ir_sizeof_storage_half_layout(CIntegerIrBuilder* builder, u32 start, u32 end, bool type_name,
+                                                       u64* size_out, u32* alignment_out)
+{
+    CScopeId root = c_ir_current_scope(builder);
+    if (root.value == C_SCOPE_ID_INVALID.value && builder->parse.scope_count) root = (CScopeId){0};
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, start);
+    return c_semantic_storage_half_operand_layout(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, type_name,
+                                                  size_out, alignment_out);
+}
+
 // A language type-identity question never reaches canonical type ids. The
 // semantic source-range answer is also used by enumerators and validation.
 BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 start, u32 end, CTypeIdentityQuery* answer)
@@ -37761,6 +37774,8 @@ c_ir_expression_core_loop:
             }
             u64 value = 0;
             u32 literal_alignment = 0;
+            String8 failure_before_sizeof = builder->failure_message;
+            u32 failure_token_before_sizeof = builder->failure_token_index;
             if (operand && operand->layout.resolved)
             {
                 value = is_sizeof ? c_ir_sizeof_operand_size(operand) : c_ir_sizeof_operand_alignment(operand);
@@ -37826,14 +37841,28 @@ c_ir_expression_core_loop:
                                                ? IR_TYPE_ID_INVALID
                                                : c_ir_predict_expression_type(builder, operand_start, operand_end);
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
-                if (!expression || !expression->layout.resolved)
+                // Storage-only __fp16 has no IR type at all. The operand is
+                // unevaluated, so its size and alignment come from the C type
+                // layout; an __fp16 value elsewhere stays rejected.
+                bool type_name = parenthesized &&
+                    c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder),
+                                             builder->preprocess.tokens[operand_start]);
+                u64 half_size = 0;
+                u32 half_alignment = 0;
+                bool storage_half = !expression &&
+                    c_ir_sizeof_storage_half_layout(builder, operand_start, operand_end, type_name, &half_size, &half_alignment);
+                if (storage_half)
+                {
+                    builder->failure_message = failure_before_sizeof;
+                    builder->failure_token_index = failure_token_before_sizeof;
+                    value = is_sizeof ? half_size : half_alignment;
+                }
+                else if (!expression || !expression->layout.resolved)
                 {
                     // A type name reaches here only when it has no IR type at
                     // all -- `__fp16` is storage-only -- so say that rather
                     // than calling it an expression.
-                    if (!expression && parenthesized && !builder->failure_message.length &&
-                        c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder),
-                                                 builder->preprocess.tokens[operand_start]))
+                    if (!expression && type_name && !builder->failure_message.length)
                     {
                         builder->failure_message = S8("the operand's type has no canonical IR representation");
                         builder->failure_token_index = operand_start;
@@ -37845,15 +37874,18 @@ c_ir_expression_core_loop:
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                value = is_sizeof ? expression->layout.size : c_ir_sizeof_operand_alignment(expression);
-#if BUSTER_INCLUDE_TESTS
-                if (is_sizeof && c_sizeof_handoff_enabled())
+                else
                 {
-                    bool typed = expression->kind == IR_TYPE_INTEGER;
-                    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, index, true, value, typed, typed && expression->is_signed,
-                                             C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION);
-                }
+                    value = is_sizeof ? expression->layout.size : c_ir_sizeof_operand_alignment(expression);
+#if BUSTER_INCLUDE_TESTS
+                    if (is_sizeof && c_sizeof_handoff_enabled())
+                    {
+                        bool typed = expression->kind == IR_TYPE_INTEGER;
+                        c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, index, true, value, typed, typed && expression->is_signed,
+                                                 C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION);
+                    }
 #endif
+                }
             }
             u32 object_alignment = (u32)value;
             if (!is_sizeof && !(operand && operand->layout.resolved) &&
@@ -41631,14 +41663,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     // A GNU statement expression has the type of the trailing expression
     // statement in its body, and void when it has no such statement --
     // glibc's assert expansion, which Lua's `LUA_USER_H="ltests.h"` build
-    // reaches, ends in a call to noreturn `__assert_fail`, and letting the
-    // generic identifier fallback see that name predicts an integer and makes
-    // a valid `(void)0 : assert(...)` conditional appear incompatible. Reading
-    // the trailing `;` alone as void was the cheaper approximation of the same
-    // rule, and it made `({ 11; })` void as well, so a conditional with a
-    // statement expression in one arm merged two voids and produced nothing.
-    // Keep this shape check ahead of the strict operand query, which is
-    // intentionally type-only and cannot see a body at all.
+    // reaches, ends in a call to noreturn `__assert_fail`. Without this shape
+    // check the operand would be untyped, and a valid `(void)0 : assert(...)`
+    // conditional would be rejected. Reading the trailing `;` alone as void
+    // was the cheaper approximation of the same rule, and it made `({ 11; })`
+    // void as well, so a conditional with a statement expression in one arm
+    // merged two voids and produced nothing. Keep this shape check ahead of
+    // the strict operand query, which is intentionally type-only and cannot
+    // see a body at all.
     u32 statement_start = start;
     if (statement_start < end && builder->preprocess.tokens[statement_start].kind == C_TOKEN_IDENTIFIER &&
         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[statement_start]), S8("__extension__")))
@@ -41762,7 +41794,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
     }
     // Unary integer operators keep the promoted operand type. In particular,
-    // a cast under `~` must not fall through to the s32 literal fallback.
+    // a cast under `~` is typed from its operand here; without this check the
+    // operand would be untyped.
     if (start < end && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_TILDE) ||
                         c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS) ||
                         c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS)))
