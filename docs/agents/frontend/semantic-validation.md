@@ -35,14 +35,21 @@ unevaluated operands. This addresses the constant-designator validation residual
 of [#1570](https://github.com/buster14a/buster/issues/1570); shared parser/lowering
 member authority and nonconstant-index validation remain separate work.
 
-`c_parse_validate_bit_field_addresses` checks unary address operands against
-semantic member widths before constant folding, including parenthesized,
-indirect and promoted anonymous members. GNU `__extension__` prefixes before
-`&` and around its operand retain the same constraint. Unevaluated and unselected operands
-retain this constraint; binary `&` remains a value operation. The registered
-`compiler_driver_test_bit_field_addresses` matrix requires matching structured
-syntax-only/object diagnostics and no object for rejected source in four C
-dialects, three frontend routes and three target layouts (#3743).
+`c_parse_expression_place_shape` follows the retained selected-expression
+range for `_Generic`, so unary address checks preserve the selected
+association's C value category. Selected ordinary objects and members remain
+addressable; the bit-field validator still rejects a selected bit-field before
+lowering (#3758). `c_parse_validate_bit_field_addresses` checks unary address
+operands against semantic member widths before constant folding, including
+parenthesized, indirect and promoted anonymous members. GNU `__extension__`
+prefixes before `&` and around its operand retain the same constraint.
+Unevaluated and unselected operands retain this constraint; binary `&`
+remains a value operation. The registered
+`compiler_driver_test_bit_field_addresses` matrix covers selected ordinary
+object/member positives beside selected-bit-field negatives, with matching
+structured syntax-only/object diagnostics and no object for rejected source
+across four C dialects, three frontend routes and three target layouts
+(#3743, #3758).
 
 ## Declaration constraints
 

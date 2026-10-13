@@ -7500,6 +7500,26 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
         {
             start += 1;
         }
+        else if (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Generic")))
+        {
+            // C 6.5.1.1 gives the generic expression its selected association's
+            // value category. Use the resolver's retained range, not tokens in
+            // its controller or discarded associations, to decide place shape.
+            CTypeIdentityQuery* selection = c_parse_type_identity_find(result, start);
+            bool selected = selection && selection->token_end == end && selection->result_start != UINT32_MAX &&
+                            selection->result_start > start && selection->result_start < selection->result_end &&
+                            selection->result_end <= selection->token_end;
+            if (selected)
+            {
+                start = selection->result_start;
+                end = selection->result_end;
+            }
+            else
+            {
+                break;
+            }
+        }
         else
         {
             break;
