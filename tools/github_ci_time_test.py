@@ -341,7 +341,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         self.benchmark_reads = {"actions/runs/500/attempts/1": request, "actions/runs/600/attempts/1": publisher,
                                 "actions/runs/600/attempts/1/jobs?per_page=100": {"total_count": 1, "jobs": [writer]}}
 
-    def recovered_announcement(self):
+    def recovered_announcement(self, form="legacy"):
         """Replay the retained #3785 cancellation through the ordinary inventory."""
         payload = (ROOT / "tools/fixtures/compiler_terminal_announcement.json").read_text(encoding="utf-8")
         recorded_head = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
@@ -352,6 +352,87 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                           "head_sha": self.HEAD, "status": "completed", "conclusion": "cancelled",
                           "steps": [], "runner_id": None})
         self.benchmark_reads = fixture["reads"]
+        if form != "legacy":
+            native = json.loads((ROOT / "tools/fixtures/compiler_superseded_report.json").read_text(encoding="utf-8"))["report"]
+            payload = json.dumps(native).replace("a4ea18116d1dd5d03ecf7287234fe61f4fb40267", self.HEAD)
+            payload = payload.replace("38297937496", "38260981679").replace("38297977458", "38261019120")
+            check.update(json.loads(payload))
+            if form == "current":
+                check["conclusion"] = "cancelled"
+                check["output"]["title"] = "Not measured: terminal lifecycle reconciliation"
+                summary = check["output"]["summary"].replace("not measured; superseded before execution.", "not measured.", 1)
+                paragraphs = summary.split("\n\n")
+                paragraphs[1] = ("Cancellation cause is not established as pre-execution supersession; "
+                                 "the native cancellation classification is preserved.")
+                check["output"]["summary"] = "\n\n".join(paragraphs)
+            self.jobs[-1]["conclusion"] = check["conclusion"]
+            for identity in (38260981679, 38261019120):
+                self.benchmark_reads[f"actions/runs/{identity}"] = copy.deepcopy(
+                    self.benchmark_reads[f"actions/runs/{identity}/attempts/1"])
+            self.benchmark_reads["actions/runs/38261019120/attempts/1/jobs?per_page=100"] = {"total_count": 0, "jobs": []}
+
+    def test_native_terminal_first_reports_preserve_recovery_and_workload_proof(self):
+        for form in ("current", "superseded"):
+            for details in ("executor", "default", "workflow"):
+                with self.subTest(form=form, details=details):
+                    self.setUp()
+                    self.recovered_announcement(form)
+                    check = self.checks[-1]
+                    if details == "default": check["details_url"] = f"https://github.com/buster14a/buster/runs/{check['id']}"
+                    elif details == "workflow":
+                        check["details_url"] = "https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
+                    result = self.gate()
+                    self.assertTrue(result["success"], result["errors"])
+                    self.assertEqual(result["reconciled_checks"][-1]["check"]["conclusion"],
+                                     "neutral" if form == "superseded" else "cancelled")
+                    self.assertIn("terminal_recovery", result["reconciled_checks"][-1]["publisher_provenance"])
+                    self.assertEqual(len(result["jobs"]), 25)
+
+    def test_supersession_rejects_unproved_jobs_attempts_and_report_claims(self):
+        cases = ("jobs-missing", "jobs-null", "jobs-string", "jobs-bool", "jobs-float", "jobs-incomplete", "jobs-recorded",
+                 "request-rerun", "executor-rerun", "request-failed", "executor-failed", "foreign-link", "foreign-details",
+                 "reason-missing", "title", "cancelled", "success", "canonical-request", "canonical-executor", "candidate",
+                 "duplicate-protocol", "unquoted-history", "history-boundary", "baseline", "original-writer", "no-history",
+                 "queued-heading")
+        for case in cases:
+            with self.subTest(case=case):
+                self.setUp()
+                self.recovered_announcement("superseded")
+                check = self.checks[-1]
+                summary = check["output"]["summary"]
+                reads = self.benchmark_reads
+                jobs = reads["actions/runs/38261019120/attempts/1/jobs?per_page=100"]
+                if case == "jobs-missing": jobs.pop("total_count")
+                elif case == "jobs-null": jobs["jobs"] = None
+                elif case == "jobs-string": jobs["total_count"] = "0"
+                elif case == "jobs-bool": jobs["total_count"] = False
+                elif case == "jobs-float": jobs["total_count"] = 0.0
+                elif case == "jobs-incomplete": jobs["total_count"] = 1
+                elif case == "jobs-recorded": jobs["jobs"] = [{"name": "Compare the main commit compiler"}]
+                elif case == "request-rerun": reads["actions/runs/38260981679"]["run_attempt"] = 2
+                elif case == "executor-rerun": reads["actions/runs/38261019120"]["run_attempt"] = 2
+                elif case == "request-failed": reads["actions/runs/38260981679/attempts/1"]["conclusion"] = "failure"
+                elif case == "executor-failed": reads["actions/runs/38261019120/attempts/1"]["conclusion"] = "failure"
+                elif case == "foreign-link": summary = summary.replace("Workflow run 38261019120", "Workflow run 38261019121", 1)
+                elif case == "foreign-details": check["details_url"] += "?foreign=1"
+                elif case == "reason-missing": summary = summary.replace("GitHub's native workflow annotation states:", "Unknown reason:", 1)
+                elif case == "title": check["output"]["title"] = "Not measured: terminal lifecycle reconciliation"
+                elif case in ("cancelled", "success"): check["conclusion"] = case
+                elif case == "canonical-request": summary = summary.replace("\nRequest run 38260981679", "\nRequest run 38260981678", 1)
+                elif case == "canonical-executor": summary = summary.replace("\nWorkflow run 38261019120", "\nWorkflow run 38261019121", 1)
+                elif case == "candidate": summary = summary.replace("\nCandidate " + self.HEAD, "\nCandidate " + "f" * 40, 1)
+                elif case == "duplicate-protocol": summary = summary.replace("\nCandidate ", "\nLifecycle protocol: terminal-native-v1.\nCandidate ", 1)
+                elif case == "unquoted-history": summary = summary.replace("> Executor", "Executor").replace("> **9700X", "**9700X", 1)
+                elif case == "history-boundary": summary += "\n\nPrior report (historical; not current execution state):\n\n> extra"
+                elif case == "baseline": summary = summary.replace("\nBaseline: unavailable.", "\nBaseline `unknown`.", 1)
+                elif case == "original-writer":
+                    reads["actions/runs/38260981679/attempts/1/jobs?per_page=100"]["jobs"][1]["steps"][2]["conclusion"] = "skipped"
+                elif case == "no-history":
+                    # Removing current identity proof cannot be repaired by a quoted historical copy.
+                    summary = summary.replace("\nWorkflow run 38261019120 attempt 1:", "\n> Workflow run 38261019120 attempt 1:", 1)
+                elif case == "queued-heading": summary = "**9700X compiler benchmark: queued**\n\n" + summary
+                check["output"]["summary"] = summary
+                self.assertFalse(self.gate()["success"], case)
 
     def test_retained_terminal_announcement_replays_without_measurement_promotion(self):
         self.HEAD = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
@@ -377,10 +458,10 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                  "controller-head", "controller-failure", "controller-attempt", "writer-run", "writer-duplicate",
                  "checkout-skipped", "compile-failure", "reconcile-skipped", "upload-failure", "write-time",
                  "write-duplicate", "completion-time", "missing-workload")
-        for case in cases:
-            with self.subTest(case=case):
+        for form, case in ((form, case) for form in ("legacy", "current", "superseded") for case in cases):
+            with self.subTest(form=form, case=case):
                 self.setUp()
-                self.recovered_announcement()
+                self.recovered_announcement(form)
                 check = self.checks[-1]
                 reads = self.benchmark_reads
                 request = reads["actions/runs/38260981679/attempts/1"]
