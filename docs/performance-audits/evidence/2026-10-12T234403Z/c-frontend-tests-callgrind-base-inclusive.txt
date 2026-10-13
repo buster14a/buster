@@ -1,0 +1,75 @@
+Ir                       file:function
+--------------------------------------------------------------------------------
+44,670,335,482 (99.98%)  ???:0x000000000001f540
+44,669,497,201 (99.98%)  ???:(below main)
+44,669,497,189 (99.98%)  ./csu/../csu/libc-start.c:__libc_start_main@@GLIBC_2.34
+44,669,496,647 (99.98%)  ./csu/../sysdeps/nptl/libc_start_call_main.h:(below main)
+44,669,496,583 (99.98%)  src/buster/lib/entry_point.c:main
+44,669,496,578 (99.98%)  src/buster/lib/entry_point.c:buster_entry_point
+44,669,453,908 (99.98%)  src/buster/apps/ide/ide.c:buster_entry_point
+44,669,451,761 (99.98%)  src/buster/tests/test.c:library_tests
+44,654,766,515 (99.95%)  src/buster/tests/test.c:buster_test_run_descriptors
+44,654,750,425 (99.95%)  src/buster/tests/test.c:buster_test_run_parallel_descriptors
+44,654,733,656 (99.95%)  src/buster/tests/compiler/frontend/c/c_test.c:c_frontend_tests
+17,346,123,537 (38.82%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess
+17,344,981,239 (38.82%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess_run
+17,014,658,927 (38.08%)  src/buster/lib/compiler/driver/driver.c:compiler_driver_execute_invocation
+17,002,229,512 (38.05%)  src/buster/lib/compiler/driver/driver.c:compiler_driver_execute_unit
+17,002,166,154 (38.05%)  src/buster/lib/compiler/driver/driver.c:compiler_driver_execute_c_single
+10,618,659,783 (23.77%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_large_function_machine_scratch_runtime
+ 9,599,092,265 (21.48%)  src/buster/lib/compiler/codegen/codegen.c:codegen_generate_canonical_module_with_trace
+ 9,460,479,129 (21.17%)  src/buster/lib/compiler/codegen/codegen.c:codegen_generate_canonical_module_attempt
+ 7,473,589,832 (16.73%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_analyze_semantics_core
+ 6,994,299,648 (15.65%)  src/buster/lib/compiler/codegen/register_allocator_predicate.c:machine_predicate_placement_build
+ 6,604,355,120 (14.78%)  ???:0x0000000000202678
+ 6,598,379,809 (14.77%)  ./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms
+ 6,147,474,385 (13.76%)  src/buster/lib/compiler/codegen/register_allocator_fast.c:machine_fast_placement_build_prepassed
+ 5,522,208,686 (12.36%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_lower_to_ir_run
+ 5,512,691,272 (12.34%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_lower_to_ir_reserved_run
+ 5,330,187,603 (11.93%)  src/buster/lib/compiler/codegen/register_allocator_quality.c:machine_quality_placement_build_core
+ 4,307,935,403 ( 9.64%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms
+ 4,298,907,945 ( 9.62%)  src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_object_text
+ 4,253,262,263 ( 9.52%)  ???:0x0000000000202690
+ 4,025,108,805 ( 9.01%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_array_object_size_limits
+ 4,021,564,680 ( 9.00%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess_seal_array
+ 3,755,333,161 ( 8.41%)  src/buster/lib/compiler/codegen/register_allocator_fast.c:machine_fast_color_block_objects
+ 3,594,570,060 ( 8.05%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_type_parse_machine_run
+ 3,468,753,501 ( 7.76%)  src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+ 3,007,053,389 ( 6.73%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_dispatch_run
+ 2,947,012,877 ( 6.60%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_scalar_type_in_scope_attempt
+ 2,779,056,604 ( 6.22%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_declaration_type
+ 2,767,034,975 ( 6.19%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_analyze_with_options
+ 2,445,580,632 ( 5.47%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_lower_to_ir
+ 2,347,126,597 ( 5.25%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_validate_lowering_constraints
+ 2,213,549,226 ( 4.95%)  src/buster/lib/compiler/codegen/register_allocator_predicate.c:codegen_generate_canonical_module_attempt
+ 2,103,758,286 ( 4.71%)  src/buster/lib/compiler/frontend/c/c_parse.c:compiler_driver_execute_c_single
+ 2,040,926,967 ( 4.57%)  src/buster/lib/compiler/frontend/c/c_source.c:c_symbol_builtin_from_spelling
+ 1,972,880,574 ( 4.42%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_add_type
+ 1,873,989,095 ( 4.19%)  src/buster/lib/compiler/frontend/c/c_gen.c:compiler_driver_execute_c_single
+ 1,845,577,533 ( 4.13%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_analyze_semantics_only
+ 1,843,287,812 ( 4.13%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse
+ 1,828,803,687 ( 4.09%)  src/buster/lib/compiler/ir/ir_fast.c:ir_prepare_canonical_module
+ 1,826,483,870 ( 4.09%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_storage_class_contexts
+ 1,792,204,279 ( 4.01%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_aggregate_lookup_grow
+ 1,787,441,174 ( 4.00%)  src/buster/lib/arena.h:c_parse_aggregate_lookup_grow
+ 1,663,726,334 ( 3.72%)  src/buster/lib/compiler/codegen/register_allocator_fast.c:machine_predicate_placement_build
+ 1,657,013,537 ( 3.71%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_direct_ssa_nested_loop_parameters
+ 1,615,104,261 ( 3.61%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_enum_sizeof_expression
+ 1,611,689,174 ( 3.61%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_ssa_finish
+ 1,514,513,377 ( 3.39%)  src/buster/lib/compiler/ir/ir.c:ir_validate_canonical_function
+ 1,463,988,108 ( 3.28%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_complex_bool_conversion
+ 1,414,800,764 ( 3.17%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_braced_string_initializers
+ 1,380,571,436 ( 3.09%)  src/buster/lib/compiler/frontend/c/c_source.c:c_macro_define_indexed
+ 1,320,775,506 ( 2.96%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_c23_empty_list_prototypes
+ 1,303,588,424 ( 2.92%)  src/buster/lib/compiler/frontend/c/c_source.c:c_symbol_intern
+ 1,210,886,381 ( 2.71%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_declaration_constraints
+ 1,210,132,003 ( 2.71%)  src/buster/lib/compiler/frontend/c/c_source.c:c_symbols_intern_tokens
+ 1,205,025,743 ( 2.70%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_ssa_current
+ 1,202,232,939 ( 2.69%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_call_result_callees
+ 1,162,763,383 ( 2.60%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_expression_core_step
+ 1,099,654,868 ( 2.46%)  src/buster/lib/string.c:c_symbol_builtin_from_spelling
+ 1,081,268,947 ( 2.42%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_declarator_group_nesting
+ 1,065,829,726 ( 2.39%)  src/buster/tests/compiler/frontend/c/c_test.c:c_test_lower_source
+ 1,052,030,253 ( 2.35%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_bind_function_body
+ 1,022,341,859 ( 2.29%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_expression_step
+   983,357,496 ( 2.20%)  src/buster/lib/compiler/codegen/machine.c:codegen_generate_canonical_module_attempt

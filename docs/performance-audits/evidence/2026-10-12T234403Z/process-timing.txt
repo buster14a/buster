@@ -1,0 +1,25 @@
+# 30 runs per cell, A then B interleaved per case, two rounds; wall median/min ms, median minor faults
+# A=ide-trusted (base 64021a34, CMake Release -O3 -march=native, tests included) sha256 2f1c3cf3958224254e0accb23f405b5dafa8f630461c275bce8719dc07b15cfe
+# B=ide-cand4 (candidate, same configuration) sha256 534aa3914c31bb9d99723f228ca6bd3f988da3bcfa5871e271e53353c97f212c
+true                           r1 A median=   1.07 min=   0.94 faults=57
+true                           r1 B median=   1.14 min=   1.00 faults=57
+empty x86-64 -c                r1 A median=   7.88 min=   6.89 faults=2118
+empty x86-64 -c                r1 B median=   7.25 min=   6.24 faults=1786
+empty x86-64 -c                r2 A median=   7.97 min=   7.36 faults=2117
+empty x86-64 -c                r2 B median=   6.78 min=   5.96 faults=1786
+empty -fsyntax-only            r1 A median=   3.16 min=   2.96 faults=711
+empty -fsyntax-only            r1 B median=   2.83 min=   2.63 faults=694
+empty -fsyntax-only            r2 A median=   3.10 min=   2.91 faults=713
+empty -fsyntax-only            r2 B median=   3.01 min=   2.77 faults=693
+empty aarch64 -c               r1 A median=   3.52 min=   3.28 faults=736
+empty aarch64 -c               r1 B median=   3.51 min=   2.98 faults=714
+empty aarch64 -c               r2 A median=   4.08 min=   3.29 faults=738
+empty aarch64 -c               r2 B median=   3.36 min=   3.13 faults=712
+observables.c compile+link     r1 A median=  11.01 min=  10.33 faults=2476
+observables.c compile+link     r1 B median=  10.13 min=   9.53 faults=2159
+observables.c compile+link     r2 A median=  11.37 min=  10.66 faults=2476
+observables.c compile+link     r2 B median=  10.60 min=   9.45 faults=2156
+basic_c_operations.c -c        r1 A median=  19.35 min=  17.59 faults=2897
+basic_c_operations.c -c        r1 B median=  16.91 min=  15.95 faults=2590
+basic_c_operations.c -c        r2 A median=  18.38 min=  16.71 faults=2894
+basic_c_operations.c -c        r2 B median=  17.20 min=  15.86 faults=2590
