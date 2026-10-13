@@ -90,7 +90,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -186,7 +186,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
                 BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_CONSTANT_INTEGER) == constants - cases[index].constants);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // One block with more distinct keys than the table admits: insertion is
     // declined, probes collide, and the duplicates keyed before saturation
@@ -208,7 +208,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             BUSTER_TEST(arguments, census.saturation_declines != 0 && census.collisions != 0);
             BUSTER_TEST(arguments, census.max_block_candidates > IR_FAST_CSE_SLOTS && census.table_bytes != 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // The linear arm keeps only the last IR_FAST_CSE_WINDOW keyed rows: a
     // duplicate behind WINDOW-1 other keyed rows still hits, one more pushes
@@ -231,7 +231,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             if (census.hits != (u64)((run & 1) && (run >> 1) ? 0 : 1)) arguments->show(arguments, S8("CSE window run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
             BUSTER_TEST(arguments, census.hits == (u64)((run & 1) && (run >> 1) ? 0 : 1) && !census.saturation_declines);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Hits age the window too: in A, B x k, A (call arguments, so nothing
     // else between them is keyed) the window keeps A behind seven repeated
@@ -255,7 +255,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             if (census.hits != expected) arguments->show(arguments, S8("CSE repeated-hit run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
             BUSTER_TEST(arguments, census.hits == expected && census.candidates == repeats + 2);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Hand-edited duplicates: an exact match whose result facts differ is
     // declined, an ordered operation is a different key, a volatile row is
@@ -289,7 +289,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
                 BUSTER_TEST(arguments, table_bytes != 0 && statistics.cse.table_bytes == (variant == 4 ? 2 * table_bytes : table_bytes));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -410,7 +410,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_decline_tests(UnitTestArguments* argu
                 BUSTER_TEST(arguments, strict.function.value == (module_scope ? IR_ID_UNDERLYING_INVALID : broken->id.value));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -533,7 +533,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 mask = 0; mask <= IR_FAST_ALL; mask += 1)
     {
@@ -596,7 +596,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, repeated.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, memcmp(&snapshot, &module->fast, sizeof(snapshot)) == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Build a nontrivial join first, then make every edge carry the same
     // dominating argument. This specifically exercises existing parameters;
@@ -671,7 +671,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         probe.volatile_access = true;
         BUSTER_TEST(arguments, !ir_instruction_is_pure(program, function, &probe));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     // Optional transforms must decline a producer-certified legacy shape that
     // the stricter canonical validator cannot prove. Such source is still
     // accepted by its existing consumer, so FAST must not create a new error.
@@ -713,7 +713,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
                              - before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_OUTPUT_VALIDATIONS] == 0);
 #endif
     }
-    scratch_end(invalid_temporary);
+    c_test_scratch_end(invalid_temporary);
     // A certified module that promotion actually changed is scanned once at
     // the promotion-output boundary in test builds. FAST's input guard asks
     // the same predicate of the same unmutated rows, so it must start from
@@ -754,7 +754,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 #undef IR_PREPARATION_EXPECT
 #endif
         }
-        scratch_end(reuse_temporary);
+        c_test_scratch_end(reuse_temporary);
     }
     // Mandatory inlining of a certified module checks only the functions it
     // reads or rewrites. It must add no module-wide strict scan: every scope
@@ -792,7 +792,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 #undef IR_PREPARATION_DELTA
 #endif
         }
-        scratch_end(inline_temporary);
+        c_test_scratch_end(inline_temporary);
     }
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
@@ -883,6 +883,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] - probed.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] == 1);
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS] == probed.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS]);
         }
+        c_test_scratch_end(census_temporary);
+    }
+    // #3010 end-of-body census. `input+1` converts the int literal to unsigned
+    // for an operator; `return 0` from a _Bool function compares two literals.
+    // Each literal is read only by its folded row, so both become dead.
+    {
+        TemporalArena census_temporary = arena_begin_temporal(arguments->arena);
+        IrConstructionCounters before = ir_construction_counters();
+        CIRLowerResult form_lowered = ir_promotion_lower(arguments->arena,
+                                                         S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native);
+        IrConstructionCounters lowering = ir_construction_counters();
+#define IR_FOLD_CENSUS_DELTA(later, earlier, counter) ((later).values[IR_CONSTRUCTION_##counter] - (earlier).values[IR_CONSTRUCTION_##counter])
+        if (BUSTER_REQUIRE(arguments, form_lowered.program && !form_lowered.diagnostic_count))
+        {
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_FUNCTIONS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_SIZE_ROWS_LT_64_FUNCTIONS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_SIZE_ROWS_LT_64_FOLDS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_CONSTANT_ROWS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_IDENTITY_ROWS) == 0);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_OPERAND_SLOTS) == 3);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_LITERAL_USES) == 3);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_DEAD_LITERALS) == 3);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_FORM_REINTERPRET_OPERATOR) == 1);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_FORM_BOOL_COMPARE_RETURN) == 1);
+            // Re-take the census on the published rows. A literal or folded
+            // result held outside the rows (a pending SSA store) is live, and
+            // the held result is attributed to a store.
+            IrProgram* census_program = form_lowered.program;
+            IrFunction* census_function = census_program->modules->functions;
+            u32 literal = UINT32_MAX;
+            u32 folded = UINT32_MAX;
+            for (u32 index = 0; index < census_function->instruction_count; index += 1)
+            {
+                IrInstruction const* row = census_function->instructions + index;
+                u32 definition = row->opcode == IR_OPCODE_CAST ? census_function->values[row->operands[0].value].definition.value : UINT32_MAX;
+                if (definition < census_function->instruction_count && census_function->instructions[definition].opcode == IR_OPCODE_CONSTANT_INTEGER)
+                {
+                    literal = row->operands[0].value;
+                    folded = row->result.value;
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, literal != UINT32_MAX))
+            {
+                IrSemanticCounters semantic_before = ir_semantic_counters();
+                IrConstructionCounters held_before = ir_construction_counters();
+                ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
+                IrFoldCensus census = ir_construction_fold_census_begin(census_function);
+                ir_construction_fold_census_hold(&census, (IrValueId){.value = literal});
+                ir_construction_fold_census_hold(&census, (IrValueId){.value = folded});
+                ir_construction_fold_census_end(census_program, census_function, &census);
+                ArenaBenchmarkCounters arena_after = arena_benchmark_counters();
+                IrConstructionCounters held_after = ir_construction_counters();
+                IrSemanticCounters semantic_after = ir_semantic_counters();
+                BUSTER_TEST(arguments, memcmp(&semantic_before, &semantic_after, sizeof(semantic_before)) == 0);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_NET_SSA_USES) == 2);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_NET_CONSTANT_ROWS) == 1);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_NET_DEAD_LITERALS) == 0);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_FORM_REINTERPRET_STORE) == 1);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_FORM_REINTERPRET_OPERATOR) == 0);
+                // Census scratch is carved outside the observed arena requests.
+                BUSTER_TEST(arguments, arena_after.calls == arena_before.calls && arena_after.requested_bytes == arena_before.requested_bytes);
+            }
+        }
+#undef IR_FOLD_CENSUS_DELTA
         scratch_end(census_temporary);
     }
 #endif

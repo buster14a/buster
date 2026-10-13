@@ -366,7 +366,6 @@ COMPILER_CHECKOUTS = (
         "        with:",
         "          ref: ${{ github.sha }}",
         "          path: trusted",
-        "          sparse-checkout: tools",
         "          persist-credentials: false",
     ),
     (
@@ -392,6 +391,7 @@ COMPILER_RUN_SCRIPT = [
     "            [[ \"$commit\" =~ ^[0-9a-f]{40}$ ]]",
     "          done",
     "          [[ \"$BQ_PULL\" =~ ^[0-9]+$ ]]",
+    "          [[ \"$BQ_REQUEST_ATTEMPT\" =~ ^[1-9][0-9]*$ ]]",
     "          [[ \"$(git -C candidate rev-parse HEAD)\" == \"$BQ_HEAD_COMMIT\" ]]",
     "          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode main \\",
     "            --candidate candidate --lab trusted/tools/uarch_lab.py \\",
@@ -399,7 +399,8 @@ COMPILER_RUN_SCRIPT = [
     "            --summary \"$GITHUB_STEP_SUMMARY\" --repository \"$BQ_REPOSITORY\" --ref refs/heads/main \\",
     "            --pull \"$BQ_PULL\" --pull-head \"$BQ_PULL_HEAD\" --base \"$BQ_BASE_COMMIT\" --base-tree \"$BQ_BASE_TREE\" \\",
     "            --head \"$BQ_HEAD_COMMIT\" --head-tree \"$BQ_HEAD_TREE\" --trusted-revision \"$BQ_TRUSTED_REVISION\" \\",
-    "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\"",
+    "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\" \\",
+    "            --request-attempt \"$BQ_REQUEST_ATTEMPT\"",
 ]
 
 # MAIN keeps the historical literal recipe above for disabled routing and pull
@@ -523,6 +524,7 @@ PULL_RUN_LINES = (
     "      BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}",
     "      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}",
     "      BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}",
+    "      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}",
 )
 PULL_CHECKOUTS = (
     COMPILER_CHECKOUTS[0],
@@ -537,10 +539,15 @@ PULL_CHECKOUTS = (
     ),
     COMPILER_CHECKOUTS[2],
 )
+# The pull publisher verifies sealed raw evidence (#2918) with the full trusted
+# tree's native driver, bootstrapped by the same pinned TinyCC as MAIN.
 PULL_PUBLISH_BLOCKS = (
     ("    needs: [authorize, compare-pull]", PULL_PUBLISH_IF, "    runs-on: ubuntu-24.04",
      "    permissions:", "      actions: read", "      checks: write", "    timeout-minutes: 10"),
-    TRUSTED_TOOLS_CHECKOUT,
+    ("        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "        with:",
+     "          ref: ${{ github.sha }}", "          persist-credentials: false"),
+    MAIN_TINYCC_CHECKOUT,
+    ("        working-directory: .tools/tinycc", "        shell: bash", "        run: |", *MAIN_TINYCC_SCRIPT),
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}",
      "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}",
@@ -1344,9 +1351,11 @@ def check_compiler_path(errors: list[str]) -> None:
     for block in PULL_PUBLISH_BLOCKS:
         if not contains_block(publish_pull, block):
             errors.append(f"pull publish job is missing exact block starting: {block[0].strip()}")
-    if len([line for line in publish_pull if "uses:" in line]) != 1 or \
-            len([line for line in publish_pull if "run:" in line]) != 1:
-        errors.append("pull publish job must be one trusted checkout and one publisher call")
+    if len([line for line in publish_pull if "uses:" in line]) != 2 or \
+            len([line for line in publish_pull if "run:" in line]) != 2 or \
+            run_scripts(publish_pull) != [list(MAIN_TINYCC_SCRIPT)] or \
+            any("sparse-checkout:" in line for line in publish_pull):
+        errors.append("pull publish job must be one full trusted checkout, pinned TinyCC and one publisher call")
     for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "path: candidate", "contents: write",
                    "pull-requests: write", "actions: write", "statuses: write"):
         if any(marker in line for line in publish_pull):

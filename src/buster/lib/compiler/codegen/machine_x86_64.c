@@ -11585,17 +11585,21 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_x64_encoder_store_field(u8* desti
     }
 }
 
-// Prewarm registers a dense table (its structural checks, slots and token)
-// without encoding it: the 64 tables cost about 10,800 metadata encodes, while
-// a small compile reads a handful of them (#1295).  A table is encoded whole,
-// by the same queries and probes the eager walk ran, on its first serial read,
-// because its compact flag depends on every row.  A table whose encode or
-// probe fails is marked failed and refuses, so the caller takes its metadata
-// path, as it did for an unprepared table.  machine_x86_64_exact_prewarm_all
-// encodes every table before a gang may emit, so worker lanes only read.
+// Prewarm registers a dense table (its structural checks, slots, token and
+// flags) without encoding it: the 64 tables cost about 10,800 metadata
+// encodes, while a small compile reads a few cells of a few dozen (#1295).  A
+// cell is encoded on its first serial read, by the same query and probe the
+// eager walk ran for its distinct register key, and a replicated cell copies
+// that key's record.  A zero byte count means not yet encoded; every encoding
+// is at least one byte.  A cell whose encode or probe fails is marked failed
+// and refuses, so the caller takes its metadata path, as it did for an
+// unprepared table.  machine_x86_64_exact_prewarm_all encodes every cell of
+// every table before a gang may emit, so worker lanes only read; it marks a
+// table ready, or failed when any cell refused.
 #define MACHINE_X64_GPR_ENCODING_TABLE_PENDING 0u
 #define MACHINE_X64_GPR_ENCODING_TABLE_READY 1u
 #define MACHINE_X64_GPR_ENCODING_TABLE_FAILED 2u
+#define MACHINE_X64_GPR_ENCODING_CELL_FAILED UINT8_MAX
 struct MachineX64GprEncodingTable
 {
     MachineX64GprEncoding encodings[256];
@@ -11610,7 +11614,9 @@ struct MachineX64GprEncodingTable
     u8 displacement_operand_index;
     u8 state;
 };
-#define MACHINE_X64_GPR_ENCODING_TABLE_COMPACT 0x1u
+// A cell of at most three bytes stores its byte count in bytes[3], and the
+// worker copies it as one four-byte store.
+#define MACHINE_X64_GPR_ENCODING_COMPACT_BYTES 3u
 #define MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP 0x2u
 #define MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE 0x4u
 #define MACHINE_X64_GPR_ENCODING_TABLE_MEMORY_BASE 0x8u
@@ -12263,209 +12269,9 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         table->immediate_operand_index = immediate_operand_index;
         table->displacement_operand_index = displacement_operand_index;
         table->memory_operand_slot = displacement_operand_index == UINT8_MAX ? 0 : variant->operand_slots[displacement_operand_index];
-        table->flags = 0;
-        table->state = MACHINE_X64_GPR_ENCODING_TABLE_PENDING;
-        machine_x64_gpr_encoding_table_count += 1;
-        result = (u8)machine_x64_gpr_encoding_table_count;
-    }
-    return result;
-}
-
-// Encode a registered table with the queries and probes the eager walk ran,
-// then publish its flags and state.  Serial only: worker lanes read tables
-// that machine_x64_gpr_encoding_tables_fill_all has already encoded.
-BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_gpr_encoding_table_fill(MachineX64GprEncodingTable* table)
-{
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
-    MachineX64ExactRecipeVariant const* variant = &table->variant;
-    BusterX86MetadataMachineExactToken token = table->token;
-    u8 register_operand_count = table->operand_count;
-    u8 immediate_operand_index = table->immediate_operand_index;
-    u8 displacement_operand_index = table->displacement_operand_index;
-    u8 immediate_width = table->immediate_width;
-    // The checked projection consumes zero, one, or two register nibbles.
-    // Higher key bits cannot affect any physical operand, feature, or patch
-    // probe. Ask the metadata authority once per distinct input, not once
-    // per duplicate dense-table row. The full 256-row representation stays.
-    u32 distinct_register_keys = 1u << (4u * register_operand_count);
-    bool compact = true;
-    bool has_memory_base = false;
-    bool valid = true;
-    for (u32 register_key = 0; valid && register_key < distinct_register_keys; register_key += 1)
-    {
-        u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
-        u32 register_value_index = 0;
-        BusterX86MetadataPhysicalOperand operands[4];
-        for (u32 operand_index = 0; valid && operand_index < variant->operand_count; operand_index += 1)
-        {
-            u32 reg = 0;
-            bool register_operand = true;
-            switch ((MachineX64ExactOperandProjection)variant->operand_kinds[operand_index])
-            {
-            case MACHINE_X64_EXACT_OPERAND_GPR: reg = register_values[register_value_index++]; break;
-            case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
-            {
-                reg = register_values[register_value_index++];
-                has_memory_base = true;
-                u16 width = variant->operand_widths[operand_index];
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
-                    .width = width,
-                    .memory = {
-                        .base = {.index = (u16)reg, .width = 64,
-                                 .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-                        .address_size = 64,
-                        .scale = 1,
-                        .has_base = true,
-                    },
-                };
-                register_operand = false;
-                break;
-            }
-            case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
-            case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD:
-            {
-                u16 width = variant->operand_widths[operand_index];
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
-                    .width = width,
-                    .memory = {
-                        .base = {.index = MACHINE_X64_RBP, .width = 64,
-                                 .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-                        .address_size = 64,
-                        .scale = 1,
-                        .has_base = true,
-                        .has_displacement = true,
-                    },
-                };
-                register_operand = false;
-                break;
-            }
-            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX: reg = MACHINE_X64_RAX; break;
-            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX: reg = MACHINE_X64_RDX; break;
-            case MACHINE_X64_EXACT_OPERAND_FIXED_RSP: reg = MACHINE_X64_RSP; break;
-            case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
-            {
-                u16 width = variant->operand_widths[operand_index];
-                bool unsigned_immediate = variant->key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID;
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
-                    .width = width,
-                    .has_value = !unsigned_immediate,
-                    .has_unsigned_value = unsigned_immediate,
-                    .unsigned_value = 0,
-                };
-                register_operand = false;
-                break;
-            }
-            default: valid = false; break;
-            }
-            if (valid && register_operand)
-            {
-                u16 width = variant->operand_widths[operand_index];
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-                    .width = width,
-                    .reg = {.index = (u16)reg, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-                };
-            }
-        }
-        MachineX64GprEncoding* encoding = table->encodings + register_key;
-        BusterX86MetadataEmitResult emitted = {0};
-        if (valid)
-        {
-            emitted = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
-                .operands = operands,
-                .operand_count = variant->operand_count,
-                .output = encoding->bytes,
-                .output_capacity = BUSTER_ARRAY_LENGTH(encoding->bytes),
-                .force_disp32 = displacement_operand_index != UINT8_MAX,
-            });
-            valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 0 &&
-                    emitted.byte_count <= BUSTER_ARRAY_LENGTH(encoding->bytes);
-        }
-        if (valid)
-        {
-            encoding->byte_count = (u8)emitted.byte_count;
-        }
-        if (valid && immediate_operand_index != UINT8_MAX)
-        {
-            valid = emitted.byte_count >= immediate_width;
-            u64 probe_value = immediate_width == 1 ? UINT64_C(0x5a) :
-                              immediate_width == 2 ? UINT64_C(0x5aa5) :
-                              immediate_width == 4 ? UINT64_C(0x5aa55aa5) : UINT64_C(0x5aa55aa55aa55aa5);
-            BusterX86MetadataPhysicalOperand* immediate = operands + immediate_operand_index;
-            if (immediate->has_unsigned_value) immediate->unsigned_value = probe_value;
-            else immediate->value = (s64)probe_value;
-            u8 probe_bytes[15];
-            BusterX86MetadataEmitResult probe = {0};
-            if (valid)
-            {
-                probe = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
-                    .operands = operands,
-                    .operand_count = variant->operand_count,
-                    .output = probe_bytes,
-                    .output_capacity = BUSTER_ARRAY_LENGTH(probe_bytes),
-                });
-            }
-            valid = valid && probe.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe.relocation_count == 0 &&
-                    probe.byte_count == emitted.byte_count;
-            u32 immediate_offset = emitted.byte_count - immediate_width;
-            for (u32 byte_index = 0; valid && byte_index < emitted.byte_count; byte_index += 1)
-            {
-                u8 expected = (u8)(byte_index >= immediate_offset ? probe_value >> ((byte_index - immediate_offset) * 8u) : encoding->bytes[byte_index]);
-                valid = probe_bytes[byte_index] == expected;
-            }
-        }
-        if (valid && displacement_operand_index != UINT8_MAX)
-        {
-            valid = emitted.byte_count >= sizeof(u32);
-            u32 probe_value = UINT32_C(0x5aa55aa5);
-            operands[displacement_operand_index].memory.displacement = (s32)probe_value;
-            u8 probe_bytes[15];
-            BusterX86MetadataEmitResult probe = {0};
-            if (valid)
-            {
-                probe = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
-                    .operands = operands,
-                    .operand_count = variant->operand_count,
-                    .output = probe_bytes,
-                    .output_capacity = BUSTER_ARRAY_LENGTH(probe_bytes),
-                    .force_disp32 = true,
-                });
-            }
-            valid = valid && probe.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe.relocation_count == 0 &&
-                    probe.byte_count == emitted.byte_count;
-            u32 displacement_offset = emitted.byte_count - (u32)sizeof(u32);
-            for (u32 byte_index = 0; valid && byte_index < emitted.byte_count; byte_index += 1)
-            {
-                u8 expected = (u8)(byte_index >= displacement_offset ? probe_value >> ((byte_index - displacement_offset) * 8u) : encoding->bytes[byte_index]);
-                valid = probe_bytes[byte_index] == expected;
-            }
-        }
-        compact &= emitted.byte_count <= 3;
-    }
-    if (valid)
-    {
-        // Replicate only the bytes the metadata query would write. Publish
-        // neither the flags nor the ready state until every distinct
-        // query/probe passed.
-        for (u32 register_key = distinct_register_keys; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
-        {
-            MachineX64GprEncoding const* source = table->encodings + (register_key & (distinct_register_keys - 1u));
-            MachineX64GprEncoding* destination = table->encodings + register_key;
-            memcpy(destination->bytes, source->bytes, source->byte_count);
-            destination->byte_count = source->byte_count;
-        }
-        if (compact)
-        {
-            for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
-            {
-                table->encodings[register_key].bytes[3] = table->encodings[register_key].byte_count;
-            }
-        }
-        table->flags = (compact ? MACHINE_X64_GPR_ENCODING_TABLE_COMPACT : 0u) |
-                       ((register_operand_count == 2 && (variant->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP))
+        // Every flag is a property of the variant, not of any one cell, so
+        // it is published with the registration.
+        table->flags = ((register_operand_count == 2 && (variant->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP))
                             ? MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP
                             : 0u) |
                        (immediate_operand_index != UINT8_MAX ? MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE : 0u) |
@@ -12478,32 +12284,211 @@ BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_gpr_encoding_table_fill(Machine
                        ((immediate_operand_index != UINT8_MAX && variant->key.form_id == MACHINE_X64_SUB_RSP_EXACT_FORM_ID)
                             ? MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
                             : 0u);
-        WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLES_BUILT, 1);
+        table->state = MACHINE_X64_GPR_ENCODING_TABLE_PENDING;
+        machine_x64_gpr_encoding_table_count += 1;
+        result = (u8)machine_x64_gpr_encoding_table_count;
     }
-    table->state = valid ? MACHINE_X64_GPR_ENCODING_TABLE_READY : MACHINE_X64_GPR_ENCODING_TABLE_FAILED;
+    return result;
 }
 
-// Encodes a registered table on its first read; false refuses the table.
-BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST bool machine_x64_gpr_encoding_table_resolve(u32 table_index)
+// Encode one distinct register key of a registered table, then probe its
+// immediate or displacement field, with the queries the eager table walk ran
+// for it.  Serial only: worker lanes read cells that
+// machine_x64_gpr_encoding_tables_fill_all has already encoded.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_gpr_encoding_cell_fill(MachineX64GprEncodingTable* table, u32 register_key)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    MachineX64ExactRecipeVariant const* variant = &table->variant;
+    BusterX86MetadataMachineExactToken token = table->token;
+    u8 immediate_operand_index = table->immediate_operand_index;
+    u8 displacement_operand_index = table->displacement_operand_index;
+    u8 immediate_width = table->immediate_width;
+    bool valid = true;
+    u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
+    u32 register_value_index = 0;
+    BusterX86MetadataPhysicalOperand operands[4];
+    for (u32 operand_index = 0; valid && operand_index < variant->operand_count; operand_index += 1)
+    {
+        u32 reg = 0;
+        bool register_operand = true;
+        switch ((MachineX64ExactOperandProjection)variant->operand_kinds[operand_index])
+        {
+        case MACHINE_X64_EXACT_OPERAND_GPR: reg = register_values[register_value_index++]; break;
+        case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
+        {
+            reg = register_values[register_value_index++];
+            u16 width = variant->operand_widths[operand_index];
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = width,
+                .memory = {
+                    .base = {.index = (u16)reg, .width = 64,
+                             .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                },
+            };
+            register_operand = false;
+            break;
+        }
+        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
+        case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD:
+        {
+            u16 width = variant->operand_widths[operand_index];
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = width,
+                .memory = {
+                    .base = {.index = MACHINE_X64_RBP, .width = 64,
+                             .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                    .has_displacement = true,
+                },
+            };
+            register_operand = false;
+            break;
+        }
+        case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX: reg = MACHINE_X64_RAX; break;
+        case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX: reg = MACHINE_X64_RDX; break;
+        case MACHINE_X64_EXACT_OPERAND_FIXED_RSP: reg = MACHINE_X64_RSP; break;
+        case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
+        {
+            u16 width = variant->operand_widths[operand_index];
+            bool unsigned_immediate = variant->key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID;
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+                .width = width,
+                .has_value = !unsigned_immediate,
+                .has_unsigned_value = unsigned_immediate,
+                .unsigned_value = 0,
+            };
+            register_operand = false;
+            break;
+        }
+        default: valid = false; break;
+        }
+        if (valid && register_operand)
+        {
+            u16 width = variant->operand_widths[operand_index];
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = width,
+                .reg = {.index = (u16)reg, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            };
+        }
+    }
+    MachineX64GprEncoding* encoding = table->encodings + register_key;
+    BusterX86MetadataEmitResult emitted = {0};
+    if (valid)
+    {
+        emitted = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+            .operands = operands,
+            .operand_count = variant->operand_count,
+            .output = encoding->bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(encoding->bytes),
+            .force_disp32 = displacement_operand_index != UINT8_MAX,
+        });
+        valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 0 &&
+                emitted.byte_count <= BUSTER_ARRAY_LENGTH(encoding->bytes);
+    }
+    if (valid)
+    {
+        encoding->byte_count = (u8)emitted.byte_count;
+    }
+    if (valid && immediate_operand_index != UINT8_MAX)
+    {
+        valid = emitted.byte_count >= immediate_width;
+        u64 probe_value = immediate_width == 1 ? UINT64_C(0x5a) :
+                          immediate_width == 2 ? UINT64_C(0x5aa5) :
+                          immediate_width == 4 ? UINT64_C(0x5aa55aa5) : UINT64_C(0x5aa55aa55aa55aa5);
+        BusterX86MetadataPhysicalOperand* immediate = operands + immediate_operand_index;
+        if (immediate->has_unsigned_value) immediate->unsigned_value = probe_value;
+        else immediate->value = (s64)probe_value;
+        u8 probe_bytes[15];
+        BusterX86MetadataEmitResult probe = {0};
+        if (valid)
+        {
+            probe = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+                .operands = operands,
+                .operand_count = variant->operand_count,
+                .output = probe_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(probe_bytes),
+            });
+        }
+        valid = valid && probe.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe.relocation_count == 0 &&
+                probe.byte_count == emitted.byte_count;
+        u32 immediate_offset = emitted.byte_count - immediate_width;
+        for (u32 byte_index = 0; valid && byte_index < emitted.byte_count; byte_index += 1)
+        {
+            u8 expected = (u8)(byte_index >= immediate_offset ? probe_value >> ((byte_index - immediate_offset) * 8u) : encoding->bytes[byte_index]);
+            valid = probe_bytes[byte_index] == expected;
+        }
+    }
+    if (valid && displacement_operand_index != UINT8_MAX)
+    {
+        valid = emitted.byte_count >= sizeof(u32);
+        u32 probe_value = UINT32_C(0x5aa55aa5);
+        operands[displacement_operand_index].memory.displacement = (s32)probe_value;
+        u8 probe_bytes[15];
+        BusterX86MetadataEmitResult probe = {0};
+        if (valid)
+        {
+            probe = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+                .operands = operands,
+                .operand_count = variant->operand_count,
+                .output = probe_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(probe_bytes),
+                .force_disp32 = true,
+            });
+        }
+        valid = valid && probe.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe.relocation_count == 0 &&
+                probe.byte_count == emitted.byte_count;
+        u32 displacement_offset = emitted.byte_count - (u32)sizeof(u32);
+        for (u32 byte_index = 0; valid && byte_index < emitted.byte_count; byte_index += 1)
+        {
+            u8 expected = (u8)(byte_index >= displacement_offset ? probe_value >> ((byte_index - displacement_offset) * 8u) : encoding->bytes[byte_index]);
+            valid = probe_bytes[byte_index] == expected;
+        }
+    }
+    MachineX64GprEncoding* published = table->encodings + register_key;
+    if (valid && emitted.byte_count <= MACHINE_X64_GPR_ENCODING_COMPACT_BYTES)
+    {
+        published->bytes[MACHINE_X64_GPR_ENCODING_COMPACT_BYTES] = (u8)emitted.byte_count;
+    }
+    published->byte_count = valid && emitted.byte_count ? (u8)emitted.byte_count : MACHINE_X64_GPR_ENCODING_CELL_FAILED;
+}
+
+// The byte count of cell `register_key`, encoding its distinct key first if
+// this is the first read of either; zero refuses the cell.  The projection
+// consumes zero, one or two register nibbles, so higher key bits cannot
+// affect any operand, feature or probe: a replicated cell copies only the
+// bytes the metadata query wrote for its distinct key.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST u32 machine_x64_gpr_encoding_resolve_cell(u32 table_index, u32 register_key)
 {
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + table_index;
-    if (table->state == MACHINE_X64_GPR_ENCODING_TABLE_PENDING)
+    u32 distinct_key = register_key & ((1u << (4u * table->operand_count)) - 1u);
+    MachineX64GprEncoding* source = table->encodings + distinct_key;
+    if (!source->byte_count)
     {
-        machine_x64_gpr_encoding_table_fill(table);
+        machine_x64_gpr_encoding_cell_fill(table, distinct_key);
     }
-    bool result = table->state == MACHINE_X64_GPR_ENCODING_TABLE_READY;
+    MachineX64GprEncoding* encoding = table->encodings + register_key;
+    if (!encoding->byte_count)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        memcpy(encoding->bytes, source->bytes, sizeof(encoding->bytes));
+        encoding->byte_count = source->byte_count;
+    }
+    u32 result = encoding->byte_count == MACHINE_X64_GPR_ENCODING_CELL_FAILED ? 0 : encoding->byte_count;
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_gpr_encoding_table_ready(u32 table_index)
-{
-    bool result = BUSTER_LIKELY(machine_x64_gpr_encoding_tables[table_index].state == MACHINE_X64_GPR_ENCODING_TABLE_READY) ||
-                  machine_x64_gpr_encoding_table_resolve(table_index);
-    return result;
-}
-
-// The complete preparation: every registered table, in registration order.
-// Call it serially before any lane_run that may emit x86-64 code.
+// The complete preparation: every cell of every registered table, in key
+// order, then each table's ready or failed state.  Call it serially before
+// any lane_run that may emit x86-64 code.
 BUSTER_GLOBAL_LOCAL void machine_x64_gpr_encoding_tables_fill_all(void)
 {
     if (!machine_x64_gpr_encoding_tables_complete)
@@ -12511,7 +12496,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_gpr_encoding_tables_fill_all(void)
         BUSTER_CHECK_SERIAL_INITIALIZATION();
         for (u32 table_index = 0; table_index < machine_x64_gpr_encoding_table_count; table_index += 1)
         {
-            (void)machine_x64_gpr_encoding_table_resolve(table_index);
+            MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + table_index;
+            bool valid = true;
+            for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+            {
+                valid &= machine_x64_gpr_encoding_resolve_cell(table_index, register_key) != 0;
+            }
+            table->state = valid ? MACHINE_X64_GPR_ENCODING_TABLE_READY : MACHINE_X64_GPR_ENCODING_TABLE_FAILED;
+            WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLES_BUILT, (u64)valid);
         }
         machine_x64_gpr_encoding_tables_complete = true;
     }
@@ -15302,7 +15294,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
         // shorter MOV would carry the value. Variant 2 already proves the
         // complete register population and its trailing eight-byte field.
         u32 table_index = entry->gpr_encoding_tables[2] - 1u;
-        if (table_index >= machine_x64_gpr_encoding_table_count || !machine_x64_gpr_encoding_table_ready(table_index))
+        u32 cell_byte_count = 0;
+        if (table_index < machine_x64_gpr_encoding_table_count)
+        {
+            cell_byte_count = machine_x64_gpr_encoding_tables[table_index].encodings[reg].byte_count;
+            if (BUSTER_UNLIKELY(cell_byte_count - 1u >= sizeof(machine_x64_gpr_encoding_tables[table_index].encodings[reg].bytes)))
+            {
+                cell_byte_count = machine_x64_gpr_encoding_resolve_cell(table_index, reg);
+            }
+        }
+        if (!cell_byte_count)
         {
             result = machine_x64_exact_reject(encoder, counters);
         }
@@ -15578,8 +15579,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         }
         gpr_table_plus_one = entry->gpr_encoding_tables[variant_index];
     }
-    if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count &&
-        machine_x64_gpr_encoding_table_ready(gpr_table_plus_one - 1u))
+    if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
         MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
         WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
@@ -15596,72 +15596,82 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                 }
                 return true;
             }
-            MachineX64GprEncoding const* encoding = table->encodings + low_register + ((u32)high_register << 4);
+            u32 register_key = low_register + ((u32)high_register << 4);
+            MachineX64GprEncoding const* encoding = table->encodings + register_key;
             u32 byte_count = encoding->byte_count;
-            s32 displacement = 0;
-            if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
+            // Not yet encoded (zero) or refused: one unsigned compare sends both
+            // to the cold path, which encodes on first read or refuses; a
+            // refused cell takes the lanes below.
+            if (BUSTER_UNLIKELY(byte_count - 1u >= BUSTER_ARRAY_LENGTH(encoding->bytes)))
             {
-                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_INCOMING_DISPLACEMENT)
+                byte_count = machine_x64_gpr_encoding_resolve_cell(gpr_table_plus_one - 1u, register_key);
+            }
+            if (byte_count)
+            {
+                s32 displacement = 0;
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
                 {
-                    displacement = (s32)(16u + (placement ? placement->incoming_base : 0u) + payload);
-                }
-                else
-                {
-                    u8 operand_slot = table->memory_operand_slot;
-                    if (!instruction || !placement || operand_slot >= 4 ||
-                        machine_ref_kind(instruction->operands[operand_slot]) != MACHINE_REF_STACK_SLOT)
+                    if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_INCOMING_DISPLACEMENT)
                     {
-                        if (counters)
-                        {
-                            counters->attempts += 1;
-                            counters->fallbacks += 1;
-                        }
-                        return false;
+                        displacement = (s32)(16u + (placement ? placement->incoming_base : 0u) + payload);
                     }
-                    u32 offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[operand_slot])] - payload;
-                    displacement = -(s32)offset;
+                    else
+                    {
+                        u8 operand_slot = table->memory_operand_slot;
+                        if (!instruction || !placement || operand_slot >= 4 ||
+                            machine_ref_kind(instruction->operands[operand_slot]) != MACHINE_REF_STACK_SLOT)
+                        {
+                            if (counters)
+                            {
+                                counters->attempts += 1;
+                                counters->fallbacks += 1;
+                            }
+                            return false;
+                        }
+                        u32 offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[operand_slot])] - payload;
+                        displacement = -(s32)offset;
+                    }
+                    displacement = (s32)((u32)displacement + encoder->frame_base_offset);
                 }
-                displacement = (s32)((u32)displacement + encoder->frame_base_offset);
-            }
-            if (counters) counters->attempts += 1;
-            if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
-            {
-                encoder->overflow = true;
-                if (counters) counters->fallbacks += 1;
-                return false;
-            }
-            if ((table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT) &&
-                encoder->capacity - encoder->count >= sizeof(u32))
-            {
-                memcpy(encoder->bytes + encoder->count, encoding->bytes, sizeof(u32));
-            }
-            else
-            {
-                machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
-            }
-            if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE)
-            {
-                u32 immediate_width = table->immediate_width;
-                if (!immediate_width || immediate_width > byte_count)
+                if (counters) counters->attempts += 1;
+                if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
                 {
+                    encoder->overflow = true;
                     if (counters) counters->fallbacks += 1;
                     return false;
                 }
-                u64 patch_value = table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
-                                      ? payload
-                                      : immediate_value;
-                u32 immediate_offset = encoder->count + byte_count - immediate_width;
-                machine_x64_encoder_store_field(encoder->bytes + immediate_offset, patch_value, immediate_width);
+                if (byte_count <= MACHINE_X64_GPR_ENCODING_COMPACT_BYTES && encoder->capacity - encoder->count >= sizeof(u32))
+                {
+                    memcpy(encoder->bytes + encoder->count, encoding->bytes, sizeof(u32));
+                }
+                else
+                {
+                    machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
+                }
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE)
+                {
+                    u32 immediate_width = table->immediate_width;
+                    if (!immediate_width || immediate_width > byte_count)
+                    {
+                        if (counters) counters->fallbacks += 1;
+                        return false;
+                    }
+                    u64 patch_value = table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
+                                          ? payload
+                                          : immediate_value;
+                    u32 immediate_offset = encoder->count + byte_count - immediate_width;
+                    machine_x64_encoder_store_field(encoder->bytes + immediate_offset, patch_value, immediate_width);
+                }
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
+                {
+                    u32 displacement_offset = encoder->count + byte_count - (u32)sizeof(u32);
+                    u32 value = (u32)displacement;
+                    memcpy(encoder->bytes + displacement_offset, &value, sizeof(value));
+                }
+                encoder->count += byte_count;
+                if (counters) counters->successes += 1;
+                return true;
             }
-            if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
-            {
-                u32 displacement_offset = encoder->count + byte_count - (u32)sizeof(u32);
-                u32 value = (u32)displacement;
-                memcpy(encoder->bytes + displacement_offset, &value, sizeof(value));
-            }
-            encoder->count += byte_count;
-            if (counters) counters->successes += 1;
-            return true;
         }
     }
     u8 variable_memory_table_plus_one = entry->variable_memory_encoding_tables[variant_index];
@@ -15899,9 +15909,9 @@ MachineX64GprPreparationAudit machine_x64_test_gpr_preparation(void)
                 {
                     row_valid = memcmp(encoding->bytes, canonical->bytes, encoding->byte_count) == 0;
                 }
-                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT)
+                if (encoding->byte_count <= MACHINE_X64_GPR_ENCODING_COMPACT_BYTES)
                 {
-                    row_valid &= encoding->byte_count <= 3 && encoding->bytes[3] == encoding->byte_count;
+                    row_valid &= encoding->bytes[MACHINE_X64_GPR_ENCODING_COMPACT_BYTES] == encoding->byte_count;
                 }
                 result.rows += 1;
                 result.failures += !row_valid;

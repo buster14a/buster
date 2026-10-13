@@ -141,12 +141,19 @@ X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperatio
 // BUSTER_CHECK_SERIAL_INITIALIZATION so a caller that forgot is told rather
 // than left to race.
 //
-// One decode covers the pool and the lookup indexes. Per-table laziness was
-// measured and bought nothing for them: the indexes yield string-pool offsets
-// and form ids, so a consumer that reaches any index reaches most of them.
+// One decode covers the mnemonic and form-hash indexes, which every x86
+// compile reaches. Laziness within an index was measured and bought nothing:
+// the indexes yield string-pool offsets and form ids, so a consumer that
+// reaches an index reaches most of it. The iclass and iform indexes no compile
+// queries decode whole on their first read instead
+// (buster_x86_metadata_name_indexes_decoded).
 // The form and operand records are the exception: they are most of the
 // decoded bytes, and a compile reads a few hundred of the 11.013 forms, so
 // each record decodes from its own base64 groups on its first serial read.
+// The string pool is copied per generated chunk on the first serial read of a
+// string in it (see buster_x86_metadata_pool_chunks_filled): copying all of it
+// was the largest resident piece of a compile's x86 tables, and a compile reads
+// strings from a small part of it (#3913).
 //
 // Record validity is cached beside the tables. They are immutable, so a record
 // that validates once validates forever, and the public accessors would
@@ -163,6 +170,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_coverage_record(const Bust
                                                                      BusterX86MetadataValidationResult* result);
 
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_bytes[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
+// Which generated chunks buster_x86_metadata_pool_bytes holds. Copying the
+// whole 1.726.254-byte pool wrote 422 pages and read as many more in every
+// x86 process, while a compile reads strings at about a thousand offsets
+// (#3913). A string's chunks are copied in on a serial first touch by the
+// NUL-distance scan that gives every string record its length, so span
+// readers find them resident; the per-byte accessor, whose callers may compare
+// against a pool key they have not measured, tests and copies its own byte.
+// buster_x86_metadata_pool_fill_all copies the rest for a caller about to run
+// a gang or to read the pool whole.
+#define BUSTER_X86_METADATA_POOL_CHUNKS \
+    ((BUSTER_X86_GENERATED_STRING_POOL_SIZE + BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE - 1u) / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE)
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_pool_chunks_filled[(BUSTER_X86_METADATA_POOL_CHUNKS + 63u) / 64u];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_complete;
 // Distance from each pool byte to its terminating NUL
 // (BUSTER_X86_METADATA_NUL_DISTANCE_NONE when none follows), so asking a
 // string's length is one read instead of a byte scan -- consumers ask per
@@ -883,19 +903,41 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_hash_ranges(BusterX86Generat
 // The pool is stored as chunks of BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE
 // bytes; chunk c starts at c times that, and a position a chunk does not
 // reach -- a short chunk, or the end of the chunk table -- is zero, which is
-// what the generated per-byte accessor answers there.
-BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_string_pool(void)
+// what the generated per-byte accessor answers there. The array is zero until
+// written, so only a chunk's own bytes are copied.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD void buster_x86_metadata_pool_fill_chunk(u64 chunk)
 {
-    u64 position = 0;
-    for (u64 chunk = 0; chunk < BUSTER_ARRAY_LENGTH(buster_x86_generated_string_pool_chunks) && position < BUSTER_X86_GENERATED_STRING_POOL_SIZE; chunk += 1)
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    u64 position = chunk * BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 span = BUSTER_MIN((u64)BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE, BUSTER_X86_GENERATED_STRING_POOL_SIZE - position);
+    if (chunk < BUSTER_ARRAY_LENGTH(buster_x86_generated_string_pool_chunks))
     {
-        u64 span = BUSTER_MIN((u64)BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE, BUSTER_X86_GENERATED_STRING_POOL_SIZE - position);
         u64 length = BUSTER_MIN(span, (u64)buster_x86_generated_string_pool_chunk_lengths[chunk]);
         memcpy(buster_x86_metadata_pool_bytes + position, buster_x86_generated_string_pool_chunks[chunk], length);
-        memset(buster_x86_metadata_pool_bytes + position + length, 0, span - length);
-        position += span;
     }
-    memset(buster_x86_metadata_pool_bytes + position, 0, BUSTER_X86_GENERATED_STRING_POOL_SIZE - position);
+    WORK_LEDGER_RECORD(TARGET_X86_POOL_BYTES_COPIED, span);
+    buster_x86_metadata_pool_chunks_filled[chunk / 64u] |= (u64)1 << (chunk % 64u);
+}
+
+// Copies in every chunk [start, end) touches, for end within the pool.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_pool_fill_range(u64 start, u64 end)
+{
+    for (u64 chunk = start / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE; chunk * BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE < end; chunk += 1)
+    {
+        if (!((buster_x86_metadata_pool_chunks_filled[chunk / 64u] >> (chunk % 64u)) & 1u))
+        {
+            buster_x86_metadata_pool_fill_chunk(chunk);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_pool_fill_all(void)
+{
+    if (!buster_x86_metadata_pool_complete)
+    {
+        buster_x86_metadata_pool_fill_range(0, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
+        buster_x86_metadata_pool_complete = true;
+    }
 }
 
 // Two flags, not one. `decoding` guards re-entry: validation below reads
@@ -915,6 +957,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prewarmed;
 // the counts and the coverage accessor read them -- never a compile -- so
 // they are decoded on the first serial read rather than with every table.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_decoded;
+// The iclass and iform name indexes likewise: a compile looks instructions up
+// by mnemonic and by form key, never by these names, yet decoding and
+// layout-checking them was part of every x86 process (#3913).
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_name_indexes_decoded;
 
 // The NUL-distance table is one descending ramp per string: inside a run that
 // ends at a NUL every position holds its own distance to that NUL, so the
@@ -1017,13 +1063,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     }
     BUSTER_CHECK_SERIAL_INITIALIZATION();
     buster_x86_metadata_tables_decoding = true;
-    buster_x86_metadata_decode_string_pool();
-    WORK_LEDGER_RECORD(TARGET_X86_POOL_BYTES_COPIED, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
     WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED,
                        (u64)BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT + BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT +
-                           BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT + BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT + BUSTER_X86_GENERATED_IFORM_RANGE_COUNT +
-                           BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT +
-                           BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT);
+                           BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT + BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT);
     // Each index blob is decoded whole into the scratch array, copied out into
     // its typed cache, and three of its records are then re-read through the
     // generated reader as the layout check described at the flat readers.
@@ -1044,20 +1086,6 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
                                           BUSTER_X86_METADATA_BLOB(mnemonic_candidates));
     BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_mnemonic_candidates, BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT,
                                    buster_x86_generated_mnemonic_candidate_at, buster_x86_metadata_candidates_equal);
-    buster_x86_metadata_decode_text_ranges(buster_x86_metadata_iclass_ranges, BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT, BUSTER_X86_METADATA_BLOB(iclass_ranges));
-    BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iclass_ranges, BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT, buster_x86_generated_iclass_range_at,
-                                   buster_x86_metadata_text_ranges_equal);
-    buster_x86_metadata_decode_candidates(buster_x86_metadata_iclass_candidates, BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT,
-                                          BUSTER_X86_METADATA_BLOB(iclass_candidates));
-    BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iclass_candidates, BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT, buster_x86_generated_iclass_candidate_at,
-                                   buster_x86_metadata_candidates_equal);
-    buster_x86_metadata_decode_text_ranges(buster_x86_metadata_iform_ranges, BUSTER_X86_GENERATED_IFORM_RANGE_COUNT, BUSTER_X86_METADATA_BLOB(iform_ranges));
-    BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iform_ranges, BUSTER_X86_GENERATED_IFORM_RANGE_COUNT, buster_x86_generated_iform_range_at,
-                                   buster_x86_metadata_text_ranges_equal);
-    buster_x86_metadata_decode_candidates(buster_x86_metadata_iform_candidates, BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT,
-                                          BUSTER_X86_METADATA_BLOB(iform_candidates));
-    BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iform_candidates, BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT, buster_x86_generated_iform_candidate_at,
-                                   buster_x86_metadata_candidates_equal);
     buster_x86_metadata_decode_hash_ranges(buster_x86_metadata_form_hash_ranges, BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT,
                                            BUSTER_X86_METADATA_BLOB(form_hash_ranges));
     BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_form_hash_ranges, BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT, buster_x86_generated_form_hash_range_at,
@@ -1110,6 +1138,38 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_coverage(void)
                                        buster_x86_metadata_coverages_equal);
         WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, BUSTER_X86_GENERATED_COVERAGE_COUNT);
         buster_x86_metadata_coverage_decoded = true;
+    }
+}
+
+// The iclass and iform indexes, decoded and layout-checked exactly as the
+// mnemonic and hash indexes are, on their first serial read; see
+// buster_x86_metadata_name_indexes_decoded.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_name_indexes(void)
+{
+    buster_x86_metadata_decode_tables();
+    if (!buster_x86_metadata_name_indexes_decoded)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_decode_text_ranges(buster_x86_metadata_iclass_ranges, BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT,
+                                               BUSTER_X86_METADATA_BLOB(iclass_ranges));
+        BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iclass_ranges, BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT, buster_x86_generated_iclass_range_at,
+                                       buster_x86_metadata_text_ranges_equal);
+        buster_x86_metadata_decode_candidates(buster_x86_metadata_iclass_candidates, BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT,
+                                              BUSTER_X86_METADATA_BLOB(iclass_candidates));
+        BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iclass_candidates, BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT,
+                                       buster_x86_generated_iclass_candidate_at, buster_x86_metadata_candidates_equal);
+        buster_x86_metadata_decode_text_ranges(buster_x86_metadata_iform_ranges, BUSTER_X86_GENERATED_IFORM_RANGE_COUNT,
+                                               BUSTER_X86_METADATA_BLOB(iform_ranges));
+        BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iform_ranges, BUSTER_X86_GENERATED_IFORM_RANGE_COUNT, buster_x86_generated_iform_range_at,
+                                       buster_x86_metadata_text_ranges_equal);
+        buster_x86_metadata_decode_candidates(buster_x86_metadata_iform_candidates, BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT,
+                                              BUSTER_X86_METADATA_BLOB(iform_candidates));
+        BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_iform_candidates, BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT,
+                                       buster_x86_generated_iform_candidate_at, buster_x86_metadata_candidates_equal);
+        WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED,
+                           (u64)BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT + BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT +
+                               BUSTER_X86_GENERATED_IFORM_RANGE_COUNT + BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT);
+        buster_x86_metadata_name_indexes_decoded = true;
     }
 }
 
@@ -1402,10 +1462,13 @@ bool buster_x86_metadata_test_nul_distances_match_reference(void)
     }
     // And the decoded pool itself, against the same reference: every offset's
     // first-read scan, every entry the table already holds, and -- once the
-    // gang path has filled it whole -- every entry.
+    // gang path has filled it whole -- every entry. The reference reads the
+    // whole pool, so it is copied in first; entries filled before that came
+    // from the chunk-at-a-time scan and must agree with it.
     if (ok)
     {
         buster_x86_metadata_decode_tables();
+        buster_x86_metadata_pool_fill_all();
         for (u32 pass = 0; ok && pass < 2; pass += 1)
         {
             if (pass == 1)
@@ -1442,6 +1505,7 @@ bool buster_x86_metadata_test_nul_distances_match_reference(void)
 bool buster_x86_metadata_test_flat_decode_matches_generated(bool test_vbmi)
 {
     buster_x86_metadata_decode_tables();
+    buster_x86_metadata_pool_fill_all();
     bool ok = true;
     for (u64 index = 0; ok && index < BUSTER_X86_GENERATED_STRING_POOL_SIZE; index += 1)
     {
@@ -1463,18 +1527,43 @@ bool buster_x86_metadata_test_flat_decode_matches_generated(bool test_vbmi)
 #undef BUSTER_X86_METADATA_TEST_BLOB
 #endif
 
+// The test a pool reader without a string's NUL distance in hand makes before
+// it reads a nonempty [start, end): a string spans one chunk or two, so both
+// ends being copied in is the common answer, and anything wider or missing
+// takes the per-chunk fill.
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE void buster_x86_metadata_pool_require(u64 start, u64 end)
+{
+    u64 first = start / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 last = (end - 1u) / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
+    if (last - first > 1u || !((buster_x86_metadata_pool_chunks_filled[first / 64u] >> (first % 64u)) & 1u) ||
+        !((buster_x86_metadata_pool_chunks_filled[last / 64u] >> (last % 64u)) & 1u))
+    {
+        buster_x86_metadata_pool_fill_range(start, end);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_byte(u64 logical)
 {
     buster_x86_metadata_decode_tables();
-    return logical < BUSTER_X86_GENERATED_STRING_POOL_SIZE ? buster_x86_metadata_pool_bytes[logical] : (char8)0;
+    char8 result = 0;
+    if (logical < BUSTER_X86_GENERATED_STRING_POOL_SIZE)
+    {
+        buster_x86_metadata_pool_require(logical, logical + 1u);
+        result = buster_x86_metadata_pool_bytes[logical];
+    }
+    return result;
 }
 
-// The decode flattens the chunked generated pool into one contiguous array, so
-// a range of it can be handed out as a plain span.  Comparing or searching a
-// pool string through buster_x86_metadata_pool_byte() costs a call per byte
-// over a 1.7 MB pool; taking the span once and reading it directly does not.
-// An out-of-range request yields an empty span, which every caller below
-// treats as "no match" exactly as a zero byte did.
+// The chunked generated pool is copied into one contiguous array, so a range
+// of it can be handed out as a plain span.  Comparing or searching a pool
+// string through buster_x86_metadata_pool_byte() costs a call per byte over a
+// 1.7 MB pool; taking the span once and reading it directly does not.  Every
+// caller here spans a string whose length it has just read with
+// buster_x86_metadata_string_offset_terminated, and that read copied the
+// string's chunks in (buster_x86_metadata_fill_nul_distance), so this hot
+// path makes no chunk test of its own.  An out-of-range request yields an
+// empty span, which every caller below treats as "no match" exactly as a zero
+// byte did.
 BUSTER_GLOBAL_LOCAL String8 buster_x86_metadata_pool_span(u32 offset, u32 length)
 {
     buster_x86_metadata_decode_tables();
@@ -1491,6 +1580,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_metadata_pool_span(u32 offset, u32 length
     return result;
 }
 
+// A string record with a length is minted only through
+// buster_x86_metadata_string_offset_terminated, so its chunks are resident.
 String8 buster_x86_metadata_string_span(BusterX86MetadataString string)
 {
     return buster_x86_metadata_pool_span(string.offset, string.length);
@@ -1572,27 +1663,27 @@ BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_mnemonic_candidate(u32 index)
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iclass_range(u32 index)
 {
-    buster_x86_metadata_decode_tables();
+    buster_x86_metadata_decode_name_indexes();
     BusterX86GeneratedTextRange empty = {0};
     return index < BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT ? buster_x86_metadata_iclass_ranges[index] : empty;
 }
 
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_iclass_candidate(u32 index)
 {
-    buster_x86_metadata_decode_tables();
+    buster_x86_metadata_decode_name_indexes();
     return index < BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT ? buster_x86_metadata_iclass_candidates[index] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iform_range(u32 index)
 {
-    buster_x86_metadata_decode_tables();
+    buster_x86_metadata_decode_name_indexes();
     BusterX86GeneratedTextRange empty = {0};
     return index < BUSTER_X86_GENERATED_IFORM_RANGE_COUNT ? buster_x86_metadata_iform_ranges[index] : empty;
 }
 
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_iform_candidate(u32 index)
 {
-    buster_x86_metadata_decode_tables();
+    buster_x86_metadata_decode_name_indexes();
     return index < BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT ? buster_x86_metadata_iform_candidates[index] : 0;
 }
 
@@ -1838,12 +1929,25 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validation_fail(BusterX86MetadataVa
 }
 
 // Fills the entry of `offset` on its first serial read; see
-// buster_x86_metadata_pool_nul_known.
+// buster_x86_metadata_pool_nul_known.  The scan copies in one chunk at a time
+// and widens only while no NUL has turned up, so it reads exactly the bytes a
+// scan of the whole pool would and leaves the string's chunks resident for
+// its readers.  Pool strings are at most a few hundred bytes, so this is one
+// chunk or two.
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST u16 buster_x86_metadata_fill_nul_distance(u32 offset)
 {
     BUSTER_CHECK_SERIAL_INITIALIZATION();
     WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_ENTRIES, 1);
-    u16 distance = buster_x86_metadata_nul_distance_at(buster_x86_metadata_pool_bytes, BUSTER_X86_GENERATED_STRING_POOL_SIZE, offset);
+    u64 limit = BUSTER_MIN((u64)BUSTER_X86_GENERATED_STRING_POOL_SIZE, (u64)offset + BUSTER_X86_METADATA_NUL_DISTANCE_NONE);
+    u64 scanned = offset;
+    u16 distance = BUSTER_X86_METADATA_NUL_DISTANCE_NONE;
+    while (distance == BUSTER_X86_METADATA_NUL_DISTANCE_NONE && scanned < limit)
+    {
+        u64 chunk_end = (scanned / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE + 1u) * BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
+        buster_x86_metadata_pool_fill_range(scanned, scanned + 1u);
+        scanned = BUSTER_MIN(limit, chunk_end);
+        distance = buster_x86_metadata_nul_distance_at(buster_x86_metadata_pool_bytes, scanned, offset);
+    }
     buster_x86_metadata_pool_nul_distances[offset] = distance;
     buster_x86_metadata_pool_nul_known[offset / 64u] |= (u64)1 << (offset % 64u);
     return distance;
@@ -13634,8 +13738,9 @@ void buster_x86_metadata_prewarm_all_forms(void)
         BUSTER_CHECK_SERIAL_INITIALIZATION();
         buster_x86_metadata_decode_all_form_records();
         buster_x86_metadata_decode_all_operand_records();
-        // Every NUL distance at once, which is what a first read of each
-        // offset would store, so no lane ever fills one.
+        // The whole pool, then every NUL distance at once, which is what a
+        // first read of each offset would store, so no lane ever fills one.
+        buster_x86_metadata_pool_fill_all();
         buster_x86_metadata_fill_nul_distances(buster_x86_metadata_pool_bytes, buster_x86_metadata_pool_nul_distances,
                                                BUSTER_X86_GENERATED_STRING_POOL_SIZE);
         WORK_LEDGER_RECORD(TARGET_X86_NUL_DISTANCE_ENTRIES, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
@@ -13650,6 +13755,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         {
             buster_x86_metadata_coverage_record_valid(coverage_id);
         }
+        buster_x86_metadata_decode_name_indexes();
         (void)buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_ALL);
         (void)buster_x86_metadata_forwarding_prepare();
         (void)buster_x86_metadata_got_prepare(BUSTER_X86_GOT_PREPARE_ALL);
@@ -13698,6 +13804,8 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
         }
     }
     unprepared += (u64)!buster_x86_metadata_coverage_decoded;
+    unprepared += (u64)!buster_x86_metadata_name_indexes_decoded;
+    unprepared += (u64)!buster_x86_metadata_pool_complete;
     for (u32 operand_id = 0; operand_id < BUSTER_X86_GENERATED_OPERAND_COUNT; operand_id += 1)
     {
         unprepared += (u64)!buster_x86_metadata_operand_records_decoded[operand_id];
@@ -14172,9 +14280,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_prefix(u32 offset, 
 {
     u32 length = 0;
     if (!buster_x86_metadata_string_offset_terminated(offset, &length) || prefix.length > length) return false;
+    char8 const* bytes = buster_x86_metadata_pool_span(offset, length).pointer;
     for (u32 index = 0; index < prefix.length; index += 1)
     {
-        char8 left = buster_x86_metadata_pool_byte((u64)offset + index);
+        char8 left = bytes[index];
         char8 right = prefix.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
@@ -14186,9 +14295,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_suffix(u32 offset, 
     u32 length = 0;
     if (!buster_x86_metadata_string_offset_terminated(offset, &length) || suffix.length > length) return false;
     u32 first = length - (u32)suffix.length;
+    char8 const* bytes = buster_x86_metadata_pool_span(offset, length).pointer;
     for (u32 index = 0; index < suffix.length; index += 1)
     {
-        char8 left = buster_x86_metadata_pool_byte((u64)offset + first + index);
+        char8 left = bytes[first + index];
         char8 right = suffix.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
@@ -14200,12 +14310,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_contains(u32 offset, St
     u32 length = 0;
     if (needle.length && buster_x86_metadata_string_offset_terminated(offset, &length) && needle.length <= length)
     {
+        char8 const* bytes = buster_x86_metadata_pool_span(offset, length).pointer;
         for (u32 first = 0; first <= length - needle.length; first += 1)
         {
             bool equal = true;
             for (u32 index = 0; index < needle.length; index += 1)
             {
-                char8 left = buster_x86_metadata_pool_byte((u64)offset + first + index);
+                char8 left = bytes[first + index];
                 char8 right = needle.pointer[index];
                 if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right))
                 {

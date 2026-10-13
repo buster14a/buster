@@ -28,6 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import bootstrap_wrapper_test as bootstrap
 
 EXCLUSIVE_TEST = "test_concurrent_cold_publication_uses_immutable_outputs"
+# Hosted Windows Release runners have four logical CPUs. On AArch64 every
+# PowerShell wrapper launch costs about 22.6 s, and six concurrent launches
+# take 35 s each (six launches over four CPUs), so four lanes use the whole
+# budget without oversubscribing it (#3912).
+MAX_JOBS = 4
 
 
 class LineOutput:
@@ -301,8 +306,8 @@ def behavior_cases():
 
 
 def run_cases(cases, jobs=1, stream=None, ownership=None):
-    if jobs not in (1, 2):
-        raise ValueError("bootstrap case jobs must be 1 or 2")
+    if jobs not in range(1, MAX_JOBS + 1):
+        raise ValueError("bootstrap case jobs must be between 1 and %d" % MAX_JOBS)
     if not cases or len({case.id() for case in cases}) != len(cases):
         raise ValueError("bootstrap cases must be nonempty and unique")
     if os.name == "nt":
@@ -435,7 +440,7 @@ def run_cases(cases, jobs=1, stream=None, ownership=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jobs", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--jobs", type=int, choices=range(1, MAX_JOBS + 1), default=1)
     args = parser.parse_args()
     print("BOOTSTRAP_ENVIRONMENT " + json.dumps({
         "os": platform.system(), "machine": platform.machine(),
