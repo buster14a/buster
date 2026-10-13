@@ -9,8 +9,8 @@ reports `owned-by-release-shard` without executing the suite again.
 python3 tests/bootstrap_wrapper_test.py -v
 # Bash platforms; use python rather than python3 on Windows.
 python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v
-# Windows CI runs the same behavior methods through two-case scheduling.
-python tools/bootstrap_wrapper_cases.py --jobs 2
+# Windows CI runs the same behavior methods through four-case scheduling.
+python tools/bootstrap_wrapper_cases.py --jobs 4
 # Serial control with identical instrumentation and assertions.
 python tools/bootstrap_wrapper_cases.py --jobs 1
 # Lifecycle/admission controls, executed by workflow_tools in Release.
@@ -76,7 +76,10 @@ logs and environment outputs; each retains its 120-second deadline measured
 from its own launch and its existing ten-second cleanup deadline. This bounds
 PowerShell startup pressure while the other two suite lanes compile their
 fixtures. A timed-out owner remains a failure and does not suppress later
-controls. Cleanup attempts every registered child even if one cleanup fails,
+controls. `probe_order` admits the four probes that pass the vendor shell
+(`SLOW_PROBES`, 24-39 s each on hosted AArch64) before the sub-second early
+failures, so the fixed batches no longer pair each slow probe with a fast one
+(#3912). Cleanup attempts every registered child even if one cleanup fails,
 then propagates that error. `VS_PROBE_START`/`VS_PROBE_END` records retain slot,
 case, outcome and duration. Host-independent scheduling controls cover the
 owner limit, complete inventory after timeout, launch failure, cleanup failure
@@ -104,8 +107,11 @@ provider/directory rejection, UTF8 export bytes and all original failure cases.
 
 ## Bounded independent cases (#2034)
 
-Windows admits two independent behavior cases through one persistent worker
-gang. Each original test instance owns a temporary repository, cache, environment
+Windows admits four independent behavior cases (`MAX_JOBS`) through one
+persistent worker gang. On hosted Windows AArch64 every PowerShell wrapper
+launch costs about 22.6 s, and the six-writer case's 35 s launches match six
+CPU-bound launches over four CPUs; two lanes left half the runner idle for
+the step's 218 s of cases (#3912). Each original test instance owns a temporary repository, cache, environment
 dictionary, fake compiler log, outputs and child owners. Cold/warm, invalidation,
 corrupt/incomplete-entry and failure sequences stay ordered inside their method.
 Assertions and shell selection stay in the unchanged, ledger-pinned test module.

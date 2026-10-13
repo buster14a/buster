@@ -629,7 +629,7 @@ class WorkflowSetupTests(unittest.TestCase):
                         self.assertIn(f"BOOTSTRAP_TEST helper {self.owner_helper}\n", log)
                         self.assertIn(f"BOOTSTRAP_TEST fixture {entry}", log)
                         self.assertIn(argument, log)
-                        self.assertIn("'2'" if platform == "Windows" else "'-v'", log)
+                        self.assertIn("'4'" if platform == "Windows" else "'-v'", log)
 
     def test_process_owner_record_is_bound_to_its_inputs_and_fails_closed(self):
         name = "Bootstrap wrapper regression tests"
