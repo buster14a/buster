@@ -842,9 +842,12 @@ Mach-O writer adds the C-level one, and marks a name without one
 (except on Mach-O), `.hidden`, `.type` and
 `.size`; on Mach-O targets `.weak_definition` accepts a comma-separated symbol list and
 sets N_WEAK_DEF on a defined global in either order relative to `.globl`; it is ignored on
-a defined local, leaves `.set` aliases strong, and permits same-section differences as
-llvm-mc does. An undefined `.weak_definition` name is refused because the object model
-represents weak definitions but not the N_WEAK_REF weak reference that llvm-mc emits;
+a defined local. A pure `.set` alias (a bare symbol reference or `.`) inherits the
+aliasee's N_WEAK_DEF flag: aliases of strong targets stay strong, while aliases of weak
+targets stay weak, including chains. An expression with an addend retains its own flag.
+Same-section differences are permitted as llvm-mc does. An undefined `.weak_definition`
+name is refused because the object model represents weak definitions but not the
+N_WEAK_REF weak reference that llvm-mc emits;
 `.weak_reference` is refused for the same reason, with a diagnostic naming the
 directive. `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
