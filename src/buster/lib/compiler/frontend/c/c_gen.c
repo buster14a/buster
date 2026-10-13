@@ -18867,6 +18867,8 @@ struct CIrLowerAutomaticDeclarationListState
     u32 parentheses;
     u32 brackets;
     u32 braces;
+    // The `?:` nesting outside every group (c_token_conditional_depth_step).
+    u32 conditionals;
     u64 temporary_mark;
 };
 
@@ -46543,7 +46545,9 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
         {
             state->braces -= 1;
         }
-        bool separator = at_end || (!state->parentheses && !state->brackets && !state->braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
+        bool outside_groups = !state->parentheses && !state->brackets && !state->braces;
+        bool separator = at_end || (outside_groups && !state->conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
+        state->conditionals = outside_groups && !separator ? c_token_conditional_depth_step(&token, state->conditionals) : state->conditionals;
         if (!separator)
         {
             state->scan += 1;
@@ -50495,6 +50499,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 declaration_parentheses = 0;
                 u32 declaration_brackets = 0;
                 u32 declaration_braces = 0;
+                u32 declaration_conditionals = 0;
                 bool multiple_declarators = false;
                 for (u32 scan = index; scan < end; scan += 1)
                 {
@@ -50523,10 +50528,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         declaration_braces -= 1;
                     }
-                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces && !declaration_conditionals &&
+                             c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
                     {
                         multiple_declarators = true;
                         break;
+                    }
+                    else if (!declaration_parentheses && !declaration_brackets && !declaration_braces)
+                    {
+                        declaration_conditionals = c_token_conditional_depth_step(&token, declaration_conditionals);
                     }
                 }
                 if (multiple_declarators)

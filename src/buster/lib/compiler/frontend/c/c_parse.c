@@ -7994,7 +7994,15 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         if (cast.value < result->type_count)
                         {
                             cast = c_parse_pointer_chain(result, preprocess, cast, &type_index, close);
-                            if (cast.value < result->type_count && type_index == close) cast_prefix_close = close;
+                            // The abstract declarator of a pointer to array or
+                            // function, `T (*)[N]` or `T (*)(int)`, follows the
+                            // pointer chain as a group; it still ends the type
+                            // name, so the cast takes the whole postfix operand.
+                            if (cast.value < result->type_count &&
+                                (type_index == close || (type_index < close && c_token_is_punctuator(&preprocess.tokens[type_index], C_PUNCTUATOR_LEFT_PARENTHESIS))))
+                            {
+                                cast_prefix_close = close;
+                            }
                         }
                         // A type name the machineless reader does not cover --
                         // `(typeof (x))` -- still marks a cast: a parenthesized
@@ -8035,7 +8043,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     (c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
                          C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)) ||
                      c_parse_complex_part_token(preprocess, preprocess.tokens[index - 1]));
-                bool binary = precedence && index > task->start && index + 1 < task->end && index - 1 != cast_prefix_close &&
+                // An operator between a `?` and its `:` belongs to the
+                // middle operand, a full expression that may hold a comma or
+                // an assignment (#4003), so it never competes for the root.
+                bool binary = precedence && !nested_questions && index > task->start && index + 1 < task->end && index - 1 != cast_prefix_close &&
                               !prefix_update && !prefix_word && c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
                 bool right_associative = precedence == 2;
                 if (binary && (precedence < best_precedence || (precedence == best_precedence && !right_associative)))
@@ -25627,6 +25638,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPrepr
             info->invalid_declarator = true;
         }
         depth = 0;
+        u32 conditional_depth = 0;
         for (u32 index = start; index < end; index += 1)
         {
             CToken token = preprocess.tokens[index];
@@ -25640,7 +25652,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPrepr
             {
                 depth -= depth != 0;
             }
-            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!depth && !conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
             {
                 info->has_multiple_declarators = true;
             }
@@ -25648,6 +25660,10 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPrepr
             {
                 info->has_initializer = true;
                 info->initializer_start = index + 1;
+            }
+            else if (!depth)
+            {
+                conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
             }
         }
         info->initializer_end = end;
@@ -26507,6 +26523,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         }
         u32 segment_end = declarator ? declarator->end : segment_start;
         u32 depth = 0;
+        u32 conditional_depth = 0;
         for (; !declarator && segment_end < end; segment_end += 1)
         {
             CToken token = preprocess.tokens[segment_end];
@@ -26523,9 +26540,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
                     depth -= 1;
                 }
             }
-            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!depth && !conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
             {
                 break;
+            }
+            else if (!depth)
+            {
+                conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
             }
         }
         u32 suffix_end = declarator && declarator->assign != UINT32_MAX ? declarator->assign : segment_end;
@@ -30840,6 +30861,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
         u32 shadow_count = 0;
         u32 last_closed_open = UINT32_MAX;
         bool initializer_seen = false;
+        u32 conditional_depth = 0;
         for (u32 index = declaration->token_start; index < end && index < preprocess->token_count; index += 1)
         {
             CToken token = preprocess->tokens[index];
@@ -30923,9 +30945,13 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
             {
                 initializer_seen = true;
             }
-            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!depth && !conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
             {
                 initializer_seen = false;
+            }
+            else if (!depth)
+            {
+                conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
             }
             else if (depth && !(top & C_PARSE_EARLY_USE_EXPRESSION) && c_token_is_punctuator(&preprocess->tokens[open_tokens[depth - 1]], C_PUNCTUATOR_LEFT_BRACE) &&
                      (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)))
@@ -31771,11 +31797,14 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
 
 // End of the declarator that begins at `start`: the first top-level ',' or the
 // end of the declarator list. Delimiters keep an aggregate body, a parameter
-// list, an array bound, and a braced initializer from being read as separators.
+// list, an array bound, and a braced initializer from being read as separators,
+// and the `?:` depth keeps a comma in a conditional's middle operand from it.
 BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 delimiter_count = 0;
-    for (u32 index = start; index < end; index += 1)
+    u32 conditional_depth = 0;
+    u32 index = start;
+    for (; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
         if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
@@ -31786,12 +31815,16 @@ BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult pre
         {
             delimiter_count -= delimiter_count != 0;
         }
-        else if (!delimiter_count && token.punctuator == C_PUNCTUATOR_COMMA)
+        else if (!delimiter_count && !conditional_depth && token.punctuator == C_PUNCTUATOR_COMMA)
         {
-            return index;
+            break;
+        }
+        else if (!delimiter_count)
+        {
+            conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
         }
     }
-    return end;
+    return index;
 }
 
 // The identifier-list half of an old-style definition is deliberately
