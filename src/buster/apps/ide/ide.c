@@ -2163,6 +2163,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
                      layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
                      layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
+        // Counts and sizes: the facts lowering retained for the unit (GitHub #3102 step 1), with or without the pilot.
+        {
+            CAstLowerStatistics retained = compile.c_ast.lower;
+            string_print(S8("C_AST_RETAINED trees_built={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64}\n"),
+                         retained.trees_built, retained.tree_nodes, retained.tree_bytes, retained.span_nodes, retained.span_bytes);
+        }
         if (compile.c_ast.units)
         {
             CompilerDriverCAstPilotResult tree = compile.c_ast;

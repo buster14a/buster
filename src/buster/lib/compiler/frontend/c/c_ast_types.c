@@ -331,7 +331,7 @@ struct CAstTypeArithmeticMemo
 #define C_AST_TYPE_ARITHMETIC_MEMO_COUNT 64
 BUSTER_CT_CHECK(C_AST_TYPE_ARITHMETIC_MEMO_COUNT == 64);
 // c_ast_types_type_body fills the entity array with all-ones bytes.
-BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX);
+BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX && C_AST_SPAN_NONE == C_AST_TYPE_NONE);
 
 // The `{` token of every top-level function definition, ascending, and the
 // FUNCTION_DEFINITION node it opens; and the first token of every top-level
@@ -675,23 +675,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_punctuator_at(CAstTypeBody co
     return token < body->token_total && c_token_is_punctuator(&body->tokens[token], punctuator);
 }
 
+// The rules are c_ast_span_rule's (c_ast.c), applied to this region's arrays,
+// which hold spans at relative indices.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE CAstSpanInput c_ast_types_span_input(CAstTypeBody const* body)
+{
+    return (CAstSpanInput){.ast = body->ast, .tokens = body->tokens, .matches_plus_one = body->matches, .first = body->first,
+                           .end = body->end, .token_total = body->token_total, .base = body->begin};
+}
+
 // The span of the node at `relative`, widened over every balanced pair of
-// parentheses that wraps it exactly. The tree has no node for a parenthesis, so
-// an operator's own span begins or ends outside its operand's.
+// parentheses that wraps it exactly.
 BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relative, u32* first_out, u32* end_out)
 {
-    u32 first = body->first[relative];
-    u32 end = body->end[relative];
-    if (first != C_AST_TYPE_NONE)
-    {
-        while (first > 0 && c_ast_types_punctuator_at(body, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_types_match(body, first - 1) == end)
-        {
-            first -= 1;
-            end += 1;
-        }
-    }
-    *first_out = first;
-    *end_out = end;
+    CAstSpanInput input = c_ast_types_span_input(body);
+    c_ast_span_expand(&input, relative, first_out, end_out);
 }
 
 // Computes [first, end) for one expression node. Returns false when the span
@@ -700,130 +697,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relati
 // accepted.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
-    CAst const* ast = body->ast;
-    u32 kind = ast->kinds[node];
-    u32 token = ast->tokens[node];
-    u32 first = C_AST_TYPE_NONE;
-    u32 end = C_AST_TYPE_NONE;
-    switch (kind)
-    {
-    case C_AST_IDENTIFIER:
-    case C_AST_NUMBER:
-    case C_AST_CHARACTER:
-    case C_AST_BOOLEAN_CONSTANT:
-    case C_AST_NULLPTR:
-    {
-        first = token;
-        end = token + 1;
-    }
-    break;
-    case C_AST_STRING:
-    {
-        first = token;
-        end = token + ast->data[node];
-    }
-    break;
-    case C_AST_LABEL_ADDRESS:
-    {
-        first = token ? token - 1 : C_AST_TYPE_NONE;
-        end = token + 1;
-    }
-    break;
-    case C_AST_STATEMENT_EXPRESSION:
-    {
-        u32 close = c_ast_types_match(body, token);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_GENERIC_SELECTION:
-    case C_AST_SIZEOF_TYPE:
-    case C_AST_ALIGNOF_TYPE:
-    {
-        u32 close = c_ast_types_match(body, token + 1);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_CALL:
-    case C_AST_INDEX:
-    {
-        u32 callee = c_ast_types_first_child(ast, node);
-        u32 expanded_first = C_AST_TYPE_NONE;
-        u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, callee - body->begin, &expanded_first, &expanded_end);
-        u32 close = c_ast_types_match(body, token);
-        if (expanded_first != C_AST_TYPE_NONE && close != C_AST_TYPE_NONE)
-        {
-            first = expanded_first;
-            end = close + 1;
-        }
-    }
-    break;
-    case C_AST_MEMBER:
-    case C_AST_MEMBER_ARROW:
-    case C_AST_POST_INCREMENT:
-    case C_AST_POST_DECREMENT:
-    {
-        u32 expanded_first = C_AST_TYPE_NONE;
-        u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
-        if (expanded_first != C_AST_TYPE_NONE)
-        {
-            first = expanded_first;
-            end = token + 1;
-        }
-    }
-    break;
-    case C_AST_COMPOUND_LITERAL:
-    {
-        u32 close = c_ast_types_match(body, ast->tokens[node - 1]);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_INITIALIZER_LIST:
-    {
-        u32 close = c_ast_types_match(body, token);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    default:
-    {
-        if (kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST)
-        {
-            u32 expanded_first = C_AST_TYPE_NONE;
-            u32 expanded_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
-            if (expanded_first != C_AST_TYPE_NONE)
-            {
-                first = token;
-                end = expanded_end;
-            }
-        }
-        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
-        {
-            u32 leftmost = c_ast_types_first_child(ast, node);
-            u32 left_first = C_AST_TYPE_NONE;
-            u32 left_end = C_AST_TYPE_NONE;
-            u32 right_first = C_AST_TYPE_NONE;
-            u32 right_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, leftmost - body->begin, &left_first, &left_end);
-            c_ast_types_expand(body, relative - 1, &right_first, &right_end);
-            if (left_first != C_AST_TYPE_NONE && right_end != C_AST_TYPE_NONE)
-            {
-                first = left_first;
-                end = right_end;
-            }
-        }
-    }
-    break;
-    }
-    bool valid = first != C_AST_TYPE_NONE && end != C_AST_TYPE_NONE && first < end && end <= body->token_total;
-    *first_out = valid ? first : C_AST_TYPE_NONE;
-    *end_out = valid ? end : C_AST_TYPE_NONE;
-    return valid;
+    BUSTER_CHECK(node - body->begin == relative);
+    CAstSpanInput input = c_ast_types_span_input(body);
+    return c_ast_span_rule(&input, node, first_out, end_out);
 }
 
 // ---- the typing rules ----------------------------------------------------------

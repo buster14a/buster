@@ -24,7 +24,9 @@
 // c_ast_test_types probes the typer's accepted kinds, declines and misses one
 // range at a time; c_ast_test_type_lookups holds its name checks to the
 // machine on shadowing shapes; c_ast_test_split runs the tree split on one
-// shape per fallback reason in every layout.
+// shape per fallback reason in every layout. c_ast_test_spans checks the
+// retained token spans and their range lookup, which the corpus also holds
+// to every node (c_ast_test_spans_consistent).
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -2597,6 +2599,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
 // hold the tree to the claims above. `label` names the input in failures (a
 // path, or the source text of a construct); `required` makes a preprocessing
 // error a failure instead of a skip.
+// The matching-delimiter index c_ast_spans_build reads (closer + 1 at each
+// opener, 0 elsewhere), built with a stack as CPositionIndex builds it. A
+// stream whose delimiters do not match has none.
+BUSTER_GLOBAL_LOCAL u32* c_ast_test_matches(Arena* arena, CPreprocessResult preprocess)
+{
+    u32 count = (u32)preprocess.token_count;
+    u32* matches = arena_allocate_zeroed(arena, u32, (u64)count + 1);
+    u32* stack = arena_allocate(arena, u32, (u64)count + 1);
+    u32 depth = 0;
+    bool matched = true;
+    for (u32 index = 0; index < count && matched; index += 1)
+    {
+        CToken const* token = &preprocess.tokens[index];
+        bool open = token->punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+                    token->punctuator == C_PUNCTUATOR_LEFT_BRACE;
+        bool close = token->punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                     token->punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+        if (open)
+        {
+            stack[depth] = index;
+            depth += 1;
+        }
+        else if (close)
+        {
+            matched = depth > 0;
+            if (matched)
+            {
+                depth -= 1;
+                matches[stack[depth]] = index + 1;
+            }
+        }
+    }
+    return matched && !depth ? matches : 0;
+}
+
+// The spellings of [first, end), one space apart.
+BUSTER_GLOBAL_LOCAL String8 c_ast_test_span_text(Arena* arena, CPreprocessResult preprocess, u32 first, u32 end)
+{
+    String8 text = {0};
+    for (u32 token = first; token < end; token += 1)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]);
+        text = text.length ? string_format(arena, S8("{S8} {S8}"), text, spelling) : spelling;
+    }
+    return text;
+}
+
+// Every spanned node of a built tree holds its anchor token, and the span
+// maps back to a node with the same span.
+BUSTER_GLOBAL_LOCAL bool c_ast_test_spans_consistent(CAst const* ast, CAstSpans const* spans, CPreprocessResult preprocess, u32 const* matches)
+{
+    bool consistent = spans->node_count == ast->node_count;
+    for (u32 node = 0; node < ast->node_count && consistent; node += 1)
+    {
+        u32 first = spans->first[node];
+        u32 end = spans->end[node];
+        if (first != C_AST_SPAN_NONE)
+        {
+            u32 token = ast->tokens[node];
+            // A label address is anchored at its label, after the `&&`.
+            consistent = token >= first && token < end;
+            u32 found = c_ast_spans_locate(spans, preprocess.tokens, matches, first, end);
+            consistent = consistent && found != C_AST_NODE_INVALID && spans->first[found] == first && spans->end[found] == end;
+        }
+    }
+    return consistent;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* arguments, String8 label, String8 source, CPreprocessOptions options, bool required,
                                                      CAstCorpusTally* tally)
 {
@@ -2626,6 +2696,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
         if (built.complete)
         {
             BUSTER_TEST_RAW(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID, label);
+            u32* matches = c_ast_test_matches(temporary.arena, preprocess);
+            CAstSpans spans = {0};
+            if (matches && c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, matches, &spans))
+            {
+                BUSTER_TEST_RAW(arguments, c_ast_test_spans_consistent(&built.ast, &spans, preprocess, matches),
+                                string_format(temporary.arena, S8("{S8}: token spans"), label));
+            }
             c_ast_test_merge(&result, c_ast_corpus_split(arguments, temporary.arena, label, preprocess, &built.ast, &syntax, tally));
             if (!syntax.diagnostic_count)
             {
@@ -5767,6 +5844,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_members(UnitTestArguments* argumen
     return result;
 }
 
+// Token spans (c_ast_spans_build, GitHub #3102 step 1): an operator's span
+// reaches over the parentheses that wrap its operands, a call and a subscript
+// end at their closer, and c_ast_spans_locate finds a node from its span with
+// or without the parentheses that wrap it, but not from a range that is no
+// node's span.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+                                                          S8("int f(int, int); int g[4];\n"
+                                                             "void h(int c, int d) { (void)((c + d) * f(c, d) + g[2]--); }\n"),
+                                                          C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    u32* matches = c_ast_test_matches(temporary.arena, preprocess);
+    CAstSpans spans = {0};
+    if (BUSTER_REQUIRE(arguments, built.complete && matches) &&
+        BUSTER_REQUIRE(arguments, c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, matches, &spans)))
+    {
+        CAst const* ast = &built.ast;
+        BUSTER_TEST(arguments, c_ast_test_spans_consistent(ast, &spans, preprocess, matches));
+        BUSTER_TEST(arguments, spans.retained_bytes == (u64)ast->node_count * 12 + (preprocess.token_count + 1) * 4);
+        u32 multiply = c_ast_test_find_kind(ast, C_AST_MULTIPLY);
+        u32 decrement = c_ast_test_find_kind(ast, C_AST_POST_DECREMENT);
+        u32 cast = c_ast_test_find_kind(ast, C_AST_CAST);
+        u32 add = c_ast_test_find_kind(ast, C_AST_ADD);
+        if (BUSTER_REQUIRE(arguments, multiply != C_AST_NODE_INVALID && decrement != C_AST_NODE_INVALID && cast != C_AST_NODE_INVALID &&
+                                          add != C_AST_NODE_INVALID))
+        {
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[multiply], spans.end[multiply]),
+                               S8("( c + d ) * f ( c , d )"));
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[decrement], spans.end[decrement]),
+                               S8("g [ 2 ] --"));
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[cast], spans.end[cast]),
+                               S8("( void ) ( ( c + d ) * f ( c , d ) + g [ 2 ] -- )"));
+            // The inner `c + d`, found from its own tokens and from its
+            // parenthesized form.
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[add], spans.end[add]), S8("c + d"));
+            BUSTER_TEST(arguments, c_ast_spans_locate(&spans, preprocess.tokens, matches, spans.first[add], spans.end[add]) == add);
+            BUSTER_TEST(arguments, c_ast_spans_locate(&spans, preprocess.tokens, matches, spans.first[add] - 1, spans.end[add] + 1) == add);
+            // `d ) * f` is no node's span.
+            BUSTER_TEST(arguments, c_ast_spans_locate(&spans, preprocess.tokens, matches, spans.end[add] - 1, spans.end[add] + 3) ==
+                                       C_AST_NODE_INVALID);
+            BUSTER_TEST(arguments, spans.first[ast->root] == C_AST_SPAN_NONE);
+        }
+    }
+    // Without a delimiter index there are no spans.
+    CAstSpans none = {.spanned = 1};
+    BUSTER_TEST(arguments, !c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, 0, &none) &&
+                               none.spanned == 0 && !none.first);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5783,6 +5915,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_AST_TEST_FIXTURE(arguments, c_ast_test_failures);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_tables);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_navigation);
+    C_AST_TEST_FIXTURE(arguments, c_ast_test_spans);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_validator);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_attribute_slots);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);

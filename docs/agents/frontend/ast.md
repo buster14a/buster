@@ -7,8 +7,11 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and five consumers read it:
+included. **Status: pilot for parsing and analysis; always built for
+lowering.** Every compile that lowers has the tree: lowering builds it itself
+when the caller passes none ([retained facts](#retained-facts-for-lowering)).
+The opt-in [driver hook](#driver-pilot-hook) builds it before parsing instead,
+and five consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
@@ -228,6 +231,46 @@ charges the bytes to this budget. It must also show that each retained id
 still names the same row when lowering reads it: `c_ast_types.c` keeps its
 arrays per body because a speculative rollback may truncate rows an entry
 refers to. The typer's other arrays (spans, chains, flags) stay body scratch.
+
+## Retained facts for lowering
+
+Step 1 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
+on #3102: each phase keeps its finished output for the next, and `c_gen.c`
+lowers from nodes and facts.
+
+- **The tree.** `CIRLowerOptions.syntax_tree` is never missing for lowering.
+  When the caller passes none, `c_lower_to_ir_tree_run` (`c_gen.c`) builds
+  the implicit tree from the final token stream with `c_ast_build`, keeps it
+  for the whole lowering call and releases it on the same thread before
+  returning. A unit the builder rejects fails with the builder's one
+  structured diagnostic and is not lowered. `-fsyntax-only` does not lower,
+  so it builds no tree.
+- **Token spans.** `c_ast_spans_build` gives every node the span
+  [first, end) defined by `c_ast_span_rule`, which is also the
+  [typer](#tree-expression-typer)'s rule; there is one statement of it. It
+  is computed once per unit in index order, so each operand's span is known
+  before its parent. A per-start-token chain maps a token range back to its
+  node (`c_ast_spans_locate`, which strips balanced outer parentheses as the
+  typer's lookup does). This is the
+  [token-to-node map](#token-to-node-map-for-lowering)'s design A, built once
+  per unit instead of per body: 12 bytes per node and 4 per token, in a
+  private arena (`c_ir_syntax_spans_create`). Lowering keeps it in
+  `CIntegerIrBuilder.syntax_spans`. Token and node indices stay in that
+  arena; no node id reaches the IR.
+- **Types.** The tree typer's per-node C types are still body scratch in
+  analysis and run only under the pilot. They are not retained yet. Lowering's
+  expression IR types come from the values it emits; the C types its type
+  queries need (`sizeof` operands, `typeof`, type names) belong to the query
+  machine, which step 4 moves to nodes. Retaining typer facts is that step's
+  dependency, not this one's.
+- **Counts.** `CAstLowerStatistics` records the trees lowering built
+  (`trees_built`, `tree_nodes`, `tree_bytes`) and the span facts
+  (`span_nodes`, `span_bytes`). `-v` prints them on every compile as
+  `C_AST_RETAINED trees_built=<> tree_nodes=<> tree_bytes=<> span_nodes=<>
+  span_bytes=<>`.
+
+Retained bytes are measured and reported, not budgeted per slice. The
+end-to-end measurement waits until lowering is complete (step 5).
 
 ## Layouts
 
@@ -1443,11 +1486,12 @@ typedef.
 
 ## Lowering from the tree
 
-Under `-fc-ast-pilot` the driver also hands the tree to lowering, in
-`CIRLowerOptions.syntax_tree`. Without it, lowering reads tokens as before. The tree
-outlives lowering: the driver releases it at the end of the unit, after the
-backend. Lowering reads nodes only while `c_lower_to_ir_with_options` runs,
-and no IR record, type or source range refers to a node.
+Under `-fc-ast-pilot` the driver hands its tree to lowering, in
+`CIRLowerOptions.syntax_tree`, and releases it at the end of the unit, after
+the backend. Without the pilot, lowering builds and releases the unit's tree
+itself ([retained facts](#retained-facts-for-lowering)). Either way lowering
+reads nodes only while `c_lower_to_ir_with_options` runs, and no IR record,
+type or source range refers to a node.
 
 **First slice: root conditionals.** `c_ir_root_conditional` decides whether a
 token range, after its outer parentheses are stripped, is a `?:` at the root.

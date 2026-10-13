@@ -1675,6 +1675,11 @@ struct CAstExtentStatistics
 // fallback went to the token scan. Steps are the nodes and parentheses the
 // index build's walks and widening visited, a work count that must stay linear
 // in the input; it leaves out the memo's binary-search comparisons.
+// The retained facts (GitHub #3102 step 1): trees_built counts the units whose
+// tree lowering built itself because the caller passed none, with that tree's
+// nodes and retained bytes (CAstStatistics.retained_bytes); span_nodes and
+// span_bytes are the nodes c_ast_spans_build gave a span and the bytes of its
+// columns, for every lowered unit with a tree.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
@@ -1684,6 +1689,11 @@ struct CAstLowerStatistics
     u64 answers;
     u64 negatives;
     u64 fallbacks;
+    u64 trees_built;
+    u64 tree_nodes;
+    u64 tree_bytes;
+    u64 span_nodes;
+    u64 span_bytes;
 };
 
 typedef struct CParserResult CParserResult;
@@ -2212,10 +2222,11 @@ struct CIRLowerOptions
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
     // The unit's syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
-    // from its nodes and runs the token scans for everything else. Null
-    // lowers exactly as before. Read only during the call; the tree and the
-    // preprocessing result must outlive it.
+    // -fc-ast-pilot, GitHub #3102). Lowering always reads a tree: when this is
+    // null it builds one from `preprocess` itself (c_lower_to_ir_tree_run) and
+    // releases it before returning, and a unit whose tree cannot be built
+    // fails with the builder's diagnostic. Read only during the call; a
+    // caller's tree and the preprocessing result must outlive it.
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;
