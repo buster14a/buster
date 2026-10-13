@@ -2913,6 +2913,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_block_constant_interning = string_equal(argument, S8("-fno-canonical-intern-constants"));
             continue;
         }
+        if (string_equal(argument, S8("-fcanonical-construction-fold")) || string_equal(argument, S8("-fno-canonical-construction-fold")))
+        {
+            invocation.construction_fold = string_equal(argument, S8("-fcanonical-construction-fold"));
+            continue;
+        }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
         {
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
@@ -8757,6 +8762,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
                                                                     .disable_block_constant_interning = invocation.disable_block_constant_interning,
+                                                                    .construction_fold = invocation.construction_fold,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
                                                                     // A GPU target has no symbol visibility to restrict.
                                                                     .default_visibility = invocation.has_gpu_target ? C_SYMBOL_VISIBILITY_UNSPECIFIED : invocation.default_visibility,
@@ -8772,6 +8778,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.constant_interning = lowered.constant_interning;
+    result.construction_folds = lowered.construction_folds;
     result.type_layout = lowered.type_layout;
     if (!lowered.program || lowered.diagnostic_count || !lowered.program->modules || lowered.program->module_count != 1)
     {
@@ -11002,6 +11009,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.constant_interning.lookups += unit.constant_interning.lookups;
         result.constant_interning.hits += unit.constant_interning.hits;
         result.constant_interning.stale += unit.constant_interning.stale;
+        result.construction_folds.casts += unit.construction_folds.casts;
+        result.construction_folds.truths += unit.construction_folds.truths;
         result.direct_ssa.functions += unit.direct_ssa.functions;
         result.direct_ssa.locals += unit.direct_ssa.locals;
         result.direct_ssa.fallback_locals += unit.direct_ssa.fallback_locals;

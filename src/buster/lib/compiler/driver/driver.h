@@ -363,6 +363,8 @@ struct CompilerDriverInvocation
     bool disable_direct_ssa;
     // -fno-canonical-intern-constants: CIRLowerOptions.disable_block_constant_interning.
     bool disable_block_constant_interning;
+    // -fcanonical-construction-fold: CIRLowerOptions.construction_fold.
+    bool construction_fold;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
@@ -612,6 +614,7 @@ struct CompilerDriverResult
     IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
     CIRConstantInternStatistics constant_interning;
+    CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;

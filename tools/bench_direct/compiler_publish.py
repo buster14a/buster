@@ -56,14 +56,16 @@ Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
 artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
 with the strict sampling_archive reader and verified by the trusted native
 `./build.sh compiler_evidence verify` under the identity this publisher
-authorized (verify_evidence_bundle); the receipt's evidence_bundle must name
-the verified manifest (evidence_bundle_problems). An artifact with neither is
+authorized (verify_evidence_bundle); a pull snapshot-v1 receipt's route selects
+the snapshot inventory (#3211). The receipt's evidence_bundle must name the
+verified inventory and manifest (evidence_bundle_problems). An artifact with neither is
 legacy-unsealed: its outcome stands and its raw bytes are reported unverified.
 Anything else fails closed.
 
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle,
-validate_compiler_probes_bundle, validate_frontend_selector_bundle and
+validate_compiler_probes_bundle, validate_frontend_selector_bundle,
+validate_frontend_nesting_bundle (#2676 deep nesting) and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 validate_selfhost_inline_bundle (#58),
 decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
@@ -98,7 +100,7 @@ from inline_acceptance import metrics as inline_metrics, validate_documents as v
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
-from compiler_receipt import EVIDENCE_INVENTORY, EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity
+from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
@@ -115,6 +117,8 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
                               validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
                               SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, selfhost_inline_digest,
@@ -429,6 +433,33 @@ def validate_frontend_selector_bundle(record: object, bundle: object, binaries: 
     return problems
 
 
+FRONTEND_NESTING_BUNDLE_FILES = {
+    "provenance": "frontend_nesting/provenance.json",
+    "results": "frontend_nesting/results.json",
+}
+
+
+def validate_frontend_nesting_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2676 deep-nesting families from their exported records."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt frontend-nesting record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt frontend-nesting run did not complete successfully")
+    if record.get("request_line") != FRONTEND_NESTING_REQUEST_LINE:
+        problems.append("receipt frontend-nesting request selector is not the exact supported line")
+    if record.get("profile") != FRONTEND_NESTING_PROFILE:
+        problems.append("receipt frontend-nesting profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(FRONTEND_NESTING_BUNDLE_FILES):
+        return [*problems, "requested frontend-nesting evidence bundle is incomplete"]
+    problems.extend(validate_frontend_nesting(record.get("exit"), bundle["provenance"], bundle["results"], binaries))
+    if record.get("cells") != frontend_scaling_digest(bundle["results"]):
+        problems.append("receipt frontend-nesting cells do not match the exported evidence")
+    return problems
+
+
 WILD_LINKER_BUNDLE_FILES = {key: f"wild_linker/{name}" for key, name in wild_linker_bundle_files().items()}
 
 
@@ -618,6 +649,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the link-tls leg")
                 if receipt.get("selfhost_inline") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the self-host inline leg")
+                if receipt.get("frontend_nesting") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-nesting leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -761,6 +794,18 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_selfhost_inline_bundle(receipt["selfhost_inline"],
                                                                    corpus.get("selfhost_inline_bundle"),
                                                                    receipt.get("binaries")))
+                if receipt.get("frontend_nesting") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the frontend-nesting leg is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker", "link_tls", "selfhost_inline",
+                            "constant_reuse_acceptance")):
+                        reasons.append("the frontend-nesting leg cannot be combined with another opt-in leg")
+                    reasons.extend(validate_frontend_nesting_bundle(receipt["frontend_nesting"],
+                                                                    corpus.get("frontend_nesting_bundle"),
+                                                                    receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -779,19 +824,25 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     return conclusion, title, reasons
 
 
-def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str) -> dict:
+def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str,
+                           receipt: dict | None = None) -> dict:
     """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
 
     {"state": "legacy-unsealed"} when read_evidence found neither control file; {"state": "verified",
     "members", "payload_bytes", "manifest_sha256"} when `compiler_evidence verify` reproduces the sealed
     manifest from the extracted bytes; otherwise {"state": "refused", "reason"}. The identity comes from
-    the authorized expected identity and admitted profiles, never from the receipt.
+    the authorized expected identity and admitted profiles, never from the receipt; only a snapshot-v1
+    receipt's route lines (its declared policy and owned-phase count) come from it, and validate_closure
+    binds that policy to its closure records, so a receipt cannot select the weaker ordinary inventory
+    for a snapshot attempt (#3211).
     """
     import tempfile
     result: dict = {"state": "legacy-unsealed"}
     if "sealed_files" in throughput:
         files = throughput.get("sealed_files")
-        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile},
+        route = {key: receipt[key] for key in ("preparation_policy", "closure", "phase_ownership")
+                 if isinstance(receipt, dict) and key in receipt}
+        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile, **route},
                                      request_attempt)
         result = {"state": "refused", "reason": throughput.get("sealed_problem") or "sealed evidence archive is unreadable"}
         if isinstance(files, dict) and not identity:
@@ -819,7 +870,7 @@ def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dic
                 if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
                         fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
                         re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
-                    result = {"state": "verified", "members": int(fields["members"]),
+                    result = {"state": "verified", "inventory": evidence_inventory(route), "members": int(fields["members"]),
                               "payload_bytes": int(fields["payload_bytes"]), "manifest_sha256": fields["manifest_sha256"]}
                 else:
                     result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
@@ -837,7 +888,7 @@ def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
             problems.append("receipt names sealed raw evidence that the artifact does not carry")
     elif bundle.get("state") != "verified":
         problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
-    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != EVIDENCE_INVENTORY or \
+    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != bundle.get("inventory") or \
             any(claimed.get(key) != bundle.get(key) for key in ("manifest_sha256", "members", "payload_bytes")):
         problems.append("receipt evidence_bundle does not name the verified sealed manifest")
     return problems
@@ -850,7 +901,7 @@ def evidence_bundle_note(bundle: dict) -> str:
         note = ("raw evidence: legacy-unsealed (no v1 manifest or seal, #2918); the outcome stands but its "
                 "retained raw bytes are unverified")
     elif bundle.get("state") == "verified":
-        note = (f"raw evidence: sealed {EVIDENCE_INVENTORY} verified natively, {bundle['members']} members, "
+        note = (f"raw evidence: sealed {bundle['inventory']} verified natively, {bundle['members']} members, "
                 f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}")
     return note
 
@@ -1187,7 +1238,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
             "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or \
             "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
-            "link_tls" in receipt or "selfhost_inline" in receipt:
+            "link_tls" in receipt or "selfhost_inline" in receipt or "frontend_nesting" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1434,6 +1485,28 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                     closure_files[operation] = archive.read(info)
                 throughput["closure"] = closure_files
+            # A non-owned pull snapshot-v1 attempt's native phase population (#3211): validate_closure
+            # replays every declared phase's five retained members, as for the owned routes.
+            ownership = receipt.get("phase_ownership") if isinstance(receipt, dict) and not problem else None
+            if isinstance(ownership, dict):
+                owned: dict = {}
+                phases = ownership.get("phases")
+                for phase in phases if isinstance(phases, list) else []:
+                    name = phase.get("file") if isinstance(phase, dict) else None
+                    if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+                        problem = "native phase population is ambiguous"
+                        break
+                    infos = {label: members.get("owned-phases/" + name + suffix) for label, suffix in
+                             (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"), ("stderr", ".stderr"),
+                              ("bootstrap", ".bootstrap.complete"))}
+                    if any(info is None or info.file_size > MEMBER_LIMIT for info in infos.values()):
+                        problem = f"required native phase evidence owned-phases/{name} missing or oversized"
+                        break
+                    owned[name] = {label: archive.read(info) for label, info in infos.items()}
+                throughput.setdefault("closure", {})["owned_phases"] = owned
+                corpus_raw = {key: members.get(f"throughput/{key}.json") for key in ("summary", "metadata")}
+                if all(info is not None and info.file_size <= MEMBER_LIMIT for info in corpus_raw.values()):
+                    throughput["closure"]["owned_throughput"] = {key: archive.read(info) for key, info in corpus_raw.items()}
             receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
             if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
                 bundle: dict = {}
@@ -1552,6 +1625,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["frontend_selector_bundle"] = (bundle if not problem and
                                                           len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("frontend_nesting") is not None and not problem:
+                bundle = {}
+                for key, member in FRONTEND_NESTING_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frontend-nesting evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["frontend_nesting_bundle"] = (bundle if not problem and
+                                                         len(bundle) == len(FRONTEND_NESTING_BUNDLE_FILES) else None)
             if isinstance(receipt, dict) and receipt.get("wild_linker") is not None and not problem:
                 bundle = {}
                 for key, member in WILD_LINKER_BUNDLE_FILES.items():
@@ -1673,6 +1763,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
     head_link_tls_count = head_lines.count(LINK_TLS_REQUEST_LINE)
     head_selfhost_count = head_lines.count(SELFHOST_INLINE_REQUEST_LINE)
+    head_nesting_count = head_lines.count(FRONTEND_NESTING_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
@@ -1684,6 +1775,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     selector_deltas = []
     link_tls_deltas = []
     selfhost_deltas = []
+    nesting_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1704,6 +1796,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
         link_tls_deltas.append(head_link_tls_count - parent_lines.count(LINK_TLS_REQUEST_LINE))
         selfhost_deltas.append(head_selfhost_count - parent_lines.count(SELFHOST_INLINE_REQUEST_LINE))
+        nesting_deltas.append(head_nesting_count - parent_lines.count(FRONTEND_NESTING_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1758,6 +1851,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit self-host inline request")
     if selfhost_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selfhost_deltas):
         return "a fresh self-host inline selector has no self-host inline record in the receipt"
+    nesting_record = receipt.get("frontend_nesting")
+    if nesting_record is not None and not all(delta == 1 for delta in nesting_deltas):
+        return ("the exact frontend-nesting selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit frontend-nesting request")
+    if nesting_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in nesting_deltas):
+        return "a fresh frontend-nesting selector has no frontend-nesting record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
@@ -6104,7 +6203,7 @@ def main() -> int:
                 # that names another request run, or none, cannot name a sealed bundle and refuses it.
                 request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
                     titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
-                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt)
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt, receipt)
                 if evidence_bundle_note(evidence_bundle):
                     notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):

@@ -1408,6 +1408,15 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 // floating exceptions and unknown/exact effects remain observable.
 BUSTER_F_DECL bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruction const* row);
 BUSTER_F_DECL String8 ir_fast_pass_name(IrFastPass pass);
+// Construction-time fold experiment (#3010, -fcanonical-construction-fold):
+// the immediate ir_fast_fold would write for `candidate`, a CAST or BINARY row
+// a builder has described but not committed, whose operands are committed
+// values. A non-null `right_bits` is the constant the second operand would
+// hold once its own rows were built; that operand then supplies only its type.
+// True only for a constant rule (ir_fast_fold_rule); an identity, an
+// unfoldable row or one with no single-limb integer result is left as is.
+BUSTER_F_DECL bool ir_fast_fold_candidate(IrProgram* program, IrFunction* function, IrInstruction const* candidate, u64 const* right_bits,
+                                          u64* bits);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);
 
 // Fixed-width two's-complement integer semantics (ir_integer.c): the one
