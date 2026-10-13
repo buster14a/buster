@@ -43108,7 +43108,12 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
         CType const* type = result->types + index;
         if ((type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION) || !type->is_complete || !cache->states[index] ||
             cache->sizes[index] <= c_array_object_size_limit(pointer_bits) || type->definition_start >= preprocess.token_count) continue;
-        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[type->definition_start]);
+        // Keep the oversized-layout diagnostic if source tokens are unavailable for location recovery.
+        CSourceLocation location = {0};
+        if (preprocess.tokens)
+        {
+            location = c_preprocess_token_location(&preprocess, preprocess.tokens[type->definition_start]);
+        }
         bool reported = false;
         for (u32 diagnostic = 0; !reported && diagnostic < result->diagnostic_count; diagnostic += 1)
         {
