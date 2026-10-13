@@ -866,3 +866,12 @@ results, before fresh symbol interning and preprocessing. It imports owned
 copies into the current phase/spelling arenas; no cache pointer reaches a sealed
 result or canonical IR. Read [bounded raw source reuse](../source-lex-reuse.md)
 for the input model, limits, ownership, replay contract and pending cost gates.
+
+A parameter named inside a prototype that a type name spells -- `(void (*)(void *ctx, int n))fp`,
+`sizeof(int (*)(int R, int a[R]))`, `_Alignof`, a compound literal, a `_Generic`
+association -- is declared in that prototype's scope only (C17 6.2.1p4). The
+binder (`c_parse_type_name_parameter_name`) recognises the list by the abstract
+group before it (`(*)`, `(^)`) and leaves its names unbound; lowering's
+`c_ir_type_name_parameter` skips the declarator name; the subscript constraint
+walk exempts `a[...]` there. An object of the same name outside is unaffected
+(#3324). `sizeof(__typeof__(<function-pointer type name>))` is a separate gap.

@@ -40510,6 +40510,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
 // which has no `typeof`, so it split at the `+` and the declaration it typed
 // declared nothing.  The neighbours at the end resolved before and must keep
 // resolving.
+// A parameter named inside a prototype that a type name spells is declared in
+// that prototype's scope alone (C17 6.2.1p4, #3324): a cast, `sizeof`,
+// `_Alignof`, a compound literal, a `_Generic` association, `__typeof__` and a
+// nested function-pointer parameter all accept it, a bound may use an earlier
+// parameter, and an object of the same name outside is untouched.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_prototype_parameter_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 accepted =
+        S8("void g(void *p);\n"
+           "void (*f)(void *);\n"
+           "void (*variadic)(void *, ...);\n"
+           "void (*block)(void *, const unsigned char *);\n"
+           "int ctx = 7;\n"
+           "enum { R = 3 };\n"
+           "unsigned long file_size = sizeof(void (*)(int ctx));\n"
+           "unsigned long file_bound = sizeof(int (*)(int R, int a[R]));\n"
+           "_Static_assert(sizeof(void (*)(void *ctx, int n)) == sizeof(void *), \"file sizeof\");\n"
+           "_Static_assert(_Alignof(void (*)(int ctx)) == _Alignof(void *), \"file alignof\");\n"
+           "_Static_assert(sizeof(void (*(*)(int ctx))(int n)) == sizeof(void *), \"returns pointer\");\n"
+           "_Static_assert(sizeof(void (*)(void (*callback)(int ctx), int n)) == sizeof(void *), \"nested\");\n"
+           "_Static_assert(sizeof(void (*)(int callback(int x), int n)) == sizeof(void *), \"function parameter\");\n"
+           "_Static_assert(sizeof(void (*)(const unsigned char *block, int a[], int (*cb)(int x))) == sizeof(void *), \"mixed\");\n"
+           "void h(void)\n"
+           "{\n"
+           "    f = (void (*)(void *ctx))g;\n"
+           "    variadic = (void (*)(void *ctx, ...))g;\n"
+           "    block = (void (*)(void *, const unsigned char *block))g;\n"
+           "}\n"
+           "int use(void)\n"
+           "{\n"
+           "    void (*cast)(int) = (void (*)(int ctx))0;\n"
+           "    void (*literal)(int) = (void (*)(int ctx)){0};\n"
+           "    unsigned long a = sizeof(void (*)(int ctx));\n"
+           "    unsigned long b = _Alignof(void (*)(int ctx, int a[ctx]));\n"
+           "    unsigned long c = sizeof(__typeof__(void (*)(int ctx)));\n"
+           "    int selected = _Generic((void (*)(int))0, void (*)(int ctx): 1, default: 0);\n"
+           "    void (*(*pointer_literal)(int))(int n) = (void (*(*)(int ctx))(int n)){0};\n"
+           "    return (int)(a + b + c) + selected + ctx + (cast != 0) + (literal != 0) + (pointer_literal != 0);\n"
+           "}\n");
+    CPreprocessResult tokens = c_preprocess(temporary.arena, accepted, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("type-name-prototype-parameter-names.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    // The name is scoped to the prototype: after it, an unrelated undeclared
+    // identifier is still undeclared, and so is the parameter's own name.
+    String8 rejected[] = {
+        S8("int f(void) { return sizeof(void (*)(int ctx)) + ctx; }\n"),
+        S8("int f(void) { return sizeof(void (*)(int n)) + zzz; }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        CPreprocessResult rejected_tokens = c_preprocess(temporary.arena, rejected[index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult rejected_parse = c_parse(temporary.arena, rejected_tokens);
+        BUSTER_TEST(arguments, rejected_parse.diagnostic_count == 1);
+        BUSTER_TEST(arguments, rejected_parse.diagnostic_count && rejected_parse.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -66913,6 +66982,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_typedef_generic_sizeof_constant);
     C_TEST_FIXTURE(arguments, c_test_type_name_attributes);
     C_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
+    C_TEST_FIXTURE(arguments, c_test_type_name_prototype_parameter_names);
     C_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
     C_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
     C_TEST_FIXTURE(arguments, c_test_type_self_compatibility);

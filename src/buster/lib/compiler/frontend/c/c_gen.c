@@ -4229,7 +4229,7 @@ BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32
     return c_parse_label_address_prefix_with_typedef(&builder->parse, &builder->preprocess, scope, expression_start, index);
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer);
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer, bool named_parameter);
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
@@ -4251,7 +4251,7 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
     {
         switch (left.kind)
         {
-        case C_IR_QUERY_FRAME_TYPE_NAME: return left.start == right.start && left.end == right.end && left.flag == right.flag;
+        case C_IR_QUERY_FRAME_TYPE_NAME: return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third;
         case C_IR_QUERY_FRAME_ARRAY_BOUND:
             return left.bound.inferred_count == right.bound.inferred_count && left.bound.token_start == right.bound.token_start &&
                    left.bound.token_count == right.bound.token_count && left.bound.is_static == right.bound.is_static && left.bound.is_star == right.bound.is_star &&
@@ -4363,7 +4363,7 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
         switch (frame->kind)
         {
         case C_IR_QUERY_FRAME_TYPE_NAME:
-            frame->result_type = c_ir_type_name_internal_attempt(builder, frame->start, frame->end, frame->flag);
+            frame->result_type = c_ir_type_name_internal_attempt(builder, frame->start, frame->end, frame->flag, frame->third != 0);
             frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
             break;
         case C_IR_QUERY_FRAME_ARRAY_BOUND: frame->success = c_ir_array_bound_evaluate_attempt(builder, frame->bound, &frame->integer); break;
@@ -32103,7 +32103,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
 // list, when a pointer, another group or an array bound follows it; a
 // parameter list starts with a specifier or `)`.
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_function_pointer,
-                                                       CType* qualifiers)
+                                                       bool named_parameter, CType* qualifiers)
 {
     CToken const* tokens = builder->preprocess.tokens;
     // Without function-pointer shapes a type name may carry only its array
@@ -32133,6 +32133,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
                 type = c_ir_add_qualified_type(builder->program, type, pointer_qualifiers.is_atomic, pointer_qualifiers.is_volatile);
             }
         }
+        // A parameter's declarator names its parameter (C17 6.7.6.3p6), in the
+        // prototype's own scope; the name adds nothing to the type.
+        index += named_parameter && index < end && tokens[index].kind == C_TOKEN_IDENTIFIER;
         bool group = index + 1 < end && c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                      (c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_STAR) ||
                       c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -32186,7 +32189,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
     return allow_function_pointer ? type : plain;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer)
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer, bool named_parameter)
 {
     u32 index = start;
     CType qualifiers = {
@@ -32201,7 +32204,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
     {
         return type;
     }
-    return c_ir_type_name_declarator(builder, type, index, end, allow_function_pointer, &qualifiers);
+    return c_ir_type_name_declarator(builder, type, index, end, allow_function_pointer, named_parameter, &qualifiers);
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end)
@@ -32287,7 +32290,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix_bounds(CIntegerIrBuilder* build
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     IrTypeId type = IR_TYPE_ID_INVALID;
-    c_ir_query_type_name(builder, start, end, true, &type);
+    CIrQueryFrame frame = {0};
+    if (c_ir_query_request(builder, (CIrQueryFrame){.start = start, .end = end, .third = 1, .kind = C_IR_QUERY_FRAME_TYPE_NAME, .flag = true}, &frame) &&
+        frame.success)
+    {
+        type = frame.result_type;
+    }
     IrType* value = ir_type_from_id(&builder->program->types, type);
     if (value && value->kind == IR_TYPE_FUNCTION)
     {
