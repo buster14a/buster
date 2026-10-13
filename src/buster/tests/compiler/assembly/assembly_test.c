@@ -4910,8 +4910,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArg
                 // Late directives must affect the same final binding decision.
                 for (u32 late = 0; late < 2; late += 1)
                 {
+                    String8 binding_source = bindings[binding];
+                    if (binding >= 3 && target_index >= 2)
+                    {
+                        binding_source = binding == 3
+                            ? S8(".globl chosen\n.weak_definition chosen\n")
+                            : S8(".globl chosen\n.weak_definition chosen\n.hidden chosen\n");
+                    }
                     source = string_format(arguments->arena, S8(".text\n{S8}{S8} chosen\nchosen: ret\n{S8}"),
-                        late ? S8("") : bindings[binding], cases[index].instruction, late ? bindings[binding] : S8(""));
+                        late ? S8("") : binding_source, cases[index].instruction, late ? binding_source : S8(""));
                     AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
                     bool replaceable = binding >= 3 || (binding == 1 && target_index == 0);
                     if (replaceable && index >= 2)
