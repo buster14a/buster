@@ -8,7 +8,7 @@
 // compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
 // compiler_driver_test_output_input_collisions checks followed file identity
-// between named outputs, positional inputs and resolved preprocessor files.
+// between named outputs, positional inputs and physical preprocessor files.
 // compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_bit_field_assignment_results checks stored-width results.
@@ -1151,6 +1151,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         target_output_stem.length ? string_format_z(arena, S8("{S8}.o"), target_output_stem) : (String8){0};
     String8 extension_input = S8("a.out");
     bool extension_input_cleanup = false;
+    String8 builtin_output = S8("stdbool.h");
+    bool builtin_output_cleanup = false;
+    bool include_next_directory_cleanup = false;
+    String8 include_next_directory =
+        os_path_absolute_lexical(arena, buster_test_temporary_path(arena, S8("output-input-include-next"), S8("")), false);
+    String8 include_next_header = string_format_z(arena, S8("{S8}/limits.h"), include_next_directory);
     String8 llvm_default_output = string_format_z(arena, S8("{S8}.bc"), target_output_stem);
     bool llvm_default_output_cleanup = false;
     bool multi_bitcode_output_cleanup = false;
@@ -1208,6 +1214,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
             BUSTER_TEST(arguments, string_first_sequence(searched_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
             BUSTER_STRING_TEST(arguments,
                                BYTE_SLICE_TO_STRING(8, file_read(arena, forced_search_header, (FileReadOptions){0})), searched_header);
+        }
+
+        // Virtual builtin headers have no filesystem identity. A previous
+        // output with the same basename must remain replaceable when the
+        // compiler synthesizes the included header rather than reading it.
+        String8 builtin_source = S8("#include <stdbool.h>\nint builtin_value = true;\n");
+        String8 builtin_output_before = S8("preexisting virtual-builtin-name output\n");
+        FileStats builtin_output_stats = os_file_replacement_target_stats(builtin_output);
+        if (BUSTER_REQUIRE(arguments, builtin_output.length && builtin_output_stats.valid &&
+                                      builtin_output_stats.kind == OS_FILE_KIND_MISSING))
+        {
+            builtin_output_cleanup = true;
+            if (BUSTER_REQUIRE(arguments, file_write(builtin_output, BUSTER_SLICE_TO_BYTE_SLICE(builtin_output_before)) &&
+                                          file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(builtin_source))))
+            {
+                String8 builtin_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), input, S8("-o"), builtin_output};
+                CompilerDriverResult builtin_result = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(builtin_command)));
+                BUSTER_TEST_RAW(arguments, builtin_result.error == COMPILER_DRIVER_ERROR_NONE, builtin_result.diagnostic);
+                ByteSlice builtin_output_after = file_read(arena, builtin_output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, builtin_result.has_object && builtin_output_after.pointer && builtin_output_after.length &&
+                                            (builtin_output_after.length != builtin_output_before.length ||
+                                             memcmp(builtin_output_after.pointer, builtin_output_before.pointer,
+                                                    builtin_output_before.length) != 0));
+            }
+        }
+
+        // Builtin limits.h uses include_next to reach this physical system
+        // header. That resolved file remains part of the collision closure.
+        String8 include_next_header_bytes = S8("#define BUSTER_INCLUDE_NEXT_VALUE 23\n");
+        String8 include_next_source = S8("#include <limits.h>\nint include_next_value = BUSTER_INCLUDE_NEXT_VALUE;\n");
+        FileStats include_next_directory_stats = os_path_followed_stats(include_next_directory);
+        if (BUSTER_REQUIRE(arguments, include_next_directory.length && include_next_header.length &&
+                                      include_next_directory_stats.valid &&
+                                      include_next_directory_stats.kind == OS_FILE_KIND_MISSING))
+        {
+            include_next_directory_cleanup = os_make_directory_attempt(include_next_directory);
+            if (BUSTER_REQUIRE(arguments, include_next_directory_cleanup &&
+                                          file_write(include_next_header, BUSTER_SLICE_TO_BYTE_SLICE(include_next_header_bytes)) &&
+                                          file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(include_next_source))))
+            {
+                String8 include_next_command[] = {S8("-target"), target, S8("-isystem"), include_next_directory, S8("-E"), input,
+                                                  S8("-o"), include_next_header};
+                CompilerDriverResult include_next_refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(include_next_command)));
+                BUSTER_TEST_RAW(arguments, include_next_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                                include_next_refused.diagnostic);
+                BUSTER_TEST(arguments, string_first_sequence(include_next_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_STRING_TEST(arguments,
+                                   BYTE_SLICE_TO_STRING(8, file_read(arena, include_next_header, (FileReadOptions){0})),
+                                   include_next_header_bytes);
+            }
         }
 
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
@@ -1510,6 +1568,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
             BUSTER_TEST(arguments, os_file_delete(extension_input));
         }
     }
+    if (builtin_output_cleanup)
+    {
+        FileStats builtin_cleanup_stats = os_file_replacement_target_stats(builtin_output);
+        if (builtin_cleanup_stats.valid && builtin_cleanup_stats.kind != OS_FILE_KIND_MISSING)
+        {
+            BUSTER_TEST(arguments, os_file_delete(builtin_output));
+        }
+    }
     if (llvm_default_output_cleanup)
     {
         FileStats bitcode_cleanup_stats = os_file_replacement_target_stats(llvm_default_output);
@@ -1535,6 +1601,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
     if (assembly_directory_stats.valid && assembly_directory_stats.kind != OS_FILE_KIND_MISSING)
     {
         BUSTER_TEST(arguments, os_directory_delete(assembly_directory));
+    }
+    if (include_next_directory_cleanup)
+    {
+        FileStats include_next_directory_cleanup_stats = os_path_followed_stats(include_next_directory);
+        if (include_next_directory_cleanup_stats.valid && include_next_directory_cleanup_stats.kind != OS_FILE_KIND_MISSING)
+        {
+            BUSTER_TEST(arguments, os_directory_delete(include_next_directory));
+        }
     }
     arena_set_position(arena, position);
 #else

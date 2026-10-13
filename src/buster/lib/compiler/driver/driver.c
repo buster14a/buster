@@ -63,8 +63,8 @@
 // dependency target storage grows with argument and output bytes.
 // Every unit enters through compiler_driver_execute_unit. The followed
 // identity checks in compiler_driver_output_input_alias and
-// compiler_driver_output_lexed_file_alias refuse named-output collisions with
-// positional or resolved C preprocessor inputs; multi-input object/bitcode
+// compiler_driver_output_dependency_alias refuse named-output collisions with
+// positional or physically resolved C preprocessor inputs; multi-input object/bitcode
 // outputs are preflighted against the full positional list before unit work.
 // With collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
@@ -7747,8 +7747,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_input_alias(CompilerDriverInv
     return alias;
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_lexed_file_alias(String8 output_path, CSourceFileMetrics const* lexed_files,
-                                                                                u32 lexed_file_count)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_dependency_alias(String8 output_path, CPreprocessDependency const* dependencies,
+                                                                            u32 dependency_count)
 {
     String8 alias = {0};
     FileStats output_stats = {0};
@@ -7758,9 +7758,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_lexed_file_alias(String8 outp
     }
     if (output_stats.valid && output_stats.kind != OS_FILE_KIND_MISSING)
     {
-        for (u32 index = 0; lexed_files && !alias.length && index < lexed_file_count; index += 1)
+        for (u32 index = 0; dependencies && !alias.length && index < dependency_count; index += 1)
         {
-            String8 input_path = lexed_files[index].path;
+            String8 input_path = dependencies[index].path;
             if (input_path.length && !string_equal(input_path, S8("-")))
             {
                 FileStats input_stats = os_path_followed_stats(input_path);
@@ -7773,6 +7773,29 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_output_lexed_file_alias(String8 outp
         }
     }
     return alias;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_copy_physical_inputs(Arena* arena, CPreprocessDependency const* source, u32 count,
+                                                               CPreprocessDependency** destination)
+{
+    CPreprocessDependency* copy = 0;
+    bool ready = !count || source != 0;
+    if (count && ready)
+    {
+        copy = arena_allocate(arena, CPreprocessDependency, count);
+        ready = copy != 0;
+        for (u32 index = 0; ready && index < count; index += 1)
+        {
+            copy[index] = source[index];
+            if (source[index].path.length)
+            {
+                copy[index].path = string_duplicate_arena(arena, source[index].path, false);
+                ready = copy[index].path.pointer != 0;
+            }
+        }
+    }
+    *destination = ready ? copy : 0;
+    return ready;
 }
 
 typedef struct CompilerDriverResolvedOutputAlias CompilerDriverResolvedOutputAlias;
@@ -7799,8 +7822,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResolvedOutputAlias compiler_driver_resolved_o
     {
         result.output_path = compiler_driver_artifact_output_path(arena, invocation);
     }
-    result.input_path = compiler_driver_output_lexed_file_alias(result.output_path, preprocess_detail->lexed_files,
-                                                                 preprocess_detail->lexed_file_count);
+    result.input_path = compiler_driver_output_dependency_alias(result.output_path, preprocess_detail->dependencies,
+                                                                 preprocess_detail->dependency_count);
     if (!result.input_path.length && !suppress_object_write && !invocation.emit_llvm_bitcode &&
         (invocation.dependency_file ||
          (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY &&
@@ -7815,8 +7838,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResolvedOutputAlias compiler_driver_resolved_o
         String8 dependency_path = invocation.dependency_path.pointer || invocation.dependency_path.length
                                       ? invocation.dependency_path
                                       : compiler_driver_dependency_path(arena, object_path);
-        result.input_path = compiler_driver_output_lexed_file_alias(dependency_path, preprocess_detail->lexed_files,
-                                                                     preprocess_detail->lexed_file_count);
+        result.input_path = compiler_driver_output_dependency_alias(dependency_path, preprocess_detail->dependencies,
+                                                                     preprocess_detail->dependency_count);
         if (result.input_path.length)
         {
             result.output_path = dependency_path;
@@ -8634,6 +8657,11 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .forced_includes = invocation.forced_includes,
                                                     .forced_include_count = invocation.forced_include_count,
+                                                    .record_dependencies = invocation.dependency_file || invocation.dependency_passthrough ||
+                                                                          invocation.output_path.length ||
+                                                                          invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+                                                                          invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
+                                                                          invocation.action == COMPILER_DRIVER_ACTION_LINK,
                                                     .assembly_comment_lines = true,
                                                     .retain_output_spacing = true,
                                                     .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
@@ -8684,8 +8712,11 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     }
     CSourceFileMetrics* retained_lexed_files = 0;
     u32 retained_lexed_file_count = 0;
+    CPreprocessDependency* retained_physical_inputs = 0;
+    u32 retained_physical_input_count = 0;
     bool retain_lexed_files = suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT;
     bool retained_lexed_files_ready = true;
+    bool retained_physical_inputs_ready = true;
     if (retain_lexed_files)
     {
         CPreprocessDetail const* detail = c_preprocess_detail(preprocess);
@@ -8702,8 +8733,12 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                              retained_lexed_files[index].path.pointer != 0;
             }
         }
+        retained_physical_input_count = detail->dependency_count;
+        retained_physical_inputs_ready = compiler_driver_copy_physical_inputs(arena, detail->dependencies,
+                                                                               retained_physical_input_count,
+                                                                               &retained_physical_inputs);
     }
-    if (!retained_lexed_files_ready)
+    if (!retained_lexed_files_ready || !retained_physical_inputs_ready)
     {
         result.error = COMPILER_DRIVER_ERROR_RESOURCE;
         result.diagnostic = S8("could not retain preprocessed assembly inputs for link safety");
@@ -8716,6 +8751,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         {
             result.lexed_files = retained_lexed_files;
             result.lexed_file_count = retained_lexed_file_count;
+            result.physical_inputs = retained_physical_inputs;
+            result.physical_input_count = retained_physical_input_count;
         }
     }
     c_preprocess_release(&preprocess);
@@ -8930,7 +8967,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .forced_includes = invocation.forced_includes,
                                                     .forced_include_count = invocation.forced_include_count,
-                                                    .record_dependencies = invocation.dependency_file,
+                                                    .record_dependencies = invocation.dependency_file || invocation.dependency_passthrough || invocation.output_path.length ||
+                                                                          invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+                                                                          invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
+                                                                          invocation.action == COMPILER_DRIVER_ACTION_LINK,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                     .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
@@ -8974,10 +9014,23 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             }
         }
     }
-    if (retained_lexed_files_ready)
+    CPreprocessDependency* retained_physical_inputs = 0;
+    u32 retained_physical_input_count = 0;
+    bool retain_physical_inputs = suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT;
+    bool retained_physical_inputs_ready = true;
+    if (retain_physical_inputs)
+    {
+        retained_physical_input_count = preprocess_detail->dependency_count;
+        retained_physical_inputs_ready = compiler_driver_copy_physical_inputs(arena, preprocess_detail->dependencies,
+                                                                               retained_physical_input_count,
+                                                                               &retained_physical_inputs);
+    }
+    if (retained_lexed_files_ready && retained_physical_inputs_ready)
     {
         result.lexed_files = retained_lexed_files;
         result.lexed_file_count = retained_lexed_file_count;
+        result.physical_inputs = retained_physical_inputs;
+        result.physical_input_count = retained_physical_input_count;
     }
     else if (!preprocess.error_count && !promoted_warnings)
     {
@@ -11638,7 +11691,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             String8 output_path = invocation.output_path.length ? invocation.output_path
                                                                  : compiler_driver_default_executable_path(invocation.target);
-            String8 input_alias = compiler_driver_output_lexed_file_alias(output_path, unit.lexed_files, unit.lexed_file_count);
+            String8 input_alias = compiler_driver_output_dependency_alias(output_path, unit.physical_inputs, unit.physical_input_count);
             if (input_alias.length)
             {
                 unit.error = COMPILER_DRIVER_ERROR_ARGUMENT;

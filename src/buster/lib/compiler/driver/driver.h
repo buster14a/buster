@@ -677,6 +677,11 @@ struct CompilerDriverResult
     bool has_llvm_bitcode;
     bool has_ebpf;
     bool has_spirv;
+    // Physical C source/header files kept alive for the enclosing native-link
+    // output guard. Virtual builtin headers are absent; the system bit only
+    // classifies depfile text and never filters this safety closure.
+    CPreprocessDependency* physical_inputs;
+    u32 physical_input_count;
 };
 
 // Prepare the target-independent frontend, ABI and opcode tables. Serial
