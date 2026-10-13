@@ -1,0 +1,212 @@
+MACHINE_INFO arch=x86_64 cpu="AMD Ryzen 9 7940HS w/ Radeon 780M Graphics" model=znver4 cores=16 ram_mib=47955
+STAGE_OBJECT_PROVENANCE_SELF_TEST matching=1 stale=1 source=1 tree=1 compiler=1 toolchain=1 cached=1 malformed_cached=1 pre_link=1
+SELF_HOST_STAGE_SLOW_SELF_TEST cases=7 factor=3
+SELF_HOST_WORK_GATE_SELF_TEST current=1 at_ceiling=1 over_ceiling=1 pr2406=1 missing=1 duplicate=1
+ninja: no work to do.
+TARGET cpu=native features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdpid,rdrand,rdseed,rdtscp,sha,shstk,smap,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsavec,xsaveopt,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                387                      428
+bytes on disk                 35.526.631               35.594.563
+physical lines                   498.559                  500.452
+
+bytes scanned                 35.523.001               35.590.925
+  code                        26.738.398   75.3 %      26.782.874   75.3 %
+  comment                      2.890.677    8.1 %       2.908.537    8.2 %
+  whitespace                   5.893.926   16.6 %       5.899.514   16.6 %
+  literals, within code       11.952.470   33.6 %      11.954.575   33.6 %
+
+lines scanned                    496.744                  498.633
+  code, the sLOC                 436.800   87.9 %         438.271   87.9 %
+  comment                         46.385    9.3 %          46.733    9.4 %
+  blank                           15.459    3.1 %          15.544    3.1 %
+  both, counted twice              1.900    0.4 %           1.915    0.4 %
+
+comments                          41.119                   41.226
+tokens                         3.798.492                3.807.026
+spliced-away lines                 1.815    0.4 %           1.819    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.378.500  115.0 %
+  their spelling bytes        27.584.600  103.0 %
+  bytes retained              39.860.543  112.0 %
+  macro expansions               174.686
+  #define directives               4.138
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=5994 locals=29551 reads=102361 writes=44662 parameters_created=187579 parameters_removed=173228 temporaries=13436 fallback_locals=31879
+C_TYPE_LAYOUT solves=226 pass_solves=174 pass_state_types=11741848 pass_attempts=408728 agenda_solves=52 agenda_types=54 agenda_attempts=54 agenda_edges=2 agenda_notifications=2 agenda_pushes=56 agenda_fallbacks=0
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=2034161 changes=149776
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=2034161 changes=712
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=4087054 changes=203439
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=44993 changes=69
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=6387 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=737024 retained_bound=24211116 compact_ns=0 instructions_before=2034161 instructions_after=1829779
+IR_INLINE tiny=0 candidates=70 inlined=70 always_inlined=70 copied_instructions=2396 growth=2396 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=3787931 released_bytes=3403776
+IR_LOCAL_PROMOTION candidates=68640 promoted=132 loads_removed=375 stores_removed=257 parameters_inserted=618 parameters_removed=493 uninitialized=0 barriers=9 instructions_before=2034925 instructions_after=2034161 values_before=1702973 values_after=1702591
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=42 block_visits=7949 parameter_visits=1564 incoming_visits=3344
+CODEGEN cpu=native vector_bits=512 functions=6387 instructions=1829779 values=1498140 stack_value_bytes=6104784 stack_frame_bytes=6104784 max_stack_frame_bytes=144552 code_bytes=15287818 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=125 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=2101763 exact_successes=2101763 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=139220
+CODEGEN_EMIT machine_code_in_place=15240354 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=154 symbol_visits=103104 relocation_visits=913836 image_reserved=50079944 image_stored=8813169 image_zeroed=124 image_patched=0 payload_copied=387 payload_borrowed=41266775 scratch=139544 retained=50080160 output=50079944
+CODEGEN_ALLOCATOR reloads=44711 spills=22192 boundary_spills=8244 boundary_reloads=4520 boundary_copies=399 copies=299960 rematerializations=48492 pins=0 splits=0 scheduled=0 schedule_kept=0
+SELF_HOST_WORK stage=1 c_type_layout.solves=226 ceiling=400 c_type_layout.pass_state_types=11741848 ceiling=36000000
+TARGET cpu=native features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdpid,rdrand,rdseed,rdtscp,sha,shstk,smap,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsavec,xsaveopt,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                384                      425
+bytes on disk                 35.491.680               35.559.612
+physical lines                   497.500                  499.393
+
+bytes scanned                 35.488.084               35.556.008
+  code                        26.716.300   75.3 %      26.760.776   75.3 %
+  comment                      2.882.201    8.1 %       2.900.061    8.2 %
+  whitespace                   5.889.583   16.6 %       5.895.171   16.6 %
+  literals, within code       11.952.446   33.7 %      11.954.551   33.6 %
+
+lines scanned                    495.702                  497.591
+  code, the sLOC                 436.033   88.0 %         437.504   87.9 %
+  comment                         46.181    9.3 %          46.529    9.4 %
+  blank                           15.325    3.1 %          15.410    3.1 %
+  both, counted twice              1.837    0.4 %           1.852    0.4 %
+
+comments                          40.996                   41.103
+tokens                         3.794.911                3.803.445
+spliced-away lines                 1.798    0.4 %           1.802    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.378.500  115.1 %
+  their spelling bytes        27.584.600  103.1 %
+  bytes retained              39.825.623  112.0 %
+  macro expansions               174.675
+  #define directives               4.114
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=5994 locals=29551 reads=102361 writes=44662 parameters_created=187579 parameters_removed=173228 temporaries=13436 fallback_locals=31879
+C_TYPE_LAYOUT solves=226 pass_solves=174 pass_state_types=11743714 pass_attempts=408728 agenda_solves=52 agenda_types=54 agenda_attempts=54 agenda_edges=2 agenda_notifications=2 agenda_pushes=56 agenda_fallbacks=0
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=2034161 changes=149776
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=2034161 changes=712
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=4087054 changes=203439
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=44993 changes=69
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=6387 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=737024 retained_bound=24211116 compact_ns=0 instructions_before=2034161 instructions_after=1829779
+IR_INLINE tiny=0 candidates=70 inlined=70 always_inlined=70 copied_instructions=2396 growth=2396 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=3787931 released_bytes=3362816
+IR_LOCAL_PROMOTION candidates=68640 promoted=132 loads_removed=375 stores_removed=257 parameters_inserted=618 parameters_removed=493 uninitialized=0 barriers=9 instructions_before=2034925 instructions_after=2034161 values_before=1702973 values_after=1702591
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=42 block_visits=7949 parameter_visits=1564 incoming_visits=3344
+CODEGEN cpu=native vector_bits=512 functions=6387 instructions=1829779 values=1498140 stack_value_bytes=6104784 stack_frame_bytes=6104784 max_stack_frame_bytes=144552 code_bytes=15287818 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=125 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=2101763 exact_successes=2101763 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=139220
+CODEGEN_EMIT machine_code_in_place=15240354 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=154 symbol_visits=103104 relocation_visits=913836 image_reserved=50079944 image_stored=8813169 image_zeroed=124 image_patched=0 payload_copied=387 payload_borrowed=41266775 scratch=139544 retained=50080160 output=50079944
+CODEGEN_ALLOCATOR reloads=44711 spills=22192 boundary_spills=8244 boundary_reloads=4520 boundary_copies=399 copies=299960 rematerializations=48492 pins=0 splits=0 scheduled=0 schedule_kept=0
+SELF_HOST fixed_point bytes=42839112 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+SELF_HOST stage 1 throughput
+  workload:      35.590.925 bytes | 498.633 LOC | 438.271 SLOC | 4.378.500 tokens
+  elapsed:       2.238389 seconds
+  bandwidth:     15.900 MB/s | 222.764 LOC/s | 195.798 SLOC/s
+  instructions:  23.490.932.276 total | 660.026/byte | 53599.103/SLOC | 5365.064/token
+SELF_HOST stage 2 throughput
+  workload:      35.556.008 bytes | 497.591 LOC | 437.504 SLOC | 4.378.500 tokens
+  elapsed:       12.848205 seconds
+  bandwidth:     2.767 MB/s | 38.728 LOC/s | 34.052 SLOC/s
+  instructions:  141.508.553.415 total | 3979.877/byte | 323445.165/SLOC | 32318.957/token
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=12614050 median_ns=12743531 throughput_mb_s=1
+TARGET cpu=native features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdpid,rdrand,rdseed,rdtscp,sha,shstk,smap,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsavec,xsaveopt,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                384                      425
+bytes on disk                 35.491.680               35.559.612
+physical lines                   497.500                  499.393
+
+bytes scanned                 35.488.084               35.556.008
+  code                        26.716.300   75.3 %      26.760.776   75.3 %
+  comment                      2.882.201    8.1 %       2.900.061    8.2 %
+  whitespace                   5.889.583   16.6 %       5.895.171   16.6 %
+  literals, within code       11.952.446   33.7 %      11.954.551   33.6 %
+
+lines scanned                    495.702                  497.591
+  code, the sLOC                 436.033   88.0 %         437.504   87.9 %
+  comment                         46.181    9.3 %          46.529    9.4 %
+  blank                           15.325    3.1 %          15.410    3.1 %
+  both, counted twice              1.837    0.4 %           1.852    0.4 %
+
+comments                          40.996                   41.103
+tokens                         3.794.911                3.803.445
+spliced-away lines                 1.798    0.4 %           1.802    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.378.500  115.1 %
+  their spelling bytes        27.584.600  103.1 %
+  bytes retained              39.825.623  112.0 %
+  macro expansions               174.675
+  #define directives               4.114
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=5994 locals=29551 reads=102361 writes=44662 parameters_created=187579 parameters_removed=173228 temporaries=13436 fallback_locals=31879
+C_TYPE_LAYOUT solves=226 pass_solves=174 pass_state_types=11743714 pass_attempts=408728 agenda_solves=52 agenda_types=54 agenda_attempts=54 agenda_edges=2 agenda_notifications=2 agenda_pushes=56 agenda_fallbacks=0
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=2034161 changes=149776
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=2034161 changes=712
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=4087054 changes=203439
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=44993 changes=69
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=6387 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=737024 retained_bound=24211116 compact_ns=0 instructions_before=2034161 instructions_after=1829779
+IR_INLINE tiny=0 candidates=70 inlined=70 always_inlined=70 copied_instructions=2396 growth=2396 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=3787931 released_bytes=3416064
+IR_LOCAL_PROMOTION candidates=68640 promoted=132 loads_removed=375 stores_removed=257 parameters_inserted=618 parameters_removed=493 uninitialized=0 barriers=9 instructions_before=2034925 instructions_after=2034161 values_before=1702973 values_after=1702591
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=42 block_visits=7949 parameter_visits=1564 incoming_visits=3344
+CODEGEN cpu=native vector_bits=512 functions=6387 instructions=1829779 values=1498140 stack_value_bytes=6061960 stack_frame_bytes=6061960 max_stack_frame_bytes=144552 code_bytes=15114186 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=125 allocator=quality fallback_functions=0
+CODEGEN_ENCODER exact_attempts=2101763 exact_successes=2101763 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=139220
+CODEGEN_EMIT machine_code_in_place=15066576 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=154 symbol_visits=103104 relocation_visits=913836 image_reserved=49015136 image_stored=8813175 image_zeroed=130 image_patched=0 payload_copied=387 payload_borrowed=40201961 scratch=139544 retained=49015352 output=49015136
+CODEGEN_ALLOCATOR reloads=13475 spills=10723 boundary_spills=2576 boundary_reloads=1311 boundary_copies=173 copies=291234 rematerializations=36986 pins=6086 splits=16 scheduled=449 schedule_kept=276
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=12825572 median_ns=12968509 throughput_mb_s=1
+Self-host stage 1 took 2.238389 seconds (2238389000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 1 instructions=23490932276
+Self-host stage 1 link took 0.030548 seconds (30548000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 1 link instructions=160076752
+Self-host stage 2 took 12.848205 seconds (12848205000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 instructions=141508553415
+Self-host stage 2 link took 0.090941 seconds (90941000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 link instructions=912747129
+Self-host stage 2 benchmark took 0.080789 seconds (80789000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 benchmark instructions=709105021
+Self-host machine stage took 13.677000 seconds (13677000000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage instructions=158381722420
+Self-host machine stage link took 0.090928 seconds (90928000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage link instructions=913150188
+Self-host machine stage benchmark took 0.090865 seconds (90865000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage benchmark instructions=705018090
