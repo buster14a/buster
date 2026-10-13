@@ -8944,14 +8944,47 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CPreprocessDetail const* preprocess_detail = c_preprocess_detail(preprocess);
     result.source_lexed = preprocess_detail->source_lexed;
     result.source_unique = preprocess_detail->source_unique;
-    result.lexed_files = preprocess_detail->lexed_files;
-    result.lexed_file_count = preprocess_detail->lexed_file_count;
     result.preprocessed = preprocess_detail->preprocessed;
     u64 promoted_warnings = 0;
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, preprocess.diagnostics,
                                                                           preprocess.diagnostic_count, invocation.input_paths[0], (String8){0},
                                                                           &promoted_warnings);
     result.tokenizer_warning_count = (u32)(preprocess.warning_count - promoted_warnings);
+    // Builtin include names can still borrow the spelling arena. Keep every
+    // lexed path alive through unit aggregation and the final link guard.
+    CSourceFileMetrics* retained_lexed_files = 0;
+    u32 retained_lexed_file_count = preprocess_detail->lexed_file_count;
+    bool retained_lexed_files_ready = true;
+    if (retained_lexed_file_count)
+    {
+        retained_lexed_files = arena_allocate(arena, CSourceFileMetrics, retained_lexed_file_count);
+        retained_lexed_files_ready = retained_lexed_files != 0 && preprocess_detail->lexed_files != 0;
+        for (u32 index = 0; retained_lexed_files_ready && index < retained_lexed_file_count; index += 1)
+        {
+            String8 path = preprocess_detail->lexed_files[index].path;
+            retained_lexed_files[index] = preprocess_detail->lexed_files[index];
+            if (path.length)
+            {
+                retained_lexed_files_ready = path.pointer != 0;
+                if (retained_lexed_files_ready)
+                {
+                    retained_lexed_files[index].path = string_duplicate_arena(arena, path, false);
+                    retained_lexed_files_ready = retained_lexed_files[index].path.pointer != 0;
+                }
+            }
+        }
+    }
+    if (retained_lexed_files_ready)
+    {
+        result.lexed_files = retained_lexed_files;
+        result.lexed_file_count = retained_lexed_file_count;
+    }
+    else if (!preprocess.error_count && !promoted_warnings)
+    {
+        result.error = COMPILER_DRIVER_ERROR_RESOURCE;
+        result.diagnostic = S8("could not retain C preprocessor input paths");
+        goto end;
+    }
     if (preprocess.error_count || promoted_warnings)
     {
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
