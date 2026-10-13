@@ -44471,7 +44471,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_address_of_array.c"),
         S8("tests/basic_c_local_typedef_scope.c"),
         S8("tests/basic_c_goto_into_loop.c"),
-        S8("tests/basic_c_statement_nodes.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/basic_c_statement_nodes.c"),
     };
     String8 c_lz4_regression_names[] = {
         S8("buster-c-builtin-memory"),

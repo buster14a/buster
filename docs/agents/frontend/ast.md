@@ -1482,9 +1482,9 @@ controlled-substatement shape alike in every layout and with or without a
 passed tree, and refuses a tree whose body brace or `if` anchor is moved. `c_test_statement_nodes_kinds`
 and `c_test_statement_nodes_deep_nesting` (blocks, `if` blocks, an `else if`
 chain, a braceless loop nest, a run of labels and nested statement
-expressions, thousands deep) lower to certified IR, and
-`tests/basic_c_statement_nodes.c` runs every statement kind under both
-register allocators.
+expressions, thousands deep) lower to certified IR, and the driver fixture
+`basic_c_statement_nodes.c` (`src/buster/tests/compiler/driver/fixtures/`)
+runs every statement kind under both register allocators.
 
 The extent table that answered controlled-body ranges from the tree before
 this (#3495) is deleted with the token walkers it fronted.
