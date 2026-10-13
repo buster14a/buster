@@ -65,6 +65,18 @@ retain this constraint; binary `&` remains a value operation. The registered
 syntax-only/object diagnostics and no object for rejected source in four C
 dialects, three frontend routes and three target layouts (#3743).
 
+## Block-scope static initializers
+
+In GNU dialects, a block-scope scalar static initializer whose complete
+expression is a statement expression with one expression statement can be
+folded when that tail expression satisfies the existing static-constant rules.
+The parser and folder use the same bounded tail range. Bodies with declarations,
+multiple statements or an evaluated nested statement expression remain
+nonconstant. File-scope statement expressions remain rejected by the separate
+file-scope constraint. The registered driver regression checks the
+constant-only runtime result alongside declaration and multiple-statement
+refusals.
+
 ## Declaration constraints
 
 Before C23, a `for` initializer declaration may introduce only automatic or

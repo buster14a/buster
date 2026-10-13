@@ -39321,13 +39321,87 @@ BUSTER_C_INTERNAL u32 c_parse_unevaluated_unary_operand_end(CParseResult* result
     return operand_end;
 }
 
+// A whole GNU block-scope static initializer may be a statement expression
+// with exactly one expression statement. Return that statement's expression
+// range so semantic validation and the folder use the same bounded shape.
+BUSTER_C_SHARED bool c_parse_block_static_single_statement_expression_tail(CParseResult* parse, CPreprocessResult preprocess,
+                                                                              u32 start, u32 end, u32* tail_start_out,
+                                                                              u32* tail_end_out)
+{
+    bool result = false;
+    u32 tail_start = start;
+    u32 tail_end = end;
+    u32 range_length = end >= start ? end - start : 0;
+    if (end <= preprocess.token_count && c_preprocess_dialect_is_gnu(preprocess.dialect) && range_length >= 6 &&
+        c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_RIGHT_BRACE) &&
+        c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 group_close = c_parse_matching_delimiter_indexed(parse, preprocess, start);
+        u32 body_close = c_parse_matching_delimiter_indexed(parse, preprocess, start + 1);
+        if (group_close == end - 1 && body_close == end - 2)
+        {
+            u32 body_start = start + 2;
+            u32 semicolon = UINT32_MAX;
+            bool multiple_statements = false;
+            bool balanced = true;
+            for (u32 cursor = body_start; cursor < body_close; cursor += 1)
+            {
+                CToken token = preprocess.tokens[cursor];
+                bool opening = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
+                bool closing = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                               c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
+                if (opening)
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(parse, preprocess, cursor);
+                    if (close >= body_close)
+                    {
+                        balanced = false;
+                        cursor = body_close;
+                    }
+                    else
+                    {
+                        cursor = close;
+                    }
+                }
+                else if (closing)
+                {
+                    balanced = false;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+                {
+                    multiple_statements = semicolon != UINT32_MAX;
+                    semicolon = cursor;
+                }
+            }
+            if (balanced && !multiple_statements && semicolon == body_close - 1 && body_start < semicolon)
+            {
+                tail_start = body_start;
+                tail_end = semicolon;
+                while (tail_start < tail_end &&
+                       c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+                {
+                    tail_start += 1;
+                }
+                result = tail_start < tail_end;
+            }
+        }
+    }
+    *tail_start_out = tail_start;
+    *tail_end_out = tail_end;
+    return result;
+}
+
 // The `(` of the first evaluated GNU statement expression in a block-scope
-// static initializer [start, end), or end. Such a static is initialized before
-// the function runs, so GCC and Clang reject the `({` as "initializer element is
-// not constant" (#3415), while a sizeof or _Alignof unary operand, or a typeof
-// operand, stays unevaluated and constant. The position index answers the
-// common case, a static without one; only a hit walks the range to skip those
-// operands.
+// static initializer [start, end), or end. The whole one-expression form is
+// screened and narrowed separately; this walk diagnoses any evaluated form
+// that remains. A sizeof or _Alignof unary operand, or a typeof operand, stays
+// unevaluated. The position index answers the common case, a static without
+// one; only a hit walks the range to skip those operands.
 BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                  u32 start, u32 end)
 {
@@ -39709,6 +39783,18 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 bool braced = initializer_start < initializer_end &&
                               c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
                 u32 statement_expression = c_parse_block_static_statement_expression(result, preprocess, entity->scope, initializer_start, initializer_end);
+                u32 statement_tail_start = initializer_start;
+                u32 statement_tail_end = initializer_end;
+                if (statement_expression < initializer_end &&
+                    c_parse_block_static_single_statement_expression_tail(result, preprocess, initializer_start, initializer_end,
+                                                                            &statement_tail_start, &statement_tail_end) &&
+                    c_parse_block_static_statement_expression(result, preprocess, entity->scope, statement_tail_start, statement_tail_end) ==
+                        statement_tail_end)
+                {
+                    initializer_start = statement_tail_start;
+                    initializer_end = statement_tail_end;
+                    statement_expression = initializer_end;
+                }
                 bool incompatible = statement_expression == initializer_end && !braced &&
                                     c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
                                                                          initializer_start, initializer_end, true, &conversion_message);

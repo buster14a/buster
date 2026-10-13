@@ -208,6 +208,9 @@ BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
 BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // The first GNU statement-expression candidate in [from, end), or end.
 BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end);
+BUSTER_C_EXTERN bool c_parse_block_static_single_statement_expression_tail(CParseResult* parse, CPreprocessResult preprocess,
+                                                                              u32 start, u32 end, u32* tail_start_out,
+                                                                              u32* tail_end_out);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
