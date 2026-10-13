@@ -1118,6 +1118,8 @@ typedef struct CTypeAlignment CTypeAlignment;
 struct CTypeAlignment
 {
     u32 type_index;
+    // The type row whose written request this row inherits; self for its owner.
+    u32 source_type_index;
     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
     u32 alignment_start;
     u32 alignment_count;
