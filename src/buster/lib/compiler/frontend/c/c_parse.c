@@ -24307,11 +24307,27 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
         result->typedef_lookup_buckets[name_bucket] = entity;
     }
     c_parse_binding_bind(result, scope, entity, added->symbol);
+    if (result->symbol_bound_words && added->symbol && added->symbol < result->binding_capacity)
+    {
+        result->symbol_bound_words[added->symbol / 64] |= UINT64_C(1) << (added->symbol % 64);
+    }
     if (result->scope_cursor)
     {
         result->scope_cursor->stale = true;
     }
     c_parse_lookup_generation_bump(result);
+}
+
+// Whether no entity with `symbol` was ever added to the lookup chains, which
+// a lookup of a nonzero symbol matches by symbol alone: the walk from any
+// scope would fail, so the caller fails without it. A label, a type keyword
+// or a name only a macro spells is looked up at every nesting level by the
+// lowering's first-token probe, and each failing walk climbed every
+// enclosing scope (#2676).
+BUSTER_C_INTERNAL bool c_parse_symbol_never_bound(CParseResult const* result, u32 symbol)
+{
+    return result->symbol_bound_words && symbol && symbol < result->binding_capacity &&
+           !(result->symbol_bound_words[symbol / 64] & (UINT64_C(1) << (symbol % 64)));
 }
 
 BUSTER_C_INTERNAL void c_parse_lookup_generation_bump(CParseResult* result)
@@ -24345,6 +24361,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
 {
     CEntityId found = C_ENTITY_ID_INVALID;
     *hops = 0;
+    scope = c_parse_symbol_never_bound(result, symbol) ? C_SCOPE_ID_INVALID : scope;
     while (scope.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
     {
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
@@ -24491,8 +24508,13 @@ CEntityId c_parse_lookup_entity_at_token(CParseResult* result, CPreprocessResult
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_at_symbol(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 symbol, String8 name,
                                                              u32 token_index)
 {
+    if (c_parse_symbol_never_bound(result, symbol))
+    {
+        scope = C_SCOPE_ID_INVALID;
+    }
     while (scope.value != C_ID_UNDERLYING_INVALID)
     {
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
         u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
         CEntityId entity = result->entity_lookup_buckets[bucket];
@@ -43118,6 +43140,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         result.binding_capacity = result.symbols->count + 1;
         result.binding_by_symbol = arena_allocate(arena, CEntityId, result.binding_capacity);
         memset(result.binding_by_symbol, 0xff, sizeof(*result.binding_by_symbol) * result.binding_capacity);
+        u32 bound_words = (result.binding_capacity + 63) / 64;
+        result.symbol_bound_words = arena_allocate(arena, u64, bound_words);
+        memset(result.symbol_bound_words, 0, sizeof(*result.symbol_bound_words) * bound_words);
         result.binding_undo_capacity = result.entity_capacity + 1;
         result.binding_undo = arena_allocate(arena, CParseBindingUndo, result.binding_undo_capacity);
     }

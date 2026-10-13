@@ -44404,6 +44404,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deep_block_lookup_linear(UnitTestArgum
     return result;
 }
 
+// Lowering probes every statement's unbound first token for a typedef name
+// (c_ir_lower_body_advance). A label, a type keyword such as `int`, or any
+// name no entity binds failed that lookup only after climbing every enclosing
+// scope, so a nest with one at each level lowered in depth squared (#2676).
+// A symbol no entity was ever added under now fails at once. Each goto also
+// found its label's scope by descending from the function's scope; it now
+// starts from the previous answer. And every edge into a label block, which
+// lies outside every loop window, climbed the whole nest in the direct-SSA
+// loop pass; it now jumps over loops already found open. Steps are lookup
+// hops, scope levels and those loop-pass visits.
+enum
+{
+    C_TEST_UNBOUND_PROBE_LABEL,
+    C_TEST_UNBOUND_PROBE_DECLARATION,
+    C_TEST_UNBOUND_PROBE_GOTO,
+    C_TEST_UNBOUND_PROBE_SHAPES,
+};
+
+BUSTER_GLOBAL_LOCAL u64 c_test_unbound_probe_lowering_steps(u32 shape, u32 depth)
+{
+    u64 steps = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = (u64)depth * 80 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int tall(int x) { "));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        String8 piece = shape == C_TEST_UNBOUND_PROBE_LABEL ? string_format(temporary.arena, S8("L{u32}: for (; x > 1;) {{ "), level)
+                        : shape == C_TEST_UNBOUND_PROBE_DECLARATION ? S8("for (; x > 1;) { int y = x; ")
+                                                                   : string_format(temporary.arena, S8("for (; x > 1;) {{ if (x == 3) goto L{u32}; L{u32}: ; "), level, level);
+        c_test_append_source(bytes, capacity, &length, piece);
+    }
+    c_test_append_source(bytes, capacity, &length, S8("x -= 1; "));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("}"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8(" return x; }"));
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) + c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) +
+                 c_test_ir_ssa_loop_edge_steps();
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("unbound-probe.c"), preprocess, parse, target_native);
+    if (length < capacity && preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 && ir.diagnostic_count == 0 && ir.program)
+    {
+        steps = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) + c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) +
+                c_test_ir_ssa_loop_edge_steps() - before;
+    }
+    c_test_scratch_end(temporary);
+    return steps;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbound_first_token_probe_linear(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 256, DEEP = 1024 };
+    for (u32 shape = 0; shape < C_TEST_UNBOUND_PROBE_SHAPES; shape += 1)
+    {
+        u64 shallow = c_test_unbound_probe_lowering_steps(shape, SHALLOW);
+        u64 deep = c_test_unbound_probe_lowering_steps(shape, DEEP);
+        // The failing walks took some DEEP * DEEP / 2 = 524 K steps here.
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && deep <= shallow * 5 + 64 && deep <= (u64)DEEP * 32,
+                        string_format(arguments->arena, S8("unbound first-token probe steps shape={u32} shallow={u64} deep={u64}"), shape, shallow,
+                                      deep));
+    }
+    return result;
+}
+
 // `sizeof(c ? (c ? ( ... 1) : 2) : 2)` nested `depth` deep, spelled into one
 // constant-expression context (issue #2765). The strict operand type walk once
 // refused anything past 64 levels, which surfaced as a false "not a true
@@ -44579,14 +44648,22 @@ BUSTER_GLOBAL_LOCAL String8 c_test_tall_expression_source(Arena* arena, const u3
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
     u32 heights[] = {1, 2, 63, 64, 65, 4096, 10000};
     String8 source_text = c_test_tall_expression_source(arguments->arena, heights, BUSTER_ARRAY_LENGTH(heights));
-    for (u32 form = 0; form < 2; form += 1)
+    for (u32 run = 0; run < 2 * BUSTER_ARRAY_LENGTH(targets); run += 1)
     {
+        u32 form = run % 2;
+        Target target = targets[run / 2];
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){0});
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParseResult parsed = c_parse(temporary.arena, tokens);
-        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tall-expression-types.c"), tokens, parsed, target_native,
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tall-expression-types.c"), tokens, parsed, target,
             (CIRLowerOptions){.disable_direct_ssa = form != 0});
         if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
         {
@@ -44622,15 +44699,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
                "    return t + _Generic({S8}, int: 0, default: 1) + _Generic({S8}, int: 0, default: 1);\n"
                "}}\n"),
             conditional, shift, mixed, conditional, shift);
-        TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, chain_source, (CPreprocessOptions){0});
-        CParseResult parsed = c_parse(temporary.arena, tokens);
-        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("tall-expression-chains.c"), tokens, parsed, target_native);
-        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
         {
-            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            Target target = targets[target_index];
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, chain_source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("tall-expression-chains.c"), tokens, parsed, target);
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+            c_test_scratch_end(temporary);
         }
-        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -44645,6 +44727,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
     String8 source_text = S8(
         "#define SAME(e, T) _Static_assert(sizeof(e) == sizeof(T) && _Generic(e, T: 1, default: 0), #e)\n"
         "int builtins(int i, long l, _Complex double z, _Complex long double w, int c) {\n"
@@ -44670,12 +44757,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         "    SAME(probed, int);\n"
         "    return (c ? __builtin_ffs(i) - (int)l : 0) < 0 || chosen != l || probed;\n"
         "}\n");
-    for (u32 form = 0; form < 2; form += 1)
+    for (u32 run = 0; run < 2 * BUSTER_ARRAY_LENGTH(targets); run += 1)
     {
+        u32 form = run % 2;
+        Target target = targets[run / 2];
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){0});
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParseResult parsed = c_parse(temporary.arena, tokens);
-        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-operand-types.c"), tokens, parsed, target_native,
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-operand-types.c"), tokens, parsed, target,
             (CIRLowerOptions){.disable_direct_ssa = form != 0});
         if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
         {
@@ -44718,15 +44808,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         "    if (static_bound() != 3 * (int)sizeof(int) + 4) return 4;\n"
         "    return deferred(1, 2) || probed(1) != 87 ? 5 : 0;\n"
         "}\n");
-    for (u32 form = 0; form < 2; form += 1)
+    for (u32 run = 0; run < 2 * BUSTER_ARRAY_LENGTH(targets); run += 1)
     {
+        u32 form = run % 2;
+        Target target = targets[run / 2];
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, choice_source, (CPreprocessOptions){0});
+        CPreprocessResult tokens = c_preprocess(temporary.arena, choice_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParseResult parsed = c_parse(temporary.arena, tokens);
-        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-nested-choice.c"), tokens, parsed, target_native,
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-nested-choice.c"), tokens, parsed, target,
             (CIRLowerOptions){.disable_direct_ssa = form != 0});
         BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program,
-            string_format(temporary.arena, S8("nested choice form={u32}: {S8}"), form,
+            string_format(temporary.arena, S8("nested choice target={u32} form={u32}: {S8}"), run / 2, form,
                 lowered.diagnostic_count ? lowered.diagnostics[0].message : parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("")));
         if (lowered.program)
         {
@@ -44768,13 +44861,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
 #endif
     // GNU requires an integer constant condition. A pointer constant selects
     // nothing, so the operand has no type and the assertion is rejected.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
+        Target target = targets[target_index];
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult tokens = c_preprocess(temporary.arena, S8(
             "int pointer_choice(void) {\n"
             "    _Static_assert(sizeof(__builtin_choose_expr((void*)1, 1, 2L)) == sizeof(int), \"pointer condition\");\n"
             "    return 0;\n"
-            "}\n"), (CPreprocessOptions){0});
+            "}\n"),
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParseResult parsed = c_parse(temporary.arena, tokens);
         BUSTER_TEST(arguments, !tokens.diagnostic_count && parsed.diagnostic_count);
         c_test_scratch_end(temporary);
@@ -44796,12 +44892,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
            "    return sizeof({S8});\n"
            "}}\n"),
         nest);
-    for (u32 form = 0; form < 2; form += 1)
+    for (u32 run = 0; run < 2 * BUSTER_ARRAY_LENGTH(targets); run += 1)
     {
+        u32 form = run % 2;
+        Target target = targets[run / 2];
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, nest_source, (CPreprocessOptions){0});
+        CPreprocessResult tokens = c_preprocess(temporary.arena, nest_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParseResult parsed = c_parse(temporary.arena, tokens);
-        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-operand-nest.c"), tokens, parsed, target_native,
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-operand-nest.c"), tokens, parsed, target,
             (CIRLowerOptions){.disable_direct_ssa = form != 0});
         if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
         {
@@ -65921,6 +66020,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_static_declaration_inline_definition);
     C_TEST_FIXTURE(arguments, c_test_static_label_differences);
     C_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
+    C_TEST_FIXTURE(arguments, c_test_unbound_first_token_probe_linear);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
     C_TEST_FIXTURE(arguments, c_test_obsolete_designator_labels);
     C_TEST_FIXTURE(arguments, c_test_static_range_designators);
