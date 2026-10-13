@@ -42790,7 +42790,8 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
         for (u32 entity_index = 0; valid && entity_index < result->entity_count; entity_index += 1)
         {
             u32 type_index = result->entities[entity_index].type.value;
-            valid = type_index < result->type_count;
+            valid = type_index < result->type_count &&
+                    result->types[type_index].kind > C_TYPE_INVALID && result->types[type_index].kind < C_TYPE_COUNT;
             if (valid && !marked[type_index])
             {
                 marked[type_index] = 1;
@@ -42800,7 +42801,8 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
         for (u32 member_index = 0; valid && member_index < result->member_count; member_index += 1)
         {
             u32 type_index = result->members[member_index].type.value;
-            valid = type_index < result->type_count;
+            valid = type_index < result->type_count &&
+                    result->types[type_index].kind > C_TYPE_INVALID && result->types[type_index].kind < C_TYPE_COUNT;
             if (valid && !marked[type_index])
             {
                 marked[type_index] = 1;
@@ -42811,7 +42813,8 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
         {
             u32 parent_index = pending[cursor];
             CType parent = result->types[parent_index];
-            if (parent.kind == C_TYPE_VECTOR || parent.kind == C_TYPE_POINTER || parent.kind == C_TYPE_ARRAY)
+            valid = parent.kind > C_TYPE_INVALID && parent.kind < C_TYPE_COUNT;
+            if (valid && (parent.kind == C_TYPE_VECTOR || parent.kind == C_TYPE_POINTER || parent.kind == C_TYPE_ARRAY))
             {
                 u32 child = parent.element_type.value;
                 valid = child < result->type_count;
@@ -42821,7 +42824,7 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                     pending[reachable_count++] = child;
                 }
             }
-            else if (parent.kind == C_TYPE_FUNCTION)
+            else if (valid && parent.kind == C_TYPE_FUNCTION)
             {
                 bool parameters_valid = parent.parameter_start <= result->parameter_count &&
                     parent.parameter_count <= result->parameter_count - parent.parameter_start;
@@ -42844,7 +42847,7 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                     }
                 }
             }
-            else if (parent.has_unqualified_type)
+            else if (valid && parent.has_unqualified_type)
             {
                 u32 child = parent.unqualified_type.value;
                 valid = child < result->type_count;
