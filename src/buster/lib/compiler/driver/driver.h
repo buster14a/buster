@@ -143,8 +143,10 @@ typedef enum CompilerDriverCDialect
 
 // -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
 // tree of each C input after preprocessing and before c_parse_ast, inside the
-// parse phase. The tree feeds no later stage yet; a unit the tree builder
-// rejects fails with the parse error class. OFF is the default.
+// parse phase, for analysis and lowering to read; a unit the tree builder
+// rejects fails with the parse error class. compiler_driver_parse_arguments
+// defaults to IMPLICIT; -fno-c-ast-pilot selects OFF, the tree-free reference
+// path, until #4058 deletes it. A zero-initialized invocation is OFF.
 typedef enum CompilerDriverCAstPilot
 {
     COMPILER_DRIVER_C_AST_PILOT_OFF,

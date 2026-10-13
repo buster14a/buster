@@ -17,7 +17,7 @@
 // against input prefixes before the native writer receives its DSO list.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
-// through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
+// through preprocess, parse (the -fc-ast-pilot syntax-tree build, on by default,
 // compiler_driver_c_ast_pilot_run, runs ahead of c_parse_ast), lowering,
 // codegen, and object/executable output (with -emit-llvm, WebAssembly, eBPF, and direct Vulkan compute
 // SPIR-V as alternate canonical emissions), the
@@ -2104,6 +2104,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+        // The syntax tree is built ahead of analysis on every compile
+        // (GitHub #3102); -fno-c-ast-pilot is the tree-free reference path
+        // until #4058 deletes it.
+        .c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
         // Source debug information is opt-in; ordinary artifact generation
         // should not construct debug models or pay their output cost.
         .debug_info = false,
@@ -2923,9 +2927,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
             continue;
         }
-        if (string_equal(argument, S8("-fc-ast-pilot")))
+        if (string_equal(argument, S8("-fc-ast-pilot")) || string_equal(argument, S8("-fno-c-ast-pilot")))
         {
-            invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
+            invocation.c_ast_pilot = string_equal(argument, S8("-fc-ast-pilot")) ? COMPILER_DRIVER_C_AST_PILOT_IMPLICIT : COMPILER_DRIVER_C_AST_PILOT_OFF;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fc-ast-pilot="));

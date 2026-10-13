@@ -695,8 +695,9 @@ disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
 
-`-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
-`implicit`) builds the [implicit postorder syntax
+`-fc-ast-pilot[=implicit|hybrid|explicit]` (default `implicit` since the
+[owner decision of 2026-10-13](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845);
+the bare flag is `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
 unit's declaration records then come from the tree
@@ -709,16 +710,20 @@ binder follows each function body's
 [statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
 answers its root-conditional splits from it
 ([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
-stage reads it. Only under the flag does analysis share the primitive and
+stage reads it. Only with the tree does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical, and a tree the builder rejects fails
+and every diagnostic are byte-identical to the tree-free path's, and a tree the builder rejects fails
 the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
 `C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
-`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
+`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`. `-fno-c-ast-pilot` selects the
+tree-free path: analysis and lowering answer every question from tokens, as
+they did before the switch. It is the reference arm for differentials and
+bisection, and [#4058](https://github.com/buster14a/buster/issues/4058)
+removes it once lowering reads only the tree. The last of the two flags wins.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`

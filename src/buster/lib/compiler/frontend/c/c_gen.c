@@ -23,11 +23,12 @@
 // index and forward-link forest once the general walk overspends its linear
 // budget. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
-// By default lowering has no syntax tree: it re-walks token ranges directly,
-// resolving identifiers through the parse result's scopes and answering
-// structure questions from a prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). Under -fc-ast-pilot the caller also passes the
-// implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
+// Lowering re-walks token ranges, resolving identifiers through the parse
+// result's scopes and answering structure questions from a prebuilt
+// matching-delimiter index (c_ir_build_delimiter_index). Under -fc-ast-pilot,
+// the driver's default since the 2026-10-13 switch (-fno-c-ast-pilot is the
+// tree-free reference path), the caller also passes the implicit postorder
+// tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
 // c_ir_root_conditional answers from its conditional nodes through
 // c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
 // question still reads tokens. No node id reaches the IR. The prepared control

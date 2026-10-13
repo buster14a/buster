@@ -7,8 +7,14 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and five consumers read it:
+included. **Status: default since 2026-10-13.** The
+[driver hook](#driver-pilot-hook) builds it on every C compile, by the
+[owner decision](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845)
+that put the switch ahead of steps 3 and 4 of the
+[lowering direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034).
+`-fno-c-ast-pilot` keeps the tree-free path as a reference arm until
+[#4058](https://github.com/buster14a/buster/issues/4058) deletes it. Five
+consumers read the tree:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
@@ -291,7 +297,8 @@ The tree accepts two attribute placements that need node slots of their own:
 ## Driver pilot hook
 
 `ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` (see the
-[driver guide](../driver.md)) is off by default. When given, the C compile path
+[driver guide](../driver.md)) is on by default with the implicit layout;
+`-fno-c-ast-pilot` turns it off. When on, the C compile path
 calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
 phase boundary, so the build's time is part of `parse_ns` and of the `parse`
 phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree's
@@ -2129,6 +2136,19 @@ off is now an end-to-end comparison of the same checked frontend that includes
 the tree's build cost. Hosted measurements are diagnostic. Acceptance needs the Ryzen 7 9700X route required by
 [#2761](https://github.com/buster14a/buster/issues/2761) and described in
 [benchmarking](../benchmarking.md).
+
+**Since the default switch** (2026-10-13), the arms are renamed, not
+re-budgeted. The sections below were measured when the tree-free path was the
+default, so their "default path" and "D against A" mean the path that is now
+`-fno-c-ast-pilot`; they stay as recorded. Under the
+[owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034),
+lowering slices carry no per-slice budget. Work after the switch reports
+correctness and counters, the opt-out is the no-added-work reference arm
+while it exists, and the end-to-end measurement and the Zen 5 acceptance
+follow [#4058](https://github.com/buster14a/buster/issues/4058). The
+`ast-pilot-acceptance-v1` profile compares no flag against `-fc-ast-pilot`,
+so on a head after the switch its two arms are the same compile and it no
+longer measures the tree.
 
 For the pilot, the budgets for the self-host unity input (about 3.97 M tokens
 reach the parser) were declared before any timing was taken:
