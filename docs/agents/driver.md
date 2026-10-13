@@ -30,6 +30,17 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Before publishing a named output, the driver compares the followed file
+identity of the destination with every positional input path and explicit
+`-include` path. A match fails with an argument diagnostic before staging or
+replacing the destination, preserving both the input and any existing output
+bytes. This catches direct, symbolic-link, hard-link and case aliases whenever
+the filesystem reports the same identity. Executable link outputs are checked
+before native linking; ordinary `-o` outputs (`-E`, `-S` and `-c`) and
+`-MF` dependency outputs are checked before publication. The check does not
+resolve implicit `-lNAME` library searches or ordinary transitive
+preprocessor includes.
+
 Publication (`file_publish_checked`, `file_publish_slices_checked` and
 `file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
 the destination, closes it and renames it over the destination. It promises

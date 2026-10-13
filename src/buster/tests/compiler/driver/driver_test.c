@@ -7,6 +7,8 @@
 // compiler_driver_test_empty_dependency_names owns argv/API refusal and output preservation.
 // compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
+// compiler_driver_test_output_input_collisions checks followed file identity
+// between named outputs and positional/forced-include inputs.
 // compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_bit_field_assignment_results checks stored-width results.
@@ -92,6 +94,9 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 #include <buster/lib/system_headers.h>
+#if BUSTER_LINUX || BUSTER_MACOS
+#include <unistd.h>
+#endif
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 #include <poll.h>
 #endif
@@ -897,8 +902,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_paths(UnitTestArg
             String8 command[] = {S8("-c"), S8("-g0"), input, S8("-o"), symlink_path};
             CompilerDriverResult refused = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_FILE_WRITE);
-            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("symbolic links")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, symlink_path) != BUSTER_STRING_NO_MATCH);
             BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source);
             BUSTER_TEST(arguments, os_file_replacement_target_stats(symlink_path).kind == OS_FILE_KIND_LINK);
@@ -1073,6 +1078,168 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_prepr
     BUSTER_UNUSED(arguments);
     BUSTER_UNUSED(source_path);
     BUSTER_UNUSED(expanded);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-identity"), S8(".c")), false);
+    String8 forced_include = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-forced"), S8(".h")), false);
+    String8 object = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-object"), S8(".o")), false);
+    String8 hard_link = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-hard-link"), S8(".o")), false);
+    String8 symlink_path = os_path_absolute(arena, buster_test_temporary_path(arena, S8("output-input-symlink"), S8(".c")), false);
+    String8 source = S8("int main(void) { return 0; }\n");
+    String8 source_bytes = source;
+    String8 target = S8("x86_64-unknown-linux-gnu");
+    if (BUSTER_REQUIRE(arguments, input.length && forced_include.length && object.length && hard_link.length && symlink_path.length &&
+                                  file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes))))
+    {
+        String8 modes[] = {S8("-E"), S8("-S"), S8("-c"), S8("")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+            String8 command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), input, S8("-o"), input, modes[mode]};
+            u64 count = BUSTER_ARRAY_LENGTH(command) - (modes[mode].length ? 0u : 1u);
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){command, count}));
+            BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+        }
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                       .use_process_environment = 1, .search_path = 1};
+        String8 child_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"), target,
+                                   S8("-nostdinc"), S8("-g0"), input, S8("-o"), input};
+        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command),
+                                                     (SliceString8){0}, (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+            String8 standard_error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+            bool refused = !waited.timed_out && waited.result != PROCESS_RESULT_SUCCESS &&
+                           waited.result != PROCESS_RESULT_CRASH &&
+                           string_first_sequence(standard_error, S8("aliases input")) != BUSTER_STRING_NO_MATCH;
+            BUSTER_TEST_RAW(arguments, refused, standard_error);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+        }
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8 header = S8("/* forced include input */\n");
+        BUSTER_TEST(arguments, file_write(forced_include, BUSTER_SLICE_TO_BYTE_SLICE(header)));
+        String8 forced_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-include"), forced_include,
+                                    S8("-c"), input, S8("-o"), forced_include};
+        CompilerDriverResult forced_refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(forced_command)));
+        BUSTER_TEST_RAW(arguments, forced_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, forced_refused.diagnostic);
+        BUSTER_TEST(arguments, string_first_sequence(forced_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, forced_include, (FileReadOptions){0})), header);
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8 depfile_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-MD"), S8("-MF"), input,
+                                     S8("-c"), input, S8("-o"), object};
+        CompilerDriverResult depfile_refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(depfile_command)));
+        BUSTER_TEST_RAW(arguments, depfile_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, depfile_refused.diagnostic);
+        BUSTER_TEST(arguments, string_first_sequence(depfile_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+        FileStats dep_object_stats = os_path_followed_stats(object);
+        BUSTER_TEST(arguments, dep_object_stats.valid && dep_object_stats.kind == OS_FILE_KIND_MISSING);
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8 object_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), input, S8("-o"), object};
+        CompilerDriverResult compiled_object = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+        BUSTER_TEST_RAW(arguments, compiled_object.error == COMPILER_DRIVER_ERROR_NONE, compiled_object.diagnostic);
+        ByteSlice object_before = file_read(arena, object, (FileReadOptions){0});
+        String8 object_link_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), object, S8("-o"), object};
+        CompilerDriverResult object_refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_link_command)));
+        BUSTER_TEST_RAW(arguments, object_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, object_refused.diagnostic);
+        BUSTER_TEST(arguments, string_first_sequence(object_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+        ByteSlice object_after = file_read(arena, object, (FileReadOptions){0});
+        BUSTER_TEST(arguments, object_before.pointer && object_after.pointer && object_before.length == object_after.length &&
+                               memcmp(object_before.pointer, object_after.pointer, object_before.length) == 0);
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8 case_alias = {.pointer = arena_allocate(arena, char8, input.length), .length = input.length};
+        memcpy(case_alias.pointer, input.pointer, input.length);
+        for (u64 index = 0; index < case_alias.length; index += 1)
+        {
+            if (case_alias.pointer[index] >= 'a' && case_alias.pointer[index] <= 'z')
+            {
+                case_alias.pointer[index] = (char8)(case_alias.pointer[index] - 'a' + 'A');
+            }
+        }
+        FileStats input_stats = os_path_followed_stats(input);
+        FileStats case_stats = os_path_followed_stats(case_alias);
+        if (input_stats.valid && case_stats.valid && input_stats.kind != OS_FILE_KIND_MISSING &&
+            input_stats.device == case_stats.device && input_stats.index == case_stats.index)
+        {
+            String8 case_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), input,
+                                      S8("-o"), case_alias};
+            CompilerDriverResult case_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(case_command)));
+            BUSTER_TEST_RAW(arguments, case_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, case_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(case_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+        }
+
+#if BUSTER_LINUX || BUSTER_MACOS
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8Z input_z = {0};
+        String8Z symlink_z = {0};
+        bool symlink_paths_ready = string8z_copy_arena(arena, input, &input_z) &&
+                                   string8z_copy_arena(arena, symlink_path, &symlink_z);
+        if (BUSTER_REQUIRE(arguments, symlink_paths_ready && symlink(input_z.pointer, symlink_z.pointer) == 0))
+        {
+            String8 symlink_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"),
+                                         symlink_path, S8("-o"), input};
+            CompilerDriverResult symlink_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(symlink_command)));
+            BUSTER_TEST_RAW(arguments, symlink_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, symlink_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(symlink_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+            BUSTER_TEST(arguments, os_file_replacement_target_stats(symlink_path).kind == OS_FILE_KIND_LINK);
+            BUSTER_TEST(arguments, os_file_delete(symlink_path));
+        }
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source_bytes)));
+        String8Z hard_link_z = {0};
+        bool hard_link_paths_ready = string8z_copy_arena(arena, input, &input_z) &&
+                                     string8z_copy_arena(arena, hard_link, &hard_link_z);
+        if (BUSTER_REQUIRE(arguments, hard_link_paths_ready && link(input_z.pointer, hard_link_z.pointer) == 0))
+        {
+            String8 hard_link_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"),
+                                           input, S8("-o"), hard_link};
+            CompilerDriverResult hard_link_refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(hard_link_command)));
+            BUSTER_TEST_RAW(arguments, hard_link_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, hard_link_refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(hard_link_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source_bytes);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, hard_link, (FileReadOptions){0})), source_bytes);
+            BUSTER_TEST(arguments, os_file_delete(hard_link));
+        }
+#endif
+    }
+    String8 cleanup_paths[] = {input, forced_include, object, hard_link, symlink_path};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cleanup_paths); index += 1)
+    {
+        FileStats stats = os_path_followed_stats(cleanup_paths[index]);
+        if (stats.valid && stats.kind != OS_FILE_KIND_MISSING)
+        {
+            BUSTER_TEST(arguments, os_file_delete(cleanup_paths[index]));
+        }
+    }
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
@@ -36201,6 +36368,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cached_plan_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_output_paths);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_output_input_collisions);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_executable_cleanup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frontend_reservation_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_reservation_failure);
