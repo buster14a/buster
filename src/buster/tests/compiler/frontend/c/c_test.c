@@ -11886,6 +11886,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_slot_tables(UnitTestArgume
 }
 
 // #1568: signed bounds retain their target type through constraint checking.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_element_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 rejected[] = {
+        S8("typedef int F(void); F a[2];"),
+        S8("typedef int F(void); typedef F A[2];"),
+        S8("typedef int F(void); void f(void) { F a[2]; }"),
+        S8("typedef int F(void); void f(void) { typedef F A[2]; }"),
+        S8("typedef int F(void); struct S { F a[2]; };"),
+        S8("typedef int F(void); void f(F a[2]);"),
+        S8("typedef int F(void); void f(void) { (void)sizeof(F[2]); }"),
+        S8("typedef int F(void); F (*p)[2];"),
+        S8("struct S; struct S a[2];"),
+        S8("struct S; extern struct S a[2]; struct S { int n; };"),
+        S8("struct S; typedef struct S A[2]; struct S { int n; };"),
+        S8("struct S; void f(void) { struct S a[2]; } struct S { int n; };"),
+        S8("struct S; const struct S a[2]; struct S { int n; };"),
+        S8("struct S { struct S a[2]; };"),
+        S8("struct S; struct T { struct S a[2]; }; struct S { int n; };"),
+        S8("struct S; void f(struct S a[2]); struct S { int n; };"),
+        S8("struct S; struct S (*p)[2]; struct S { int n; };"),
+        S8("struct S; void f(void) { (void)sizeof(struct S[2]); } struct S { int n; };"),
+        S8("union U; extern union U a[]; union U { int n; };"),
+        S8("typedef int A[]; A a[2];"),
+        S8("int a[2][];"),
+        S8("enum E; enum E a[2]; enum E { N };"),
+    };
+    String8 accepted[] = {
+        S8("typedef int F(void); F *a[2];"),
+        S8("struct S; struct S *a[2];"),
+        S8("struct S; typedef struct S S; struct S { int n; }; const S a[2];"),
+        S8("struct S { int n; }; struct S a[2];"),
+        S8("struct T { struct S { int n; } a[2]; struct S b[2]; };"),
+        S8("struct S; struct S *a[2][3];"),
+        S8("typedef int A[]; A *p; int a[][2] = {{1, 2}};"),
+        S8("struct S { int n; int a[]; };"),
+        S8("struct S { int n; int a[0]; };"),
+        S8("void f(int n) { int a[n][2]; (void)sizeof a; }"),
+        S8("typedef int F(void); void f(F *a[2]) { (void)a; }"),
+        S8("#if __STDC_VERSION__ >= 202311L\nenum E : int { N = sizeof(enum E[2]) }; enum E a[2];\n#else\nenum E { N = 2 }; enum E a[2];\n#endif\n"),
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected) + BUSTER_ARRAY_LENGTH(accepted); index += 1)
+                {
+                    bool valid = index >= BUSTER_ARRAY_LENGTH(rejected);
+                    String8 source = valid ? accepted[index - BUSTER_ARRAY_LENGTH(rejected)] : rejected[index];
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessOptions options = {.target = targets[target], .data_layout = target_data_layout(targets[target]), .dialect = dialects[dialect]};
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    bool found = false;
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic error = semantic.diagnostics[diagnostic];
+                        found |= error.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                            string_equal(error.message, S8("array element type must be a complete object type")) &&
+                            error.location.offset < source.length && source.pointer[error.location.offset] == '[';
+                    }
+                    BUSTER_TEST_RAW(arguments, valid ? !semantic.diagnostic_count : found, source);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("array-elements.c"), tokens, syntax, targets[target],
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, valid ? !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified :
+                        lowered.diagnostic_count && !lowered.program && !lowered.canonical_ir_certified, source);
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        BUSTER_STRING_TEST(arguments, semantic.diagnostics[diagnostic].message, lowered.diagnostics[diagnostic].message);
+                        BUSTER_TEST(arguments, semantic.diagnostics[diagnostic].location.offset == lowered.diagnostics[diagnostic].location.offset);
+                    }
+                    if (valid && lowered.program)
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_negative_array_bounds(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -66503,6 +66597,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
     C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
     C_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    C_TEST_FIXTURE(arguments, c_test_array_element_constraints);
     C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);

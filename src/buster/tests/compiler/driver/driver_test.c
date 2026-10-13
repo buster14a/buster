@@ -5667,6 +5667,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         String8 expected_diagnostic;
         String8 dialect;
     } cases[] = {
+        {S8("enum E : int { N = sizeof(enum E[2]) }; enum E a[2];"), true, false, {0}, S8("-std=c23")},
+        {S8("typedef int F(void); F a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); typedef F A[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { F a[2]; }"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { (void)sizeof(F[2]); }"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; extern struct S a[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S (*p)[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; void f(struct S a[2]); struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int A[]; A a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); F *a[2]; struct S; struct S *b[2];"), true},
         // Function designators are never assignment places, even under sizeof (#3746).
         {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
         {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},

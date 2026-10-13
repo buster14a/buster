@@ -22076,6 +22076,28 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
     }
     for (u32 bound_index = result->array_bound_count; bound_index > first_bound; bound_index -= 1)
     {
+        CType const* element = element_type.value < result->type_count ? &result->types[element_type.value] : 0;
+        if (element && element->has_unqualified_type && element->unqualified_type.value < result->type_count)
+        {
+            element = &result->types[element->unqualified_type.value];
+        }
+        bool invalid_element = element && element->kind == C_TYPE_FUNCTION;
+        if (element && (element->kind == C_TYPE_STRUCT || element->kind == C_TYPE_UNION ||
+                        (element->kind == C_TYPE_ENUM && !element->has_fixed_underlying_type)))
+        {
+            // Nested aggregate definitions may be parsed before their completion
+            // is published. Their closing token must precede this declarator;
+            // a later definition or the enclosing aggregate's own body cannot.
+            u32 bracket = result->array_bounds[bound_index - 1].token_start - 1;
+            invalid_element = element->definition_start ? element->definition_start + element->definition_token_count >= bracket :
+                !element->is_complete && !element->has_fixed_underlying_type;
+        }
+        else if (element && element->kind == C_TYPE_ARRAY && element->array_bound < result->array_bound_count)
+        {
+            CArrayBound bound = result->array_bounds[element->array_bound];
+            invalid_element = !bound.token_count && !bound.is_star && !bound.has_inferred_count;
+        }
+        result->array_bounds[bound_index - 1].has_invalid_element_type = invalid_element;
         element_type = c_parse_add_type(result, (CType){
                                                     .element_type = element_type,
                                                     .return_type = C_TYPE_ID_INVALID,
@@ -42497,9 +42519,22 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* ma
         u64 checked_bytes = (preprocess.token_count + 7) / 8;
         u8* checked = arena_allocate(machine->scratch_arena, u8, checked_bytes);
         memset(checked, 0, checked_bytes);
+        u8* checked_elements = 0;
         for (u32 index = 0; index < result->array_bound_count; index += 1)
         {
             CArrayBound bound = result->array_bounds[index];
+            if (bound.has_invalid_element_type && bound.token_start && bound.token_start <= preprocess.token_count)
+            {
+                if (!checked_elements) checked_elements = arena_allocate_zeroed(machine->scratch_arena, u8, checked_bytes);
+                u32 bracket = bound.token_start - 1;
+                u8 element_mask = (u8)(1u << (bracket & 7));
+                if (!(checked_elements[bracket / 8] & element_mask))
+                {
+                    checked_elements[bracket / 8] |= element_mask;
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[bracket]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                                       S8("array element type must be a complete object type"));
+                }
+            }
             u32 start = c_parse_array_bound_expression_start(preprocess, bound);
             u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
             u8 mask = (u8)(1u << (start & 7));
