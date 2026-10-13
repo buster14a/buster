@@ -410,6 +410,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_tentative_object_complet
         {S8("static int values[];\n"), false, S8("tentative definition of 'values' has incomplete type"), {0}, 0},
         {S8("static int values[];\nstatic int values[2];\n"), false, S8("tentative definition of 'values' has incomplete type with internal linkage"), {0}, 0},
         {S8("static int values[];\nstatic int values[2] = {0};\n"), false, S8("tentative definition of 'values' has incomplete type with internal linkage"), {0}, 0},
+        {S8("static int values[];\nstatic int values[] = {1, 2};\n"), false, S8("tentative definition of 'values' has incomplete type with internal linkage"), {0}, 0},
         {S8("struct S;\nstruct S values[];\n"), false, S8("array element type must be a complete object type"), {0}, 0},
         {S8("int values[];\nint read(void) { return (int)sizeof(values); }\n"), false, S8("incomplete type"), {0}, 0},
         {S8("typedef int A[];\nA values;\nint read(void) { return (int)sizeof(A); }\n"), false, S8("incomplete type"), {0}, 0},
