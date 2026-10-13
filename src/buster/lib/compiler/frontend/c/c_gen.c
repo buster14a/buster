@@ -62337,9 +62337,18 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
             return true;
         }
-        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end))
+        bool too_many_scalar_braces =
+            !builder->function && !aggregate_type && start < end &&
+            c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+            c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end) || too_many_scalar_braces)
         {
-            builder->failure_message = S8("invalid initializer separator");
+            builder->failure_message = too_many_scalar_braces ? S8("too many braces around scalar initializer") : S8("invalid initializer separator");
+            if (too_many_scalar_braces)
+            {
+                builder->failure_token_index = start;
+            }
             return false;
         }
     }

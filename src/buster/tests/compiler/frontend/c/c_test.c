@@ -66094,6 +66094,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_group_cast_probe(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scalar_initializer_brace_diagnostic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } rejected[] = {
+        {S8("int a = {{1}}; int main(void) { return 0; }"), 10},
+        {S8("int a = {{{{{{1}}}}}}; int main(void) { return 0; }"), 10},
+        {S8("double a = {{1.0}}; int main(void) { return 0; }"), 13},
+        {S8("int *a = {{0}}; int main(void) { return 0; }"), 11},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, rejected[index].source, S8("scalar-brace.c"), target_native,
+                                                     &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1 && lowered.diagnostics))
+        {
+            CDiagnostic diagnostic = lowered.diagnostics[0];
+            BUSTER_STRING_TEST(arguments, diagnostic.message, S8("C IR lowering: too many braces around scalar initializer"));
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_TEST(arguments, diagnostic.location.line == 1 && diagnostic.location.column == rejected[index].column);
+        }
+        c_test_scratch_end(temporary);
+    }
+    TemporalArena accepted_temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult accepted_preprocess = {0};
+    CParseResult accepted_parse = {0};
+    CIRLowerResult accepted = c_test_lower_source(accepted_temporary.arena, S8("int a = {1}; int main(void) { return 0; }"),
+        S8("scalar-brace.c"), target_native, &accepted_preprocess, &accepted_parse);
+    if (BUSTER_REQUIRE(arguments, accepted_preprocess.diagnostic_count == 0 && accepted_parse.diagnostic_count == 0 &&
+                       accepted.diagnostic_count == 0 && accepted.program && accepted.program->modules))
+    {
+        IrGlobal* global = c_test_find_ir_global(accepted.program->modules, accepted.program, S8("a"));
+        BUSTER_TEST(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 1);
+    }
+    c_test_scratch_end(accepted_temporary);
+    return result;
+}
+
 // A file-scope typedef whose typeof operand is a _Generic selection names an
 // ordinary complete type, so sizeof of it is an integer constant in every
 // constant context (C11 6.6p6). The typedef is the file's first declaration,
@@ -67028,6 +67074,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_runtime);
     C_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
     C_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_scalar_initializer_brace_diagnostic);
     C_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     C_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     C_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
