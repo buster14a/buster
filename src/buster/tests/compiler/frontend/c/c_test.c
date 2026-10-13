@@ -19747,6 +19747,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_contexts(UnitTest
     return result;
 }
 
+// #4052: -fshort-wchar narrows wchar_t, wide literals and the predefined
+// wchar macros on an ABI whose wchar_t is 32-bit; wint_t keeps its width.
+BUSTER_GLOBAL_LOCAL String8 const c_test_short_wchar_source = S8_INITIALIZER(
+    "#include <stddef.h>\n"
+    "#if SHORT\n"
+    "#define WIDTH 2\n"
+    "#define WCHAR_MAXIMUM 65535\n"
+    "#define WIDE_TYPE unsigned short\n"
+    "#else\n"
+    "#define WIDTH 4\n"
+    "#define WCHAR_MAXIMUM 2147483647\n"
+    "#define WIDE_TYPE int\n"
+    "#endif\n"
+    "_Static_assert(sizeof(wchar_t) == WIDTH, \"wchar_t size\");\n"
+    "_Static_assert(sizeof(L'a') == WIDTH, \"wide character size\");\n"
+    "_Static_assert(_Generic(L'a', WIDE_TYPE: 1, default: 0), \"wide character type\");\n"
+    "_Static_assert(_Generic((wchar_t)0, WIDE_TYPE: 1, default: 0), \"wchar_t type\");\n"
+    "_Static_assert(_Generic(L\"ab\"[0], WIDE_TYPE: 1, default: 0), \"wide string element\");\n"
+    "_Static_assert(sizeof(L\"ab\") == 3 * WIDTH, \"wide string size\");\n"
+    "_Static_assert(_Generic((__WCHAR_TYPE__)0, WIDE_TYPE: 1, default: 0), \"__WCHAR_TYPE__\");\n"
+    "_Static_assert(__SIZEOF_WCHAR_T__ == WIDTH, \"__SIZEOF_WCHAR_T__\");\n"
+    "_Static_assert(__WCHAR_MAX__ == WCHAR_MAXIMUM, \"__WCHAR_MAX__\");\n"
+    "_Static_assert(__WCHAR_WIDTH__ == WIDTH * 8, \"__WCHAR_WIDTH__\");\n"
+    "_Static_assert(__SIZEOF_WINT_T__ == 4, \"wint_t keeps its width\");\n"
+    "#if SHORT\n"
+    "#ifndef __WCHAR_UNSIGNED__\n"
+    "#error short wchar_t is unsigned\n"
+    "#endif\n"
+    "_Static_assert((wchar_t)-1 > 0, \"unsigned wchar_t\");\n"
+    "#else\n"
+    "#ifdef __WCHAR_UNSIGNED__\n"
+    "#error wchar_t is signed on this ABI\n"
+    "#endif\n"
+    "_Static_assert((wchar_t)-1 < 0, \"signed wchar_t\");\n"
+    "#endif\n"
+    "int main(void) { return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_short_wchar_override(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 short_wchar = 0; short_wchar < 2; short_wchar += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = target_native;
+        target.cpu_arch = CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        target.short_wchar = short_wchar != 0;
+        BUSTER_TEST(arguments, target_uses_16_bit_wchar(target) == (short_wchar != 0));
+        BUSTER_TEST(arguments, target_uses_unsigned_wchar(target) == (short_wchar != 0));
+        String8 source = string_format(temporary.arena, S8("#define SHORT {u32}\n{S8}"), short_wchar, c_test_short_wchar_source);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+            semantic.diagnostic_count == 0 && semantic.analysis_complete,
+            tokens.diagnostic_count ? tokens.diagnostics[0].message :
+            syntax.diagnostic_count ? syntax.diagnostics[0].message :
+            semantic.diagnostic_count ? semantic.diagnostics[0].message : source);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42510,7 +42574,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
 // label addresses; `:` before a parenthesized or cast else operand; chains in
 // either arm; GNU `?:`; and conditionals in calls, returns, initializers,
 // subscripts, statement expressions and `if` conditions. A conditional after a
-// root assignment or comma goes to the scan.
+// root assignment or comma goes to the scan. The pilot's retained facts
+// (GitHub #4062) reach the driver's counts and change neither object.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42571,6 +42636,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         BUSTER_TEST(arguments, lower.answers >= 20);
         BUSTER_TEST(arguments, lower.negatives > 0);
         BUSTER_TEST(arguments, lower.fallbacks > 0);
+        // The pilot also retains analysis's facts through lowering (GitHub
+        // #4062), which leaves the object as it was (above).
+        CAstFactStatistics facts = compiled[1].c_ast.facts;
+        BUSTER_TEST(arguments, compiled[0].c_ast.facts.nodes == 0 && compiled[0].c_ast.facts.retained_bytes == 0);
+        BUSTER_TEST(arguments, facts.nodes && facts.retained_bytes && facts.regions == 3 && facts.candidates && facts.stale == 0);
+    }
+    // Nothing lowers a -fsyntax-only unit, so it retains no facts.
+    {
+        String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), input};
+        CompilerDriverResult checked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){command, BUSTER_ARRAY_LENGTH(command)}));
+        BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+        BUSTER_TEST(arguments, checked.c_ast.units && checked.c_ast.facts.nodes == 0 && checked.c_ast.facts.candidates == 0);
     }
     scratch_end(temporary);
     return result;
@@ -53840,6 +53918,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArg
                     BUSTER_TEST(arguments, calls == 1);
                     BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
                 }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_callback_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("src/buster/tests/compiler/driver/fixtures/noreturn_callback_scope.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("noreturn-callback-scope.c"), tokens, syntax, target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !lowered.diagnostic_count);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                String8 names[] = {S8("setter"), S8("pointer_setter"), S8("grouped_setter"), S8("through_true_prefix"), S8("through_true_suffix"), S8("through_true_mixed")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, names[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        bool returns = false;
+                        bool unreachable = false;
+                        for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                        {
+                            returns |= function->instructions[instruction].opcode == IR_OPCODE_RETURN;
+                            unreachable |= function->instructions[instruction].opcode == IR_OPCODE_UNREACHABLE;
+                        }
+                        BUSTER_TEST(arguments, index >= 3 ? unreachable && !returns : returns && !unreachable);
+                    }
+                }
+                IrFunction* caller = c_test_find_ir_function(module, S8("main"));
+                u32 calls = 0;
+                bool returns = false;
+                bool unreachable = false;
+                if (BUSTER_REQUIRE(arguments, caller != 0))
+                {
+                    for (u32 index = 0; index < caller->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = caller->instructions + index;
+                        calls += instruction->opcode == IR_OPCODE_CALL;
+                        returns |= instruction->opcode == IR_OPCODE_RETURN;
+                        unreachable |= instruction->opcode == IR_OPCODE_UNREACHABLE;
+                    }
+                }
+                BUSTER_TEST(arguments, calls == 3 && returns && !unreachable);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
             }
             c_test_scratch_end(temporary);
         }
@@ -67397,6 +67541,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_volatile_recursive_records);
     C_TEST_FIXTURE(arguments, c_test_array_size_identity_layout);
     C_TEST_FIXTURE(arguments, c_test_git_expression_shapes);
+    C_TEST_FIXTURE(arguments, c_test_noreturn_callback_scope);
     C_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
     C_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
     C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_ir);
@@ -67528,6 +67673,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);
+    C_TEST_FIXTURE(arguments, c_test_short_wchar_override);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_runtime);
     C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     C_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);

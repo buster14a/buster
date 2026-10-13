@@ -30,7 +30,9 @@
 // implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
 // c_ir_root_conditional answers from its conditional nodes through
 // c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
-// question still reads tokens. No node id reaches the IR. The prepared control
+// question still reads tokens. The caller may also pass the facts semantic
+// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062);
+// no lowering consumer reads them yet. No node id reaches the IR. The prepared control
 // expressions of a function are answered by token-indexed tables, not scans of
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
@@ -2162,12 +2164,24 @@ BUSTER_C_INTERNAL u32 c_ir_local_declarator_start(CPreprocessResult preprocess, 
    or UINT32_MAX: one in the shared specifiers before
    c_ir_declarator_list_specifier_end, or one in the declaration's own
    declarator range. */
+BUSTER_C_INTERNAL u32 c_ir_attribute_marker_outside_parameters(CPreprocessResult preprocess, u32 start, u32 end,
+                                                                u32 parameter_open, u32 parameter_after, CIrAttributeMarker marker)
+{
+    u32 result = c_ir_attribute_marker_find(preprocess, start, BUSTER_MIN(end, parameter_open), marker);
+    if (result == UINT32_MAX && parameter_after < end)
+    {
+        result = c_ir_attribute_marker_find(preprocess, BUSTER_MAX(start, parameter_after), end, marker);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult preprocess, CDeclaration declaration, CIrAttributeMarker marker)
 {
     u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
     u32 body = declaration.body_token_count ? declaration.body_start : UINT32_MAX;
     u32 specifier_end = declaration.token_start + declaration.token_count;
-    u32 declarator_end = declaration.declarator_start + declaration.declarator_count;
+    u32 declarator_start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+    u32 declarator_end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count : specifier_end;
     specifier_end = specifier_end < limit ? specifier_end : limit;
     declarator_end = declarator_end < limit ? declarator_end : limit;
     specifier_end = body < specifier_end ? body : specifier_end;
@@ -2181,6 +2195,55 @@ BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult prepro
     if (result == UINT32_MAX && declaration.declarator_count != 0)
     {
         result = c_ir_attribute_marker_find(preprocess, declaration.declarator_start, declarator_end, marker);
+    }
+    // The usual negative answer needs no parameter walk. Only a retained
+    // marker can belong to a callback rather than the enclosing declaration.
+    if (result != UINT32_MAX && declaration.kind == C_DECLARATION_FUNCTION && declaration.name.length)
+    {
+        u32 parameter_open = limit;
+        u32 parameter_after = limit;
+        u32 name_token = UINT32_MAX;
+        CParserDeclaration* syntax = declaration.syntax_declaration;
+        if (syntax)
+        {
+            name_token = syntax->function_name_token < limit ? syntax->function_name_token : syntax->name_token;
+        }
+        if (name_token < declarator_start || name_token >= declarator_end ||
+            !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_token]), declaration.name))
+        {
+            name_token = UINT32_MAX;
+        }
+        if (name_token == UINT32_MAX)
+        {
+            for (u32 index = declarator_start; index < declarator_end && name_token == UINT32_MAX; index += 1)
+            {
+                CToken token = preprocess.tokens[index];
+                if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), declaration.name))
+                {
+                    name_token = index;
+                }
+            }
+        }
+        u32 after_name = name_token < limit ? c_parse_skip_attributes(preprocess, name_token + 1, declarator_end) : declarator_end;
+        while (after_name < declarator_end && c_token_is_punctuator(&preprocess.tokens[after_name], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            after_name = c_parse_skip_attributes(preprocess, after_name + 1, declarator_end);
+        }
+        if (after_name < declarator_end && c_token_is_punctuator(&preprocess.tokens[after_name], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parameter_open = after_name;
+            parameter_after = c_ir_skip_balanced_group(preprocess, after_name, declarator_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
+        if (result >= parameter_open && result < parameter_after)
+        {
+            // Parameter declarations own their callbacks' attributes. A
+            // noreturn callback does not terminate its returning setter.
+            result = c_ir_attribute_marker_outside_parameters(preprocess, declaration.token_start, specifier_end, parameter_open, parameter_after, marker);
+            if (result == UINT32_MAX && declaration.declarator_count != 0)
+            {
+                result = c_ir_attribute_marker_outside_parameters(preprocess, declaration.declarator_start, declarator_end, parameter_open, parameter_after, marker);
+            }
+        }
     }
 
     return result;

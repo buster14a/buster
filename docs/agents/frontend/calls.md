@@ -886,3 +886,16 @@ also supports unevaluated `sizeof` queries without evaluating the size operand.
 `c_test_conditional_alloca` covers both operand orders with `char *` and
 `void *`, both frontend forms, canonical validation, FAST/QUALITY execution,
 selected-arm effects and rejected pointer/floating controls.
+
+## Declaration attribute ownership
+
+A marker on a function's callback parameter belongs to that parameter's
+function type, not to the function accepting it. Declaration marker queries
+first retain their usual negative fast path, then exclude the outer parameter
+list only when a found marker lies there. Shared and trailing outer markers
+remain visible, including true noreturn declarations.
+
+`c_test_noreturn_callback_scope` checks typedef, inline pointer and grouped-name
+setters on x86-64/AArch64 in both frontend forms, preserving reachable calls
+and returns alongside true prefix/trailing noreturn controls. The native
+fixture executes all three setters under both allocators.
