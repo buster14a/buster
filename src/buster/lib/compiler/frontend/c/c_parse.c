@@ -6256,7 +6256,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
     }
     if (indirect)
     {
-        if (type_value->kind != C_TYPE_POINTER || type_value->element_type.value >= result->type_count)
+        if ((type_value->kind != C_TYPE_POINTER && type_value->kind != C_TYPE_ARRAY) || type_value->element_type.value >= result->type_count)
         {
             type = C_TYPE_ID_INVALID;
             break;
@@ -20955,7 +20955,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
         {
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
             {
-                valid = record->kind == C_TYPE_POINTER && record->element_type.value < result->type_count;
+                valid = (record->kind == C_TYPE_POINTER || record->kind == C_TYPE_ARRAY) && record->element_type.value < result->type_count;
                 record = valid ? &result->types[record->element_type.value] : record;
             }
             valid = valid && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
@@ -35426,7 +35426,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                     if (valid && c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_ARROW))
                     {
                         CType pointer = query.types[aggregate.value];
-                        aggregate = pointer.kind == C_TYPE_POINTER ? pointer.element_type : C_TYPE_ID_INVALID;
+                        aggregate = pointer.kind == C_TYPE_POINTER || pointer.kind == C_TYPE_ARRAY ? pointer.element_type : C_TYPE_ID_INVALID;
                     }
                     valid &= aggregate.value < query.type_count &&
                         (query.types[aggregate.value].kind == C_TYPE_STRUCT || query.types[aggregate.value].kind == C_TYPE_UNION);
