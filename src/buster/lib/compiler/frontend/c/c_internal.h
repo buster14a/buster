@@ -1079,14 +1079,18 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
     {
         result = token.symbol < 64 && ((set >> token.symbol) & 1);
     }
-    else
+    else if (c_token_may_spell_word(token))
     {
         String8 spelling = c_token_spelling(spelling_base, token);
         result = false;
-        for (u64 remaining = c_token_may_spell_word(token) ? set : 0; remaining && !result; remaining &= remaining - 1)
+        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
         }
+    }
+    else
+    {
+        result = false;
     }
     return result;
 }
