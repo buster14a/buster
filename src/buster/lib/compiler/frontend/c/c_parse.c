@@ -7608,6 +7608,22 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
     return place;
 }
 
+// A parameter keeps its declared array spelling in its entity type, so a
+// type query reports `int a[4]` or `char *argv[]` as an array. C17 6.7.6.3p7
+// adjusts it to a pointer to the element, qualified by what the brackets
+// carry: `int a[const 2]` is a const pointer. The array type's own `const`
+// is what c_ir_mark_local_read_only also keeps read-only for that pointer.
+BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* result, CTypeId type)
+{
+    bool is_const = false;
+    if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
+    {
+        CType array = result->types[type.value];
+        is_const = array.is_const || (array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const);
+    }
+    return is_const;
+}
+
 // A type query retains the operand's qualifiers and does not evaluate it.
 // The place check is shared with address-of and asm output constraints; a
 // scalar type alone would also describe an enumerator, cast, call or rvalue.
