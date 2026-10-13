@@ -7850,6 +7850,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         statement = index + 1;
                     }
                 }
+                while (tail_start < tail_end && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+                {
+                    tail_start += 1;
+                }
                 // The final statement belongs to the body's parsed scope:
                 // a local value there can shadow an enclosing typedef name.
                 // The active body map records lexical scope independently of
@@ -16383,6 +16387,7 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
         frame->alignment_count = 0;
         frame->index = frame->start;
         frame->depth = 0;
+        frame->pending_index = 0;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
     else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
@@ -16428,7 +16433,29 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
             frame->index += 1;
             continue;
         }
-        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !c_parse_alignment_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])))
+        u32 c23_attribute_end = 0;
+        if (!frame->depth && c_parse_c23_attribute_at(preprocess, index, frame->end, &c23_attribute_end))
+        {
+            frame->pending_index = c23_attribute_end - 2;
+            frame->index = index + 2;
+            continue;
+        }
+        CAttributeGroup attribute = {0};
+        if (!frame->depth && c_parse_attribute_group_at(preprocess, index, frame->end, &attribute))
+        {
+            frame->pending_index = attribute.payload_end;
+            frame->index = attribute.payload_start;
+            continue;
+        }
+        if (!frame->depth && index < frame->pending_index && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            frame->index = close < frame->pending_index ? close + 1 : frame->pending_index;
+            continue;
+        }
+        String8 word = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+        bool alignment = c_parse_alignas_word(word) || (index < frame->pending_index && c_parse_aligned_attribute_word(word));
+        if (frame->depth || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER || !alignment)
         {
             frame->index += 1;
             continue;
@@ -37707,7 +37734,8 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
         {
             cursor += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        else if (token.kind == C_TOKEN_STRING_LITERAL || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
         // A label address, as in the GNU difference `&&b - &&a`, is an
         // address constant like `&object`: IR lowering decides it.
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&

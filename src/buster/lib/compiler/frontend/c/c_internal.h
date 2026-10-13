@@ -1332,6 +1332,7 @@ struct CTypeParseFrame
     // PARAMETER frames: the diagnostic count at entry, so a failed type
     // specifier that said nothing can be named.
     u32 diagnostic_start;
+    // ALIGNMENT frames: end of the current attribute payload.
     u32 pending_index;
     u64 arena_mark;
     CTypeParseFrameKind kind;
