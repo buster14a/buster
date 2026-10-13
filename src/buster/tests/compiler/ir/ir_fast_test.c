@@ -769,7 +769,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_promotion_proof_tests(UnitTestArgumen
                     BUSTER_TEST(arguments, string_equal(module->fast.declines[0].function_name, S8("broken")) &&
                                            module->fast.declines[0].validation.error == IR_VALIDATION_OPERATION);
                 }
-                BUSTER_TEST(arguments, ir_validate_canonical_function(program, kept).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_OPERATION);
                 // A later preparation cannot inherit the temporary proof: a
                 // formerly valid neighbor now fails and must decline as well.
                 corrupted = false;
