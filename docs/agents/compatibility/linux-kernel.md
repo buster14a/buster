@@ -109,8 +109,11 @@ Native controls check argument preservation (spaces and empty arguments),
 nonzero exit attribution, timeout cleanup, malformed/truncated action results,
 ledger row/status parsing, and collision-free record names after PID reuse.
 The deterministic classifier matrix covers C `-c`, C `-S`, preprocessed
-`.S`, raw `.s`, explicit `-x` overrides and reset with `-x none`, last
-mode-option wins, and preprocessing/syntax probes. Config controls require
+`.S`, raw `.s`, explicit `-x` overrides and reset with `-x none`,
+including suffix overrides, GCC stage-stop precedence, and preprocessing/syntax
+probes. Stdin C actions remain inventoried but are not replayed because input
+bytes are not retained; their target-C rows stay pending and the replay summary
+reports `stdin_input_not_captured`. Config controls require
 whole-line symbol matches, treat missing symbols as unknown, and reject
 contradictory duplicates. A fixture census proves that host `.S` records do
 not count as target assembly and that missing action results cannot pass.
@@ -216,7 +219,7 @@ actually satisfied.
 
 The original frontier growth is acknowledged in
 [`docs/source-size/acks/3186-linux-kernel-frontier.txt`](../../source-size/acks/3186-linux-kernel-frontier.txt).
-This assembly-census change adds 56,884 build-category bytes including its
+This assembly-census change adds 58,076 build-category bytes including its
 bounded first-party lint control; that incremental growth is acknowledged in
 [`docs/source-size/acks/4079-linux-assembly-census.txt`](../../source-size/acks/4079-linux-assembly-census.txt).
 The harness changes no compiler behavior or native-retirement identity

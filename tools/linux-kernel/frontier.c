@@ -669,7 +669,8 @@ BUSTER_GLOBAL_LOCAL KernelAction kernel_classify_action(size_t count)
                 input = argument;
             }
         }
-        else if ((argument[0] != '-' || strcmp(argument, "-") == 0) && !kernel_non_source_operand(argument))
+        else if ((argument[0] != '-' || strcmp(argument, "-") == 0) &&
+                 (!kernel_non_source_operand(argument) || language))
         {
             bool suffix_c = kernel_suffix(argument, ".c");
             bool suffix_preprocessed_c = kernel_suffix(argument, ".i");
@@ -748,6 +749,13 @@ BUSTER_GLOBAL_LOCAL bool kernel_target_c(size_t count)
     bool assembly = action.kind == KERNEL_ACTION_C_ASSEMBLY && kernel_suffix(action.output, ".s");
     bool valid = action.output[0] != 0 && (object || assembly) &&
                  strstr(action.output, ".tmp") == 0;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool kernel_target_c_replayable(size_t count)
+{
+    KernelAction action = kernel_classify_action(count);
+    bool valid = kernel_target_c(count) && strcmp(action.input, "-") != 0;
     return valid;
 }
 
@@ -1062,7 +1070,8 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
     bool valid = kernel_path(index_path, kernel_context.output, "target-c.tsv");
     FILE* index = valid ? fopen(index_path, "wb") : 0;
     DIR* directory = index ? opendir(kernel_context.records) : 0;
-    unsigned required = 0, selected = 0, attempted = 0, passed = 0, malformed = 0;
+    unsigned required = 0, selected = 0, attempted = 0, passed = 0;
+    unsigned malformed = 0, unreplayable_stdin = 0;
     if (index)
     {
         fprintf(index, "record\toutput\tattempted\texit\n");
@@ -1087,24 +1096,32 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
                     ++required;
                     KernelAction action = kernel_classify_action(count);
                     char const* original_output = action.output;
-                    // Stable selection by original object path, independent
-                    // of filesystem enumeration and compiler process IDs.
-                    unsigned slot = 0;
-                    while (slot < selected && strcmp(kernel_selection[slot].output, original_output) <= 0)
+                    if (strcmp(action.input, "-") == 0)
                     {
-                        ++slot;
+                        ++unreplayable_stdin;
                     }
-                    if (slot < KERNEL_REPLAY_LIMIT && strlen(entry->d_name) < sizeof(kernel_selection[slot].record) &&
-                        strlen(original_output) < sizeof(kernel_selection[slot].output))
+                    else
                     {
-                        unsigned end = selected < KERNEL_REPLAY_LIMIT ? selected++ : KERNEL_REPLAY_LIMIT - 1;
-                        while (end > slot)
+                        // Stable selection by original object path, independent
+                        // of filesystem enumeration and compiler process IDs.
+                        unsigned slot = 0;
+                        while (slot < selected && strcmp(kernel_selection[slot].output, original_output) <= 0)
                         {
-                            kernel_selection[end] = kernel_selection[end - 1];
-                            --end;
+                            ++slot;
                         }
-                        strcpy(kernel_selection[slot].record, entry->d_name);
-                        strcpy(kernel_selection[slot].output, original_output);
+                        if (slot < KERNEL_REPLAY_LIMIT &&
+                            strlen(entry->d_name) < sizeof(kernel_selection[slot].record) &&
+                            strlen(original_output) < sizeof(kernel_selection[slot].output))
+                        {
+                            unsigned end = selected < KERNEL_REPLAY_LIMIT ? selected++ : KERNEL_REPLAY_LIMIT - 1;
+                            while (end > slot)
+                            {
+                                kernel_selection[end] = kernel_selection[end - 1];
+                                --end;
+                            }
+                            strcpy(kernel_selection[slot].record, entry->d_name);
+                            strcpy(kernel_selection[slot].output, original_output);
+                        }
                     }
                     valid = kernel_index_row(index, entry->d_name, original_output, false, -1) && valid;
                 }
@@ -1162,9 +1179,11 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
     char summary[512], path[KERNEL_PATH_BYTES];
     int bytes = snprintf(summary, sizeof(summary),
                          "reference_target_c_actions=%u\nreplay_attempted=%u\nreplay_passed=%u\n"
-                         "replay_failed=%u\nreplay_unattempted=%u\nmalformed_records=%u\n"
-                         "candidate_generated_inputs=unqualified\nqualified_kernel=no\nperformance=unvalidated\n",
-                         required, attempted, passed, attempted - passed, required - attempted, malformed);
+                         "replay_failed=%u\nreplay_unattempted=%u\nstdin_input_not_captured=%u\n"
+                         "malformed_records=%u\ncandidate_generated_inputs=unqualified\n"
+                         "qualified_kernel=no\nperformance=unvalidated\n",
+                         required, attempted, passed, attempted - passed, required - attempted,
+                         unreplayable_stdin, malformed);
     valid = bytes > 0 && bytes < (int)sizeof(summary) && kernel_path(path, kernel_context.output, "frontier.txt") &&
             kernel_write(path, summary, (size_t)bytes) && valid;
     printf("%s", summary);
@@ -1897,6 +1916,8 @@ BUSTER_GLOBAL_LOCAL bool kernel_classifier_controls(char const* temporary)
         {"gcc", "-c", "-okernel.o", "kernel.c", 0},
         {"gcc", "-S", "-E", "-o", "probe.i", "kernel.c", 0},
         {"gcc", "-c", "-x", "c", "-o", "stdin.o", "-", 0},
+        {"gcc", "-x", "c", "-c", "-o", "typed.o", "fixture.o", 0},
+        {"gcc", "-x", "assembler", "-c", "-o", "typed.o", "fixture.bin", 0},
         {"gcc", "-c", "-o", "response.o", "@compile.rsp", 0}
     };
     KernelActionKind expected[] = {
@@ -1906,11 +1927,15 @@ BUSTER_GLOBAL_LOCAL bool kernel_classifier_controls(char const* temporary)
         KERNEL_ACTION_C_ASSEMBLY, KERNEL_ACTION_C_PROBE, KERNEL_ACTION_C_PROBE,
         KERNEL_ACTION_CPP_ASSEMBLY, KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_OBJECT,
         KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_C_PROBE, KERNEL_ACTION_C_OBJECT,
-        KERNEL_ACTION_AMBIGUOUS
+        KERNEL_ACTION_C_OBJECT, KERNEL_ACTION_RAW_ASSEMBLY, KERNEL_ACTION_AMBIGUOUS
     };
     bool expected_target[] = {
         true, true, false, false, false, false, true, true, true, true, false, false,
-        false, true, true, true, false, true, false
+        false, true, true, true, false, true, true, false, false
+    };
+    bool expected_replayable[] = {
+        true, true, false, false, false, false, true, true, true, true, false, false,
+        false, true, true, true, false, false, true, false, false
     };
     bool valid = kernel_path(path, temporary, "classify.argv");
     for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]) && valid; ++i)
@@ -1919,7 +1944,8 @@ BUSTER_GLOBAL_LOCAL bool kernel_classifier_controls(char const* temporary)
         valid = kernel_argv(path, temporary, cases[i]) && kernel_read_record(path, &count);
         KernelAction action = valid ? kernel_classify_action(count) :
                                       (KernelAction){KERNEL_ACTION_AMBIGUOUS, "", ""};
-        valid = valid && action.kind == expected[i] && kernel_target_c(count) == expected_target[i];
+        valid = valid && action.kind == expected[i] && kernel_target_c(count) == expected_target[i] &&
+                kernel_target_c_replayable(count) == expected_replayable[i];
         if (valid && i == 15)
         {
             valid = strcmp(action.output, "kernel.o") == 0;
