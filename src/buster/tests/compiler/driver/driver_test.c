@@ -34877,9 +34877,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
         "    if (value == 0) return 0;\n"
         "    return mutual_even(value - 1);\n"
         "}\n"
+        "static volatile int label_effects;\n"
+        "static inline __attribute__((always_inline)) int label_leaf(int value)\n"
+        "{ label_effects += 1; if (value < 0) return -value; return value * 3 + 1; }\n"
+        "static int label_caller(int index)\n"
+        "{ void *targets[] = {&&zero, &&one}; int value = label_leaf(index); goto *targets[index & 1];\n"
+        "  zero: value += label_leaf(4); goto done; one: value += label_leaf(5); done: return value; }\n"
         "static int (*volatile escaped_helper)(int) = tiny_helper;\n"
         "int main(void)\n"
         "{\n"
+        "    int label_first = label_caller(0), label_second = label_caller(1);\n"
         "    int first = tiny_helper(argument(2));\n"
         "    int second = tiny_helper(argument(3));\n"
         "    int forced = forced_helper(argument(4));\n"
@@ -34893,6 +34900,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
         "    InlinePair pair = forced_aggregate(argument(5));\n"
         "    return first != 13 || second != 16 || forced != 9 || blocked != 10 || escaped != 25 ||\n"
         "           cfg != 10 || pair.first != 8 || pair.second != 9 ||\n"
+        "           label_first != 14 || label_second != 20 || label_effects != 4 ||\n"
         "           argument_evaluations != 5 || effects != 11 || discarded_effects != 13 || recursive != 2 || mutual != 1;\n"
         "}\n");
     bool wrote_source = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
@@ -35072,16 +35080,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
 #else
                                                              S8(""));
 #endif
-        String8 run_command[] = {
-            S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
-            source_path, S8("-o"), executable_path,
-        };
-        CompilerDriverResult executable = compiler_driver_execute_invocation(
-            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
-        BUSTER_TEST_RAW(arguments, executable.error == COMPILER_DRIVER_ERROR_NONE, executable.diagnostic);
-        if (executable.error == COMPILER_DRIVER_ERROR_NONE)
+        String8 run_allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 run_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(run_allocators); allocator_index += 1)
         {
-            BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable_path));
+            for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(run_frontends); frontend_index += 1)
+            {
+                String8 run_command[] = {
+                    S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                    run_allocators[allocator_index], run_frontends[frontend_index],
+                    source_path, S8("-o"), executable_path,
+                };
+                CompilerDriverResult executable = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
+                BUSTER_TEST_RAW(arguments, executable.error == COMPILER_DRIVER_ERROR_NONE, executable.diagnostic);
+                if (executable.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable_path));
+                }
+            }
         }
 #endif
 

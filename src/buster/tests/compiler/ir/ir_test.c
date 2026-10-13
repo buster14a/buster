@@ -2373,6 +2373,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         c_test_scratch_end(cycle_temporary);
     }
 
+    // Splices preserve caller-owned computed-goto values and destinations;
+    // the callee still cannot bring computed-label provenance of its own.
+    for (u32 label_form = 0; label_form < 2; label_form += 1)
+    {
+        for (u32 label_callee = 0; label_callee < 2; label_callee += 1)
+        {
+            TemporalArena label_temporary = scratch_begin(&arguments->arena, 1);
+            Arena* label_arena = label_temporary.arena;
+            String8 label_source = label_callee ? S8(
+                "static inline __attribute__((always_inline)) int label_leaf(int value) {\n"
+                "void *targets[] = {&&first, &&second}; goto *targets[value & 1]; first: return 3; second: return 5; }\n"
+                "int label_caller(int value) { return label_leaf(value); }\n") : S8(
+                "static inline __attribute__((always_inline)) int label_leaf(int value) {\n"
+                "if (value < 0) return -value; return value * 3 + 1; }\n"
+                "int label_caller(int index) { void *targets[] = {&&first, &&second};\n"
+                "int value = label_leaf(index); goto *targets[index & 1];\n"
+                "first: value += label_leaf(4); goto done; second: value += label_leaf(5); done: return value; }\n");
+            CPreprocessResult label_tokens = c_preprocess(label_arena, label_source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CAnalysisResult label_analysis = c_parse(label_arena, label_tokens);
+            CIRLowerResult label_lowered = c_lower_to_ir_with_options(label_arena, S8("inline-caller-labels.c"),
+                label_tokens, label_analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = label_form != 0});
+            BUSTER_TEST(arguments, !label_tokens.error_count && !label_analysis.diagnostic_count && !label_lowered.diagnostic_count);
+            if (BUSTER_REQUIRE(arguments, label_lowered.program && label_lowered.program->module_count == 1))
+            {
+                IrProgram* label_program = label_lowered.program;
+                IrModule* label_module = label_program->modules;
+                IrFunction* label_caller = ir_test_inline_find_function(label_module, S8("label_caller"));
+                label_program->fast_passes = 0;
+                label_program->inline_options = (IrInlineOptions){0};
+                u32 metadata_count = label_caller ? label_caller->label_metadata_count : 0;
+                IrValueId* metadata_values = arena_allocate(label_arena, IrValueId, metadata_count);
+                IrValueLabelMetadata* metadata = arena_allocate(label_arena, IrValueLabelMetadata, metadata_count);
+                if (metadata_count)
+                {
+                    memcpy(metadata_values, label_caller->label_metadata_values, sizeof(*metadata_values) * metadata_count);
+                    memcpy(metadata, label_caller->label_metadata, sizeof(*metadata) * metadata_count);
+                    for (u32 metadata_index = 0; metadata_index < metadata_count; metadata_index += 1)
+                    {
+                        u32 destination_count = metadata[metadata_index].label_block_count;
+                        metadata[metadata_index].label_blocks = arena_allocate(label_arena, IrBlockId, destination_count);
+                        if (destination_count)
+                        {
+                            memcpy(metadata[metadata_index].label_blocks, label_caller->label_metadata[metadata_index].label_blocks,
+                                sizeof(IrBlockId) * destination_count);
+                        }
+                    }
+                }
+                IrValidationResult label_prepared = ir_prepare_canonical_module(label_program, label_module, false);
+                if (label_callee)
+                {
+                    BUSTER_TEST(arguments, label_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                    BUSTER_TEST(arguments, label_module->inlining.shape_skips != 0);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, label_prepared.error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, label_module->inlining.always_inlined == 3);
+                    BUSTER_TEST(arguments, label_caller && metadata_count && label_caller->label_metadata_count == metadata_count);
+                    BUSTER_TEST(arguments, label_caller && ir_test_direct_call_count(label_program, label_caller, S8("label_leaf")) == 0);
+                    for (u32 metadata_index = 0; label_caller && metadata_index < metadata_count; metadata_index += 1)
+                    {
+                        BUSTER_TEST(arguments, label_caller->label_metadata_values[metadata_index].value == metadata_values[metadata_index].value);
+                        BUSTER_TEST(arguments, label_caller->label_metadata[metadata_index].label_block_count == metadata[metadata_index].label_block_count);
+                        for (u32 destination = 0; destination < metadata[metadata_index].label_block_count; destination += 1)
+                        {
+                            BUSTER_TEST(arguments, label_caller->label_metadata[metadata_index].label_blocks[destination].value ==
+                                metadata[metadata_index].label_blocks[destination].value);
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(label_program, label_module).error == IR_VALIDATION_NONE);
+                }
+            }
+            c_test_scratch_end(label_temporary);
+        }
+    }
+
     // Required bodies can exceed both optional row caps. Explicit row limits
     // still diagnose the same source call instead of silently retaining it.
     for (u32 limit_case = 0; limit_case < 3; limit_case += 1)
