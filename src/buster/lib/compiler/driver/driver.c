@@ -289,6 +289,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_warning_group_find(String8 name)
         {S8_INITIALIZER("endif-labels"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS)},
         {S8_INITIALIZER("gnu-designator"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
         {S8_INITIALIZER("gnu"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
+        {S8_INITIALIZER("pointer-sign"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN)},
         {S8_INITIALIZER("everything"), COMPILER_DRIVER_WARNING_GROUP_MASK_ALL},
     };
     u32 result = 0;
@@ -308,6 +309,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_group_name(CompilerDriverWar
         [COMPILER_DRIVER_WARNING_GROUP_CPP] = S8_INITIALIZER("cpp"),
         [COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] = S8_INITIALIZER("extra-tokens"),
         [COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR] = S8_INITIALIZER("gnu-designator"),
+        [COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN] = S8_INITIALIZER("pointer-sign"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_WARNING_GROUP_COUNT);
     return (u32)group < (u32)BUSTER_ARRAY_LENGTH(names) ? names[group] : S8("");
@@ -329,6 +331,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_of_
         break;
     case C_DIAGNOSTIC_OBSOLETE_DESIGNATOR:
         result = COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR;
+        break;
+    case C_DIAGNOSTIC_POINTER_SIGN:
+        result = COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN;
         break;
     default:
         break;
@@ -3431,7 +3436,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             // translation units that run before thread-local storage exists,
             // where the canary's own load would fault; accepting the flag lets
             // one flag set drive this compiler and the reference one.
-            string_equal(argument, S8("-fno-stack-protector"));
+            string_equal(argument, S8("-fno-stack-protector")) ||
+            // Presentation-only options (#4041). No diagnostic here is colored,
+            // and doc-comment commands only affect Clang's -Wdocumentation, so
+            // both are accepted and ignored for build-system probes.
+            string_equal(argument, S8("-fcolor-diagnostics")) || string_equal(argument, S8("-fno-color-diagnostics")) ||
+            (string_starts_with_sequence(argument, S8("-fcomment-block-commands=")) && argument.length > 25);
         if (warning_option)
         {
             compiler_driver_warning_policy_apply(&invocation.warning_policy, argument);
@@ -3690,6 +3700,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 invocation.input_paths[input_index] = resolved;
             }
         }
+    }
+    // GCC ignores linker arguments when nothing is linked and Clang warns and
+    // ignores them, so -c/-S/-E/-fsyntax-only probes drop them (#4041). A
+    // leading --version stays so the linker query keeps rejecting it.
+    if (invocation.action != COMPILER_DRIVER_ACTION_LINK && invocation.linker_argument_count && invocation.linker_arguments &&
+        !string_equal(invocation.linker_arguments[0], S8("--version")))
+    {
+        invocation.linker_argument_count = 0;
     }
     compiler_driver_validate_linker_query(&invocation);
     compiler_driver_consume_linker_as_needed(&invocation);
@@ -8744,13 +8762,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
         result.analysis_diagnostic_count = semantic.diagnostic_count;
-        if (semantic.diagnostic_count || !semantic.analysis_complete)
+        u64 promoted_analysis_warnings = 0;
+        String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.warnings,
+                                                                                 semantic.warning_count, invocation.input_paths[0],
+                                                                                 (String8){0}, &promoted_analysis_warnings);
+        result.analysis_warning_count = (u32)(semantic.warning_count - promoted_analysis_warnings);
+        if (semantic.diagnostic_count || !semantic.analysis_complete || promoted_analysis_warnings)
         {
             result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
             if (semantic.diagnostic_count)
             {
                 result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.diagnostics,
                                                                           semantic.diagnostic_count, invocation.input_paths[0], (String8){0}, 0);
+            }
+            else if (promoted_analysis_warnings)
+            {
+                result.diagnostic = promoted_analysis_error;
             }
             else
             {
@@ -8775,6 +8802,13 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
+    // Semantic warnings (-Wpointer-sign) publish ahead of any error; one that
+    // -Werror promotes fails the unit as an analysis error.
+    u64 promoted_analysis_warnings = 0;
+    String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.warnings,
+                                                                             lowered.warning_count, invocation.input_paths[0],
+                                                                             (String8){0}, &promoted_analysis_warnings);
+    result.analysis_warning_count = (u32)(lowered.warning_count - promoted_analysis_warnings);
     result.direct_ssa = lowered.direct_ssa;
     result.constant_interning = lowered.constant_interning;
     result.construction_folds = lowered.construction_folds;
@@ -8791,6 +8825,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         {
             result.diagnostic = string_format(arena, S8("{S8}: C analysis or lowering did not publish a complete program"), invocation.input_paths[0]);
         }
+        goto end;
+    }
+    if (promoted_analysis_warnings)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
+        result.diagnostic = promoted_analysis_error;
         goto end;
     }
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_IR);
@@ -10983,6 +11023,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         result.tokenizer_error_count += unit.tokenizer_error_count;
         result.tokenizer_warning_count += unit.tokenizer_warning_count;
+        result.analysis_warning_count += unit.analysis_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;
         result.analysis_diagnostic_count += unit.analysis_diagnostic_count;
         // Each unit dedups its own include closure, so across several inputs
