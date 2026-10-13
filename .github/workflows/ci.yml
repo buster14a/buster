@@ -885,6 +885,8 @@ jobs:
           CLANG_ARCH: ${{ matrix.clang_arch }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Load by name: an unloaded cmdlet scans PSModulePath (#3979).
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
           # Export the shell's PATH and target for the result step's re-probe.
@@ -1187,6 +1189,8 @@ jobs:
           CLANG_ARCH: ${{ matrix.clang_arch }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Load by name: an unloaded cmdlet scans PSModulePath (#3979).
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
           & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
@@ -1227,6 +1231,8 @@ jobs:
           VS_COMPONENT: ${{ matrix.vs_component }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Load by name: an unloaded cmdlet scans PSModulePath (#3979).
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           # cl.exe only: no installed LLVM and no clang probe in this step.
           & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
@@ -1496,16 +1502,18 @@ jobs:
             --package "$BUSTER_ANDROID_SYSTEM_IMAGE"
           printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
 
-      - name: Bootstrap the build driver (Android runtime order)
+      - name: Bootstrap the build driver (Android packages and runtime order)
         if: ${{ matrix.os == 'android' }}
         shell: bash
         run: |
           set -euo pipefail
           # Hosted jobs build build.c only with Clang (the documented CI
-          # bootstrap exception); android/runtime_order.sh uses this driver to
+          # bootstrap exception). android/test_ci.sh uses this driver to build
+          # both ABIs' packages concurrently, and android/runtime_order.sh to
           # generate and build its host ide.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
             build.c -o "$RUNNER_TEMP/buster-android-build-driver"
+          "$RUNNER_TEMP/buster-android-build-driver" android_packages --self-test "$RUNNER_TEMP/buster-android-packages-self-test"
 
       - name: Test (Android)
         id: android

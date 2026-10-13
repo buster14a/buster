@@ -364,6 +364,18 @@ with the other opt-in profiles. Its evidence is under `selfhost_inline/` in
 the artifact, and a partial, failed or cancelled leg fails the check. Its
 method is in [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: frontend-nesting-v1` line, added once against every
+parent, adds the deep-nesting leg (#2676) after the corpus leg. The merge
+base's `tools/benchmark_frontend_scaling.py --suite nesting` runs on the same
+two binaries, pinned to CPU 2 with frozen arguments. It times eleven
+families of control statements nested 2,000, 8,000 and 32,000 levels deep:
+braced and braceless loops, conditionals and switches, and nests that
+declare, label or jump at every level. Objects must match between the
+binaries; the timings are report-only. The profile cannot be combined with
+the other opt-in profiles. Its evidence is under `frontend_nesting/` in the
+artifact, and a missing, partial, failed or cancelled leg fails the check.
+Its method is in [benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate

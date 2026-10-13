@@ -451,11 +451,23 @@ DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelIn
 
 
 
+// Where one lexical block's locals land in the model: the function scope, a
+// scope of their own, or no scope at all (their parent chain never
+// materialized, matching a DEBUG_SCOPE_INVALID slot in scopes[]).
+enum
+{
+    DEBUG_SCOPE_OUTCOME_FUNCTION,
+    DEBUG_SCOPE_OUTCOME_OWN,
+    DEBUG_SCOPE_OUTCOME_DROP,
+};
+
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* model, DebugModelInput* input, DebugFunction* function,
                                                     DebugFunctionSeed* seed, IrFunction* ir_function, u32 model_scope_capacity)
 {
     if (!ir_function)
     {
+        function->scope = debug_scope_add(arena, model, model->root_scope, DEBUG_SCOPE_FUNCTION, function->declaration,
+                                          function->code_offset, function->code_offset + function->code_size, 0);
         return;
     }
     // Ordinal 0 is the function scope; every other ordinal names one lexical
@@ -472,10 +484,12 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
     u64 ordinal_slots = (u64)ir_scope_count + 1;
     u32* representative = arena_allocate(temporary.arena, u32, ordinal_slots);
     u32* merged_child = arena_allocate(temporary.arena, u32, ordinal_slots);
-    u32* scope_variable_counts = arena_allocate(temporary.arena, u32, ordinal_slots);
+    u8* scope_outcome = arena_allocate(temporary.arena, u8, ordinal_slots);
+    u32* member_counts = arena_allocate(temporary.arena, u32, ordinal_slots);
     DebugScopeId* scopes = arena_allocate(temporary.arena, DebugScopeId, ordinal_slots);
     memset(merged_child, 0, sizeof(*merged_child) * ordinal_slots);
-    memset(scope_variable_counts, 0, sizeof(*scope_variable_counts) * ordinal_slots);
+    memset(scope_outcome, 0, sizeof(*scope_outcome) * ordinal_slots);
+    memset(member_counts, 0, sizeof(*member_counts) * ordinal_slots);
     representative[0] = 0;
     for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
     {
@@ -488,11 +502,63 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
         }
         representative[ordinal] = merged_child[parent];
     }
+    // Each scope's membership array is sized to the members that will actually
+    // append, so every block's creation outcome is decided before the scopes
+    // exist: a merged block joins its representative's scope and a block the
+    // model's capacity turned away joins the function scope (#989). Outcomes
+    // are needed only for representative ordinals (a merged ordinal's locals
+    // take its representative's outcome); ordinal 0 is the function scope and
+    // stays FUNCTION.
+    u32 simulated_scope_count = model->scope_count + 1;
+    for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
+    {
+        u32 ordinal = scope_index + 1;
+        if (representative[ordinal] == ordinal)
+        {
+            u32 parent_ordinal = ir_function->debug_scopes[scope_index].parent;
+            u8 parent_outcome = scope_outcome[representative[parent_ordinal <= scope_index ? parent_ordinal : 0]];
+            if (parent_outcome == DEBUG_SCOPE_OUTCOME_DROP)
+            {
+                scope_outcome[ordinal] = DEBUG_SCOPE_OUTCOME_DROP;
+            }
+            else if (simulated_scope_count < model_scope_capacity)
+            {
+                scope_outcome[ordinal] = DEBUG_SCOPE_OUTCOME_OWN;
+                simulated_scope_count += 1;
+            }
+            else
+            {
+                scope_outcome[ordinal] = DEBUG_SCOPE_OUTCOME_FUNCTION;
+            }
+        }
+    }
+    u32 function_member_count = 0;
     for (u32 local_index = 0; local_index < ir_function->debug_local_count; local_index += 1)
     {
-        u32 local_scope = ir_function->debug_locals[local_index].scope;
-        scope_variable_counts[representative[local_scope <= ir_scope_count ? local_scope : 0]] += 1;
+        IrDebugLocal* local = ir_function->debug_locals + local_index;
+        // The append loop and debug_variable_add drop rows without a backing
+        // local ID, without a name, or whose scope never materialized; the
+        // census applies the same filters so capacity matches membership.
+        if (local->id.value == IR_ID_UNDERLYING_INVALID || !local->name.length)
+        {
+            continue;
+        }
+        u32 local_scope = representative[local->scope <= ir_scope_count ? local->scope : 0];
+        if (local_scope && scope_outcome[local_scope] == DEBUG_SCOPE_OUTCOME_DROP)
+        {
+            continue;
+        }
+        if (local_scope && scope_outcome[local_scope] == DEBUG_SCOPE_OUTCOME_OWN)
+        {
+            member_counts[local_scope] += 1;
+        }
+        else
+        {
+            function_member_count += 1;
+        }
     }
+    function->scope = debug_scope_add(arena, model, model->root_scope, DEBUG_SCOPE_FUNCTION, function->declaration,
+                                      function->code_offset, function->code_offset + function->code_size, function_member_count);
     scopes[0] = function->scope;
     for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
     {
@@ -509,7 +575,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             if (parent != DEBUG_SCOPE_INVALID && model->scope_count < model_scope_capacity)
             {
                 added = debug_scope_add(arena, model, parent, DEBUG_SCOPE_LEXICAL, (DebugSourceLocation){0}, function->code_offset,
-                                        function->code_offset + function->code_size, scope_variable_counts[ordinal]);
+                                        function->code_offset + function->code_size, member_counts[ordinal]);
             }
             // When only the model's capacity ran out the locals go to the
             // function scope instead; a block's locals are never dropped.
@@ -948,13 +1014,7 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                     }
                 }
             }
-            u32 function_variable_capacity = module_function && module_function->debug_local_count ? module_function->debug_local_count : 1;
-            function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
-                                              function->code_offset + function->code_size, function_variable_capacity);
-            if (module_function)
-            {
-                debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity);
-            }
+            debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity);
         }
         scratch_end(temporary);
         debug_add_canonical_globals(arena, &result, &input, variable_capacity);

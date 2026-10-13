@@ -801,6 +801,7 @@ class SamplingTransportTest(unittest.TestCase):
                  "files": [{"filename": authorize.COMPARE_REQUEST, "status": "modified",
                             "patch": "@@ -0,0 +1 @@\n+" + marker.rstrip("\n")}]}
         closed_list = [closed]
+        associated = [[]]
         commits = [{"sha": BASE}, {"sha": HEAD}]
         paths = []
 
@@ -815,7 +816,7 @@ class SamplingTransportTest(unittest.TestCase):
             if "/compare/" in path:
                 return delta
             if path.endswith(f"/commits/{HEAD}/pulls?per_page=100"):
-                return []
+                return associated[0]
             if "/pulls?state=closed&" in path:
                 return closed_list
             if "/pulls/42/commits?" in path:
@@ -847,6 +848,11 @@ class SamplingTransportTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         history()
                     closed[field] = saved
+            # A record without an explicit unmerged state is not closed-unmerged.
+            del closed["merged_at"]
+            with self.assertRaises(ValueError):
+                history()
+            closed["merged_at"] = None
             # The pull must still contain the exact request commit.
             commits[1] = {"sha": "d" * 40}
             with self.assertRaises(ValueError):
@@ -865,6 +871,11 @@ class SamplingTransportTest(unittest.TestCase):
                 history()
             old["pull_requests"] = [{"number": 42}]
             self.assertEqual(history()[0][6], "hostless")
+            # An unavailable associated-pull read refuses instead of falling back.
+            associated[0] = {"message": "unavailable"}
+            with self.assertRaises(ValueError):
+                history()
+            associated[0] = []
             old["head_branch"] = None
             with self.assertRaises(ValueError):
                 history()

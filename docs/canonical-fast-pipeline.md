@@ -443,12 +443,14 @@ matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
 constants, the next section measures a construction-time constant cache
 against the late pass.
 
-## Opt-in construction-time constant interning (#3011)
+## Construction-time constant interning (#3011)
 
-`-fcanonical-intern-constants` (cleared by `-fno-canonical-intern-constants`,
-the last one given winning) asks C lowering to reuse an integer constant
-already built earlier in the current block instead of building another one.
-It is independent of every `-O` level and FAST control, and off by default.
+C lowering reuses an integer constant already built earlier in the current
+block instead of building another one. This is on by default;
+`-fno-canonical-intern-constants` turns it off and
+`-fcanonical-intern-constants` turns it back on, the last one given winning.
+It is independent of every `-O` level and FAST control. It was opt-in until
+the Zen 5 measurement below justified making it the default.
 `c_ir_emit_integer_value_at` looks up a 64-slot direct-mapped table shared by
 one lowering. Each function builder takes a fresh generation, so no entry
 crosses a function and none is cleared. The key is the canonical type, the
@@ -520,13 +522,73 @@ What the data show:
   hosted run-to-run range. Neither is established here.
 
 Interning is therefore the cheaper way to obtain most of the constant reuse,
-with less memory and without the spill growth. Both stay opt-in. Adopting
-either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
-peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
-measures both flags on the 9700X; its method is in
-[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
-expect today's default, so enabling interning by default would also update
-those expectations.
+with less memory and without the spill growth. The fixed report-only profile
+`profile: constant-reuse-acceptance-v1` measures both flags on the 9700X; its
+method is in [benchmarking.md](agents/benchmarking.md).
+
+### Zen 5 measurement (9700X)
+
+The profile ran on main `446f742e`, check
+[115128610735](https://github.com/buster14a/buster/runs/115128610735). It used
+one binary on the `-g0` unity `-c` self-host compile, with 20 ABBA pairs per
+cell. Ratios are B (flag) over A (default):
+
+| Flag | Wall [95% CI] | Retired instructions | Peak RSS | Code bytes |
+| --- | --- | --- | --- | --- |
+| `-fcanonical-intern-constants` | 0.9932 [0.9912, 0.9954] | 0.9868 | −1.81% | −1.62% |
+| `-fcanonical-fast-cse` | 1.0024 [1.0007, 1.0034] | 0.9957 | −0.47% | −1.96% |
+
+Both flags left diagnostics identical to the default. Interning is a
+detectable compile-time win, while the late table is a detectable cost that
+buys 0.34 points more code reduction. Interning is the only adoption candidate
+under the throughput priority. On that measurement it became the default; the
+late CSE table stays opt-in. Making interning the default also updated the C
+frontend's row-capacity, codegen-shape and CSE-count tests, which had
+expected the old default. The constant-reuse profile's `intern` cell passes
+`-fcanonical-intern-constants` to B, so after this change both of its
+variants intern and the cell no longer measures the arm.
+
+## Opt-in construction-time folding (#3010)
+
+`-fcanonical-construction-fold` (cleared by
+`-fno-canonical-construction-fold`, the last one given winning) is the bounded
+experiment that the [fold census](#construction-time-fold-census-3010) pointed
+to. It is off by default and independent of every `-O` level and FAST control.
+It touches only the two C-lowering helpers where the census found birth folds:
+
+- `c_ir_emit_cast`, for an integer sign-extend, zero-extend, truncate or
+  reinterpret;
+- `c_ir_truth_value`, for the `_Bool` conversion of an integer.
+
+When the operand is a committed single-limb `CONSTANT_INTEGER`, the helper
+describes the row it would build and asks `ir_fast_fold_candidate`, which
+calls `ir_fast_fold_rule` exactly as `ir_fast_fold` does. If that is a
+constant rule, the helper builds that constant through
+`c_ir_emit_integer_value_at` instead of the `CAST` or `BINARY` row. A truth
+test is the candidate `value != 0`: the zero is supplied as bits, and the
+operand supplies its type, as the converted zero would. So a folded truth
+also builds no zero literal and no conversion of it. Anything else builds
+the rows as before:
+
+- an identity rule;
+- an unfoldable row;
+- a type wider than 64 bits;
+- a volatile or atomic type;
+- floating or pointer operands;
+- an operand whose `points_to_read_only` or label provenance the row's result
+  would have inherited.
+
+The constant's value then has the metadata the late fold keeps, and
+`ir_fast_fold` still folds every row this leaves.
+
+The operand's own literal row is still built and stays for FAST DCE when it
+has no other reader. Operands are evaluated as before, since only an
+already-built constant is read. `-fno-canonical-fast` keeps its meaning:
+FAST's admission, validation and late folding are unchanged, and the
+construction fold runs whether or not FAST does. `-v` prints
+`C_CONSTRUCTION_FOLD casts truths`. In `BUSTER_BENCH_ALLOCATIONS` builds, a
+row this experiment never builds is never seen by the commit census. So the
+`fold_birth_*` and `fold_match_direct_*` counters drop for the rows it folds.
 
 ## Tests
 
@@ -535,8 +597,14 @@ retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
 `ir_fast_intern_tests` checks that interning shares a repeated constant
 within a block, never across blocks, types or signs, and that each hit is
-one row and one value never built. The driver test runs the shared fixture
-with interning and CSE on every backend.
+one row and one value never built. `ir_fast_construction_fold_tests` checks, with
+construction folding on and off, the widths, signedness, wrapping and `_Bool`
+cases, an effectful comma operand, and unchanged non-constant, 128-bit and
+floating operands. Each folded case returns the constant FAST folds to
+without its row; diagnostic builds also check that no birth fold remains. A
+direct check rejects a volatile result type through `ir_fast_fold_candidate`. The driver test runs the shared fixture
+with interning and CSE, and with construction folding and no FAST pass, on
+every backend.
 `ir_fast_cse_tests` runs each case under both strategies and checks the
 window boundary for distinct rows and for repeated hits. The cases cover
 commuted and ordered pairs, duplicate operands, block boundaries, excluded
@@ -583,7 +651,9 @@ embedders start with the conservative interposition policy.
 Mandatory candidates can contain
 multiple blocks, local storage, ordinary calls and aggregate returns.
 The iterative mandatory-call graph processes callees before callers and
-rejects cycles. Dynamic stack lifetime operations, computed labels,
+rejects cycles. Caller-owned computed-goto label values and destinations retain
+their IDs across a splice; computed labels inside the callee remain refused
+until their provenance has a cloning contract (#3995). Dynamic stack lifetime operations, callee-owned computed labels,
 variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
 Unsupported candidates remain calls when optional and diagnose when mandatory.
 Arguments are evaluated once before the splice. Expansion remaps canonical
@@ -648,7 +718,14 @@ work totals let the first few large callers starve every later one. Optional
 expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
-rescanning every instruction to build reverse edges. Planning storage includes
+rescanning every instruction to build reverse edges. That scan skips a
+function whose producer opcode summary records no `CALL`
+(`IR_OPCODE_SUMMARY_TRACKED`) and streams the dense rows of the rest. Planning
+classifies every call row with one byte of per-symbol callee facts
+(`ir_inline_plan_facts`: required, `noinline`, linkage-allowed, tiny leaf),
+filled once per pass, instead of re-deriving the symbol and callee predicates
+at every site. The table adds one byte per symbol to the planning scratch
+charge; work charges and statistics are unchanged. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
 chains directly, so no full caller compaction is required. Each caller has one

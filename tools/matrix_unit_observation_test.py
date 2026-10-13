@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Native same-binary qualification receipts; fixtures compile no ide sources."""
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -45,6 +46,14 @@ int main(int argc, char** argv)
             Sleep(5000);
 #else
             sleep(5);
+#endif
+        }
+        if (inventory && mode && !strcmp(mode, "query-slow"))
+        {
+#ifdef _WIN32
+            Sleep(250);
+#else
+            usleep(250000);
 #endif
         }
         if (inventory && mode && !strcmp(mode, "query-overflow"))
@@ -96,21 +105,28 @@ class MatrixUnitObservationTests(unittest.TestCase):
             raise RuntimeError("native observer controls require a C compiler")
         suffix = ".exe" if os.name == "nt" else ""
         cls.driver = cls.directory / ("driver" + suffix)
+        cls.query_hang_driver = cls.directory / ("query-hang-driver" + suffix)
         cls.ide = cls.directory / ("fixture-ide" + suffix)
         source = cls.directory / "driver.c"
         phase = (ROOT / "tools/matrix_phase.c").read_text()
         phase = phase.replace("#define MATRIX_UNIT_INVENTORY_LIMIT BUSTER_MB(1)", "#define MATRIX_UNIT_INVENTORY_LIMIT BUSTER_KB(8)")
         phase = phase.replace("#define MATRIX_UNIT_LOG_LIMIT BUSTER_MB(64)", "#define MATRIX_UNIT_LOG_LIMIT BUSTER_KB(64)")
-        phase = phase.replace("#define MATRIX_UNIT_QUERY_TIMEOUT_US (30ull * 1000000ull)", "#define MATRIX_UNIT_QUERY_TIMEOUT_US 100000ull")
         native = (ROOT / "build.c").read_text().replace('#include "tools/matrix_phase.c"', phase)
-        source.write_text(native)
         command = [compiler, "-Isrc", "-I.", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
-                   "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", str(source), "-o", str(cls.driver)]
+                   "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", str(source)]
         if os.name == "nt":
             command.append("-lws2_32")
             if "clang" in Path(compiler).name:
                 command.append("-Wno-microsoft-enum-forward-reference")
-        subprocess.run(command, cwd=ROOT, check=True, timeout=120)
+        timeout = "#define MATRIX_UNIT_QUERY_TIMEOUT_US (30ull * 1000000ull)"
+        if native.count(timeout) != 1:
+            raise RuntimeError("expected one production inventory query deadline")
+        for driver in (cls.driver, cls.query_hang_driver):
+            # Only the deliberate hanging query uses an accelerated deadline.
+            # Every other control exercises the unchanged production budget.
+            source.write_text(native if driver == cls.driver else
+                              native.replace(timeout, "#define MATRIX_UNIT_QUERY_TIMEOUT_US 100000ull"))
+            subprocess.run([*command, "-o", str(driver)], cwd=ROOT, check=True, timeout=120)
         fake = cls.directory / "ide.c"
         fake.write_text(FAKE_IDE)
         # Same ceiling as the driver compile: hosted Windows clang has stalled
@@ -121,8 +137,29 @@ class MatrixUnitObservationTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
-    def run_worker(self, *, enabled=True, partitioned=False, mode="", collision=False):
+    @contextmanager
+    def positive_control(self):
         directory = Path(tempfile.mkdtemp(dir=self.directory))
+        try:
+            yield directory
+        except Exception:
+            parent = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "buster-ci" / "matrix-unit-observation-failures"
+            parent.mkdir(parents=True, exist_ok=True)
+            retained = Path(tempfile.mkdtemp(dir=parent))
+            shutil.copytree(directory, retained, dirs_exist_ok=True)
+            print(f"OBSERVATION_CONTROL_FAILURE evidence={retained}", file=sys.stderr, flush=True)
+            for path in sorted(retained.rglob("*")):
+                if path.is_file():
+                    data = path.read_bytes()
+                    print(f"--- {path.relative_to(retained)} bytes={len(data)} ---\n"
+                          f"{data[:16384].decode('utf-8', errors='replace')}", file=sys.stderr, flush=True)
+                    if len(data) > 16384:
+                        print(f"[omitted {len(data) - 16384} bytes; full file retained]", file=sys.stderr, flush=True)
+            raise
+
+    def run_worker(self, *, enabled=True, partitioned=False, mode="", collision=False, directory=None):
+        if directory is None:
+            directory = Path(tempfile.mkdtemp(dir=self.directory))
         root = directory / "matrix-phases"
         root.mkdir()
         (root / "plan.json").write_text("{}")
@@ -131,40 +168,48 @@ class MatrixUnitObservationTests(unittest.TestCase):
         if collision:
             observation.mkdir(parents=True)
             (observation / "observation.json").write_text("immutable-earlier-proof")
-        argv = [str(self.driver), "test_units_partitioned", str(self.ide)] if partitioned else [str(self.ide), "test", "--verbose=1", "--ci=1"]
+        driver = self.query_hang_driver if mode == "query-hang" else self.driver
+        argv = [str(driver), "test_units_partitioned", str(self.ide)] if partitioned else [str(self.ide), "test", "--verbose=1", "--ci=1"]
         environment = dict(os.environ, BUSTER_CI_CHECKS_EVIDENCE="1" if enabled else "0",
                            GITHUB_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
                            BUSTER_TEST_SOURCE_REVISION="a" * 40, BUSTER_TEST_JOBS="4" if partitioned else "2",
                            BUSTER_TEST_TABLE_AUDITS="1", OBSERVATION_FIXTURE_MODE=mode)
-        result = subprocess.run([str(self.driver), "matrix_phase_run", str(root), task, "1", "0", "--", *argv],
+        result = subprocess.run([str(driver), "matrix_phase_run", str(root), task, "1", "0", "--", *argv],
                                 cwd=ROOT, env=environment, capture_output=True, timeout=30)
+        (directory / "worker.stdout.log").write_bytes(result.stdout)
+        (directory / "worker.stderr.log").write_bytes(result.stderr)
         end = json.loads(next(root.glob("*.end.json")).read_text())
         return result, end, observation, argv
 
     def test_direct_serial_and_real_nested_partitions_bind_observed_bytes(self):
-        for partitioned in (False, True):
-            with self.subTest(partitioned=partitioned):
-                result, end, directory, argv = self.run_worker(partitioned=partitioned)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                receipt = json.loads((directory / "observation.json").read_text())
-                self.assertEqual(receipt["schema"], "buster-desktop-unit-observation-v1")
-                self.assertEqual((receipt["id"], receipt["pid"], receipt["epoch_us"], receipt["argv"]),
-                                 (end["id"], end["pid"], end["epoch_us"], argv))
-                self.assertEqual((receipt["source_revision"], receipt["run_id"], receipt["run_attempt"]), ("a" * 40, "123", "1"))
-                self.assertEqual(receipt["binary_sha256"], hashlib.sha256(self.ide.read_bytes()).hexdigest())
-                self.assertEqual(receipt["binary_bytes"], self.ide.stat().st_size)
-                self.assertTrue(receipt["binary_unchanged"])
-                self.assertTrue(receipt["capture_complete"])
-                self.assertEqual(receipt["test_result"], 0)
-                for field, filename in (("inventory_sha256", "inventory.log"), ("log_sha256", "test.log")):
-                    self.assertEqual(receipt[field], hashlib.sha256((directory / filename).read_bytes()).hexdigest())
-                self.assertIn(b"selected=0", (directory / "inventory.log").read_bytes())
-                self.assertEqual(len(campaign.inventory(directory / "inventory.log")), 2)
-                self.assertIn(b"OBSERVATION_ACTUAL_TEST", result.stdout)
-                if partitioned:
-                    self.assertIn(b"CI_UNIT_PARTITION_V1 groups=2 workers=4", (directory / "test.log").read_bytes())
-                else:
-                    self.assertIn(b"OBSERVATION_STDERR", result.stderr)
+        for mode in ("", "query-slow"):
+            for partitioned in (False, True):
+                with self.subTest(mode=mode, partitioned=partitioned), self.positive_control() as worker_directory:
+                    self.assert_observed_worker(mode, partitioned, worker_directory)
+
+    def assert_observed_worker(self, mode, partitioned, worker_directory):
+        result, end, directory, argv = self.run_worker(mode=mode, partitioned=partitioned, directory=worker_directory)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(end["state"], "success")
+        receipt = json.loads((directory / "observation.json").read_text())
+        self.assertEqual(receipt["schema"], "buster-desktop-unit-observation-v1")
+        self.assertEqual((receipt["id"], receipt["pid"], receipt["epoch_us"], receipt["argv"]),
+                         (end["id"], end["pid"], end["epoch_us"], argv))
+        self.assertEqual((receipt["source_revision"], receipt["run_id"], receipt["run_attempt"]), ("a" * 40, "123", "1"))
+        self.assertEqual(receipt["binary_sha256"], hashlib.sha256(self.ide.read_bytes()).hexdigest())
+        self.assertEqual(receipt["binary_bytes"], self.ide.stat().st_size)
+        self.assertTrue(receipt["binary_unchanged"])
+        self.assertTrue(receipt["capture_complete"])
+        self.assertEqual(receipt["test_result"], 0)
+        for field, filename in (("inventory_sha256", "inventory.log"), ("log_sha256", "test.log")):
+            self.assertEqual(receipt[field], hashlib.sha256((directory / filename).read_bytes()).hexdigest())
+        self.assertIn(b"selected=0", (directory / "inventory.log").read_bytes())
+        self.assertEqual(len(campaign.inventory(directory / "inventory.log")), 2)
+        self.assertIn(b"OBSERVATION_ACTUAL_TEST", result.stdout)
+        if partitioned:
+            self.assertIn(b"CI_UNIT_PARTITION_V1 groups=2 workers=4", (directory / "test.log").read_bytes())
+        else:
+            self.assertIn(b"OBSERVATION_STDERR", result.stderr)
 
     def test_disabled_capture_preserves_direct_streams_and_has_no_sidecars(self):
         result, end, directory, _ = self.run_worker(enabled=False)

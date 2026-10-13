@@ -122,6 +122,15 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+`build.ps1` imports `Microsoft.PowerShell.Management` and
+`Microsoft.PowerShell.Utility` by name before its first cmdlet. Without that,
+Windows PowerShell 5.1 resolves the first cmdlet from an unloaded module by
+analyzing every module on `PSModulePath`: about 23 s per process with a cold
+module analysis cache, as on hosted Windows ARM64
+([#3979](../ci-bootstrap-wrapper.md#windows-powershell-command-discovery-3979)).
+Keep PowerShell glue to Core and those two modules, or import any other module
+it needs by name.
+
 A cached driver whose recorded dependency was deleted is a normal cache miss:
 the wrapper quietly rejects it and selects another valid entry or rebuilds.
 The warm snapshot also stays quiet if an input disappears after the manifest scan.
@@ -228,6 +237,8 @@ covers this behavior.
 ./build.sh build -t test_all        # build and run the full test suite
 ./build.sh build --config Release -t test_all
 ./build.sh generate --sanitize && ./build.sh build -t test_all   # sanitized run
+./build.sh generate --tsan --build-directory build/tsan    # ThreadSanitizer tree
+./build.sh build --build-directory build/tsan --config Release -t test_tsan
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
@@ -252,7 +263,9 @@ target takes the console pool: `matrix_superbuild_analyze_jobs` passes
 `--parallel 2` to that step on hosts with at least three logical CPUs and
 `MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY` (12 GiB), so the audit runs while
 the analyzer's longest shard leaves a worker idle; smaller hosts, including
-the 7 GiB macOS runners, keep `--parallel 1` (#3912). A production
+the 7 GiB macOS runners, keep `--parallel 1` (#3912). On a single-tree release
+shard with at least four CPUs, that step also runs beside the self-host worker
+in its own outer slot (see the superbuild self-host worker below). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
@@ -335,7 +348,7 @@ toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
 Mach-O, 12 legs. Where `test_self_host` is deep on one mode and one target,
 this matrix is wide: each leg links a small self-checking fixture corpus
 (`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
-`basic_c_vector_register_pressure`, `basic_c_machine_alias`,
+`basic_c_vector_register_pressure`, `basic_c_wide_vector_joins`, `basic_c_machine_alias`,
 `basic_c_fast_ra_cfg`) at the default CPU model and then takes
 the strongest verification avenue the host offers — native execution when
 host and target agree, `qemu-aarch64` for AArch64 ELF, `wine` for x86-64 PE,
@@ -464,6 +477,20 @@ consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
 environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
 process, and remains disabled for the direct scheduler and unsupported platforms.
+A single-tree superbuild (every release shard) has one slot in that pool, so the
+one-CPU worker used to wait for the producer's `test_all` and then for its
+analyzers, while the analyzer's longest shard left most CPUs idle (hosted
+x86-64: 59-66 s of analyzers, then 65-96 s of self-host). Where
+`matrix_superbuild_post_test_assign` admits it, the analyzers instead become
+their own `buster_post_test_N` target in the one-slot `buster_matrix_post_test`
+pool after the tree's tests, the worker also waits for the tree's tests so it
+never competes with `test_all`, and the outer `--parallel` is the unchanged CPU
+pool depth plus that slot; the worker and the analyzers then run side by side.
+Admission needs one tree, the analyzers at `--parallel 2` (so at least 12 GiB)
+and at least `MATRIX_SUPERBUILD_POST_TEST_OVERLAP_THREADS` (four) CPUs, for the
+two analyzer workers, the optnone frontend and the worker. The 7 GiB macOS
+release runners, three-CPU hosts and every multi-tree matrix keep the previous
+graph, and `BUSTER_SUPERBUILD_PARALLELISM` reports `post_test_jobs`.
 The worker deletes its private bootstrap executable after stage-one linking.
 Only Windows sharing/access deletion errors get a bounded cleanup retry (at most
 500 ms and 51 attempts, matching generated-test executable cleanup); permanent
@@ -542,7 +569,7 @@ tree out with `BUSTER_TEST_TABLE_AUDITS=0`, and **the default is on**, so a
 bare `ide test`, a single-tree build, or any runner that does not set the
 variable keeps full coverage. Never mark a module whose result depends on
 generated code, the host, or the sanitizer.
-Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
+Flag scope matters: `--sanitize`, `--tsan`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`** for public workflows; `build` rejects them with an explicit
 diagnostic. The internal `self_host_from_existing` worker is the narrow
@@ -561,6 +588,22 @@ replaced by the generated command. This fixed precedence prevents
 into a diagnostic-only run. Invoke a built binary directly, outside the
 `test_all`/`test_ide` targets, for exploratory recovery behavior; that run is
 not a correctness result.
+
+`generate --tsan` (`BUSTER_THREAD_SANITIZE`, #3949) builds a separate
+ThreadSanitizer tree for lane-parallel code. ThreadSanitizer cannot share a
+process with ASan, so the driver and CMake both reject it with `--sanitize`,
+and with MSVC, Zig or a Windows target. Every executable and `buster_compiler`
+compile and link with `-fsanitize=thread`; Clang keeps line tables only.
+`BUSTER_SANITIZE` stays 0, so ASan-specific code paths are unchanged, and the
+tree is never an artifact fan-out producer. Its generated test commands set
+`TSAN_OPTIONS=halt_on_error=1:exitcode=66:second_deadlock_stack=1` (plus the
+matching `llvm-symbolizer`), replacing any value from the shell, and spawned
+`cc` children inherit it. The `test_tsan` target is the gate: it runs
+`os_tests` and `compiler_driver_tests` (lane gangs, once-claims, the lane
+first-fill and unit-batch fixtures, and multi-TU `-fcompile-jobs` links) from
+the Release tree; the full `test_all` is not its contract. A race fails the
+process, or the `cc` child a fixture spawned, with status 66. See
+[parallelism.md](parallelism.md#threadsanitizer-gate) for what it covers.
 
 Generated test commands also set `BUSTER_SANITIZER_POLICY_MODE=fatal` or
 `unsupported`. The registered test treats missing fatal sanitizer options as a

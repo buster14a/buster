@@ -971,6 +971,8 @@ struct CArrayBound
     // Bounds made while parsing a parameter (nested prototypes included).
     // Definition parameters receive the additional signature-scope check.
     bool is_parameter_declarator;
+    // Captured before later tag or array completion can erase the constraint.
+    bool has_invalid_element_type;
 };
 
 typedef struct CType CType;
@@ -2184,10 +2186,16 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
-    // -fcanonical-intern-constants (#3011): reuse an integer constant already
-    // built earlier in the current block instead of building another row.
-    // Opt-in construction-time arm of the CSE census; off emits as before.
-    bool intern_block_constants;
+    // -fno-canonical-intern-constants (#3011): by default an integer constant
+    // already built earlier in the current block is reused instead of building
+    // another row (measured on Zen 5: -0.7% wall, -1.8% peak RSS on the
+    // self-host compile). Set to build every constant row afresh.
+    bool disable_block_constant_interning;
+    // -fcanonical-construction-fold (#3010): when c_ir_emit_cast or
+    // c_ir_truth_value receives a committed single-limb integer constant,
+    // build the constant FAST's fold rule gives instead of the CAST or BINARY
+    // row. Experimental and off by default; FAST still runs unchanged.
+    bool construction_fold;
     // Resolve every pending SSA parameter of a local initialized only at its
     // declaration through the general predecessor walk. The output must not
     // change; tests use it as the differential reference for the shortcut.
@@ -2243,11 +2251,23 @@ struct CIRConstantInternStatistics
     u64 stale;
 };
 
+// Construction-time folds (#3010): integer conversions of a constant built
+// as the converted constant (casts) and integer truth conversions of a
+// constant built as a _Bool constant (truths). Each saved one CAST or BINARY
+// row; a truth also saved the zero operand and any conversion of it.
+typedef struct CIRConstructionFoldStatistics CIRConstructionFoldStatistics;
+struct CIRConstructionFoldStatistics
+{
+    u64 casts;
+    u64 truths;
+};
+
 typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
     CIRConstantInternStatistics constant_interning;
+    CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
     // Attempts the lowering's type-mapping passes made, retries included, so
     // a test can pin them to the unit's size (#3312).

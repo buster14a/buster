@@ -1989,6 +1989,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         }
         c_test_scratch_end(defaults_temporary);
     }
+    // Inlining a call whose result is a function pointer leaves the indirect
+    // call's callee as a continuation-block parameter with no defining row.
+    // That is an ordinary pointer value and must still validate (#3988).
+    {
+        TemporalArena pointer_temporary = scratch_begin(&arguments->arena, 1);
+        String8 pointer_source = S8(
+            "typedef int (*fp)(int);\n"
+            "int id(int x) { return x + 1; }\n"
+            "static fp get(void) { return id; }\n"
+            "int use(int v) { return get()(v); }\n");
+        CPreprocessResult pointer_preprocess = c_preprocess(pointer_temporary.arena, pointer_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult pointer_analysis = c_parse(pointer_temporary.arena, pointer_preprocess);
+        CIRLowerResult pointer_lowered = {0};
+        if (!pointer_preprocess.error_count && !pointer_analysis.diagnostic_count)
+        {
+            pointer_lowered = c_lower_to_ir(pointer_temporary.arena, S8("canonical-inline-pointer.c"),
+                pointer_preprocess, pointer_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, pointer_preprocess.error_count == 0 && pointer_analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, pointer_lowered.diagnostic_count == 0 && pointer_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, pointer_lowered.program && pointer_lowered.program->module_count == 1))
+        {
+            IrProgram* pointer_program = pointer_lowered.program;
+            IrModule* pointer_module = pointer_program->modules;
+            pointer_program->fast_passes = 0;
+            pointer_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrValidationResult pointer_prepared = ir_prepare_canonical_module(pointer_program, pointer_module, false);
+            BUSTER_TEST(arguments, pointer_prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, pointer_module->inlining.inlined >= 1);
+            IrFunction* pointer_caller = ir_test_inline_find_function(pointer_module, S8("use"));
+            BUSTER_TEST(arguments, pointer_caller != 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(pointer_program, pointer_caller, S8("get")) == 0);
+            u32 parameter_callees = 0;
+            for (u32 index = 0; pointer_caller && index < pointer_caller->instruction_count; index += 1)
+            {
+                IrInstruction* call = pointer_caller->instructions + index;
+                if (call->opcode == IR_OPCODE_CALL && call->operand_count &&
+                    pointer_caller->values[call->operands[0].value].definition.value >= pointer_caller->instruction_count)
+                {
+                    parameter_callees += 1;
+                }
+            }
+            BUSTER_TEST(arguments, parameter_callees == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(pointer_program, pointer_module).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(pointer_temporary);
+    }
 
     // With FAST selected, a caller whose splices were all optional defers its
     // strict output check to the FAST input guard's module scan (#48). The
@@ -2373,6 +2421,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         c_test_scratch_end(cycle_temporary);
     }
 
+    // Splices preserve caller-owned computed-goto values and destinations;
+    // the callee still cannot bring computed-label provenance of its own.
+    for (u32 label_form = 0; label_form < 2; label_form += 1)
+    {
+        for (u32 label_callee = 0; label_callee < 2; label_callee += 1)
+        {
+            TemporalArena label_temporary = scratch_begin(&arguments->arena, 1);
+            Arena* label_arena = label_temporary.arena;
+            String8 label_source = label_callee ? S8(
+                "static inline __attribute__((always_inline)) int label_leaf(int value) {\n"
+                "void *targets[] = {&&first, &&second}; goto *targets[value & 1]; first: return 3; second: return 5; }\n"
+                "int label_caller(int value) { return label_leaf(value); }\n") : S8(
+                "static inline __attribute__((always_inline)) int label_leaf(int value) {\n"
+                "if (value < 0) return -value; return value * 3 + 1; }\n"
+                "int label_caller(int index) { void *targets[] = {&&first, &&second};\n"
+                "int value = label_leaf(index); goto *targets[index & 1];\n"
+                "first: value += label_leaf(4); goto done; second: value += label_leaf(5); done: return value; }\n");
+            CPreprocessResult label_tokens = c_preprocess(label_arena, label_source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CAnalysisResult label_analysis = c_parse(label_arena, label_tokens);
+            CIRLowerResult label_lowered = c_lower_to_ir_with_options(label_arena, S8("inline-caller-labels.c"),
+                label_tokens, label_analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = label_form != 0});
+            BUSTER_TEST(arguments, !label_tokens.error_count && !label_analysis.diagnostic_count && !label_lowered.diagnostic_count);
+            if (BUSTER_REQUIRE(arguments, label_lowered.program && label_lowered.program->module_count == 1))
+            {
+                IrProgram* label_program = label_lowered.program;
+                IrModule* label_module = label_program->modules;
+                IrFunction* label_caller = ir_test_inline_find_function(label_module, S8("label_caller"));
+                label_program->fast_passes = 0;
+                label_program->inline_options = (IrInlineOptions){0};
+                u32 metadata_count = label_caller ? label_caller->label_metadata_count : 0;
+                IrValueId* metadata_values = arena_allocate(label_arena, IrValueId, metadata_count);
+                IrValueLabelMetadata* metadata = arena_allocate(label_arena, IrValueLabelMetadata, metadata_count);
+                if (metadata_count)
+                {
+                    memcpy(metadata_values, label_caller->label_metadata_values, sizeof(*metadata_values) * metadata_count);
+                    memcpy(metadata, label_caller->label_metadata, sizeof(*metadata) * metadata_count);
+                    for (u32 metadata_index = 0; metadata_index < metadata_count; metadata_index += 1)
+                    {
+                        u32 destination_count = metadata[metadata_index].label_block_count;
+                        metadata[metadata_index].label_blocks = arena_allocate(label_arena, IrBlockId, destination_count);
+                        if (destination_count)
+                        {
+                            memcpy(metadata[metadata_index].label_blocks, label_caller->label_metadata[metadata_index].label_blocks,
+                                sizeof(IrBlockId) * destination_count);
+                        }
+                    }
+                }
+                IrValidationResult label_prepared = ir_prepare_canonical_module(label_program, label_module, false);
+                if (label_callee)
+                {
+                    BUSTER_TEST(arguments, label_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                    BUSTER_TEST(arguments, label_module->inlining.shape_skips != 0);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, label_prepared.error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, label_module->inlining.always_inlined == 3);
+                    BUSTER_TEST(arguments, label_caller && metadata_count && label_caller->label_metadata_count == metadata_count);
+                    BUSTER_TEST(arguments, label_caller && ir_test_direct_call_count(label_program, label_caller, S8("label_leaf")) == 0);
+                    for (u32 metadata_index = 0; label_caller && metadata_index < metadata_count; metadata_index += 1)
+                    {
+                        BUSTER_TEST(arguments, label_caller->label_metadata_values[metadata_index].value == metadata_values[metadata_index].value);
+                        BUSTER_TEST(arguments, label_caller->label_metadata[metadata_index].label_block_count == metadata[metadata_index].label_block_count);
+                        for (u32 destination = 0; destination < metadata[metadata_index].label_block_count; destination += 1)
+                        {
+                            BUSTER_TEST(arguments, label_caller->label_metadata[metadata_index].label_blocks[destination].value ==
+                                metadata[metadata_index].label_blocks[destination].value);
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(label_program, label_module).error == IR_VALIDATION_NONE);
+                }
+            }
+            c_test_scratch_end(label_temporary);
+        }
+    }
+
     // Required bodies can exceed both optional row caps. Explicit row limits
     // still diagnose the same source call instead of silently retaining it.
     for (u32 limit_case = 0; limit_case < 3; limit_case += 1)
@@ -2413,8 +2538,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         CIRLowerResult large_lowered = {0};
         if (!large_preprocessed.error_count && !large_analysis.diagnostic_count)
         {
-            large_lowered = c_lower_to_ir(large_arena, S8("canonical-inline-large-required.c"),
-                large_preprocessed, large_analysis, target_native);
+            // The leaf's size comes from repeated constants; keep each row so it exceeds the budgets.
+            large_lowered = c_lower_to_ir_with_options(large_arena, S8("canonical-inline-large-required.c"),
+                large_preprocessed, large_analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
         }
         BUSTER_TEST(arguments, !large_preprocessed.error_count && !large_analysis.diagnostic_count && !large_lowered.diagnostic_count);
         if (BUSTER_REQUIRE(arguments, large_lowered.program && large_lowered.program->module_count == 1))
@@ -2778,8 +2904,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         CIRLowerResult spread_lowered = {0};
         if (!spread_preprocess.error_count && !spread_analysis.diagnostic_count)
         {
-            spread_lowered = c_lower_to_ir(spread_arena, S8("canonical-inline-spread.c"),
-                spread_preprocess, spread_analysis, target_native);
+            // The callers' sizes come from repeated constants; keep each row so they exceed the storage limit.
+            spread_lowered = c_lower_to_ir_with_options(spread_arena, S8("canonical-inline-spread.c"),
+                spread_preprocess, spread_analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
         }
         BUSTER_TEST(arguments, spread_preprocess.error_count == 0 && spread_analysis.diagnostic_count == 0);
         BUSTER_TEST(arguments, spread_lowered.diagnostic_count == 0 && spread_lowered.program != 0);
@@ -2961,9 +3088,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_i386_abi(UnitTestArguments* arguments
     return result;
 }
 
+// ir_type_from_id answers only rows a table actually holds: a missing table,
+// an out-of-range id, or a row-less table with a nonzero count (#3952) is null.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_type_from_id_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrType rows[2] = {0};
+    IrTypeTable table = {.types = rows, .count = 2, .capacity = 2};
+    IrTypeTable rowless = {.types = 0, .count = 2, .capacity = 2};
+    BUSTER_TEST(arguments, ir_type_from_id(&table, (IrTypeId){.value = 1}) == rows + 1);
+    BUSTER_TEST(arguments, ir_type_from_id(&table, (IrTypeId){.value = 2}) == 0);
+    BUSTER_TEST(arguments, ir_type_from_id(0, (IrTypeId){.value = 0}) == 0);
+    BUSTER_TEST(arguments, ir_type_from_id(&rowless, (IrTypeId){.value = 1}) == 0);
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_type_from_id_bounds);
     BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);

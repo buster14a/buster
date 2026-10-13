@@ -5,6 +5,19 @@
 #define IR_INLINE_FUNCTION_SCRATCH_BYTES 64u
 #define IR_INLINE_PLAN_ALIGNMENT_BYTES 256u
 #define IR_INLINE_GRAPH_FUNCTION_WORK 12u
+// Planning scratch per symbol: function_by_symbol plus callee_facts.
+#define IR_INLINE_SYMBOL_SCRATCH_BYTES (sizeof(u32) + sizeof(u8))
+
+// Per-symbol callee facts, one byte each, filled once per pass by
+// ir_inline_plan_facts so a call row is classified with one byte load instead
+// of re-deriving symbol and callee predicates at every site. Directives and
+// linkage do not change during the pass. A tiny leaf has no calls, so no
+// splice changes it; a spliced caller's tiny bit is recomputed after its
+// splices all the same.
+#define IR_INLINE_FACT_REQUIRED 0x1u
+#define IR_INLINE_FACT_NOINLINE 0x2u
+#define IR_INLINE_FACT_LINKAGE 0x4u
+#define IR_INLINE_FACT_TINY 0x8u
 
 typedef struct IrInlinePlan IrInlinePlan;
 struct IrInlinePlan
@@ -31,6 +44,7 @@ struct IrInlinePlan
     u64 budget_limit;
     u8* required_callers;
     u8* cyclic;
+    u8* callee_facts;
 };
 
 BUSTER_GLOBAL_LOCAL u64 ir_inline_storage_add(u64 left, u64 right)
@@ -197,6 +211,34 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_tiny_leaf(IrFunction* callee, u32 instruction
     return result;
 }
 
+// The tiny bit of a linkage-allowed callee; zero unless tiny inlining is on.
+BUSTER_GLOBAL_LOCAL u8 ir_inline_tiny_fact(IrFunction* callee, IrInlineOptions const* options)
+{
+    u8 result = options->tiny && ir_inline_tiny_leaf(callee, options->max_callee_instructions) ? IR_INLINE_FACT_TINY : 0u;
+    return result;
+}
+
+// Fill plan->callee_facts once function_by_symbol is known; the symbol
+// loop is already charged as one planning unit per symbol.
+BUSTER_GLOBAL_LOCAL void ir_inline_plan_facts(IrProgram* program, IrModule* module, Arena* arena, IrInlinePlan* plan,
+                                              IrInlineOptions const* options)
+{
+    u32 symbol_count = program->symbols.count;
+    plan->callee_facts = arena_allocate(arena, u8, symbol_count ? symbol_count : 1u);
+    for (u32 symbol = 0; symbol < symbol_count; symbol += 1)
+    {
+        IrSymbol* row = program->symbols.symbols + symbol;
+        u32 function = plan->function_by_symbol[symbol];
+        IrFunction* callee = function < module->function_count ? module->functions + function : 0;
+        u8 facts = (row->always_inline ? IR_INLINE_FACT_REQUIRED : 0u) | (row->noinline ? IR_INLINE_FACT_NOINLINE : 0u);
+        if (callee && ir_inline_linkage_allowed(program, row, callee))
+        {
+            facts |= IR_INLINE_FACT_LINKAGE | ir_inline_tiny_fact(callee, options);
+        }
+        plan->callee_facts[symbol] = facts;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_callsite_error(IrFunction* caller, u32 block, u32 row)
 {
     return ir_inline_required(caller, (IrBlockId){.value = block}, (IrInstructionId){.value = row});
@@ -228,13 +270,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_first_required_error(IrProgram*
 }
 
 BUSTER_GLOBAL_LOCAL void ir_inline_plan_optional(IrProgram* program, IrModule* module, Arena* arena,
-                                                   IrInlinePlan* plan, u32* order_count_out)
+                                                   IrInlinePlan* plan, IrInlineOptions const* options, u32* order_count_out)
 {
     u32 count = module->function_count;
     plan->function_by_symbol = arena_allocate(arena, u32, program->symbols.count ? program->symbols.count : 1u);
     plan->order = arena_allocate(arena, u32, count ? count : 1u);
     plan->required_callers = arena_allocate(arena, u8, count ? count : 1u);
-    plan->scratch_bytes = ir_inline_storage_add(ir_inline_storage_multiply(program->symbols.count, sizeof(u32)),
+    plan->scratch_bytes = ir_inline_storage_add(ir_inline_storage_multiply(program->symbols.count, IR_INLINE_SYMBOL_SCRATCH_BYTES),
                                                  ir_inline_storage_add(ir_inline_storage_multiply(count, IR_INLINE_FUNCTION_SCRATCH_BYTES), IR_INLINE_PLAN_ALIGNMENT_BYTES));
     memset(plan->required_callers, 0, count ? count : 1u);
     for (u32 symbol = 0; symbol < program->symbols.count; symbol += 1) plan->function_by_symbol[symbol] = IR_INLINE_NONE;
@@ -244,6 +286,7 @@ BUSTER_GLOBAL_LOCAL void ir_inline_plan_optional(IrProgram* program, IrModule* m
         if (row->symbol.value < program->symbols.count) plan->function_by_symbol[row->symbol.value] = function;
         plan->order[function] = function;
     }
+    ir_inline_plan_facts(program, module, arena, plan, options);
     plan->work_units = ir_inline_storage_add(ir_inline_storage_multiply(count, 2u), program->symbols.count);
     plan->first_cycle = IR_INLINE_NONE;
     plan->first_required_caller = IR_INLINE_NONE;
@@ -269,10 +312,11 @@ struct IrInlineEdgeChunk
 };
 
 BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* module, Arena* arena, IrInlinePlan* plan,
-                                                        u64 scratch_limit, u64 work_limit, u64 base_work, u32* order_count_out)
+                                                        IrInlineOptions const* options, u64 scratch_limit, u64 work_limit,
+                                                        u64 base_work, u32* order_count_out)
 {
     u32 count = module->function_count;
-    u64 base_scratch = ir_inline_storage_multiply(program->symbols.count, sizeof(u32));
+    u64 base_scratch = ir_inline_storage_multiply(program->symbols.count, IR_INLINE_SYMBOL_SCRATCH_BYTES);
     base_scratch = ir_inline_storage_add(base_scratch, ir_inline_storage_add(ir_inline_storage_multiply(count, IR_INLINE_FUNCTION_SCRATCH_BYTES), IR_INLINE_PLAN_ALIGNMENT_BYTES));
     u64 graph_work = ir_inline_storage_add(base_work, ir_inline_storage_multiply(count, IR_INLINE_GRAPH_FUNCTION_WORK));
     graph_work = ir_inline_storage_add(graph_work, program->symbols.count);
@@ -330,20 +374,33 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
             if (row->symbol.value < program->symbols.count)
                 plan->function_by_symbol[row->symbol.value] = function;
         }
+        ir_inline_plan_facts(program, module, arena, plan, options);
+        u8 const* facts = plan->callee_facts;
+        u32 symbol_count = program->symbols.count;
 
         for (u32 function = 0; function < count && result; function += 1)
         {
             IrFunction* caller = module->functions + function;
             if (caller->state != IR_FUNCTION_LOWERED) continue;
-            // Few callers name a required callee. A streaming pass over the
-            // dense row array rejects the rest without chasing block lists;
-            // every listed row is in that array, so no site is missed.
+            // Few callers name a required callee. A function whose opcode
+            // summary records no call is skipped outright; the rest take a
+            // streaming pass over the dense row array that rejects them
+            // without chasing block lists. Every listed row is in that array,
+            // so no site is missed.
             bool calls_required = false;
-            for (u32 row = 0; row < caller->instruction_count && !calls_required; row += 1)
+            if (ir_function_may_contain_opcodes(caller, IR_OPCODE_BIT(IR_OPCODE_CALL)))
             {
-                IrInstruction const* candidate = caller->instructions + row;
-                calls_required = candidate->opcode == IR_OPCODE_CALL && candidate->symbol.value < program->symbols.count &&
-                                 program->symbols.symbols[candidate->symbol.value].always_inline;
+                IrInstruction const* rows = caller->instructions;
+                u32 row_count = caller->instruction_count;
+                for (u32 row = 0; row < row_count; row += 1)
+                {
+                    if (rows[row].opcode == IR_OPCODE_CALL && rows[row].symbol.value < symbol_count &&
+                        (facts[rows[row].symbol.value] & IR_INLINE_FACT_REQUIRED))
+                    {
+                        calls_required = true;
+                        break;
+                    }
+                }
             }
             for (u32 block = 0; block < caller->block_count && result && calls_required; block += 1)
             {
@@ -351,11 +408,8 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
                      row = caller->instructions[row].next.value)
                 {
                     IrInstruction* call = caller->instructions + row;
-                    IrSymbol* symbol = call->opcode == IR_OPCODE_CALL
-                                           ? ir_symbol_from_id(&program->symbols, call->symbol)
-                                           : 0;
-                    if (!symbol || !symbol->always_inline ||
-                        call->symbol.value >= program->symbols.count) continue;
+                    if (call->opcode != IR_OPCODE_CALL || call->symbol.value >= symbol_count ||
+                        !(facts[call->symbol.value] & IR_INLINE_FACT_REQUIRED)) continue;
                     plan->required_callers[function] = 1;
                     if (plan->first_required_caller == IR_INLINE_NONE)
                         plan->first_required_caller = function;
@@ -575,7 +629,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
         }
         else
         {
-            u64 planning_scratch = ir_inline_storage_multiply(program->symbols.count, sizeof(u32));
+            u64 planning_scratch = ir_inline_storage_multiply(program->symbols.count, IR_INLINE_SYMBOL_SCRATCH_BYTES);
             planning_scratch = ir_inline_storage_add(planning_scratch,
                                                       ir_inline_storage_add(ir_inline_storage_multiply(module->function_count, IR_INLINE_FUNCTION_SCRATCH_BYTES), IR_INLINE_PLAN_ALIGNMENT_BYTES));
             u64 optional_metadata_work = ir_inline_storage_add(ir_inline_storage_multiply(module->function_count, 2u), program->symbols.count);
@@ -604,9 +658,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 IrInlinePlan plan = {0};
                 u32 order_count = 0;
                 bool plan_ready = has_required
-                                     ? ir_inline_plan_graph(program, module, arena, &plan, IR_FAST_SCRATCH_BUDGET, IR_FAST_WORK_BUDGET, planning_units, &order_count)
+                                     ? ir_inline_plan_graph(program, module, arena, &plan, &options, IR_FAST_SCRATCH_BUDGET, IR_FAST_WORK_BUDGET, planning_units, &order_count)
                                      : true;
-                if (plan_ready && !has_required) ir_inline_plan_optional(program, module, arena, &plan, &order_count);
+                if (plan_ready && !has_required) ir_inline_plan_optional(program, module, arena, &plan, &options, &order_count);
                 module->inlining.visits = has_required ? plan.work_units : ir_inline_storage_add(planning_units, plan.work_units);
                 if (!plan_ready)
                 {
@@ -726,11 +780,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // to total_work and visits once after the scan.
                         u64 scan_budget = caller_work_limit - BUSTER_MIN(total_work, (u64)caller_work_limit);
                         u64 scan_used = 0;
+                        IrInstruction const* scan_rows = caller->instructions;
                         for (u32 block = 0; block < caller->block_count && !possible_tiny_call && !caller_scan_exhausted; block += 1)
                         {
-                            for (u32 row = caller->blocks[block].first_instruction.value;
-                                 row != IR_INLINE_NONE && !possible_tiny_call && !caller_scan_exhausted;
-                                 row = caller->instructions[row].next.value)
+                            for (u32 row = caller->blocks[block].first_instruction.value; row != IR_INLINE_NONE;
+                                 row = scan_rows[row].next.value)
                             {
                                 scan_used += 1;
                                 if (scan_used > scan_budget)
@@ -738,40 +792,35 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                     caller_scan_exhausted = true;
                                     break;
                                 }
+                                if (scan_rows[row].opcode != IR_OPCODE_CALL) continue;
                                 IrInstruction* call = caller->instructions + row;
-                                IrSymbol* symbol = call->opcode == IR_OPCODE_CALL
-                                                       ? ir_symbol_from_id(&program->symbols, call->symbol)
-                                                       : 0;
-                                if (symbol && !symbol->always_inline && !symbol->noinline &&
+                                u8 facts = call->symbol.value < program->symbols.count ? plan.callee_facts[call->symbol.value] : 0u;
+                                if ((facts & (IR_INLINE_FACT_REQUIRED | IR_INLINE_FACT_NOINLINE | IR_INLINE_FACT_LINKAGE)) ==
+                                        IR_INLINE_FACT_LINKAGE &&
                                     ir_inline_direct_call(caller, call))
                                 {
-                                    u32 callee_index = call->symbol.value < program->symbols.count
-                                                           ? plan.function_by_symbol[call->symbol.value]
-                                                           : IR_INLINE_NONE;
-                                    IrFunction* callee = callee_index < count ? module->functions + callee_index : 0;
-                                    if (ir_inline_linkage_allowed(program, symbol, callee))
+                                    u32 callee_index = plan.function_by_symbol[call->symbol.value];
+                                    IrFunction* callee = module->functions + callee_index;
+                                    if (callee_index == caller_index)
                                     {
-                                        if (callee_index == caller_index)
-                                        {
-                                            recursive_sites += 1;
-                                            continue;
-                                        }
-                                        u64 callee_scan_work = 1u;
-                                        if (callee->block_count == 1 &&
-                                            callee->instruction_count <= options.max_callee_instructions)
-                                        {
-                                            callee_scan_work =
-                                                ir_inline_storage_add(callee_scan_work, callee->instruction_count);
-                                        }
-                                        scan_used = ir_inline_storage_add(scan_used, callee_scan_work);
-                                        if (scan_used > scan_budget)
-                                        {
-                                            caller_scan_exhausted = true;
-                                            break;
-                                        }
-                                        possible_tiny_call =
-                                            ir_inline_tiny_leaf(callee, options.max_callee_instructions);
+                                        recursive_sites += 1;
+                                        continue;
                                     }
+                                    u64 callee_scan_work = 1u;
+                                    if (callee->block_count == 1 &&
+                                        callee->instruction_count <= options.max_callee_instructions)
+                                    {
+                                        callee_scan_work =
+                                            ir_inline_storage_add(callee_scan_work, callee->instruction_count);
+                                    }
+                                    scan_used = ir_inline_storage_add(scan_used, callee_scan_work);
+                                    if (scan_used > scan_budget)
+                                    {
+                                        caller_scan_exhausted = true;
+                                        break;
+                                    }
+                                    possible_tiny_call = (facts & IR_INLINE_FACT_TINY) != 0;
+                                    if (possible_tiny_call) break;
                                 }
                             }
                         }
@@ -922,30 +971,37 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     total_work = ir_inline_storage_add(total_work, original_blocks);
                     module->inlining.visits = ir_inline_storage_add(module->inlining.visits, original_blocks);
+                    // caller_main_scan above reserved these rows. Each row is
+                    // charged one unit of total_work and visits; the charge is
+                    // settled at every call row, before any budget reads it,
+                    // and after the walk, instead of once per row.
                     u32 caller_rows_scanned = 0;
+                    u32 caller_rows_charged = 0;
+                    IrInstruction const* caller_rows = caller->instructions;
                     for (u32 block = 0; block < original_blocks && result.error == IR_VALIDATION_NONE; block += 1)
                     {
-                        u32 position = 0;
+                        u32 block_rows_before = caller_rows_scanned;
                         for (u32 row = caller->blocks[block].first_instruction.value; row != IR_INLINE_NONE && result.error == IR_VALIDATION_NONE;
-                             row = caller->instructions[row].next.value)
+                             row = caller_rows[row].next.value)
                         {
-                            position += 1;
-                            planned_next[row] = position;
-                            // caller_main_scan above reserved these rows.
-                            total_work += 1;
-                            module->inlining.visits += 1;
                             caller_rows_scanned += 1;
+                            if (caller_rows[row].opcode != IR_OPCODE_CALL) continue;
+                            total_work += caller_rows_scanned - caller_rows_charged;
+                            module->inlining.visits += caller_rows_scanned - caller_rows_charged;
+                            caller_rows_charged = caller_rows_scanned;
                             IrInstruction* call = caller->instructions + row;
-                            if (call->opcode != IR_OPCODE_CALL) continue;
-                            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, call->symbol);
-                            bool required = symbol && symbol->always_inline;
-                            bool tiny = options.tiny && symbol && !symbol->noinline && ir_inline_direct_call(caller, call);
-                            if ((phase == 0 && !required) || (phase == 1 && (required || !tiny))) continue;
+                            bool symbol_known = call->symbol.value < program->symbols.count;
+                            u8 facts = symbol_known ? plan.callee_facts[call->symbol.value] : 0u;
+                            bool required = (facts & IR_INLINE_FACT_REQUIRED) != 0;
+                            if (phase == 0 ? !required
+                                           : required || !symbol_known || !options.tiny || (facts & IR_INLINE_FACT_NOINLINE))
+                                continue;
+                            bool direct = ir_inline_direct_call(caller, call);
+                            if (phase == 1 && !direct) continue;
                             module->inlining.candidates += 1;
-                            u32 callee_index = call->symbol.value < program->symbols.count ? plan.function_by_symbol[call->symbol.value] : IR_INLINE_NONE;
+                            u32 callee_index = symbol_known ? plan.function_by_symbol[call->symbol.value] : IR_INLINE_NONE;
                             IrFunction* callee = callee_index < count ? module->functions + callee_index : 0;
-                            if (!ir_inline_direct_call(caller, call) || !ir_inline_linkage_allowed(program, symbol, callee) ||
-                                (required && symbol->noinline))
+                            if (!direct || !(facts & IR_INLINE_FACT_LINKAGE) || (required && (facts & IR_INLINE_FACT_NOINLINE)))
                             {
                                 module->inlining.linkage_skips += 1;
                                 if (required) result = ir_inline_callsite_error(caller, block, row);
@@ -957,12 +1013,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 if (required) result = ir_inline_callsite_error(caller, block, row);
                                 continue;
                             }
-                            if (caller->label_metadata_count)
-                            {
-                                module->inlining.shape_skips += 1;
-                                if (required) result = ir_inline_callsite_error(caller, block, row);
-                                continue;
-                            }
+                            // Existing caller label values and destination IDs
+                            // survive the splice. Only callee-owned computed
+                            // labels need a cloning contract and remain refused.
                             u64 caller_rows_remaining = original_instructions - caller_rows_scanned;
                             if (!required)
                             {
@@ -986,7 +1039,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 module->inlining.visits =
                                     ir_inline_storage_add(module->inlining.visits, tiny_scan_work);
                             }
-                            bool tiny_eligible = required || ir_inline_tiny_leaf(callee, options.max_callee_instructions);
+                            bool tiny_eligible = required || (facts & IR_INLINE_FACT_TINY);
                             if (!tiny_eligible)
                             {
                                 module->inlining.shape_skips += 1;
@@ -1110,7 +1163,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             u64 projected_locals_after = ir_inline_storage_add(projected_locals_before, projected_new_locals);
                             u64 projected_blocks_after = ir_inline_storage_add(projected_blocks_before,
                                                                                 (u64)callee->block_count + 1u);
-                            u64 prefix_rows = planned_next[row];
+                            u64 prefix_rows = caller_rows_scanned - block_rows_before;
                             u64 caller_work = ir_inline_storage_multiply(projected_blocks_before, 7u);
                             caller_work = ir_inline_storage_add(caller_work, ir_inline_storage_multiply(prefix_rows, 3u));
                             caller_work = ir_inline_storage_add(caller_work,
@@ -1387,6 +1440,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             total_copies += copied;
                         }
                     }
+                    total_work += caller_rows_scanned - caller_rows_charged;
+                    module->inlining.visits += caller_rows_scanned - caller_rows_charged;
                     // The first splice relocates the caller's exactly sized
                     // tables, and the arena keeps the old copy. Optional sites
                     // stay calls unless their planned growth is worth that
@@ -1462,6 +1517,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // over-approximates, so no full-function remap or compaction is needed here.
                         ir_inline_cfg_rebuild_predecessors(program->arena, caller);
                         ir_function_invalidate_cfg(caller);
+                        u32 caller_symbol = caller->symbol.value;
+                        if (caller_symbol < program->symbols.count && plan.function_by_symbol[caller_symbol] == caller_index &&
+                            (plan.callee_facts[caller_symbol] & IR_INLINE_FACT_LINKAGE))
+                        {
+                            plan.callee_facts[caller_symbol] = (u8)((plan.callee_facts[caller_symbol] & ~IR_INLINE_FACT_TINY) |
+                                                                    ir_inline_tiny_fact(caller, &options));
+                        }
                         if (defer_optional_output && !required_splice)
                         {
                             // Unknown again: a later read as a callee rechecks it.
