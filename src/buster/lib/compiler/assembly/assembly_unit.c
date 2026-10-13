@@ -1338,9 +1338,14 @@ BUSTER_GLOBAL_LOCAL AssemblyRelocationKind assembly_unit_x86_modifier_relocation
         }
         else if (bytes.pointer && offset <= bytes.length && width <= bytes.length - offset)
         {
-            bool rex_mov = offset >= 3 && bytes.pointer[offset - 3] >= 0x40 && bytes.pointer[offset - 3] <= 0x4f &&
-                           bytes.pointer[offset - 2] == 0x8b && (bytes.pointer[offset - 1] & 0xc7) == 0x05;
-            bool mov = offset >= 2 && bytes.pointer[offset - 2] == 0x8b && (bytes.pointer[offset - 1] & 0xc7) == 0x05;
+            // The field's lookback is not a complete instruction boundary:
+            // prefixes such as 0x66 and FS can make the same trailing bytes a
+            // different MOV shape. Accept only the exact unprefixed and
+            // single-REX envelopes emitted by the supported forms.
+            bool rex_mov = bytes.length == 7 && offset == 3 && bytes.pointer[0] >= 0x40 && bytes.pointer[0] <= 0x4f &&
+                           bytes.pointer[1] == 0x8b && (bytes.pointer[2] & 0xc7) == 0x05;
+            bool mov = bytes.length == 6 && offset == 2 && bytes.pointer[0] == 0x8b &&
+                       (bytes.pointer[1] & 0xc7) == 0x05;
             if (rex_mov) result = ASSEMBLY_RELOCATION_X86_64_REX_GOTPCRELX;
             else if (mov) result = ASSEMBLY_RELOCATION_X86_64_GOTPCRELX;
         }

@@ -2,6 +2,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
@@ -2163,6 +2164,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
                 }
                 BUSTER_TEST(arguments, boundary.error == OBJECT_ERROR_NONE && boundary.relocation_count == 2 &&
                                       external_generic && local_generic);
+            }
+
+            String8 prefixed_got_sources[] = {
+                S8(".extern got_word_target\n"
+                   ".text\n"
+                   "mov ax, word ptr [rip + got_word_target@GOTPCREL]\n"),
+                S8(".extern got_fs_target\n"
+                   ".text\n"
+                   "fs mov eax, dword ptr [rip + got_fs_target@GOTPCREL]\n"),
+            };
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefixed_got_sources); index += 1)
+            {
+                AssemblyUnitResult prefixed_got = assembly_unit_encode(
+                    arena, prefixed_got_sources[index],
+                    (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+                BUSTER_TEST(arguments, prefixed_got.diagnostic_count &&
+                                      prefixed_got.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                      string_equal(prefixed_got.diagnostics[0].message,
+                                                   S8("unsupported symbol modifier '@GOTPCREL' for this instruction field")));
             }
 
             String8 raw_got_source = string_format_z(arena, S8("{S8}/generic-got.s"), root);

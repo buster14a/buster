@@ -999,13 +999,18 @@ DTPOFF accepts 32- or 64-bit absolute fields. The modifier must name the
 field's sole relocation symbol; repeated modifiers, multiple-symbol integer
 expressions and wrong-width fields are refused with a named diagnostic.
 This support is for x86-64 ELF only. For `@GOTPCREL` instruction operands,
-Buster examines bytes inside the encoded instruction and assigns a relaxable
-kind only to a supported RIP-relative MOV form. An integer directive such as
+Buster checks the complete encoded instruction and field offset. It assigns
+GOTPCRELX only to an exact six-byte unprefixed RIP-relative MOV r32 with its
+field at offset 2, and REX_GOTPCRELX only to an exact seven-byte form with one
+REX prefix and the field at offset 3 (MOV r32/r64). Operand-size, address-size,
+segment, lock/repeat and other prefixes receive the named unsupported-modifier
+diagnostic. An integer directive such as
 `.long symbol@GOTPCREL - .` has no instruction boundary, so Buster keeps the
 plain nonrelaxable `R_X86_64_GOTPCREL` kind and the expression's addend; it
 never infers a relaxation promise from preceding data bytes. The registered
-`compiler_driver_x86_elf_modifier_roundtrip` fixture checks this zero-addend
-data form and links and runs a program that reads the resulting GOT slot. Its
+`compiler_driver_x86_elf_modifier_roundtrip` fixture checks these prefix
+refusals, this zero-addend data form, and links and runs a program that reads
+the resulting GOT slot. Its
 object comparison keeps symbol, section, offset and addend exact and permits
 only a different spelling within the GOT relocation family. Undefined ELF
 function, object and TLS-object types are emitted and parsed, preserving
