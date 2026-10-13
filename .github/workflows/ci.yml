@@ -101,6 +101,7 @@ jobs:
           "$RUNNER_TEMP/external-project-policy"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
           "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          "$RUNNER_TEMP/external-project-driver" test_ffmpeg --harness-self-test
           python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
@@ -260,6 +261,7 @@ jobs:
           "$RUNNER_TEMP/external-project-policy"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
           "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          "$RUNNER_TEMP/external-project-driver" test_ffmpeg --harness-self-test
           python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
