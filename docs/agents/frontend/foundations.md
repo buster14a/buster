@@ -939,6 +939,14 @@ without facts for identical bitcode and diagnostics.
   See [diagnostics](../../diagnostics.md) for the recovery contract and its
   frozen equivalence test.
 
+- A volatile recursive record reserves its qualified canonical identity before
+  its base layout resolves. Pointer fields can then name it without a layout
+  dependency cycle; the existing qualified mapping retry refreshes the view
+  in place once the base resolves. Fields share the base storage, and volatile
+  loads/stores retain their access markers. Atomic construction still waits
+  for the complete layout before promotion. `c_test_volatile_recursive_records`
+  covers self/mutual recursion and unions on x86-64/AArch64 in both frontend
+  forms; the native driver executes the fixture under both allocators.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be

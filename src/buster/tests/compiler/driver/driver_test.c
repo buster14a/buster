@@ -48600,6 +48600,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_typeof_conditional.c"),
         S8("tests/basic_c_typeof_expression_frames.c"),
         S8("tests/basic_c_qualified_aggregate_call.c"),
+        S8("tests/basic_c_volatile_recursive_record.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
     };
@@ -48621,6 +48622,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-typeof-conditional"),
         S8("buster-c-typeof-expression-frames"),
         S8("buster-c-qualified-aggregate-call"),
+        S8("buster-c-volatile-recursive-record"),
         S8("buster-c-qualified-compound"),
         S8("buster-c-fresh-binding-publication"),
     };
