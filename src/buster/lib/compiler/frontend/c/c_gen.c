@@ -2019,7 +2019,7 @@ BUSTER_C_SHARED bool c_ir_declaration_has_gnu_inline_semantics(CPreprocessResult
     u32 end = declaration.body_token_count ? declaration.body_start : declaration.token_start + declaration.token_count;
     end = end < limit ? end : limit;
 
-    return preprocess.dialect == C_PREPROCESS_DIALECT_GNU89 ||
+    return preprocess.dialect == C_PREPROCESS_DIALECT_GNU89 || preprocess.dialect == C_PREPROCESS_DIALECT_C89 ||
            c_ir_attribute_marker_in_range(preprocess, declaration.token_start, end, C_IR_ATTRIBUTE_MARKER_GNU_INLINE);
 }
 

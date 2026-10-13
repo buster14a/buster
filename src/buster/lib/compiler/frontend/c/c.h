@@ -581,6 +581,8 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
     C_PREPROCESS_DIALECT_GNU89,
+    // Strict ISO C90: -std=c89, -std=c90, -std=iso9899:1990 and -ansi.
+    C_PREPROCESS_DIALECT_C89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 

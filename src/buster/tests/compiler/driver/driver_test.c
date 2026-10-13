@@ -2256,6 +2256,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         }
         (void)os_file_delete(trigraph_path);
     }
+    // C90 dialect spellings (#1418): strict_mode ISO C90 has no __STDC_VERSION__,
+    // defines __STRICT_ANSI__, reads trigraphs and drops the GNU `linux` macro.
+    // gnu89/gnu90 keep the GNU macros and leave __STRICT_ANSI__ undefined.
+    String8 c90_path = buster_test_temporary_path(arguments->arena, S8("driver-c90"), S8(".c"));
+    String8 c90_source = S8("#ifdef __STDC_VERSION__\nint version = __STDC_VERSION__;\n#else\nint version = 0;\n#endif\n"
+                            "#ifdef __STRICT_ANSI__\nint strict_mode = 1;\n#else\nint strict_mode = 0;\n#endif\n"
+                            "#ifdef linux\nint gnu = 1;\n#endif\nx ?\?( y\n");
+    if (BUSTER_REQUIRE(arguments, file_write(c90_path, BUSTER_SLICE_TO_BYTE_SLICE(c90_source))))
+    {
+        String8 c90_spellings[] = {S8("-std=c89"), S8("-std=c90"), S8("-std=iso9899:1990"), S8("-ansi"), S8("-std=gnu89"), S8("-std=gnu90"), S8("-std=c99")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c90_spellings); index += 1)
+        {
+            bool strict_mode = index != 4 && index != 5;
+            String8 command[] = {S8("--target=x86_64-linux"), S8("-w"), c90_spellings[index], S8("-E"), S8("-P"), c90_path};
+            String8 output = {0};
+            String8 error = {0};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &output, &error));
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int version = 0;")) != BUSTER_STRING_NO_MATCH) == (index != 6));
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int version = 199901L;")) != BUSTER_STRING_NO_MATCH) == (index == 6));
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int strict_mode = 1;")) != BUSTER_STRING_NO_MATCH) == strict_mode);
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("int gnu = 1;")) != BUSTER_STRING_NO_MATCH) == !strict_mode);
+            BUSTER_TEST(arguments, (string_first_sequence(output, S8("x [ y")) != BUSTER_STRING_NO_MATCH) == strict_mode);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("\n#")) == BUSTER_STRING_NO_MATCH && !string_starts_with_sequence(output, S8("#")));
+        }
+        // A later -std= replaces -ansi, and -ansi replaces an earlier -std=.
+        String8 restored[] = {S8("--target=x86_64-linux"), S8("-w"), S8("-ansi"), S8("-std=gnu99"), S8("-E"), c90_path};
+        String8 output = {0};
+        String8 error = {0};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(restored), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int version = 199901L;")) != BUSTER_STRING_NO_MATCH);
+        String8 replaced[] = {S8("--target=x86_64-linux"), S8("-w"), S8("-std=gnu99"), S8("-ansi"), S8("-E"), c90_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(replaced), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int strict_mode = 1;")) != BUSTER_STRING_NO_MATCH);
+        (void)os_file_delete(c90_path);
+    }
+    String8 c90_near[] = {S8("-std=c88"), S8("-std=c9"), S8("-std=iso9899:199409"), S8("-ansi=1")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c90_near); index += 1)
+    {
+        String8 command[] = {S8("-c"), c90_near[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    // -Wa,--noexecstack, -Qunused-arguments and -P are accepted for every
+    // action; any other assembler request stays refused with its spelling.
+    String8 inert_actions[] = {S8("-c"), S8("-S"), S8("-E"), S8("-fsyntax-only")};
+    String8 inert_options[] = {S8("-Wa,--noexecstack"), S8("-Wa,--noexecstack,--noexecstack"), S8("-Qunused-arguments"), S8("-P")};
+    for (u32 action_index = 0; action_index < BUSTER_ARRAY_LENGTH(inert_actions); action_index += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(inert_options); index += 1)
+        {
+            String8 command[] = {S8("--target=x86_64-linux"), inert_actions[action_index], inert_options[index], S8("tests/basic_c_pic.c")};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, invocation.diagnostic);
+        }
+    }
+    String8 assembler_refused[] = {S8("-Wa,--execstack"), S8("-Wa,--noexecstack,--bogus"), S8("-Wa,--noexecstack,"), S8("-Wa,,--noexecstack"), S8("-Wa,")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(assembler_refused); index += 1)
+    {
+        String8 command[] = {S8("-c"), assembler_refused[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, invocation.diagnostic, string_format(arguments->arena, S8("unsupported pass-through option: {S8}"), assembler_refused[index]));
+    }
+    String8 near_inert[] = {S8("-Qunused"), S8("-Qunused-arguments=1"), S8("-PP")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(near_inert); index += 1)
+    {
+        String8 command[] = {S8("-c"), near_inert[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    // A C object carries the non-executable stack marker with or without the
+    // request, so -Wa,--noexecstack changes nothing.
+    String8 stack_path = buster_test_temporary_path(arguments->arena, S8("driver-noexecstack"), S8(".c"));
+    String8 stack_object = buster_test_temporary_path(arguments->arena, S8("driver-noexecstack"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, file_write(stack_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int f(void)\n{\n    return 1;\n}\n")))))
+    {
+        String8 command[] = {S8("--target=x86_64-linux"), S8("-Wa,--noexecstack"), S8("-Qunused-arguments"), S8("-c"), stack_path, S8("-o"), stack_object};
+        String8 output = {0};
+        String8 error = {0};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &output, &error));
+        ByteSlice object_bytes = file_read(arguments->arena, stack_object, (FileReadOptions){0});
+        BUSTER_TEST(arguments, object_bytes.length != 0);
+        BUSTER_TEST(arguments, string_first_sequence(BYTE_SLICE_TO_STRING(8, object_bytes), S8(".note.GNU-stack")) != BUSTER_STRING_NO_MATCH);
+        (void)os_file_delete(stack_path);
+        (void)os_file_delete(stack_object);
+    }
 #endif
     return result;
 }
