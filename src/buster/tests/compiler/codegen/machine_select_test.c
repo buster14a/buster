@@ -980,7 +980,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
 }
 
 // A non-negative constant INDEX index folds into its base address offset
-// (`machine_x64_index_constant_offset`): a frame array element's address is
+// (`machine_x64_index_constant_offset`, `machine_a64_index_constant_offset`): a frame array element's address is
 // one LEA_FRAME, which the allocators rematerialize, and a pointer element's
 // is one LEA_OFFSET, or a copy at offset zero. A negative or variable index
 // keeps the computed form, a mutable copy-then-add value. Independent oracle
@@ -1029,140 +1029,154 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
                         "    q[5UL] = (unsigned char)f();\n"
                         "    return p[2L];\n"
                         "}\n");
-    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     u64 preprocess_mark = c_test_preprocess_unit_mark();
-    IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
     String8 names[] = {S8("frame_constant"), S8("field_constant"), S8("pointer_constant")};
-    u32 frame_folds = 0;
-    u32 pointer_folds = 0;
-    u32 zero_copies = 0;
-    u32 computed = 0;
-    u32 dead_constants = 0;
-    u32 frame_spills = 0;
-    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+    // AArch64 (`machine_a64_index_constant_offset`) follows the same rule with
+    // its own LEA_FRAME, LEA_OFFSET and MOV_RR rows.
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
-        IrFunction* function = program ? machine_selection_test_find(program, names[name_index]) : 0;
-        BUSTER_TEST(arguments, function != 0);
-        if (!function)
+        Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
+        c_test_release_preprocess_arenas_since(preprocess_mark);
+        bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
+        u16 lea_frame = x86_64 ? MACHINE_X64_LEA_FRAME : MACHINE_A64_LEA_FRAME;
+        u16 lea_offset = x86_64 ? MACHINE_X64_LEA_OFFSET : MACHINE_A64_LEA_OFFSET;
+        u16 mov_rr = x86_64 ? MACHINE_X64_MOV_RR : MACHINE_A64_MOV_RR;
+        String8 arch_name = x86_64 ? S8("x86-64") : S8("aarch64");
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        u32 frame_folds = 0;
+        u32 pointer_folds = 0;
+        u32 zero_copies = 0;
+        u32 computed = 0;
+        u32 dead_constants = 0;
+        u32 frame_spills = 0;
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
         {
-            continue;
-        }
-        MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, function, target);
-        BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
-        if (!selected.supported)
-        {
-            continue;
-        }
-        // Readers other than a folded INDEX, counted from the rows and the
-        // published edge arguments.
-        u8* other_reader = arena_allocate(arguments->arena, u8, function->value_count);
-        u8* fold_reader = arena_allocate(arguments->arena, u8, function->value_count);
-        memset(other_reader, 0, function->value_count);
-        memset(fold_reader, 0, function->value_count);
-        for (u32 row_index = 0; row_index < function->instruction_count; row_index += 1)
-        {
-            IrInstruction* row = function->instructions + row_index;
-            bool folded = machine_selection_test_folded_index(function, row);
-            for (u32 operand = 0; operand < row->operand_count; operand += 1)
-            {
-                if (row->operands[operand].value < function->value_count)
-                {
-                    u8* reader = folded && operand == 1 ? fold_reader : other_reader;
-                    reader[row->operands[operand].value] = 1;
-                }
-            }
-        }
-        for (u32 argument = 0; function->published_cfg && argument < function->published_cfg->argument_count; argument += 1)
-        {
-            u32 value = function->published_cfg->arguments[argument].value;
-            if (value < function->value_count)
-            {
-                other_reader[value] = 1;
-            }
-        }
-        u8* defined_origin = arena_allocate(arguments->arena, u8, function->value_count);
-        memset(defined_origin, 0, function->value_count);
-        u8* frame_folded = arena_allocate(arguments->arena, u8, selected.function.virtual_register_count + 1);
-        memset(frame_folded, 0, selected.function.virtual_register_count + 1);
-        for (u32 register_index = 0; register_index < selected.function.virtual_register_count; register_index += 1)
-        {
-            MachineVirtualRegister* virtual_register = selected.function.virtual_registers + register_index;
-            u32 origin = virtual_register->typed_origin;
-            IrInstruction* row = origin < function->value_count ? machine_selection_test_definition(function, (IrValueId){.value = origin}) : 0;
-            if (!row)
+            IrFunction* function = program ? machine_selection_test_find(program, names[name_index]) : 0;
+            BUSTER_TEST(arguments, function != 0);
+            if (!function)
             {
                 continue;
             }
-            bool defined = virtual_register->definition_point != MACHINE_POINT_INVALID;
-            MachineInstruction* definition = defined ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
-            u16 opcode = definition ? definition->opcode : 0;
-            if (machine_selection_test_folded_index(function, row))
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, function, target);
+            BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+            if (!selected.supported)
             {
-                IrInstruction* base = machine_selection_test_definition(function, row->operands[0]);
-                IrInstruction* index = machine_selection_test_definition(function, row->operands[1]);
-                IrType* element = ir_type_from_id(&program->types, row->canonical_type);
-                u64 offset = element ? index->immediates[0] * element->layout.size : UINT64_MAX;
-                bool frame_base = base && (base->opcode == IR_OPCODE_LOCAL || base->opcode == IR_OPCODE_FIELD);
-                if (frame_base)
+                continue;
+            }
+            // Readers other than a folded INDEX, counted from the rows and the
+            // published edge arguments.
+            u8* other_reader = arena_allocate(arguments->arena, u8, function->value_count);
+            u8* fold_reader = arena_allocate(arguments->arena, u8, function->value_count);
+            memset(other_reader, 0, function->value_count);
+            memset(fold_reader, 0, function->value_count);
+            for (u32 row_index = 0; row_index < function->instruction_count; row_index += 1)
+            {
+                IrInstruction* row = function->instructions + row_index;
+                bool folded = machine_selection_test_folded_index(function, row);
+                for (u32 operand = 0; operand < row->operand_count; operand += 1)
                 {
-                    // The rematerialization recipe: an immutable value whose
-                    // recorded definition takes a stack slot's address.
-                    bool folded = opcode == MACHINE_X64_LEA_FRAME && machine_ref_kind(definition->operands[1]) == MACHINE_REF_STACK_SLOT &&
-                                  !(virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
-                                  (base->opcode != IR_OPCODE_LOCAL || definition->payload == offset);
-                    BUSTER_TEST(arguments, folded);
-                    frame_folds += folded;
-                    frame_folded[register_index] = folded;
-                }
-                else if (offset == 0)
-                {
-                    BUSTER_TEST(arguments, opcode == MACHINE_X64_MOV_RR);
-                    zero_copies += opcode == MACHINE_X64_MOV_RR;
-                }
-                else
-                {
-                    bool folded = opcode == MACHINE_X64_LEA_OFFSET && definition->payload == offset;
-                    BUSTER_TEST(arguments, folded);
-                    pointer_folds += folded;
+                    if (row->operands[operand].value < function->value_count)
+                    {
+                        u8* reader = folded && operand == 1 ? fold_reader : other_reader;
+                        reader[row->operands[operand].value] = 1;
+                    }
                 }
             }
-            else if (row->opcode == IR_OPCODE_INDEX)
+            for (u32 argument = 0; function->published_cfg && argument < function->published_cfg->argument_count; argument += 1)
             {
-                // The computed form copies the base and adds the scaled
-                // index into the same register, so the value is mutable
-                // and has no recipe.
-                bool kept = opcode == MACHINE_X64_MOV_RR && (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE);
-                BUSTER_TEST(arguments, kept);
-                computed += kept;
+                u32 value = function->published_cfg->arguments[argument].value;
+                if (value < function->value_count)
+                {
+                    other_reader[value] = 1;
+                }
             }
-            if (defined)
+            u8* defined_origin = arena_allocate(arguments->arena, u8, function->value_count);
+            memset(defined_origin, 0, function->value_count);
+            u8* frame_folded = arena_allocate(arguments->arena, u8, selected.function.virtual_register_count + 1);
+            memset(frame_folded, 0, selected.function.virtual_register_count + 1);
+            for (u32 register_index = 0; register_index < selected.function.virtual_register_count; register_index += 1)
             {
-                defined_origin[origin] = 1;
+                MachineVirtualRegister* virtual_register = selected.function.virtual_registers + register_index;
+                u32 origin = virtual_register->typed_origin;
+                IrInstruction* row = origin < function->value_count ? machine_selection_test_definition(function, (IrValueId){.value = origin}) : 0;
+                if (!row)
+                {
+                    continue;
+                }
+                bool defined = virtual_register->definition_point != MACHINE_POINT_INVALID;
+                // A definition point implies selected rows; the explicit test
+                // lets the analyzer see that (#3952).
+                MachineInstruction* definition = defined && selected.function.instructions ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
+                u16 opcode = definition ? definition->opcode : 0;
+                if (machine_selection_test_folded_index(function, row))
+                {
+                    IrInstruction* base = machine_selection_test_definition(function, row->operands[0]);
+                    IrInstruction* index = machine_selection_test_definition(function, row->operands[1]);
+                    IrType* element = ir_type_from_id(&program->types, row->canonical_type);
+                    u64 offset = element ? index->immediates[0] * element->layout.size : UINT64_MAX;
+                    bool frame_base = base && (base->opcode == IR_OPCODE_LOCAL || base->opcode == IR_OPCODE_FIELD);
+                    if (frame_base)
+                    {
+                        // The rematerialization recipe: an immutable value whose
+                        // recorded definition takes a stack slot's address.
+                        bool folded = opcode == lea_frame && machine_ref_kind(definition->operands[1]) == MACHINE_REF_STACK_SLOT &&
+                                      !(virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                                      (base->opcode != IR_OPCODE_LOCAL || definition->payload == offset);
+                        BUSTER_TEST(arguments, folded);
+                        frame_folds += folded;
+                        frame_folded[register_index] = folded;
+                    }
+                    else if (offset == 0)
+                    {
+                        BUSTER_TEST(arguments, opcode == mov_rr);
+                        zero_copies += opcode == mov_rr;
+                    }
+                    else
+                    {
+                        bool folded = opcode == lea_offset && definition->payload == offset;
+                        BUSTER_TEST(arguments, folded);
+                        pointer_folds += folded;
+                    }
+                }
+                else if (row->opcode == IR_OPCODE_INDEX)
+                {
+                    // The computed form copies the base and adds the scaled
+                    // index into the same register, so the value is mutable
+                    // and has no recipe.
+                    bool kept = opcode == mov_rr && (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE);
+                    BUSTER_TEST(arguments, kept);
+                    computed += kept;
+                }
+                if (defined)
+                {
+                    defined_origin[origin] = 1;
+                }
+            }
+            for (u32 value = 0; value < function->value_count; value += 1)
+            {
+                IrInstruction* row = machine_selection_test_definition(function, (IrValueId){.value = value});
+                if (row && row->opcode == IR_OPCODE_CONSTANT_INTEGER && fold_reader[value])
+                {
+                    BUSTER_TEST(arguments, defined_origin[value] == other_reader[value]);
+                    dead_constants += !defined_origin[value];
+                }
+            }
+            // Every folded frame address is live across a call; the allocator
+            // recreates it rather than storing it.
+            MachineStackPlacement placement = machine_fast_placement_build(arguments->arena, &selected.function);
+            BUSTER_TEST(arguments, placement.valid);
+            for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+            {
+                MachineEdit* edit = placement.edits + edit_index;
+                frame_spills += edit->kind == MACHINE_EDIT_SPILL && edit->subject < selected.function.virtual_register_count && frame_folded[edit->subject];
             }
         }
-        for (u32 value = 0; value < function->value_count; value += 1)
-        {
-            IrInstruction* row = machine_selection_test_definition(function, (IrValueId){.value = value});
-            if (row && row->opcode == IR_OPCODE_CONSTANT_INTEGER && fold_reader[value])
-            {
-                BUSTER_TEST(arguments, defined_origin[value] == other_reader[value]);
-                dead_constants += !defined_origin[value];
-            }
-        }
-        // Every folded frame address is live across a call; the allocator
-        // recreates it rather than storing it.
-        MachineStackPlacement placement = machine_fast_placement_build(arguments->arena, &selected.function);
-        BUSTER_TEST(arguments, placement.valid);
-        for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
-        {
-            MachineEdit* edit = placement.edits + edit_index;
-            frame_spills += edit->kind == MACHINE_EDIT_SPILL && edit->subject < selected.function.virtual_register_count && frame_folded[edit->subject];
-        }
+        String8 counts = string_format(arguments->arena, S8("{S8} constant index folds: frame {u32}, pointer {u32}, zero copies {u32}, computed {u32}, dead constants {u32}, frame spills {u32}"),
+                                       arch_name, frame_folds, pointer_folds, zero_copies, computed, dead_constants, frame_spills);
+        BUSTER_TEST_RAW(arguments, frame_folds >= 3 && pointer_folds >= 2 && zero_copies >= 1 && computed >= 2 && dead_constants >= 1 && frame_spills == 0,
+                        counts);
     }
-    String8 counts = string_format(arguments->arena, S8("constant index folds: frame {u32}, pointer {u32}, zero copies {u32}, computed {u32}, dead constants {u32}, frame spills {u32}"),
-                                   frame_folds, pointer_folds, zero_copies, computed, dead_constants, frame_spills);
-    BUSTER_TEST_RAW(arguments, frame_folds >= 3 && pointer_folds >= 2 && zero_copies >= 1 && computed >= 2 && dead_constants >= 1 && frame_spills == 0,
-                    counts);
     c_test_release_preprocess_arenas_since(preprocess_mark);
 
     return result;

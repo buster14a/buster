@@ -4,6 +4,13 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **i386 relocatable objects use ELF32 REL records.** The object API emits and
+  reads `ELFCLASS32`/`EM_386` with the eight i386 relocation forms documented in
+  [object emission](../../object-emission.md#elf32-i386-relocatable-objects).
+  Inline addends, 16-bit fields, four-byte initializer priorities and lazy
+  archives preserve their 32-bit contracts. Driver code generation and Buster
+  image linking remain refused until their i386 backends are implemented.
+
 - **TLS classification consumes canonical keyword spellings.** Preprocessing
   rewrites C23/GNU23 `thread_local` to `_Thread_local`, including preprocessed
   input. A remaining raw `thread_local` is an ordinary identifier; its use as
@@ -77,7 +84,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `link_test_elf_shared_local_initial_exec_tls_addend` verifies a local
   initial-exec `TPOFF64` relocation retains the second TLS variable's offset.
 - **AArch64 ELF variant procedure-call metadata is refused explicitly.**
-  `object_read_elf64` refuses every non-null, non-FILE symbol carrying
+  `object_read_elf` refuses every non-null, non-FILE symbol carrying
   `STO_AARCH64_VARIANT_PCS` (st_other bit 0x80), naming the symbol and table
   index. The neutral object model cannot preserve this marking or the
   intermediary register/state guarantees required by
@@ -423,7 +430,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `.NNNNN` suffix, becomes an initializer-array section, and the ELF writer
   types it `SHT_INIT_ARRAY`, `SHT_FINI_ARRAY` or `SHT_PREINIT_ARRAY`.
   Functions moved out of `.text` leave the one-range DWARF unit.
-  `object_read_elf64` keeps every C-identifier-named input section as its
+  `object_read_elf` keeps every C-identifier-named input section as its
   own section. `link_objects` places each such set contiguously after the
   ordinary sections of its kind, and defines the `__start_NAME`/`__stop_NAME`
   references GNU `ld` would (`link_section_sets_define`). The registered
@@ -469,7 +476,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `object_split_initializer_priorities` splits it back into one section per
   priority group for the ELF and COFF writers, so an external linker orders
   two Buster objects exactly as it orders Clang's (issue #782).
-  `object_read_elf64` and `object_read_coff` recover it from those section
+  `object_read_elf` and `object_read_coff` recover it from those section
   names -- the padded `.init_array.00101` written here and the unpadded
   `.init_array.101` Clang writes are both read -- and
   `object_reader_merge_initializer_arrays` merges the sections of a kind in

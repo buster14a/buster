@@ -153,6 +153,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     };
     CompilerDriverInvocation serial = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(serial_command));
     CompilerDriverInvocation parallel = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parallel_command));
+    // The tiny positional inputs sit below the minimum-work gate; force the
+    // lane path so the two-input cohort is still exercised.
+    compiler_driver_test_set_lane_work(0, 0);
     CompilerDriverResult serial_result = compiler_driver_execute_invocation(arena, serial);
     CompilerDriverResult parallel_result = compiler_driver_execute_invocation(arena, parallel);
     if (serial_result.error != COMPILER_DRIVER_ERROR_NONE)
@@ -187,6 +190,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     }
     BUSTER_TEST(arguments, boundary_result.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, boundary_result.compilation_workers == 1);
+    compiler_driver_test_restore_lane_work();
 #endif
 
     scratch_end(temporary);
@@ -364,6 +368,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArgu
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_INITIALIZER_ELEMENTS] >= delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] &&
                                delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] >= 5);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_POPULATION_MEMBER_PROMOTED_SEARCHES] != 0);
+    // `sizeof (struct Outer)` is a call-shaped candidate the arity check skips.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_CALL_ARITY_CANDIDATES] >= delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED]);
+    // Each body token is stored once; the visited shares cover at least that.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_SHARE_TOKENS] >= delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LITERAL_NUMBER_CONVERSIONS] != 0);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS] != 0 &&
                                delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERN_PROBES] >= delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS]);
@@ -860,6 +870,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
     String8 last_release[] = {S8("-O0"), S8("-O3"), S8("source.c")};
     CompilerDriverInvocation release = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(last_release));
     BUSTER_TEST(arguments, release.error == COMPILER_DRIVER_ERROR_NONE && release.optimization_level == 3 && release.fast_passes == IR_FAST_ALL);
+    // The CSE experiment (#3011) is outside every level and whole-pipeline
+    // selection; those whole-pipeline controls also clear an earlier opt-in.
+    u32 const cse = IR_FAST_PASS_BIT(IR_FAST_CSE);
+    BUSTER_TEST(arguments, !(IR_FAST_ALL & cse));
+    struct { String8 first; String8 second; u32 expected; } cse_orders[] = {
+        {S8("-fcanonical-fast"), S8("-fcanonical-fast-cse"), IR_FAST_ALL | cse},
+        {S8("-fcanonical-fast-cse"), S8("-fcanonical-fast"), IR_FAST_ALL},
+        {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast"), 0},
+        {S8("-fcanonical-fast-cse"), S8("-O0"), cse},
+        {S8("-O0"), S8("-fcanonical-fast-cse"), cse},
+        {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
+    };
+    struct { String8 first; String8 second; bool intern; } interning[] = {
+        {S8("source.c"), S8("-O2"), false},
+        {S8("-fcanonical-intern-constants"), S8("-O0"), true},
+        {S8("-fcanonical-intern-constants"), S8("-fno-canonical-intern-constants"), false},
+        {S8("-fno-canonical-intern-constants"), S8("-fcanonical-intern-constants"), true},
+        {S8("-fcanonical-intern-constants"), S8("-fno-canonical-fast"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(interning); index += 1)
+    {
+        String8 command[] = {interning[index].first, interning[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.intern_block_constants == interning[index].intern);
+    }
+    // -fcanonical-construction-fold is a lowering choice like interning:
+    // off by default, last one wins, and FAST controls leave it alone.
+    struct { String8 first; String8 second; bool fold; } construction_folds[] = {
+        {S8("source.c"), S8("-O2"), false},
+        {S8("-fcanonical-construction-fold"), S8("-O0"), true},
+        {S8("-fcanonical-construction-fold"), S8("-fno-canonical-construction-fold"), false},
+        {S8("-fno-canonical-construction-fold"), S8("-fcanonical-construction-fold"), true},
+        {S8("-fcanonical-construction-fold"), S8("-fno-canonical-fast"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(construction_folds); index += 1)
+    {
+        String8 command[] = {construction_folds[index].first, construction_folds[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.construction_fold == construction_folds[index].fold);
+    }
+    struct { String8 first; String8 second; bool window; } strategies[] = {
+        {S8("-fcanonical-fast-cse-strategy=window"), S8("source.c"), true},
+        {S8("-fcanonical-fast-cse-strategy=window"), S8("-fcanonical-fast-cse-strategy=table"), false},
+        {S8("-fcanonical-fast-cse-strategy=table"), S8("-fcanonical-fast-cse-strategy=window"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(strategies); index += 1)
+    {
+        String8 command[] = {strategies[index].first, strategies[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_cse_window == strategies[index].window);
+        BUSTER_TEST(arguments, invocation.fast_passes == IR_FAST_ALL);
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cse_orders); index += 1)
+    {
+        String8 command[] = {cse_orders[index].first, cse_orders[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == cse_orders[index].expected);
+    }
     String8 overrides[] = {S8("-fno-canonical-fast"), S8("-O3"), S8("-fcanonical-fast-fold"), S8("-O0"), S8("source.c")};
     CompilerDriverInvocation overridden = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(overrides));
     BUSTER_TEST(arguments, overridden.error == COMPILER_DRIVER_ERROR_NONE && overridden.fast_passes == IR_FAST_PASS_BIT(IR_FAST_FOLD));
@@ -1043,9 +1111,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_tag_array_type_names(Uni
     return result;
 }
 
+// Ordered publication must outlive both serial and lane-owned TU arenas.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast_decline_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrFastStatistics total = {0};
+    u64 capacity = 0;
+    compiler_driver_test_merge_fast_declines(arguments->arena, &total, &total, S8("empty.c"), &capacity);
+    BUSTER_TEST(arguments, !total.declines && !capacity && !total.decline_count);
+    for (u32 unit = 0; unit < 3; unit += 1)
+    {
+        Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            IrFastStatistics measurement = {.decline_count = 2};
+            measurement.declines = arena_allocate(arena, IrFastDecline, 2);
+            for (u32 index = 0; index < 2; index += 1)
+            {
+                measurement.declines[index] = (IrFastDecline){
+                    .function_name = string_format(arena, S8("body_{u32}_{u32}"), unit, index),
+                    .validation = {.error = IR_VALIDATION_OPERATION, .function = {.value = index},
+                                   .instruction = {.value = unit}},
+                };
+            }
+            String8 source = string_format(arena, S8("input_{u32}.c"), unit);
+            compiler_driver_test_merge_fast_declines(arguments->arena, &total, &measurement, source, &capacity);
+            // Overwrite the borrowed bytes before release, so pooled reuse
+            // cannot accidentally make dangling strings appear correct.
+            memset(source.pointer, '?', source.length);
+            for (u32 index = 0; index < 2; index += 1)
+            {
+                String8 name = measurement.declines[index].function_name;
+                memset(name.pointer, '?', name.length);
+            }
+            arena_destroy(arena, 1);
+        }
+    }
+    BUSTER_TEST(arguments, total.decline_count == 6);
+    for (u64 index = 0; index < total.decline_count; index += 1)
+    {
+        IrFastDecline record = total.declines[index];
+        BUSTER_TEST(arguments, string_equal(record.source, string_format(arguments->arena, S8("input_{u32}.c"), (u32)(index / 2))));
+        BUSTER_TEST(arguments, string_equal(record.function_name, string_format(arguments->arena, S8("body_{u32}_{u32}"), (u32)(index / 2), (u32)(index % 2))));
+        BUSTER_TEST(arguments, record.validation.error == IR_VALIDATION_OPERATION && record.validation.function.value == index % 2 &&
+                               record.validation.instruction.value == index / 2);
+    }
+    // The former #1602 census decline is valid address-only C (#3777).
+    // Keep the synthetic lifetime controls above; this real driver input must
+    // now pass strict verification without allocating any decline records.
+    String8 source = S8("struct Opaque;extern struct Opaque stream;extern int sink(struct Opaque*);"
+                        "int address_only(void){return sink(&stream);}"
+                        "int kept(int a,int b){int x=a+0;return x*1+b;}");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-fast-decline"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 command[] = {S8("-nostdinc"), S8("-g0"), S8("-fverify-codegen"), S8("-target"), S8("x86_64-linux"), S8("-c"), input};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        invocation.retain_object = true;
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.fast.functions == 2 &&
+                               compiled.fast.validation_skips == 0 && compiled.fast.decline_count == 0 && !compiled.fast.declines);
+        os_file_delete(input);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast_decline_publication);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_optimization_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_flexible_initializers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_tag_array_type_names);
@@ -1064,10 +1198,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     BUSTER_TEST(arguments, disabled_invocation.error == COMPILER_DRIVER_ERROR_NONE && disabled_invocation.fast_passes == 0);
     String8 modes[] = {S8("fast"), S8("quality")};
     u32 native_count = BUSTER_ARRAY_LENGTH(modes);
+    // Executable control for the opt-in CSE pass (#3011). Exactly three
+    // arithmetic rows are commoned (b+a, b&a, b*a onto their commuted twins),
+    // a-b/b-a stay distinct and the repeated 5u is one constant hit. It is
+    // written at run time: every tracked file under tests/ is a frozen
+    // native-retirement census input, and basic_c_canonical_fast.c is pinned.
+    String8 cse_control = buster_test_temporary_path(arguments->arena, S8("buster-canonical-fast-cse"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(cse_control, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "static unsigned common(unsigned a, unsigned b)\n"
+        "{\n"
+        "    unsigned x = (a + b) * (b + a);\n"
+        "    unsigned y = (a - b) ^ (b - a);\n"
+        "    unsigned z = (a & b) | (b & a);\n"
+        "    return x + y + z + (a * b) + (b * a) + (a * 5u) + (b * 5u);\n"
+        "}\n"
+        "volatile unsigned left = 7u;\n"
+        "volatile unsigned right = 3u;\n"
+        "int main(void) { return common(left, right) != 187u; }\n"))));
     for (u32 backend = 0; backend < native_count + 3; backend += 1)
     {
-        for (u32 mask = 0; mask <= IR_FAST_ALL; mask += 1)
+        // Every subset of the adopted recipe, then the recipe plus opt-in CSE
+        // on the shared fixture and, natively, on the separate CSE control
+        // with the table and then the linear window strategy, then the
+        // shared fixture with CSE and construction-time interning, and
+        // finally that fixture with construction-time folding and no FAST
+        // pass, so its constants are folded only where they are built.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 5; selection += 1)
         {
+            bool control = selection == IR_FAST_ALL + 2 || selection == IR_FAST_ALL + 3;
+            bool window = selection == IR_FAST_ALL + 3;
+            // Construction-time constant interning (#3011) on the shared fixture.
+            bool intern = selection == IR_FAST_ALL + 4;
+            // Construction-time folding (#3010) on the shared fixture.
+            bool fold = selection == IR_FAST_ALL + 5;
+            if (control && backend >= native_count) continue;
+            u32 mask = selection <= IR_FAST_ALL ? selection : fold ? 0 : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
             Arena* arena = temporary.arena;
             String8 path = buster_test_temporary_path(arena, S8("buster-canonical-fast"),
@@ -1077,7 +1242,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             command[count++] = S8("-nostdinc");
             command[count++] = S8("-o");
             command[count++] = path;
-            command[count++] = backend < native_count ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
+            command[count++] = control ? cse_control :
+                               backend < native_count ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
             if (backend < native_count)
             {
                 command[count++] = string_format(arena, S8("-fregister-allocator={S8}"), modes[backend]);
@@ -1099,20 +1265,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                 command[count++] = S8("-c");
             }
             command[count++] = S8("-fcanonical-fast");
+            if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
+            if (intern) command[count++] = S8("-fcanonical-intern-constants");
+            if (fold) command[count++] = S8("-fcanonical-construction-fold");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
-                if (!(mask & IR_FAST_PASS_BIT(pass))) command[count++] = string_format(arena, S8("-fno-canonical-fast-{S8}"), ir_fast_pass_name((IrFastPass)pass));
+                bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
+                if (selected != ((IR_FAST_ALL & IR_FAST_PASS_BIT(pass)) != 0))
+                {
+                    command[count++] = string_format(arena, selected ? S8("-fcanonical-fast-{S8}") : S8("-fno-canonical-fast-{S8}"),
+                                                     ir_fast_pass_name((IrFastPass)pass));
+                }
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern &&
+                                   invocation.construction_fold == fold);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            // Both fixtures convert integer literals (`(unsigned char)511u`,
+            // `unsigned long long a = 3`), so folding on builds some directly.
+            BUSTER_TEST(arguments, (compiled.construction_folds.casts != 0) == (fold && compiled.error == COMPILER_DRIVER_ERROR_NONE));
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
             {
                 if (backend < native_count)
                 {
                     BUSTER_TEST(arguments, !compiled.codegen_statistics.fallback_function_count);
+                    if (control)
+                    {
+                        // Three commuted arithmetic rows and the repeated 5u,
+                        // all adjacent enough for the window strategy too.
+                        BUSTER_TEST(arguments, compiled.fast.cse.hits == 4 && compiled.fast.cse.commuted_hits == 3 &&
+                                               compiled.fast.cse.constant_hits == 1);
+                    }
 #if !BUSTER_ANDROID && !BUSTER_IOS
                     String8 run[] = {path};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},

@@ -35,6 +35,28 @@
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
+// Minimum-work gate for -fcompile-jobs translation-unit lanes (#53). Entering
+// the multi-lane path costs a fixed native-family preparation; a link whose
+// native C inputs cannot repay it keeps the one-worker path. Estimated work is
+// each eligible input's file size plus a per-input charge for the fixed cost of
+// a translation unit, in bytes. Calibration pending: the gate is disabled until
+// the 9700X scaling-v1 size series measures both values
+// (docs/agents/driver.md, "Opt-in native translation-unit lanes").
+#define COMPILER_DRIVER_LANE_MIN_WORK_BYTES ((u64)0)
+#define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)0)
+
+// What the minimum-work gate decided for one invocation. NONE: lanes were not
+// requested or cannot apply (one worker, fewer than two eligible inputs, an
+// embedding gang or a source cache). LANES: lanes were permitted. SERIAL: the
+// population was too small, so the one-worker path ran.
+typedef enum CompilerDriverLaneGate
+{
+    COMPILER_DRIVER_LANE_GATE_NONE,
+    COMPILER_DRIVER_LANE_GATE_LANES,
+    COMPILER_DRIVER_LANE_GATE_SERIAL,
+    COMPILER_DRIVER_LANE_GATE_COUNT,
+} CompilerDriverLaneGate;
+
 typedef enum CompilerDriverError
 {
     COMPILER_DRIVER_ERROR_NONE,
@@ -144,6 +166,8 @@ struct CompilerDriverLinkOperation
 {
     u32 index;
     CompilerDriverLinkOperationKind kind;
+    // Linux ELF driver policy for this library occurrence.
+    bool as_needed;
 };
 
 // The -W<name> groups that name a warning the driver publishes today. Other
@@ -318,6 +342,7 @@ struct CompilerDriverInvocation
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;
+    bool linker_verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
     // -Werror, -Wno-error and the per-group spellings (see CompilerDriverWarningPolicy).
@@ -331,7 +356,15 @@ struct CompilerDriverInvocation
     // -working-directory: relative input paths resolve against it.
     String8 working_directory;
     bool debug_info;
+    // -ffreestanding controls __STDC_HOSTED__ in the C frontend.
+    bool freestanding;
+    // Accepted only for I386, where native artifact generation is refused.
+    bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
+    // -fcanonical-intern-constants: CIRLowerOptions.intern_block_constants.
+    bool intern_block_constants;
+    // -fcanonical-construction-fold: CIRLowerOptions.construction_fold.
+    bool construction_fold;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
@@ -345,6 +378,9 @@ struct CompilerDriverInvocation
     // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
+    // -fcanonical-fast-cse-strategy=window selects the CSE census's linear
+    // arm; =table, the default, selects the hash table (#3011).
+    bool fast_cse_window;
     // Tiny direct-call inlining defaults off. An explicit optimization level
     // above -O0 enables it; -O0 disables it. The last -O* or explicit
     // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
@@ -402,6 +438,11 @@ struct CompilerDriverInvocation
     TimeDataType metrics_origin;
     // Where `ide cc` writes the records; the driver never writes it.
     String8 metrics_output_path;
+    // -fearly-exit (off by default; -fno-early-exit restores it): `ide cc`
+    // forks before any lane exists and reports its status once every
+    // artifact and report is out, leaving teardown to the child (#3686,
+    // os_early_exit_arm). The driver itself never reads it.
+    bool early_exit;
 };
 
 // Contiguous intervals of compiler_driver_execute_c_single, named after the
@@ -552,6 +593,14 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // The declaration specifier runs read from the tree (c_parse.c): runs
+    // answered, and runs left to the type machine and why. Zero when the
+    // analysis had no tree to use.
+    CAstSpecifierStatistics specifiers;
+    // The extent table lowering read controlled body ranges from
+    // (c_gen.c): bodies, entries and answers, and the queries the token
+    // walker answered and why. Zero when lowering had no tree to use.
+    CAstExtentStatistics extents;
     // What lowering read from the tree (CAstLowerStatistics). Zero for
     // -fsyntax-only and when lowering had no tree.
     CAstLowerStatistics lower;
@@ -564,6 +613,8 @@ struct CompilerDriverResult
     IrFastStatistics fast;
     IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
+    CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
@@ -573,6 +624,7 @@ struct CompilerDriverResult
     CompilerDiagnostic* diagnostics;
     u32 diagnostic_count;
     String8 output;
+    String8 linker_report;
     NativeExecutableLinkResult native_link;
     WasmArtifact wasm;
     // Compatibility mirror; both artifacts reference the same arena-owned
@@ -617,6 +669,7 @@ struct CompilerDriverResult
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
+    CompilerDriverLaneGate lane_gate;
     bool has_object;
     bool has_wasm;
     bool has_wasm64;
@@ -630,10 +683,13 @@ struct CompilerDriverResult
 // native emission also prepares its target's metadata on demand.
 BUSTER_F_DECL void compiler_prewarm(void);
 // Before an embedding caller launches a gang that may compile native C,
-// prepare both native families, including all x86 forms/inline assembly.
-// Idle persistent workers are still live threads; preparing a new target
-// after the first gang starts is too late. The opt-in multi-TU driver calls
-// this before creating its first gang; ordinary serial compilation does not.
+// prepare both native families' serially built tables. The x86 per-form
+// caches, exact plans and machine-encoder tables are not among them: lanes
+// fill the entries they reach, under once-claims. Idle persistent workers are
+// still live threads; preparing a new target after the first gang starts is
+// too late. The opt-in multi-TU driver does not call this: it prepares only
+// its cohort's family and releases its own parked gang (lane_release) before
+// preparing another. Ordinary serial compilation does neither.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 // When true, an absent -march keeps the host CPU (the test runners set it);
 // when false, the default is the portable baseline like Clang and GCC (#1557).

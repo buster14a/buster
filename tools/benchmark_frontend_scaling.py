@@ -6,11 +6,20 @@ Outputs remain under build/frontend-scaling unless --out overrides the path.
 CPU and wall times are observations, never test thresholds. Object cases require
 byte-identical output from both compilers. Linux/macOS resource accounting is
 used so unrelated compiler workers do not inflate the child CPU measurements.
+--cpu pins this process and every compiler child to one CPU; provenance.json
+records that affinity and the observed CPU model, and gains "complete": true
+only after every case and the final compiler identity check succeeded.
+--suite nesting times one function whose control statements nest to a growing
+depth, for each family in NESTING_FAMILIES (#2676): braced and braceless
+loops, conditionals and switches, and nests that declare, label or jump at
+every level. Each depth is four times the last, so time that grows as the
+square of the depth shows as a sixteenfold step.
 """
 
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import resource
 import statistics
@@ -33,19 +42,64 @@ def fresh_binding_source(count):
     return "int main(void) {\n" + "".join(f"extern int fresh_{index}(void);\n" for index in range(count)) + "return 0;\n}\n"
 
 
+# (family, opening text of level i, closing text of each level), in run order.
+# A braceless family has no closer: one statement ends every level at once,
+# except do, whose levels each close with their own while.
+NESTING_FAMILIES = (
+    ("braced-while", "while (x > {m}) {{", "}"),
+    ("braced-for", "for (; x > {m};) {{", "}"),
+    ("braced-if", "if (x > {m}) {{", "}"),
+    ("braced-switch", "switch (x) {{ case {m}: {{", "}}"),
+    ("braceless-while", "while (x > 0)", ""),
+    ("braceless-for", "for (; x > 0;)", ""),
+    ("braceless-do", "do", "while (x > 0);"),
+    ("braceless-switch", "switch (x) case 0:", ""),
+    ("declaration", "for (; x > {m};) {{ int y{i} = x;", "}"),
+    ("label", "L{i}: for (; x > {m};) {{", "}"),
+    ("goto", "for (; x > {m};) {{ if (x == {i}) goto L{i}; L{i}: ;", "}"),
+)
+NESTING_DEPTHS = (2000, 8000, 32000)
+
+
+def nesting_source(family, depth):
+    """One function whose `family` statements nest `depth` levels deep around a single update."""
+    opener, closer = next((opener, closer) for name, opener, closer in NESTING_FAMILIES if name == family)
+    lines = ["int f(int x) {", *(opener.format(i=index, m=index % 7) for index in range(depth)), "x -= 1;"]
+    lines += [closer] * depth if closer else []
+    return "\n".join([*lines, "return x; }"]) + "\n"
+
+
+def observed_cpu_model():
+    """The kernel-reported CPU model name, or "NA"."""
+    model = "NA"
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                model = line.partition(":")[2].strip()
+                break
+    except OSError:
+        pass
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--out", type=Path, default=Path("build/frontend-scaling"))
     parser.add_argument("--repetitions", type=int, default=5)
-    parser.add_argument("--suite", choices=["legacy", "bindings", "all"], default="legacy")
+    parser.add_argument("--suite", choices=["legacy", "bindings", "all", "nesting"], default="legacy")
     parser.add_argument("--warmups", type=int, default=0)
+    parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
     if args.warmups < 0:
         parser.error("--warmups must be nonnegative")
+    if args.cpu is not None:
+        if not hasattr(os, "sched_setaffinity"):
+            parser.error("--cpu needs CPU affinity, which this host lacks")
+        os.sched_setaffinity(0, {args.cpu})
     args.out.mkdir(parents=True, exist_ok=True)
     compilers = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
     cases = [("small", "int f(int x) { return x * 3 + 1; }\n", 1, ["syntax", "object"])]
@@ -62,11 +116,18 @@ def main():
     if args.suite in ["bindings", "all"]:
         for count in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536]:
             cases.append(("fresh-bindings", fresh_binding_source(count), count, ["syntax", "object"]))
+    if args.suite == "nesting":
+        for family, _, _ in NESTING_FAMILIES:
+            for depth in NESTING_DEPTHS:
+                cases.append((family, nesting_source(family, depth), depth, ["syntax", "object"]))
     binary_hashes = {label: hashlib.sha256(path.read_bytes()).hexdigest() for label, path in compilers.items()}
-    (args.out / "provenance.json").write_text(json.dumps({
+    provenance = {
         "binary_sha256": binary_hashes, "suite": args.suite,
-        "warmups": args.warmups, "repetitions": args.repetitions,
-    }, indent=2) + "\n")
+        "warmups": args.warmups, "repetitions": args.repetitions, "cpu": args.cpu,
+        "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+        "cpu_model": observed_cpu_model(), "complete": False,
+    }
+    (args.out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     records = []
     for kind, source, count, modes in cases:
         path = (args.out / f"{kind}-{count}.c").resolve()
@@ -113,6 +174,8 @@ def main():
     for label, compiler in compilers.items():
         if hashlib.sha256(compiler.read_bytes()).hexdigest() != binary_hashes[label]:
             raise SystemExit(f"compiler changed during measurement: {compiler}")
+    provenance["complete"] = True
+    (args.out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
 
 
 if __name__ == "__main__":

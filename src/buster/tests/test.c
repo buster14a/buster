@@ -25,11 +25,14 @@
 // generated tables and repository source. `ide test --module=a,b` narrows a
 // run to named descriptors (test_module_selection_resolve); library_tests
 // marks the others deselected in its working copy of the table. The opt-in
-// BUSTER_TEST_MODULE_GROUP=primary|rest selects complementary process groups
+// BUSTER_TEST_MODULE_GROUP=primary|rest selects complementary process groups;
+// module:<name> selects one enabled descriptor without taking audit ownership.
 // (test_module_group_resolve), preserving audit ownership and table indices.
 // Its inventory value queries the table without running any registered module.
 // test_native_host_profile records the same binary's usable native features
 // and compiled SIMD tiers only for that independent inventory query.
+// BUSTER_TEST_RETAIN_IMAGES activates the test-only os_image_retention_* seam
+// and publishes TEST_IMAGE_RETENTION_V1 after temporary-root teardown.
 // CI_UNIT_MODULE_V1 inventories and the post-cleanup CI_UNIT_BATCH_V1 bind
 // selected timing rows to the complete registered suite for the parent.
 
@@ -37,6 +40,7 @@
 #include <buster/lib/entry_point.h>
 
 #include <buster/lib/os.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/string.h>
@@ -463,6 +467,14 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         result.watch_parent_module = watch->module_scope;
         test_watch_publish(watch, arguments->memory_module, name, result.index, module, module ? (String8){0} : watch->last_completed);
     }
+#if BUSTER_IOS
+    // Pair module-named observations with the ending scope clock. Process CPU
+    // includes all app threads; parallel module intervals can overlap.
+    if (module && result.timing)
+    {
+        buster_ios_launch_trace(arguments->memory_module);
+    }
+#endif
     if (result.timing)
     {
         result.start = timestamp_take();
@@ -479,6 +491,12 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
     {
         end = timestamp_take();
     }
+#if BUSTER_IOS
+    if (scope.module && scope.timing)
+    {
+        buster_ios_launch_trace(arguments->memory_module);
+    }
+#endif
     u64 ends[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
     u64 peaks[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
     // Capture every arena before formatting, which itself uses scratch memory.
@@ -1181,8 +1199,7 @@ bool buster_test_module_selection_check(String8 selection)
     return result;
 }
 
-// Match the native parent independently. The frontend dominates the rest
-// group on sanitized lanes; Windows ARM keeps the driver split.
+// Match the native parent's legacy pair ownership independently.
 BUSTER_GLOBAL_LOCAL String8 test_module_group_primary_name(void)
 {
     String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
@@ -1195,6 +1212,7 @@ typedef enum TestModuleGroup
     TEST_MODULE_GROUP_PRIMARY,
     TEST_MODULE_GROUP_REST,
     TEST_MODULE_GROUP_INVENTORY,
+    TEST_MODULE_GROUP_MODULE,
     TEST_MODULE_GROUP_INVALID,
 } TestModuleGroup;
 
@@ -1205,6 +1223,7 @@ BUSTER_GLOBAL_LOCAL TestModuleGroup test_module_group_resolve(String8 name)
     else if (string_equal(name, S8("primary"))) result = TEST_MODULE_GROUP_PRIMARY;
     else if (string_equal(name, S8("rest"))) result = TEST_MODULE_GROUP_REST;
     else if (string_equal(name, S8("inventory"))) result = TEST_MODULE_GROUP_INVENTORY;
+    else if (string_starts_with_sequence(name, S8("module:")) && name.length > 7) result = TEST_MODULE_GROUP_MODULE;
     return result;
 }
 
@@ -1251,6 +1270,40 @@ BUSTER_GLOBAL_LOCAL u64 test_module_group_apply(TestDescriptor* descriptors, u64
     for (u64 index = 0; index < count; index += 1)
     {
         descriptors[index].deselected = descriptors[index].deselected || !valid || test_module_group_owner(descriptors[index]) != group;
+        result += buster_test_descriptor_runs(descriptors[index]);
+    }
+    return result;
+}
+
+// This private CI selector retains disabled table audits and the full inventory.
+// Explicit --module selection intentionally takes audit ownership; CI must not.
+BUSTER_GLOBAL_LOCAL u64 test_module_group_module_apply(TestDescriptor* descriptors, u64 count, String8 name, bool valid)
+{
+    u64 begin = 0, end = 0;
+    bool range = string_starts_with_sequence(name, S8("range:"));
+    if (range)
+    {
+        String8 text = {name.pointer + 6, name.length - 6};
+        IntegerParsingU64 first = string8_parse_u64_decimal(text);
+        bool parsed = first.status == INTEGER_PARSING_SUCCESS && first.length && first.length < text.length &&
+                      text.pointer[first.length] == ':';
+        if (parsed)
+        {
+            text.pointer += first.length + 1;
+            text.length -= first.length + 1;
+            IntegerParsingU64 last = string8_parse_u64_decimal(text);
+            parsed = last.status == INTEGER_PARSING_SUCCESS && last.length && last.length == text.length &&
+                     first.value < last.value && last.value <= count;
+            begin = first.value;
+            end = last.value;
+        }
+        valid = valid && parsed;
+    }
+    u64 result = 0;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        descriptors[index].deselected = descriptors[index].deselected || !valid ||
+            !(range ? index >= begin && index < end : string_equal(descriptors[index].name, name));
         result += buster_test_descriptor_runs(descriptors[index]);
     }
     return result;
@@ -3781,12 +3834,67 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_self_test(void)
     result = result && test_module_group_resolve(S8("")) == TEST_MODULE_GROUP_NONE &&
              test_module_group_resolve(S8("primary")) == TEST_MODULE_GROUP_PRIMARY &&
              test_module_group_resolve(S8("rest")) == TEST_MODULE_GROUP_REST &&
-             test_module_group_resolve(S8("inventory")) == TEST_MODULE_GROUP_INVENTORY;
+             test_module_group_resolve(S8("inventory")) == TEST_MODULE_GROUP_INVENTORY &&
+             test_module_group_resolve(S8("module:c_ast_tests")) == TEST_MODULE_GROUP_MODULE &&
+             test_module_group_resolve(S8("module:")) == TEST_MODULE_GROUP_INVALID;
     String8 invalid[] = {S8("all"), S8("driver"), S8("frontend"), S8("Primary"), S8("primary,rest"), S8(" primary"), S8("rest ")};
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
         result = result && test_module_group_resolve(invalid[index]) == TEST_MODULE_GROUP_INVALID;
     }
+
+    // One-module CI jobs form the same enabled union under both audit policies.
+    // The controls do not add registered modules, fixtures or assertion counts.
+    u64 module_union_count = 0;
+    for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
+    {
+        TestDescriptor module[TEST_ID_COUNT];
+        memcpy(module, test_descriptors, sizeof(module));
+        u64 selected = test_module_group_module_apply(module, TEST_ID_COUNT, test_descriptors[index].name, true);
+        result = result && selected == (u64)buster_test_descriptor_runs(test_descriptors[index]);
+        module_union_count += selected;
+        for (u64 other = 0; other < TEST_ID_COUNT; other += 1)
+        {
+            result = result && buster_test_descriptor_runs(module[other]) ==
+                (other == index && buster_test_descriptor_runs(test_descriptors[other])) &&
+                module[other].table_audit == test_descriptors[other].table_audit &&
+                module[other].function == test_descriptors[other].function;
+        }
+    }
+    result = result && module_union_count == enabled_count;
+    TemporalArena range_temporary = scratch_begin(0, 0);
+    // Every adjacent inventory slice preserves original descriptor identities,
+    // disabled-audit ownership and canonical positions. Bad bounds run nothing.
+    for (u64 begin = 0; begin < TEST_ID_COUNT; begin += 1)
+    {
+        TestDescriptor range[TEST_ID_COUNT];
+        memcpy(range, test_descriptors, sizeof(range));
+        u64 end = begin + 2 < TEST_ID_COUNT ? begin + 2 : TEST_ID_COUNT;
+        String8 name = string_format(range_temporary.arena, S8("range:{u64}:{u64}"), begin, end);
+        u64 selected = test_module_group_module_apply(range, TEST_ID_COUNT, name, true);
+        u64 expected = 0;
+        for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
+        {
+            bool runs = index >= begin && index < end && buster_test_descriptor_runs(test_descriptors[index]);
+            expected += runs;
+            result = result && buster_test_descriptor_runs(range[index]) == runs &&
+                range[index].table_audit == test_descriptors[index].table_audit &&
+                range[index].function == test_descriptors[index].function;
+        }
+        result = result && selected == expected;
+    }
+    String8 bad_ranges[] = {S8("range:0:0"), S8("range:2:1"), S8("range:0:999999"), S8("range:0:2x"),
+        S8("range:-1:2"), S8("range:0:18446744073709551616")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(bad_ranges); index += 1)
+    {
+        TestDescriptor range[TEST_ID_COUNT];
+        memcpy(range, test_descriptors, sizeof(range));
+        result = result && !test_module_group_module_apply(range, TEST_ID_COUNT, bad_ranges[index], true);
+    }
+    scratch_end(range_temporary);
+    TestDescriptor module_missing[TEST_ID_COUNT];
+    memcpy(module_missing, test_descriptors, sizeof(module_missing));
+    result = result && !test_module_group_module_apply(module_missing, TEST_ID_COUNT, S8("unknown_tests"), true);
 
     TestDescriptor original[] = {
         {.name = S8("self_test_first"), .function = &test_timing_self_test_pass},
@@ -3912,6 +4020,95 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_preservation_self_test(UnitT
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void buster_test_temporary_root_test_preserve_setting(Arena* arena, bool enabled)
+{
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + 1);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + 1);
+    keys[0] = S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE");
+    values[0] = enabled ? S8("1") : S8("");
+    for (u64 index = 0; index < inherited_keys.length; index += 1)
+    {
+        keys[index + 1] = inherited_keys.pointer[index];
+        values[index + 1] = inherited_values.pointer[index];
+    }
+    program_state->input.environment_keys = (SliceString8){keys, inherited_keys.length + 1};
+    program_state->input.environment_values = (SliceString8){values, inherited_values.length + 1};
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_finish(UnitTestArguments* arguments, bool run_succeeded, bool retain_images)
+{
+    String8 preserve_setting = os_get_environment_variable(S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE"));
+    bool preserve_on_failure = string_equal(preserve_setting, S8("1")) && !run_succeeded;
+    bool preserve_root = retain_images || preserve_on_failure;
+    bool result = true;
+    if (buster_test_temporary_root.length)
+    {
+        result = preserve_root ? buster_test_temporary_root_preserve(arguments, !retain_images) :
+                                buster_test_temporary_root_delete(arguments);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_image_retention_parse(String8 value, bool* invalid)
+{
+    bool result = string_equal(value, S8("1"));
+    *invalid = value.length && !result;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_image_retention_self_test(UnitTestArguments* arguments)
+{
+    bool invalid = false;
+    bool empty = buster_test_image_retention_parse(S8(""), &invalid);
+    bool empty_valid = !empty && !invalid;
+    bool one = buster_test_image_retention_parse(S8("1"), &invalid);
+    bool one_valid = one && !invalid;
+    bool zero = buster_test_image_retention_parse(S8("0"), &invalid);
+    bool zero_invalid = !zero && invalid;
+    bool other = buster_test_image_retention_parse(S8("true"), &invalid);
+    bool other_invalid = !other && invalid;
+
+    SliceString8 saved_keys = program_state->input.environment_keys;
+    SliceString8 saved_values = program_state->input.environment_values;
+    buster_test_temporary_root_test_preserve_setting(arguments->arena, false);
+    bool retention_created = buster_test_temporary_root_create();
+    String8 retention_root = buster_test_temporary_root;
+    bool retention_finished = retention_created && buster_test_temporary_root_finish(arguments, true, true);
+    FileStats retention_stats = os_path_followed_stats(retention_root);
+    bool retention_kept = retention_stats.valid && retention_stats.kind == OS_FILE_KIND_DIRECTORY;
+    bool retention_cleaned = !retention_kept || os_directory_delete(retention_root);
+
+    bool default_created = buster_test_temporary_root_create();
+    String8 default_root = buster_test_temporary_root;
+    bool default_finished = default_created && buster_test_temporary_root_finish(arguments, true, false);
+    FileStats default_stats = os_path_followed_stats(default_root);
+    bool default_deleted = default_stats.valid && default_stats.kind == OS_FILE_KIND_MISSING;
+
+    buster_test_temporary_root_test_preserve_setting(arguments->arena, true);
+    bool preserved_success_created = buster_test_temporary_root_create();
+    String8 preserved_success_root = buster_test_temporary_root;
+    bool preserved_success_finished = preserved_success_created && buster_test_temporary_root_finish(arguments, true, false);
+    FileStats preserved_success_stats = os_path_followed_stats(preserved_success_root);
+    bool preserved_success_deleted = preserved_success_stats.valid && preserved_success_stats.kind == OS_FILE_KIND_MISSING;
+
+    bool preserved_failure_created = buster_test_temporary_root_create();
+    String8 preserved_failure_root = buster_test_temporary_root;
+    bool preserved_failure_finished = preserved_failure_created && buster_test_temporary_root_finish(arguments, false, false);
+    FileStats preserved_failure_stats = os_path_followed_stats(preserved_failure_root);
+    bool preserved_failure_kept = preserved_failure_stats.valid && preserved_failure_stats.kind == OS_FILE_KIND_DIRECTORY;
+    bool preserved_failure_cleaned = !preserved_failure_kept || os_directory_delete(preserved_failure_root);
+    program_state->input.environment_keys = saved_keys;
+    program_state->input.environment_values = saved_values;
+
+    bool result = empty_valid && one_valid && zero_invalid && other_invalid && retention_created && retention_finished && retention_kept &&
+                  retention_cleaned && default_created && default_finished && default_deleted && preserved_success_created &&
+                  preserved_success_finished && preserved_success_deleted && preserved_failure_created && preserved_failure_finished &&
+                  preserved_failure_kept && preserved_failure_cleaned;
+    return result;
+}
+
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
 #if BUSTER_IOS
@@ -3976,6 +4173,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
     BUSTER_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
+    BUSTER_CHECK(buster_test_image_retention_self_test(arguments));
     BUSTER_VALIDATE(test_debugger_failure_self_test());
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
@@ -3996,6 +4194,21 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         BUSTER_CHECK(test_timing_self_test(arguments));
     }
 
+    String8 image_retention_setting = os_get_environment_variable(S8("BUSTER_TEST_RETAIN_IMAGES"));
+    bool image_retention_setting_invalid = false;
+    bool retain_images = buster_test_image_retention_parse(image_retention_setting, &image_retention_setting_invalid);
+    bool previous_image_retention_active = false;
+    OsImageRetentionCounters image_retention_before = {0};
+    if (image_retention_setting_invalid)
+    {
+        string_print(S8("test: invalid BUSTER_TEST_RETAIN_IMAGES='{S8}' (expected 1)\n"), image_retention_setting);
+    }
+    else if (retain_images)
+    {
+        previous_image_retention_active = os_image_retention_set_active(true);
+        image_retention_before = os_image_retention_counters();
+    }
+
     // A module selection marks the modules it leaves out in a working copy,
     // so the registration table stays whole for later runs in this process.
     TestDescriptor descriptors[TEST_ID_COUNT];
@@ -4006,7 +4219,16 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     {
         selection_valid = module_group != TEST_MODULE_GROUP_INVALID && !arguments->module_selection.length &&
                           test_module_group_table_valid(test_descriptors, TEST_ID_COUNT);
-        selected_module_count = test_module_group_apply(descriptors, TEST_ID_COUNT, module_group, selection_valid);
+        if (module_group == TEST_MODULE_GROUP_MODULE)
+        {
+            String8 name = {module_group_name.pointer + 7, module_group_name.length - 7};
+            selected_module_count = test_module_group_module_apply(descriptors, TEST_ID_COUNT, name, selection_valid);
+            selection_valid = selection_valid && (string_starts_with_sequence(name, S8("range:")) ? selected_module_count != 0 : selected_module_count == 1);
+        }
+        else
+        {
+            selected_module_count = test_module_group_apply(descriptors, TEST_ID_COUNT, module_group, selection_valid);
+        }
         if (!selection_valid)
         {
             arguments->show(arguments, S8("test: invalid BUSTER_TEST_MODULE_GROUP='{S8}', incompatible --module, or invalid registration table\n"),
@@ -4062,15 +4284,34 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         result.registered_module_count = TEST_ID_COUNT;
         result.unit_test_count += !selection_valid;
     }
+    result.unit_test_count += (u64)image_retention_setting_invalid;
 
-    String8 preserve_temporary_root = os_get_environment_variable(S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE"));
-    bool preserve_temporary_root_on_failure = string_equal(preserve_temporary_root, S8("1")) && !batch_test_succeeded(result);
     bool temporary_root_succeeded = true;
+    String8 image_retention_root = buster_test_temporary_root;
     if (buster_test_temporary_root.length)
     {
-        temporary_root_succeeded = preserve_temporary_root_on_failure ?
-                                   buster_test_temporary_root_preserve(arguments, true) :
-                                   buster_test_temporary_root_delete(arguments);
+        temporary_root_succeeded = buster_test_temporary_root_finish(arguments, batch_test_succeeded(result), retain_images);
+    }
+    if (retain_images)
+    {
+        OsImageRetentionCounters image_retention_after = os_image_retention_counters();
+        String8 reported_root = image_retention_root.length ? image_retention_root : S8("none");
+        string_print(S8("TEST_IMAGE_RETENTION_V1 status=retained root={S8} registered={u64} retained_files={u64} retained_directories={u64} overflowed={u64}\n"),
+                     reported_root, image_retention_after.registered - image_retention_before.registered,
+                     image_retention_after.retained_files - image_retention_before.retained_files,
+                     image_retention_after.retained_directories - image_retention_before.retained_directories,
+                     image_retention_after.overflowed - image_retention_before.overflowed);
+        if (image_retention_root.length)
+        {
+            string_print(S8("test: generated images retained under {S8}; after capture and symbol processing finish, remove it with: rm -rf '{S8}'\n"),
+                         image_retention_root, image_retention_root);
+        }
+        else
+        {
+            string_print(S8("test: generated images retained under none; no temporary root was created.\n"));
+        }
+        os_image_retention_set_active(false);
+        if (previous_image_retention_active) os_image_retention_set_active(true);
     }
     temporary_root_succeeded = temporary_root_succeeded && !buster_test_temporary_root_failed;
     if (!temporary_root_succeeded && !buster_test_temporary_root_failed)
@@ -4091,7 +4332,8 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     {
         String8 group = module_group == TEST_MODULE_GROUP_PRIMARY ? S8("primary") :
                         module_group == TEST_MODULE_GROUP_REST ? S8("rest") :
-                        module_group == TEST_MODULE_GROUP_INVENTORY ? S8("inventory") : S8("invalid");
+                        module_group == TEST_MODULE_GROUP_INVENTORY ? S8("inventory") :
+                        module_group == TEST_MODULE_GROUP_MODULE ? S8("module") : S8("invalid");
         String8 status = batch_test_succeeded(result) ? S8("pass") : S8("fail");
         if (module_group == TEST_MODULE_GROUP_INVENTORY && batch_test_succeeded(result))
         {

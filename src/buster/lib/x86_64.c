@@ -58,6 +58,7 @@ String8 x86_64_cpu_brand_string(char8* buffer, u64 capacity)
 TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
 {
     TargetCpuFeatures result = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
+    result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE);
     CpuId basic = input.basic;
     bool has_basic_leaf_1 = input.maximum_basic_leaf >= UINT32_C(1);
     if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x1))))
@@ -131,6 +132,10 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     bool apx_state = has_osxsave && (input.xcr0 & (UINT64_C(0x80000))) != 0;
     if (input.maximum_extended_leaf >= UINT32_C(0x80000001))
     {
+        if (input.extended_basic.edx & UINT32_C(0x08000000))
+        {
+            result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDTSCP);
+        }
         // CPUID.80000001H:ECX[6] advertises AMD SSE4a. This extension has no
         // OS-managed state, so it remains usable when AVX state is disabled.
         if (input.extended_basic.ecx & (UINT32_C(0x40)))
