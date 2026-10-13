@@ -1970,6 +1970,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == 0);
             BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
+            BUSTER_TEST(arguments, IR_INLINE_TINY_INSTRUCTIONS == 13u);
             // The module limit stays relative so each module derives its own.
             BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == 0);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 0) == IR_INLINE_MODULE_GROWTH);
