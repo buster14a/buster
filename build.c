@@ -47,6 +47,7 @@
 //   tools/android_packages.c                    concurrent Android package batches
 //   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
+//   tools/openssl_compatibility.c              pinned OpenSSL build/test intake
 //   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
 //   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
 //                                                and compatibility_ide_selection_self_test
@@ -159,6 +160,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_USERSPACE,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_RADDEBUGGER,
+    BUILD_COMMAND_TEST_OPENSSL,
+    BUILD_COMMAND_TEST_OPENSSL_CONTROLS,
     BUILD_COMMAND_TEST_CURL,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
@@ -25664,6 +25667,8 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_OPENSSL:
+        case BUILD_COMMAND_TEST_OPENSSL_CONTROLS:
         case BUILD_COMMAND_TEST_FFMPEG:
         case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
@@ -25705,6 +25710,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
         {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_OPENSSL, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_OPENSSL_CONTROLS, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_FFMPEG, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_USERSPACE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
@@ -39937,6 +39944,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/android_packages.c"
 #include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
+#include "tools/openssl_compatibility.c"
 #include "tools/ffmpeg_compatibility.c"
 #include "tools/compiler_profile_qualification.c"
 #include "tools/userspace_qualification.c"
@@ -40003,6 +40011,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_USERSPACE] = S8_INITIALIZER("test_userspace"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
+        [BUILD_COMMAND_TEST_OPENSSL] = S8_INITIALIZER("test_openssl"),
+        [BUILD_COMMAND_TEST_OPENSSL_CONTROLS] = S8_INITIALIZER("test_openssl_controls"),
         [BUILD_COMMAND_TEST_CURL] = S8_INITIALIZER("test_curl"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
@@ -40129,6 +40139,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_OPENSSL: result = openssl_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_TEST_OPENSSL_CONTROLS: result = !owned_arguments.length && openssl_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED; break;
             case BUILD_COMMAND_TEST_FFMPEG: result = ffmpeg_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_USERSPACE: result = userspace_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
@@ -41388,6 +41400,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_OPENSSL:
+        case BUILD_COMMAND_TEST_OPENSSL_CONTROLS:
         case BUILD_COMMAND_TEST_FFMPEG:
         case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
