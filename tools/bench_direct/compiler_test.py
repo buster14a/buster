@@ -2383,6 +2383,20 @@ summary = {"schema": "buster-uarch-lab-compare-v2", "baseline": variant(value("-
            "warnings": []}
 open(os.path.join(value("--output"), "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(value("--output"), "reference.exe"), "w").write("excluded")
+if os.environ.get("FAKE_RAW"):  # the v1 raw inventory (#2918): 10 pairs, counters on A only, metrics on both
+    write = lambda name, text: (os.makedirs(os.path.dirname(os.path.join(value("--output"), name)), exist_ok=True),
+                                open(os.path.join(value("--output"), name), "w").write(text))
+    write("compare.json", json.dumps({"plan": {"pairs": 10, "order": "ABBA"}}))
+    write("pairs.json", "[]")
+    write("a/env/env.json", "{}")
+    for key, usable in (("a", True), ("b", False)):
+        write(key + "/lab.json", json.dumps({"capabilities": {"perf_stat": {"usable": usable}}, "collection": {"metrics_out": True}}))
+        for log in ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log"):
+            write(key + "/" + log, log + "\\n")
+        for pair in range(1, 11):
+            write("pairs/%04d-%s.ccmetrics" % (pair, key), "metrics\\n")
+            if usable:
+                write("pairs/%04d-%s.csv" % (pair, key), "1,,cycles\\n")
 """
 
 
@@ -2422,6 +2436,14 @@ metadata = {"schema": 2, "seed": 20260907, "profile": value("--profile"), "pairs
                                     {"sha256": digest(value("--candidate")), "bytes": os.path.getsize(value("--candidate"))}]}
 open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
+if os.environ.get("FAKE_RAW"):  # the v1 raw corpus inventory (#2918)
+    os.makedirs(os.path.join(output, "inputs"))
+    os.makedirs(os.path.join(output, "artifacts"))
+    for name in ("samples.csv", "telemetry.csv", "jobs.tsv", "commands.jsonl", "capabilities.jsonl", "complete.txt", "cpuinfo.txt"):
+        open(os.path.join(output, name), "w").write(name + "\\n")
+    for name in workloads:
+        open(os.path.join(output, "inputs", name + ".c"), "w").write("int main(void) { return 0; }\\n")
+    open(os.path.join(output, "artifacts", "tiny_startup-fast-0.log"), "w").write("log\\n")
 if behavior == "missing-exit1": os.unlink(os.path.join(output, "metadata.json"))
 sys.exit(3 if behavior == "fail" else 1 if behavior in ("regression", "partial-exit1", "missing-exit1", "badexit") else 0)
 """
@@ -2456,6 +2478,19 @@ def retained(evidence: Path) -> dict:
                                 "metadata": load(evidence / "scaling" / name / "scaling-metadata.json")}
                          for name in compiler_receipt.SCALING_PROFILE["series"]}
     return result
+
+
+def bootstrapped_driver() -> Path | None:
+    """BUSTER_COMPILER_EVIDENCE_DRIVER, else this checkout's own native driver when TCC can bootstrap it."""
+    import shutil
+    named = os.environ.get("BUSTER_COMPILER_EVIDENCE_DRIVER")
+    driver = Path(named) if named else None
+    if driver is None and shutil.which("tcc"):
+        resolved = subprocess.run([str(Path(__file__).resolve().parents[2] / "build.sh"), "compiler_closure", "driver-path"],
+                                  capture_output=True, text=True, timeout=600, check=False)
+        lines = resolved.stdout.splitlines()
+        driver = Path(lines[-1]) if resolved.returncode == 0 and lines and lines[-1].startswith("/") else None
+    return driver if driver is not None and driver.is_file() else None
 
 
 class ScratchPlanTest(unittest.TestCase):
@@ -2679,9 +2714,180 @@ class ExportTest(unittest.TestCase):
         self.assertLessEqual(total, 100)
         self.assertTrue(omissions)
         self.assertTrue(all("budget" in item["reason"] for item in omissions))
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 3):
+        # The lab directory itself is one of the four entries (#2918 counts directories too).
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4):
             self.export()
         self.assertEqual(len(self.exported()), 3)
+
+    def test_required_members_of_the_whole_tree_precede_optional_ones(self) -> None:
+        # artifacts/ sorts before inputs/; the budget must still reach the required inputs (#2918).
+        (self.source / "artifacts").mkdir()
+        (self.source / "inputs").mkdir()
+        for index in range(5):
+            (self.source / "artifacts" / f"run-{index}.log").write_text("log")
+        (self.source / "inputs" / "tiny.c").write_text("int main;")
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        # Seven entries: lab/, artifacts/ and inputs/, then two required and two optional files.
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 7):
+            problems, omissions = self.export(required=("summary.json", "inputs/tiny.c"))
+        self.assertEqual(problems, [])
+        self.assertEqual(self.exported(), ["artifacts/run-0.log", "artifacts/run-1.log", "inputs/tiny.c", "summary.json"])
+        dropped = [*(f"artifacts/run-{index}.log" for index in range(2, 5)), "raw.txt"]
+        self.assertEqual([item["path"] for item in omissions], dropped)
+        self.assertEqual(compiler_compare.EVIDENCE_OMISSION_LEDGER, [("lab/" + path, "file-budget") for path in dropped])
+
+    def test_empty_optional_directories_never_starve_a_required_member(self) -> None:
+        for index in range(300):
+            (self.source / "empty" / f"{index:03}" / "deeper").mkdir(parents=True)
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 2):
+            problems, omissions = self.export()
+        self.assertEqual(problems, [])
+        self.assertEqual(self.exported(), ["summary.json"])
+        self.assertFalse((self.evidence / "lab" / "empty").exists())
+        self.assertEqual(omissions, [{"path": "raw.txt", "reason": "evidence file-count budget exhausted"}])
+
+    def test_sealed_optional_members_wait_for_every_later_required_member(self) -> None:
+        # A later leg's required member must not be starved by an earlier leg's optional data (#2918).
+        for index in range(6):
+            (self.source / f"optional-{index}.log").write_bytes(b"o" * 10)
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "summary.json").write_bytes(b"{}" + b" " * 38)
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+        receipt_omissions: dict = {}
+        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 85):
+            lab_problems, _ = self.export()
+            exported_before = self.exported()
+            corpus_problems, _ = compiler_compare.export_tree(corpus, self.evidence / "throughput", self.evidence,
+                                                              ("*.exe",), ("summary.json",))
+        self.assertEqual((lab_problems, exported_before), ([], ["optional-0.log", "optional-1.log", "optional-2.log",
+                                                                 "optional-3.log", "optional-4.log", "optional-5.log",
+                                                                 "raw.txt", "summary.json"]))
+        self.assertEqual(len(corpus_problems), 1)  # the eager export starves the later required member
+        shutil.rmtree(self.evidence / "lab")
+        shutil.rmtree(self.evidence / "throughput")
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 85):
+            lab_problems, _ = compiler_compare.export_tree(self.source, self.evidence / "lab", self.evidence, ("*.exe",),
+                                                           ("summary.json",), defer_optional=True)
+            self.assertEqual(self.exported(), ["summary.json"])
+            corpus_problems, _ = compiler_compare.export_tree(corpus, self.evidence / "throughput", self.evidence,
+                                                              ("*.exe",), ("summary.json",), defer_optional=True)
+            compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+        self.assertEqual((lab_problems, corpus_problems), ([], []))
+        self.assertTrue((self.evidence / "throughput" / "summary.json").is_file())
+        # 2 + 40 required bytes leave 43: four optional logs, then raw.txt; the last two logs do not fit.
+        self.assertEqual(self.exported(), ["optional-0.log", "optional-1.log", "optional-2.log", "optional-3.log", "raw.txt",
+                                           "summary.json"])
+        dropped = ["optional-4.log", "optional-5.log"]
+        self.assertEqual(receipt_omissions, {"lab": {"count": 2, "shown": [
+            {"path": path, "reason": "evidence byte budget exhausted"} for path in dropped]}})
+        self.assertEqual(compiler_compare.EVIDENCE_OMISSION_LEDGER, [("lab/" + path, "byte-budget") for path in dropped])
+        self.assertEqual(compiler_compare.EVIDENCE_DEFERRED_OPTIONAL, [])
+
+    def test_an_earlier_opt_in_export_defers_its_optional_data_in_a_sealed_attempt(self) -> None:
+        # The ast-pilot and inline legs call export_tree without defer_optional before the ordinary lab and
+        # corpus; a sealed attempt's EVIDENCE_DEFER_ALL must still keep their optional data for last (#2918).
+        opt_in = self.root / "ast_pilot"
+        opt_in.mkdir()
+        (opt_in / "acceptance.json").write_text("{}")
+        for index in range(6):
+            (opt_in / f"diagnostic-{index}.log").write_bytes(b"d" * 10)
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "summary.json").write_bytes(b"{}" + b" " * 38)
+        outcomes = {}
+        for sealed in (False, True):
+            shutil.rmtree(self.evidence)
+            self.evidence.mkdir()
+            compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+            compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+            with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 70), \
+                    mock.patch.object(compiler_compare, "EVIDENCE_DEFER_ALL", sealed):
+                opt_problems, _ = compiler_compare.export_tree(opt_in, self.evidence / "ast_pilot_acceptance", self.evidence,
+                                                               ("*.exe",), ("acceptance.json",))
+                lab_problems, _ = compiler_compare.export_tree(self.source, self.evidence / "lab", self.evidence, ("*.exe",),
+                                                               ("summary.json",), defer_optional=sealed)
+                corpus_problems, _ = compiler_compare.export_tree(corpus, self.evidence / "throughput", self.evidence,
+                                                                  ("*.exe",), ("summary.json",), defer_optional=sealed)
+                receipt_omissions: dict = {}
+                compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+            outcomes[sealed] = (opt_problems, lab_problems, corpus_problems)
+        # Eager: six 10-byte diagnostics (plus 2+5 lab bytes) leave no room for the 40-byte corpus summary.
+        self.assertEqual(len(outcomes[False][2]), 1)
+        self.assertEqual(outcomes[True], ([], [], []))
+        self.assertTrue((self.evidence / "throughput" / "summary.json").is_file())
+        self.assertTrue((self.evidence / "ast_pilot_acceptance" / "diagnostic-0.log").is_file())
+        self.assertIn("ast_pilot_acceptance", receipt_omissions)
+
+    def deferred_parts(self) -> Path:
+        """A leg shaped like #3901's self-host inline leg: three parts, each exported with required=()."""
+        root = self.root / "selfhost"
+        for part, name in (("stage1-baseline", "stage1.json"), ("stage1-candidate", "stage1.json"),
+                           ("compare", "result.json")):
+            (root / part).mkdir(parents=True)
+            (root / part / name).write_text("{\"ok\": true}")
+            (root / part / "trace.log").write_text("trace\n")
+        return root
+
+    def test_a_leg_reading_unlisted_members_still_sees_them_in_a_sealed_attempt(self) -> None:
+        # Deferral must not hide a member a leg validates without listing it as required (#3883 review).
+        root = self.deferred_parts()
+        exported = self.evidence / "selfhost_inline"
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+        receipt_omissions: dict = {}
+        with mock.patch.object(compiler_compare, "EVIDENCE_DEFER_ALL", True):
+            for part in ("stage1-baseline", "stage1-candidate", "compare"):
+                problems, _ = compiler_compare.export_tree(root / part, exported / part, self.evidence, ("*.exe",), ())
+                self.assertEqual(problems, [])
+            self.assertFalse((exported / "compare" / "trace.log").exists())
+            documents = [compiler_compare.read_exported_json(exported / name) for name in
+                         ("stage1-baseline/stage1.json", "stage1-candidate/stage1.json", "compare/result.json")]
+            self.assertEqual(documents, [({"ok": True}, "")] * 3)
+            self.assertFalse((exported / "compare" / "trace.log").exists())  # bulk optional data stays deferred
+            compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+        files = sorted(path.relative_to(exported).as_posix() for path in exported.rglob("*") if path.is_file())
+        self.assertEqual(files, ["compare/result.json", "compare/trace.log", "stage1-baseline/stage1.json",
+                                 "stage1-baseline/trace.log", "stage1-candidate/stage1.json", "stage1-candidate/trace.log"])
+        self.assertEqual((receipt_omissions, compiler_compare.EVIDENCE_OMISSION_LEDGER), ({}, []))
+
+    def test_on_demand_export_follows_no_link_and_records_a_refusal_once(self) -> None:
+        root = self.deferred_parts()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.json").write_text("{}")
+        (root / "compare" / "linked").symlink_to(outside, target_is_directory=True)
+        exported = self.evidence / "selfhost_inline"
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+        receipt_omissions: dict = {}
+        with mock.patch.object(compiler_compare, "EVIDENCE_DEFER_ALL", True):
+            compiler_compare.export_tree(root / "compare", exported / "compare", self.evidence, ("*.exe",), ())
+            document, problem = compiler_compare.read_exported_json(exported / "compare" / "linked" / "secret.json")
+            self.assertIsNone(document)
+            self.assertFalse((exported / "compare" / "linked").exists())
+            with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 0):
+                document, problem = compiler_compare.read_exported_json(exported / "compare" / "result.json")
+            self.assertIsNone(document)
+            compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+        refused = [item for item in compiler_compare.EVIDENCE_OMISSION_LEDGER if item[0] == "selfhost_inline/compare/result.json"]
+        self.assertEqual(refused, [("selfhost_inline/compare/result.json", "byte-budget")])
+        # The linked directory was the leg's own export omission; the deferred section adds only result.json.
+        self.assertIn(("selfhost_inline/compare/linked", "excluded-type"), compiler_compare.EVIDENCE_OMISSION_LEDGER)
+        self.assertEqual(receipt_omissions["selfhost_inline/compare"]["count"], 1)
+        self.assertTrue((exported / "compare" / "trace.log").is_file())
+        self.assertFalse((exported / "compare" / "result.json").exists())
+
+    def test_every_omission_reaches_the_ledger_with_its_fixed_code(self) -> None:
+        (self.source / "big.txt").write_bytes(b"x" * 100)
+        (self.source / "link.txt").symlink_to(self.source / "raw.txt")
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_LIMIT", 50):
+            self.export()
+        self.assertEqual(sorted(compiler_compare.EVIDENCE_OMISSION_LEDGER),
+                         [("lab/big.txt", "member-limit"), ("lab/link.txt", "excluded-type")])
 
     def test_symlinks_are_not_followed_or_copied(self) -> None:
         outside = self.root / "outside"
@@ -2729,6 +2935,14 @@ class ExportTest(unittest.TestCase):
     def test_publisher_member_limit_matches_the_producer(self) -> None:
         self.assertEqual(compiler_compare.EVIDENCE_MEMBER_LIMIT, compiler_publish.MEMBER_LIMIT)
         self.assertLess(compiler_compare.EVIDENCE_TOTAL_LIMIT, compiler_publish.ARTIFACT_LIMIT)
+
+    def test_export_budget_keeps_the_sealed_control_reserve(self) -> None:
+        source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
+        self.assertIn("#define COMPILER_EVIDENCE_TOTAL_LIMIT (48ull << 20)", source)
+        self.assertIn("#define COMPILER_EVIDENCE_ENTRY_LIMIT 4096ull", source)
+        self.assertEqual(compiler_compare.EVIDENCE_SEALED_LIMITS, (48 << 20, 4096))
+        self.assertEqual(compiler_compare.EVIDENCE_TOTAL_LIMIT + compiler_compare.EVIDENCE_CONTROL_RESERVE[0], 48 << 20)
+        self.assertEqual(compiler_compare.EVIDENCE_FILE_COUNT + compiler_compare.EVIDENCE_CONTROL_RESERVE[1], 4096)
 
 
 class HarnessTest(unittest.TestCase):
@@ -2785,6 +2999,170 @@ class HarnessTest(unittest.TestCase):
             code = compiler_compare.main(argv)
         evidence = self.root / "evidence"
         return code, json.loads((evidence / "receipt.json").read_text()), evidence
+
+    def run_sealed(self, sealer: tuple, raw: bool = True) -> tuple[int, dict, Path]:
+        with mock.patch.object(compiler_compare, "EVIDENCE_SEAL_COMMAND", sealer), \
+                mock.patch.dict(os.environ, {"FAKE_RAW": "1" if raw else ""}):
+            return self.run_harness(self.head, **{"request-attempt": "2"})
+
+    def test_ordinary_attempt_seals_its_raw_evidence_last(self) -> None:
+        # A stand-in records what it was asked to seal and writes the seal the receipt binds (#2918).
+        script = ("import sys, os, pathlib\n"
+                  "bundle, identity = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])\n"
+                  "assert sys.argv[1] == 'seal' and not (bundle / 'receipt.json.tmp').exists()\n"
+                  "(bundle.parent / 'sealed-identity.tsv').write_text(identity.read_text())\n"
+                  "(bundle / 'evidence-manifest.tsv').write_text('manifest\\n')\n"
+                  "(bundle / 'evidence-seal.txt').write_text('schema=x\\nstate=complete\\nmanifest_bytes=9\\n'\n"
+                  "    'manifest_sha256=' + 'a' * 64 + '\\nmembers=3\\npayload_bytes=4\\n')\n"
+                  "print('COMPILER_EVIDENCE_SEALED')\n")
+        code, result, evidence = self.run_sealed((sys.executable, "-c", script))
+        self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
+        self.assertEqual(result["evidence_bundle"], {"inventory": compiler_receipt.EVIDENCE_INVENTORY, "state": "sealed",
+                                                     "manifest_sha256": "a" * 64, "manifest_bytes": 9, "members": 3,
+                                                     "payload_bytes": 4, "omissions": 0})
+        omissions = json.loads((evidence / compiler_receipt.EVIDENCE_OMISSIONS).read_text())
+        self.assertEqual((omissions["schema"], omissions["total"], omissions["examples"]),
+                         (compiler_receipt.EVIDENCE_OMISSIONS_SCHEMA, 0, []))
+        self.assertEqual(set(omissions["by_reason"]), set(compiler_receipt.EVIDENCE_OMISSION_REASONS))
+        identity = dict(line.split("\t") for line in (self.root / "sealed-identity.tsv").read_text().splitlines())
+        self.assertEqual(list(identity), list(compiler_receipt.EVIDENCE_IDENTITY_KEYS))
+        self.assertEqual((identity["request_attempt"], identity["executor_run"], identity["candidate_revision"],
+                          identity["corpus_profile"], identity["corpus_harness_revision"]),
+                         ("2", "92", self.head, compiler_receipt.THROUGHPUT_PROFILE["name"], self.base))
+        self.assertTrue((evidence / "lab" / "pairs" / "0010-a.csv").is_file())
+        self.assertTrue((evidence / "throughput" / "inputs" / "tiny_startup.c").is_file())
+        # Optional members join after every leg's required ones, before the seal.
+        self.assertTrue((evidence / "throughput" / "artifacts" / "tiny_startup-fast-0.log").is_file())
+        self.assertEqual(compiler_compare.EVIDENCE_DEFERRED_OPTIONAL, [])
+        self.assertFalse(compiler_compare.EVIDENCE_DEFER_ALL)
+
+    def test_a_sealed_attempt_defers_every_export_including_opt_in_legs(self) -> None:
+        seen = []
+        real = compiler_compare.export_tree
+
+        def spy(*arguments, **options):
+            seen.append((arguments[1].relative_to(self.root / "evidence").as_posix(), compiler_compare.EVIDENCE_DEFER_ALL))
+            return real(*arguments, **options)
+
+        stand_in = (sys.executable, "-c", "raise SystemExit(1)")
+        with mock.patch.object(compiler_compare, "export_tree", spy):
+            self.run_sealed(stand_in)
+        self.assertEqual(seen, [("lab", True), ("throughput", True)])
+        self.assertFalse(compiler_compare.EVIDENCE_DEFER_ALL)
+
+    def test_a_refused_seal_fails_the_attempt(self) -> None:
+        script = "print('COMPILER_EVIDENCE_INCOMPLETE reason=required raw evidence is missing: x'); raise SystemExit(1)"
+        code, result, _ = self.run_sealed((sys.executable, "-c", script))
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("raw evidence not sealed (exit 1): COMPILER_EVIDENCE_INCOMPLETE", result["reasons"][-1])
+        self.assertEqual(result["evidence_bundle"]["state"], "failed")
+
+    def test_sealing_requires_the_v1_inventory_before_the_sealer_runs(self) -> None:
+        code, result, _ = self.run_sealed((sys.executable, "-c", "raise SystemExit('sealer must not run')"), raw=False)
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("required evidence lab/compare.json not exported: absent from the source", result["reasons"])
+        self.assertIn("required evidence throughput/inputs/tiny_startup.c not exported: absent from the source", result["reasons"])
+        self.assertNotIn("evidence_bundle", result)
+
+    def test_an_unrequested_seal_keeps_the_legacy_inventory(self) -> None:
+        code, result, evidence = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (0, "measured"))
+        self.assertNotIn("evidence_bundle", result)
+        self.assertFalse((evidence / compiler_receipt.EVIDENCE_OMISSIONS).exists())
+
+    def test_the_native_driver_seals_and_verifies_a_harness_bundle(self) -> None:
+        driver = bootstrapped_driver()
+        if driver is None:
+            self.skipTest("no native driver: set BUSTER_COMPILER_EVIDENCE_DRIVER or put tcc on PATH")
+        code, result, evidence = self.run_sealed((str(driver), "compiler_evidence"))
+        self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
+        self.assertEqual(result["evidence_bundle"]["state"], "sealed")
+        identity = self.root / "identity.tsv"
+        identity.write_text(compiler_receipt.evidence_identity(result, "2"))
+        verify = lambda: subprocess.run([str(driver), "compiler_evidence", "verify", str(evidence), str(identity)],  # noqa: E731
+                                        capture_output=True, text=True, timeout=300, check=False)
+        verified = verify()
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertIn(f"manifest_sha256={result['evidence_bundle']['manifest_sha256']}", verified.stdout)
+        self.assertIn(f"members={result['evidence_bundle']['members']}", verified.stdout)
+        (evidence / "lab" / "pairs" / "0004-a.csv").write_text("tampered\n")
+        self.assertIn("COMPILER_EVIDENCE_REFUSED", verify().stdout)
+
+    def zipped(self, evidence: Path) -> bytes:
+        """The evidence as actions/upload-artifact uploads it: hidden files, the scratch marker among them, dropped."""
+        self.assertTrue((evidence / compiler_compare.SCRATCH_MARKER).is_file())
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(evidence.rglob("*")):
+                if path.is_file() and not any(part.startswith(".") for part in path.relative_to(evidence).parts):
+                    archive.writestr(path.relative_to(evidence).as_posix(), path.read_bytes())
+        return stream.getvalue()
+
+    def test_the_publisher_verifies_a_sealed_bundle_natively(self) -> None:
+        driver = bootstrapped_driver()
+        if driver is None:
+            self.skipTest("no native driver: set BUSTER_COMPILER_EVIDENCE_DRIVER or put tcc on PATH")
+        code, result, evidence = self.run_sealed((str(driver), "compiler_evidence"))
+        self.assertEqual((code, result["state"]), (0, "measured"))
+        expected = dict(result["identity"], first_parent=self.base, range="1")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        (evidence / "machine-specifications").mkdir()
+        (evidence / "machine-specifications" / "report.json").write_text("{}")  # appended after the seal
+        throughput = dict(retained(evidence), sealed_files=compiler_publish.sampling_archive(
+            self.zipped(evidence), member_limit=compiler_publish.EVIDENCE_ARCHIVE_MEMBERS, require_nonexecutable=True))
+        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (str(driver), "compiler_evidence")):
+            verified = compiler_publish.verify_evidence_bundle(throughput, expected, compiler_receipt.THROUGHPUT_PROFILE, "2")
+            other_attempt = compiler_publish.verify_evidence_bundle(throughput, expected, compiler_receipt.THROUGHPUT_PROFILE, "3")
+            files = dict(throughput["sealed_files"])
+            files["lab/pairs/0007-b.ccmetrics"] = b"tampered\n"
+            tampered = compiler_publish.verify_evidence_bundle(dict(throughput, sealed_files=files), expected,
+                                                               compiler_receipt.THROUGHPUT_PROFILE, "2")
+        self.maxDiff = None
+        self.assertEqual(verified, {"state": "verified", **{key: result["evidence_bundle"][key]
+                                                            for key in ("members", "payload_bytes", "manifest_sha256")}})
+        self.assertEqual((other_attempt["state"], tampered["state"]), ("refused", "refused"))
+        self.assertIn("COMPILER_EVIDENCE_REFUSED", tampered["reason"])
+        decide = lambda bundle, receipt=result: compiler_publish.decide(  # noqa: E731
+            expected, True, "success", receipt, summary, "", throughput, evidence_bundle=bundle)
+        self.assertEqual(decide(verified)[0], "success")
+        self.assertIn("sealed raw evidence refused", decide(tampered)[2][0])
+        forged = dict(result, evidence_bundle=dict(result["evidence_bundle"], members=1))
+        self.assertIn("receipt evidence_bundle does not name the verified sealed manifest", decide(verified, forged)[2])
+        self.assertIn("receipt names sealed raw evidence that the artifact does not carry",
+                      decide({"state": "legacy-unsealed"})[2])
+
+    def test_legacy_unsealed_evidence_keeps_its_outcome_and_is_reported_unverified(self) -> None:
+        code, result, evidence = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (0, "measured"))
+        expected = dict(result["identity"], first_parent=self.base, range="1")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        bundle = compiler_publish.verify_evidence_bundle(retained(evidence), expected, compiler_receipt.THROUGHPUT_PROFILE, "1")
+        self.assertEqual(bundle, {"state": "legacy-unsealed"})
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                                 evidence_bundle=bundle)[0], "success")
+        self.assertIn("unverified", compiler_publish.evidence_bundle_note(bundle))
+
+    def test_an_unreadable_or_unverifiable_sealed_bundle_fails_closed(self) -> None:
+        expected = {"repository": "buster14a/buster", "request_run_id": "91", "run_id": "92", "run_attempt": "1",
+                    "trusted_revision": "9" * 40, "base": self.base, "head": self.head, "base_tree": self.trees[1],
+                    "head_tree": self.trees[0]}
+        corpus = compiler_receipt.THROUGHPUT_PROFILE
+        unsafe = compiler_publish.verify_evidence_bundle({"sealed_files": None, "sealed_problem": "sealed evidence archive "
+                                                          "refused: unsafe"}, expected, corpus, "1")
+        self.assertEqual(unsafe, {"state": "refused", "reason": "sealed evidence archive refused: unsafe"})
+        files = {"evidence-seal.txt": b"seal\n"}
+        for script, reason in (("raise SystemExit(3)", "native verify exited 3: no output"),
+                               ("print('COMPILER_EVIDENCE_VERIFIED members=x')", "native verify exited 0: "
+                                "COMPILER_EVIDENCE_VERIFIED members=x")):
+            with self.subTest(reason=reason), mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND",
+                                                                (sys.executable, "-c", script)):
+                self.assertEqual(compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1"),
+                                 {"state": "refused", "reason": reason})
+        with mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", ("/nonexistent/build.sh", "compiler_evidence")):
+            missing = compiler_publish.verify_evidence_bundle({"sealed_files": files}, expected, corpus, "1")
+        self.assertEqual(missing["state"], "refused")
+        self.assertEqual(compiler_publish.verify_evidence_bundle({"sealed_files": files}, dict(expected, head=""), corpus, "1"),
+                         {"state": "refused", "reason": "the authorized identity cannot name a sealed bundle"})
 
     def test_builds_base_then_candidate_and_measures_on_the_base_tree(self) -> None:
         code, result, evidence = self.run_harness(self.head)
@@ -2894,9 +3272,19 @@ class HarnessTest(unittest.TestCase):
         # tools/compiler_evidence.c derives required raw members from the same admitted profiles (#2918).
         import re
         source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
-        table = re.search(r"compiler_evidence_workloads\[\] = \{(.*?)\};", source, re.S)
-        self.assertIsNotNone(table)
-        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', table.group(1)), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        def table(name: str) -> list[str]:
+            found = re.search(r"compiler_evidence_" + name + r"\[\] = \{(.*?)\};", source, re.S)
+            self.assertIsNotNone(found, name)
+            return re.findall(r'S8_INITIALIZER\("([^"]+)"\)', found.group(1))
+        self.assertEqual(table("workloads"), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        self.assertEqual(table("lab_fixed"), ["lab/" + name for name in compiler_receipt.EVIDENCE_LAB_FIXED])
+        self.assertEqual(table("lab_logs"), list(compiler_receipt.EVIDENCE_LAB_LOGS))
+        self.assertEqual(table("corpus_core"), ["throughput/" + name for name in compiler_receipt.EVIDENCE_CORPUS_CORE])
+        self.assertEqual(table("omission_reasons"), list(compiler_receipt.EVIDENCE_OMISSION_REASONS))
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([a-z_]+)"\), \'', source), list(compiler_receipt.EVIDENCE_IDENTITY_KEYS))
+        for name in ("INVENTORY", "MANIFEST", "SEAL", "OMISSIONS", "OMISSIONS_SCHEMA"):
+            self.assertIn(f'#define COMPILER_EVIDENCE_{name} "{getattr(compiler_receipt, "EVIDENCE_" + name)}"', source)
+        self.assertIn(f"#define COMPILER_EVIDENCE_OMISSION_EXAMPLES {compiler_receipt.EVIDENCE_OMISSION_EXAMPLES}ull", source)
         self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
         for name in (compiler_receipt.PROFILE["name"], compiler_receipt.THROUGHPUT_PROFILE["name"],
                      compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE["name"]):
@@ -3146,8 +3534,8 @@ class HarnessTest(unittest.TestCase):
         """
         real = compiler_compare.export_tree
 
-        def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple:
-            outcome = real(source, destination, evidence, ignore, required)
+        def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple, **options) -> tuple:
+            outcome = real(source, destination, evidence, ignore, required, **options)
             key = destination.relative_to(evidence).as_posix()
             if key in tamper:
                 tamper[key](destination)
@@ -3239,8 +3627,8 @@ class HarnessTest(unittest.TestCase):
         for label, action, expected in (("hash", metadata_hash, "compiler"),
                                         ("invalid", invalid_summary, "exported evidence scaling/cores/scaling.json unreadable"),
                                         ("status", altered_status, "scaling")):
-            def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple:
-                outcome = real(source, destination, evidence, ignore, required)
+            def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple, **options) -> tuple:
+                outcome = real(source, destination, evidence, ignore, required, **options)
                 if destination.relative_to(evidence).as_posix() == "scaling/cores":
                     action(destination)
                 return outcome

@@ -413,6 +413,73 @@ runs those forms in both frontend forms. Append-only answers participate in sema
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
+### Sizeof handoff comparison (#2531)
+
+Lowering does not yet read the semantic type of a `sizeof` expression
+operand; it derives the operand's size itself. A default-off, test-only
+comparison measures whether the two agree before any lowering consumer is
+made to depend on semantic answers. `c_test_sizeof_handoff_set` turns it on
+for the calling thread. While it is on:
+
+- Semantic analysis keeps a 16-byte `CSizeofOperandType` row in
+  `CParseResult.sizeof_operand_types` for each `sizeof` expression operand it
+  types as a scalar integer. The row holds the keyword token, the scope the
+  producer typed it in, the unqualified kind (an enum's underlying kind) and
+  the size. It holds no `CTypeId`, so a rollback cannot leave it naming a
+  truncated row. The table is append-only and part of result checkpoints, and
+  a protected constant query copies it on first append.
+- Rows have two producers. `c_parse_typed_constant` contributes the operands
+  it already types in constant contexts in the normal mode. The
+  `c_parse_validate_sizeof_operands` walk asks for the operand type of
+  runtime `sizeof`s for this comparison alone, because ordinary validation
+  types nothing inside a `sizeof`.
+- Rows of the two producers for one keyword are also compared with each
+  other: a different kind or size is counted as a conflict. Each producer
+  keeps its own row and counts.
+- Lowering reports every size the `C_IR_QUERY_FRAME_SIZEOF` resolver settles,
+  and the body's prediction fallback, to `c_sizeof_handoff_compare`. Each path
+  of `c_ir_sizeof_expression_attempt` records the operand type it sized; when
+  that is an integer type, its signedness is compared as well as its size.
+  The outcomes are agree, size mismatch, signedness mismatch, declined, or
+  unmatched (no row for that keyword). Rows whose producer scope differs from
+  the keyword's innermost scope are counted separately.
+
+The fields exist only in builds with tests; there they add 16 bytes to
+`CParseResult`, which the default `ide` build also carries. When the
+comparison is off, the only work is a flag test at each recording and
+comparison site. When it is on, the emitted program does not change: the
+fixture compares it with the program lowered with the comparison off.
+
+`c_test_sizeof_semantic_handoff` covers the following in both frontend
+forms:
+- the 64-operator cast operand;
+- qualified, promoted, enum, bit-field-promoted, conditional, comma,
+  `_Generic` and cast-to-`typeof` operands;
+- a shadowing block;
+- static assertions.
+
+It runs each case for Linux x86-64, Windows x86-64 and Linux AArch64 layouts.
+It checks:
+- each row's kind;
+- that the syntax-only and `-c` analyses keep identical rows;
+- that a protected query leaves the rows unchanged;
+- that signedness was compared and agreed.
+
+As a negative control, `c_test_sizeof_handoff_perturb_set` flips the
+validation rows' signedness while keeping their size. The comparison must then
+report signedness mismatches, no size mismatch, and a conflict for each static
+assertion operand that both producers keep. The fixture also runs the
+`c_test_tall_expression_types` heights (1, 2, 63, 64, 65, 4096 and 10000) with
+the comparison on. That is the sampled sweep the regression already uses; a
+dense 1 to 10,000 sweep would lower about 50 million operands.
+`c_ast_test_sizeof_handoff` runs the comparison over the `c_ast` corpus and
+the hosted frontend sources and enforces floors on both. At `4ed35b59` on
+Linux x86-64 it keeps about 7,230 rows (17 from constant contexts). Of those
+operands, 7,165 are settled by the resolver with 0 mismatches. Another 7,515
+resolver answers have no row; they are operands outside the scalar-integer
+population. The prediction path is not reached. The validation producer made
+about 14,750 operand queries that ordinary validation does not make.
+
 Prepared `_Generic` lowering consumes the selected token range and lets its
 ordinary child expression produce the value and canonical type. It does not
 predict a selected type that the caller discards. Association duplicate checks

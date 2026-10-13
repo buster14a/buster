@@ -1211,6 +1211,7 @@ jobs:
       BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}
       BQ_TRUSTED_REVISION: ${{ github.sha }}
       BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
@@ -1228,12 +1229,12 @@ jobs:
             echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
             exit 1
           fi
+      # Full tree: the trusted native driver seals the raw evidence (#2918).
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           path: trusted
-          sparse-checkout: tools
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1265,6 +1266,7 @@ jobs:
           done
           [[ "$BQ_PULL" =~ ^[1-9][0-9]*$ ]]
           [[ "$BQ_HARNESS_ADMISSION" =~ ^(admitted|historical)$ ]]
+          [[ "$BQ_REQUEST_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$(git -C candidate rev-parse HEAD)" == "$BQ_HEAD_COMMIT" ]]
           python3 -B trusted/tools/bench_direct/compiler_compare.py --mode pull \
             --candidate candidate --lab trusted/tools/uarch_lab.py \
@@ -1273,6 +1275,7 @@ jobs:
             --pull "$BQ_PULL" --pull-head "$BQ_HEAD_COMMIT" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
             --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
             --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT" \
+            --request-attempt "$BQ_REQUEST_ATTEMPT" \
             --harness-admission "$BQ_HARNESS_ADMISSION"
       - name: Retain the machine-specification record
         if: ${{ always() }}
@@ -1359,11 +1362,11 @@ jobs:
         with:
           requested-runner: >-
             ubuntu-24.04
+      # Full tree and pinned TinyCC: the trusted native driver verifies sealed raw evidence (#2918).
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1371,6 +1374,28 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Fetch the pinned evidence verifier bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install the pinned evidence verifier bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/main-policy-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/main-policy-tcc/bin" >> "$GITHUB_PATH"
       - name: Validate the evidence and publish the check
         shell: bash
         env:
@@ -1637,6 +1662,7 @@ jobs:
             [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
           done
           [[ "$BQ_PULL" =~ ^[0-9]+$ ]]
+          [[ "$BQ_REQUEST_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$(git -C candidate rev-parse HEAD)" == "$BQ_HEAD_COMMIT" ]]
           python3 -B trusted/tools/bench_direct/compiler_compare.py --mode main \
             --candidate candidate --lab trusted/tools/uarch_lab.py \
@@ -1644,7 +1670,8 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY" --repository "$BQ_REPOSITORY" --ref refs/heads/main \
             --pull "$BQ_PULL" --pull-head "$BQ_PULL_HEAD" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
             --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
-            --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT"
+            --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT" \
+            --request-attempt "$BQ_REQUEST_ATTEMPT"
       - name: Observe the actual owned MAIN physical job start
         if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}
         shell: bash
