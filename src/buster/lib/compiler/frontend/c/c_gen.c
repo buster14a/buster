@@ -7856,6 +7856,35 @@ BUSTER_C_INTERNAL bool c_ir_ssa_loop_contains(CIrSsaLoop const* loop, u32 block)
            block == loop->members[1];
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_ssa_loop_edge_step_total;
+
+u64 c_test_ir_ssa_loop_edge_steps(void)
+{
+    return c_ir_ssa_loop_edge_step_total;
+}
+#define C_IR_SSA_LOOP_EDGE_STEP() (c_ir_ssa_loop_edge_step_total += 1)
+#else
+#define C_IR_SSA_LOOP_EDGE_STEP() ((void)0)
+#endif
+
+// The nearest loop at or above `loop` that no edge walk has opened yet
+// (c_ir_ssa_finish_loops), or UINT32_MAX past the outermost. `skip[loop]` is
+// `loop` itself while it is unopened and its parent once opened; the walk
+// halves every path it follows, so a chain of opened loops is crossed in
+// amortized near-constant time.
+BUSTER_C_INTERNAL u32 c_ir_ssa_loop_unopened(u32* skip, u32 loop)
+{
+    while (loop != UINT32_MAX && skip[loop] != loop)
+    {
+        C_IR_SSA_LOOP_EDGE_STEP();
+        u32 next = skip[loop];
+        skip[loop] = next != UINT32_MAX ? skip[next] : next;
+        loop = next;
+    }
+    return loop;
+}
+
 // Finish step one and a half: decide which recorded loops a read may pass
 // straight through (c_ir_ssa_forward_block). A loop's blocks are its header,
 // the other blocks its statement created and every block created inside its
@@ -7866,8 +7895,13 @@ BUSTER_C_INTERNAL bool c_ir_ssa_loop_contains(CIrSsaLoop const* loop, u32 block)
 // loop block writes keeps the entry's value there. Labels, case labels, goto
 // and computed jumps into a loop fail that check rather than needing their
 // own rules. One pass over the edges; each walks outward only past loops the
-// edge enters. Then the blocks writing each local, ascending, from the
-// events. Like the shortcut itself, a refused carve or an inconsistent record
+// edge enters, and past every loop an earlier walk already opened in one
+// jump: those walks found it entered from outside, so it stays open, and a
+// loop holding the predecessor holds it in every loop around it too, so a
+// jump never crosses the loop the walk would stop at. A label or goto block
+// lies outside every window, so without the jumps each of its edges climbed
+// the whole nest (#2676). Then the blocks writing each local, ascending, from
+// the events. Like the shortcut itself, a refused carve or an inconsistent record
 // leaves every read on the general walk instead of failing the function.
 BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
 {
@@ -7891,7 +7925,8 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32));
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32));
     if (fits)
     {
         u32* headers = arena_allocate(builder->scratch_arena, u32, block_count);
@@ -7903,6 +7938,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
         u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
         u32* by_block = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
         u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
+        u32* skip = arena_allocate(builder->scratch_arena, u32, loop_count);
         memset(headers, 0, sizeof(*headers) * block_count);
         // A usable record has both window ends and its blocks; windows open in
         // record order. Anything else keeps the loop out of the nest.
@@ -7968,14 +8004,22 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
                 innermost[loop->members[1]] = index;
             }
         }
+        for (u32 index = 0; index < loop_count; index += 1)
+        {
+            skip[index] = index;
+        }
         for (u32 block = 0; block < block_count && consistent; block += 1)
         {
             for (u32 edge = ssa->predecessor_offsets[block]; edge < ssa->predecessor_offsets[block + 1]; edge += 1)
             {
                 u32 predecessor = ssa->predecessors[edge];
                 u32 loop_index = innermost[block];
+                // Only the innermost loop can have `block` as its header (it
+                // is the header's innermost loop), so it is always visited;
+                // every loop past it is only opened, and jumps over opened ones.
                 while (loop_index != UINT32_MAX && !c_ir_ssa_loop_contains(ssa->loops + loop_index, predecessor))
                 {
+                    C_IR_SSA_LOOP_EDGE_STEP();
                     CIrSsaLoop* loop = ssa->loops + loop_index;
                     if (block == loop->header)
                     {
@@ -7985,8 +8029,9 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
                     else
                     {
                         loop->closed = false;
+                        skip[loop_index] = loop->parent;
                     }
-                    loop_index = loop->parent;
+                    loop_index = c_ir_ssa_loop_unopened(skip, loop->parent);
                 }
             }
         }
@@ -47547,10 +47592,7 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
                 builder->failure_message = S8("asm goto target does not belong to this function");
                 return false;
             }
-            CScopeId root_scope = builder->declaration_index < builder->parse.declaration_count
-                                      ? builder->parse.declarations[builder->declaration_index].scope
-                                      : C_SCOPE_ID_INVALID;
-            CScopeId target_scope = c_parse_scope_for_token(&builder->parse, root_scope, label->token_index);
+            CScopeId target_scope = c_ir_scope_for_token(builder, label->token_index);
             if (c_ir_cleanup_target_has_calls(builder, target_scope, label->token_index))
             {
                 edge_targets[label_index] = c_ir_block_create(builder);
@@ -47604,10 +47646,7 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
             {
                 return false;
             }
-            CScopeId root_scope = builder->declaration_index < builder->parse.declaration_count
-                                      ? builder->parse.declarations[builder->declaration_index].scope
-                                      : C_SCOPE_ID_INVALID;
-            CScopeId target_scope = c_parse_scope_for_token(&builder->parse, root_scope, label->token_index);
+            CScopeId target_scope = c_ir_scope_for_token(builder, label->token_index);
             if (!c_ir_emit_cleanup_calls(builder, 0, 0, target_scope, label->token_index, instruction_source) ||
                 !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1, instruction_source))
             {
@@ -50034,11 +50073,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_token_index = index + 1;
                     return false;
                 }
-                CScopeId label_scope = c_parse_scope_for_token(
-                    &builder->parse,
-                    builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                   : C_SCOPE_ID_INVALID,
-                    label ? label->token_index : UINT32_MAX);
+                // From the previous answer rather than the function's scope:
+                // a goto and its label are usually a few scopes apart, so a
+                // nest with one at each level no longer descends from the
+                // root per goto (#2676). The answer is the same.
+                CScopeId label_scope = c_ir_scope_for_token(builder, label ? label->token_index : UINT32_MAX);
                 IrSourceRange goto_source = c_ir_token_source_range(builder, first);
                 if (!label)
                 {

@@ -44404,6 +44404,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deep_block_lookup_linear(UnitTestArgum
     return result;
 }
 
+// Lowering probes every statement's unbound first token for a typedef name
+// (c_ir_lower_body_advance). A label, a type keyword such as `int`, or any
+// name no entity binds failed that lookup only after climbing every enclosing
+// scope, so a nest with one at each level lowered in depth squared (#2676).
+// A symbol no entity was ever added under now fails at once. Each goto also
+// found its label's scope by descending from the function's scope; it now
+// starts from the previous answer. And every edge into a label block, which
+// lies outside every loop window, climbed the whole nest in the direct-SSA
+// loop pass; it now jumps over loops already found open. Steps are lookup
+// hops, scope levels and those loop-pass visits.
+enum
+{
+    C_TEST_UNBOUND_PROBE_LABEL,
+    C_TEST_UNBOUND_PROBE_DECLARATION,
+    C_TEST_UNBOUND_PROBE_GOTO,
+    C_TEST_UNBOUND_PROBE_SHAPES,
+};
+
+BUSTER_GLOBAL_LOCAL u64 c_test_unbound_probe_lowering_steps(u32 shape, u32 depth)
+{
+    u64 steps = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = (u64)depth * 80 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int tall(int x) { "));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        String8 piece = shape == C_TEST_UNBOUND_PROBE_LABEL ? string_format(temporary.arena, S8("L{u32}: for (; x > 1;) {{ "), level)
+                        : shape == C_TEST_UNBOUND_PROBE_DECLARATION ? S8("for (; x > 1;) { int y = x; ")
+                                                                   : string_format(temporary.arena, S8("for (; x > 1;) {{ if (x == 3) goto L{u32}; L{u32}: ; "), level, level);
+        c_test_append_source(bytes, capacity, &length, piece);
+    }
+    c_test_append_source(bytes, capacity, &length, S8("x -= 1; "));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("}"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8(" return x; }"));
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) + c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) +
+                 c_test_ir_ssa_loop_edge_steps();
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("unbound-probe.c"), preprocess, parse, target_native);
+    if (length < capacity && preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 && ir.diagnostic_count == 0 && ir.program)
+    {
+        steps = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) + c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) +
+                c_test_ir_ssa_loop_edge_steps() - before;
+    }
+    c_test_scratch_end(temporary);
+    return steps;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbound_first_token_probe_linear(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 256, DEEP = 1024 };
+    for (u32 shape = 0; shape < C_TEST_UNBOUND_PROBE_SHAPES; shape += 1)
+    {
+        u64 shallow = c_test_unbound_probe_lowering_steps(shape, SHALLOW);
+        u64 deep = c_test_unbound_probe_lowering_steps(shape, DEEP);
+        // The failing walks took some DEEP * DEEP / 2 = 524 K steps here.
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && deep <= shallow * 5 + 64 && deep <= (u64)DEEP * 32,
+                        string_format(arguments->arena, S8("unbound first-token probe steps shape={u32} shallow={u64} deep={u64}"), shape, shallow,
+                                      deep));
+    }
+    return result;
+}
+
 // `sizeof(c ? (c ? ( ... 1) : 2) : 2)` nested `depth` deep, spelled into one
 // constant-expression context (issue #2765). The strict operand type walk once
 // refused anything past 64 levels, which surfaced as a false "not a true
@@ -65785,6 +65854,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_static_declaration_inline_definition);
     C_TEST_FIXTURE(arguments, c_test_static_label_differences);
     C_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
+    C_TEST_FIXTURE(arguments, c_test_unbound_first_token_probe_linear);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
     C_TEST_FIXTURE(arguments, c_test_obsolete_designator_labels);
     C_TEST_FIXTURE(arguments, c_test_static_range_designators);
