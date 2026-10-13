@@ -63,6 +63,7 @@ jobs:
           mkdir -p evidence/projects evidence/git .ci-tools
           cp docs/external-project-ci.md evidence/assignment.md
           printf 'All scheduled projects initially not-run; project records replace this only after actual execution.\n' > evidence/project-state.txt
+          printf 'result=not-run\n' > evidence/ffmpeg.status
       - name: Prepare pristine cJSON input outside timing
         if: ${{ !cancelled() }}
         id: cjson
@@ -745,6 +746,97 @@ jobs:
           include-hidden-files: true
           retention-days: 14
           if-no-files-found: error
+      - name: Checkout pinned FFmpeg 7.1.3 source after existing Linux stages
+        id: ffmpeg_input
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: FFmpeg/FFmpeg
+          ref: f46e514491172d15bd74b4abb1814cd2f05a763e
+          path: external/ffmpeg
+          persist-credentials: false
+      - name: Record pristine FFmpeg source identity
+        id: ffmpeg_source_identity
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/ffmpeg
+          source-repository: FFmpeg/FFmpeg
+      - name: Verify pinned FFmpeg source and retain license text
+        id: ffmpeg_source_verified
+        if: ${{ !cancelled() && steps.ffmpeg_input.outcome == 'success' && steps.ffmpeg_source_identity.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C external/ffmpeg rev-parse HEAD)" = "f46e514491172d15bd74b4abb1814cd2f05a763e"
+          git -C external/ffmpeg rev-parse HEAD > evidence/ffmpeg.commit
+          git -C external/ffmpeg rev-parse 'HEAD^{tree}' > evidence/ffmpeg.tree
+          git -C external/ffmpeg status --porcelain --untracked-files=all --ignored > evidence/ffmpeg.worktree-status
+          test ! -s evidence/ffmpeg.worktree-status
+          git -C external/ffmpeg ls-tree -r HEAD > evidence/ffmpeg.files
+          cp external/ffmpeg/LICENSE.md evidence/ffmpeg-LICENSE.md
+      - name: ffmpeg independent project result
+        id: oracle_ffmpeg
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.ffmpeg_input.outcome == 'success' && steps.ffmpeg_source_identity.outcome == 'success' && steps.ffmpeg_source_verified.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          .ci-tools/build external_projects ffmpeg 2>&1 | tee evidence/ffmpeg.log
+          status=$?
+          set -e
+          if test "$status" -eq 0; then
+            printf 'result=pass\n' > evidence/ffmpeg.status
+          else
+            printf 'result=failed;exit=%s\n' "$status" > evidence/ffmpeg.status
+          fi
+          exit "$status"
+      - name: Retain FFmpeg portable evidence immediately
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: external-linux-ffmpeg-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/ffmpeg.status
+            evidence/ffmpeg.commit
+            evidence/ffmpeg.tree
+            evidence/ffmpeg.worktree-status
+            evidence/ffmpeg.files
+            evidence/ffmpeg-LICENSE.md
+            evidence/projects/ffmpeg.tsv
+            evidence/ffmpeg.log
+            build/ffmpeg-portable/receipt.txt
+            build/ffmpeg-portable/h264-target-actions.tsv
+            build/ffmpeg-portable/*.argv
+            build/ffmpeg-portable/*.stdout
+            build/ffmpeg-portable/*.stderr
+            build/ffmpeg-portable/*.status
+            build/ffmpeg-portable/reference/config.h
+            build/ffmpeg-portable/reference/config_components.h
+            build/ffmpeg-portable/reference/ffbuild/config.mak
+            build/ffmpeg-portable/reference/ffbuild/config.log
+            build/ffmpeg-portable/reference/fate-counts.tsv
+            build/ffmpeg-portable/reference/*.argv
+            build/ffmpeg-portable/reference/*.stdout
+            build/ffmpeg-portable/reference/*.stderr
+            build/ffmpeg-portable/reference/*.status
+            build/ffmpeg-portable/buster/config.h
+            build/ffmpeg-portable/buster/config_components.h
+            build/ffmpeg-portable/buster/ffbuild/config.mak
+            build/ffmpeg-portable/buster/ffbuild/config.log
+            build/ffmpeg-portable/buster/fate-counts.tsv
+            build/ffmpeg-portable/buster/*.argv
+            build/ffmpeg-portable/buster/*.stdout
+            build/ffmpeg-portable/buster/*.stderr
+            build/ffmpeg-portable/buster/*.status
+            build/ffmpeg-portable/buster/compiler-actions/*.argv
+            build/ffmpeg-portable/buster/compiler-actions/*.stdout
+            build/ffmpeg-portable/buster/compiler-actions/*.stderr
+            build/ffmpeg-portable/buster/compiler-actions/*.status
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
       - name: Publish Linux OS outcomes
         if: ${{ always() }}
         env:
@@ -756,9 +848,10 @@ jobs:
           SQLITE: ${{ steps.oracle_sqlite.outcome }}
           GIT: ${{ steps.oracle_git.outcome }}
           RAD: ${{ steps.oracle_rad.outcome }}
+          FFMPEG: ${{ steps.oracle_ffmpeg.outcome }}
         run: |
           mkdir -p evidence
-          printf 'sha=%s\nrun=%s\nattempt=%s\ncjson=%s\nzlib=%s\nstb=%s\nlua=%s\nquickjs=%s\nsqlite=%s\ngit=%s\nrad=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CJSON" "$ZLIB" "$STB" "$LUA" "$QUICKJS" "$SQLITE" "$GIT" "$RAD" | tee evidence/os-outcomes.txt
+          printf 'sha=%s\nrun=%s\nattempt=%s\ncjson=%s\nzlib=%s\nstb=%s\nlua=%s\nquickjs=%s\nsqlite=%s\ngit=%s\nrad=%s\nffmpeg=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CJSON" "$ZLIB" "$STB" "$LUA" "$QUICKJS" "$SQLITE" "$GIT" "$RAD" "$FFMPEG" | tee evidence/os-outcomes.txt
           printf 'Skipped means not-run; a started record without completion is incomplete. Inner timeout/failure and test counts are in each harness log. Hosted times are scheduling diagnostics.\n' >> evidence/os-outcomes.txt
           cat evidence/os-outcomes.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Retain machine records in existing evidence 2
