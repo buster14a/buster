@@ -520,7 +520,27 @@ struct IrInstruction
     bool volatile_access;
     // An IrSimdOperation, narrowed like the rest of the enum tail.
     u8 simd_operation;
+#if BUSTER_BENCH_ALLOCATIONS
+    // Diagnostic-only #3010 birth tag (IR_FAST_BIRTH_* in ir_fast.c), held in
+    // the row's one padding byte so the 64-byte layout is unchanged. Whole-row
+    // copies (compaction, promotion, CFG publication, inlining) carry it;
+    // every row initializer leaves it zero.
+    u8 fold_birth;
+#endif
 };
+
+#if BUSTER_BENCH_ALLOCATIONS
+// IrInstruction.fold_birth: the low three bits are the IrFastFoldRule the
+// commit probe found (NONE when none), PROBED marks a row the C builder
+// committed, CASCADE a rule that needed earlier birth folds, CLONE a copy the
+// inliner made (the callee's verdict is kept), and LATE_FOLDED, cleared on
+// each FAST entry, a row that FAST's fold pass folded in the current run.
+#define IR_FAST_BIRTH_RULE_MASK 0x07u
+#define IR_FAST_BIRTH_LATE_FOLDED 0x10u
+#define IR_FAST_BIRTH_CLONE 0x20u
+#define IR_FAST_BIRTH_CASCADE 0x40u
+#define IR_FAST_BIRTH_PROBED 0x80u
+#endif
 
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT <= UINT8_MAX);
@@ -992,6 +1012,8 @@ struct IrInlineStatistics
     u64 linkage_skips;
     u64 recursion_skips;
     u64 visits;
+    // Bytes of relocated caller tables handed back to the OS (os_discard).
+    u64 released_bytes;
     IrInlineBudgetReason required_budget_reason;
     u64 required_budget_demand;
     u64 required_budget_limit;
@@ -1528,6 +1550,28 @@ struct IrSemanticCounters
 };
 
 BUSTER_F_DECL void ir_semantic_record(IrSemanticCounter counter, u64 amount);
+// Returns the previous state; a suppressed thread records no semantic work.
+BUSTER_F_DECL bool ir_semantic_suppress(bool suppressed);
+// The construction side of the scalar-fold census (#3010), under
+// ir_construction.fold_birth_*: whether the row just committed as `id` would
+// already fold under ir_fast_fold's rules. Changes nothing.
+BUSTER_F_DECL void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id);
+// The end-of-body half (ir_construction.fold_net_*, fold_form_*, fold_size_*):
+// a function's committed rows before SSA finish. `uses` counts every reader of
+// each value and `marks` holds per-value census state. Both are zeroed per
+// begin, from a thread-local arena the allocation observer does not see.
+typedef struct IrFoldCensus IrFoldCensus;
+struct IrFoldCensus
+{
+    u32* uses;
+    u8* marks;
+    u32 value_count;
+};
+BUSTER_F_DECL IrFoldCensus ir_construction_fold_census_begin(IrFunction* function);
+// A frontend-held read of `value` outside the rows: a pending SSA store or
+// read replacement. Counts as a use and attributes the value to a store.
+BUSTER_F_DECL void ir_construction_fold_census_hold(IrFoldCensus* census, IrValueId value);
+BUSTER_F_DECL void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, IrFoldCensus* census);
 // One top-level evaluation of source range [start, end) of the token array at
 // `base`; a range any evaluator saw before counts as repeated work.
 BUSTER_F_DECL void ir_semantic_census_range(IrSemanticEvaluator evaluator, void const* base, u32 start, u32 end);

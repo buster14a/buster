@@ -114,6 +114,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_COMPILER_CLOSURE,
+    BUILD_COMMAND_COMPILER_EVIDENCE,
     BUILD_COMMAND_PRODUCTION_PROFILE,
     BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST,
     BUILD_COMMAND_GENERATE,
@@ -2823,8 +2824,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_is_canonical(Generate generate, C
     bool valid_arguments = !generate.cmake_arguments.length;
     if (generate.ci)
     {
-        valid_arguments = generate.cmake_arguments.length == 1 &&
-                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"));
+        // The partition option only selects test_all's unit launcher; it
+        // changes no compile or link input of the produced ide (#3912).
+        u64 count = generate.cmake_arguments.length;
+        valid_arguments = (count == 1 || count == 2) &&
+                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")) &&
+                          (count == 1 || string_equal(generate.cmake_arguments.pointer[1], S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON")));
     }
 
     bool result = generate.compiler == BUILD_COMPILER_CLANG && !generate.cc_set && !generate.linker_set && !generate.config_set && !generate.sanitize &&
@@ -24814,17 +24819,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    // Process partitioning is a test launcher choice, never an admitted
-    // artifact-fanout producer argument. ARM opts in only without fanout.
+    // Process partitioning is a test launcher choice, so it is the one
+    // admitted producer argument; any other extra argument still disqualifies.
     String8 partition_arguments[] = {
         S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
     };
     Generate partitioned = canonical;
     partitioned.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(partition_arguments);
-    if (build_artifact_fanout_is_canonical(partitioned, release))
+    String8 unadmitted_arguments[] = {
+        S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+        S8("-DBUSTER_UNITY_BUILD=OFF"),
+    };
+    Generate unadmitted = canonical;
+    unadmitted.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(unadmitted_arguments);
+    if (!build_artifact_fanout_is_canonical(partitioned, release) || build_artifact_fanout_is_canonical(unadmitted, release))
     {
-        string_print(S8("error: artifact fan-out accepted a partitioned producer\n"));
+        string_print(S8("error: artifact fan-out must admit only the partition launcher argument\n"));
         return PROCESS_RESULT_FAILED;
     }
     if (!build_artifact_fanout_worker_quota_valid(S8("1")) || build_artifact_fanout_worker_quota_valid((String8){0}) ||
@@ -25617,6 +25628,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_COMPILER_CLOSURE:
+        case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
@@ -25662,6 +25674,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_COMPILER_EVIDENCE, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
         {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
@@ -25710,6 +25723,9 @@ struct MatrixTestTree
     // unless matrix_superbuild_allocate_jobs serializes the test phases.
     u32 parallel_jobs;
     u32 test_jobs;
+    // Inner Ninja --parallel for clang_analyze plus optnone_audit
+    // (matrix_superbuild_analyze_jobs); zero means serial.
+    u32 analyze_jobs;
     u32 unity_only : 1;
     u32 test_serialized : 1;
     u32 unity_analysis_scheduled : 1;
@@ -25721,6 +25737,10 @@ struct MatrixTestTree
 // budget the superbuild admits one tree per CPU (matrix_superbuild_outer_jobs)
 // and shares the budget between test trees (matrix_superbuild_allocate_jobs).
 #define MATRIX_SUPERBUILD_LOW_CORE_THREADS 4
+// The post-test analyzers overlap only on hosts with at least this much
+// memory: hosted Linux and Windows runners report 15.6-16 GiB, while the
+// 7 GiB macOS runners keep them serial (#3912).
+#define MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY BUSTER_GB(12)
 
 typedef struct MatrixSuperbuildSelfHostPlan MatrixSuperbuildSelfHostPlan;
 struct MatrixSuperbuildSelfHostPlan
@@ -26975,6 +26995,15 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
     return BUSTER_MIN(split_tree_limit, tree_count);
 }
 
+// clang_analyze keeps two workers and optnone_audit replays one frontend.
+// Its longest shard leaves one worker idle for most of the run (hosted Linux
+// x86-64: 57 s analysis, 26 s audit, back to back), so a host with the CPUs
+// and memory for all three processes runs the two commands together.
+BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_analyze_jobs(u32 thread_count, u64 memory_bytes)
+{
+    return thread_count >= 3 && memory_bytes >= MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY ? 2 : 1;
+}
+
 // Ninja admits ready edges from a shared pool in declaration order, and a fresh
 // CI checkout has no `.ninja_log` for its critical-path scheduler to learn from.
 // Declaring the longest trees first therefore decides whether the slowest test
@@ -27401,7 +27430,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
             .combination_indices = {0},
             .combination_count = 1,
             .parallel_jobs = 1,
+            .analyze_jobs = 2,
             .unity_only = 1,
+            .unity_analysis_scheduled = 1,
         },
         {
             .build_directory = S8("build/gcc-debug"),
@@ -27436,7 +27467,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_BUILD_TARGETS ide:Debug)")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
-                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_CONFIG Release)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_JOBS 2)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_ANALYZE_JOBS 1)")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
 
     // A four-CPU checks shard: the two sanitized test trees keep their build
@@ -27471,6 +27505,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     if (low_core_result != PROCESS_RESULT_SUCCESS ||
         matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
+        matrix_superbuild_analyze_jobs(4, 16759504896ull) != 2 || matrix_superbuild_analyze_jobs(3, BUSTER_GB(7)) != 1 ||
+        matrix_superbuild_analyze_jobs(2, BUSTER_GB(64)) != 1 ||
         !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
         !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         !matrix_superbuild_self_host_plan_valid(linux_self_host, linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16) ||
@@ -27616,6 +27652,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_test_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_JOBS {u32})\n"), prefix, BUSTER_MAX(tree.analyze_jobs, 1)));
         // Whole-table audits ride on the same canonical tree that already
         // owns clang_analyze: unsanitized optimized Clang, exactly one tree
         // per platform. They read only generated metadata tables and source
@@ -27832,11 +27869,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
-    // Sanitized Clang and Windows AArch64 Release trees use the existing
-    // isolated-process runner at four or more test workers. Smaller quotas
-    // retain the ordinary invocation (tools/ci_unit_tests.c). Windows AArch64
-    // has no artifact-fanout consumer; supported canonical producers retain
-    // exactly the standard arguments (build_artifact_fanout_is_canonical).
+    // Every Clang CI tree, including the canonical Release producer, uses the
+    // existing isolated-process runner at four or more test workers (#3912).
+    // Smaller quotas and single-threaded drivers retain the ordinary
+    // invocation (tools/ci_unit_tests.c); the option changes no artifact input.
     BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8_INITIALIZER("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
@@ -27886,7 +27922,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && (tree_plan.sanitize || (coverage_target.windows && coverage_target.aarch64)) ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
@@ -28045,6 +28081,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
         string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
                      matrix_superbuild_outer_jobs(thread_count, tree_count));
+        u64 memory_bytes = os_get_physical_memory_size();
+        u32 analyze_jobs = matrix_superbuild_analyze_jobs(thread_count, memory_bytes);
+        string_print(S8("BUSTER_SUPERBUILD_POST_TEST: analyze_jobs={u32} memory_mib={u64}\n"), analyze_jobs, memory_bytes >> 20);
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            trees[tree_i].analyze_jobs = trees[tree_i].unity_analysis_scheduled ? analyze_jobs : 0;
+        }
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
             string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} tests={u32} jobs={u32} directory={S8}\n"), tree_i,
@@ -39727,6 +39770,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/compiler_experiment_supervisor.c"
 #include "tools/compiler_closure_phase.c"
 #include "tools/compiler_closure.c"
+#include "tools/compiler_evidence.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
 #include "tools/external_projects.c"
@@ -39755,6 +39799,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
+        [BUILD_COMMAND_COMPILER_EVIDENCE] = S8_INITIALIZER("compiler_evidence"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
         [BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST] = S8_INITIALIZER("production_profile_self_test"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
@@ -39909,6 +39954,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_COMPILER_EVIDENCE: result = compiler_evidence_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
@@ -40923,6 +40969,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_COMPILER_CLOSURE:
+        case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         {

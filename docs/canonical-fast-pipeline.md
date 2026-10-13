@@ -208,6 +208,148 @@ inconclusive hosted result cannot enable the default. Self-hosting fixed point,
 all pass subsets, native mode matrix and non-native consumers remain correctness
 gates independently of performance acceptance.
 
+### Construction-time fold census (#3010)
+
+`BUSTER_BENCH_ALLOCATIONS` builds report under `ir_construction` in
+`-fsource-metrics` whether FAST's scalar folds could have happened when a row
+was first built. `ir_fast_fold_rule` is the only rule authority. The fold pass
+calls it, and `ir_construction_fold_census` also calls it with no replacement
+map on every row the C builder commits through `c_ir_append_instruction`:
+
+- `fold_birth_scalar_rows`: committed `CAST`, `UNARY` and `BINARY` rows probed.
+- `fold_birth_<rule>`: rows a rule already folds from the operands committed
+  before them (direct). `fold_birth_metadata_mismatches` counts identities
+  rejected by the replacement metadata check. `fold_birth_avoidable_bytes` is
+  logical row/value/operand/source storage for direct birth folds: an identity
+  needs none of it, while a constant still needs its row and immediate. This
+  is not an arena-call or RSS figure.
+- `fold_birth_cascade_<rule>`: rows no rule folds directly but one does once
+  earlier birth folds are applied: identity birth folds are followed to their
+  replacement, and constant birth folds supply their folded bits.
+  `fold_birth_cascade_uncached` counts rows that stayed unfoldable while an
+  operand's birth-constant bits had left the bounded cache, so it bounds the
+  cascades the census may have missed.
+- `fold_late_<rule>`: folds FAST actually applied. `fold_late_replaced_roots`
+  counts the folds whose operand had to be followed through the replacement map
+  (an earlier identity or a parameter sweep).
+
+The rules are `cast_identity`, `cast_constant`, `unary_constant`,
+`binary_constant`, `binary_right_identity` and `binary_left_identity`. Probes
+suppress `ir_semantics` recording, so those counters keep measuring only the
+compiler's own semantic work, and they allocate nothing, so `allocation.*` is
+unchanged.
+
+### Matched birth/late association
+
+Taken alone, `fold_birth_*` and `fold_late_*` count independent populations.
+Birth counts include functions that FAST later skips or does not run
+(`-fno-canonical-fast`, budget and provenance skips) and rows that later passes
+delete. Late counts include rows that SSA insertion, promotion and inlining add
+after commit. Neither a birth/late ratio nor late minus birth attributes or
+bounds anything.
+
+The `fold_match_*` counters join them per row. The census stores its answer in
+the committed row: the diagnostic-only `IrInstruction.fold_birth` byte, which
+exists only under `BUSTER_BENCH_ALLOCATIONS` and occupies the row's existing
+padding, so `sizeof(IrInstruction)` stays 64. Whole-row copies carry it through
+promotion, `ir_rewrite_compact` renumbering, CFG publication and inlining; rows
+created after commit start zeroed. Each fold `ir_fast_fold` applies is counted
+once, by rule, in exactly one class:
+
+- `fold_match_direct_<rule>`: the row's birth tag names the same rule, decided
+  from its committed operands.
+- `fold_match_cascade_<rule>`: the birth tag names the same rule, decided
+  through earlier birth folds.
+- `fold_match_post_<rule>`: anything else, so the fold needed a fact
+  construction did not have: SSA insertion, promotion, inlining, or a root the
+  late scan supplied. The causes split as `fold_match_post_unprobed` (a row the
+  C builder never committed, such as SSA or promotion output),
+  `fold_match_post_unfoldable_at_birth` (committed, but no rule folded it) and
+  `fold_match_post_rule_changed` (committed and foldable, but late facts chose
+  another rule).
+
+For each rule, `fold_late_<rule>` equals the sum of the three
+`fold_match_*_<rule>` counters. An inlined copy keeps its callee row's tag
+and the inliner adds a clone bit: a callee row foldable at its own commit
+stays direct or cascade, while one that folds only with the caller's
+arguments is post. `fold_match_clone_{direct,cascade,post}` count the clone
+share of each class; they are a split, not further folds.
+
+Survival follows each committed, non-clone birth-foldable row (direct or
+cascade) into FAST. `fold_survival_reached` counts those in functions FAST
+admits and `fold_survival_skipped` those in functions it declines (budget or
+provenance). `fold_survival_unfolded` counts reached rows that the fold pass
+did not fold in that run, for example because `fold` was not among the
+selected passes. Birth folds in functions that never reach
+`ir_fast_function` (`-fno-canonical-fast`, validation skips) or in rows
+deleted before FAST appear in neither; they stay in `fold_birth_*` only.
+These are hosted diagnostic counts, not performance evidence.
+
+#### End-of-body breakdown and net account
+
+`c_ir_fold_census_body` takes a second census of each C function after its body
+lowers and before `c_ir_ssa_finish`. At that point the rows are still the
+committed ones, minus retractions, and values are not yet renumbered. It asks
+the same rule of every row (an operand defined after its reader does not count,
+as at commit) and walks the rows twice more. Direct SSA still keeps stored
+values in its `STORE` events and resolved reads, so those are counted as
+readers (`fold_net_ssa_uses`). This population is close to the commit-time one
+but not identical: retracted rows, functions whose body failed to lower, and
+rows committed outside a function body are absent.
+
+- **Form.** `fold_form_<shape>_<consumer>` crosses the folded row's IR shape
+  with the construct that first reads its result. Shapes: `reinterpret`,
+  `sign_extend`, `zero_extend`, `truncate` (literal casts), `bool_compare` (a
+  two-literal binary producing `bool`), `other` (unary, non-boolean binary,
+  identities). Consumers: `store` (a store row or an SSA store), `aggregate`
+  (array/aggregate construction, which includes initializers), `return`,
+  `call`, `branch` (conditional branch or switch), `operator` (cast, unary or
+  binary), `other`, `unused`.
+- **Function size.** `fold_size_<bucket>_{functions,rows,folds,dead_literals}`
+  buckets functions by committed rows: `rows_lt_64`, `rows_lt_256`,
+  `rows_lt_1024`, `rows_lt_4096`, `rows_ge_4096`.
+- **Net account.** These are object counts, not bytes multiplied by a presumed
+  size.
+  - `fold_net_constant_rows` and `fold_net_identity_rows` partition the folded
+    rows.
+  - `fold_net_operand_slots` counts the operand slots those rows filled. Each
+    row's slice is its own arena request in the C builder.
+  - `fold_net_literal_uses` counts the literal reads that folding removes; an
+    identity's forwarded operand is not counted.
+  - `fold_net_dead_literals` counts literals left with no reader. Each would
+    need no row, value or immediate request.
+  - `fold_net_adjacent_dead_literals` counts the dead literals committed directly
+    before their folded reader in the same block. Those could be rewritten in
+    place.
+
+  Rows, values and source ranges come from per-unit streams trimmed to the
+  final count (`c_ir_row_streams_trim`). So the rows and values a birth fold
+  saves free stream slots, not arena requests. In that model:
+  - Rows and values not built: `identity_rows + dead_literals`.
+  - Operand-slice requests saved: `constant_rows + identity_rows`.
+  - Immediate requests at construction: `constant_rows - dead_literals` more,
+    since each folded constant needs one.
+- **Late side.** Each `fold_late_*_constant` is one FAST immediate request, and
+  `fold_late_dce_constants` counts `CONSTANT_INTEGER` rows FAST DCE deleted
+  (literals and folded rows alike). Promotion compacts rows before FAST runs,
+  so this census cannot tell which late requests or deletions belong to
+  birth-foldable rows. They only bound what a birth fold would also save:
+  - FAST immediates spared: at most `min(fold_net_constant_rows, Σ fold_late_*_constant)`.
+  - DCE deletions spared: at most `min(fold_net_dead_literals, fold_late_dce_constants)`.
+
+  The late folds themselves are attributed per row by the
+  [matched association](#matched-birthlate-association):
+  `fold_match_direct_*` plus `fold_match_cascade_*` are exactly the late folds
+  a birth fold would replace. The immediates and DCE deletions remain bounds.
+  Whether FAST would skip a whole function's compaction is not measured.
+
+Scratch is a per-thread arena created on first use and carved with the raw
+arena primitive. The census therefore adds no `allocation.*` request and does
+not move any other arena's dirty prefix. The arena's reservation does appear
+among OS events in the exit census, and its pages in minor-fault counts. A
+function with more than 2^25 values is skipped and counted in
+`fold_net_skipped_functions`.
+
 ## Opt-in block-local CSE (#3011)
 
 `ir_fast_cse` is an experiment, outside every optimization level and outside
@@ -298,15 +440,103 @@ arm to byte-identical output. What the data show:
 So this census answers the recurrence question and makes the cost comparison
 diagnostically. It does not complete #3011's first gate, which needs the
 matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
-constants, a construction-time constant cache (#3010) remains a cheaper
-candidate that neither arm measures. The pass stays opt-in. Adopting either
-arm, or that alternative, also needs allocation, spill and runtime data.
+constants, the next section measures a construction-time constant cache
+against the late pass.
+
+## Opt-in construction-time constant interning (#3011)
+
+`-fcanonical-intern-constants` (cleared by `-fno-canonical-intern-constants`,
+the last one given winning) asks C lowering to reuse an integer constant
+already built earlier in the current block instead of building another one.
+It is independent of every `-O` level and FAST control, and off by default.
+`c_ir_emit_integer_value_at` looks up a 64-slot direct-mapped table shared by
+one lowering. Each function builder takes a fresh generation, so no entry
+crosses a function and none is cleared. The key is the canonical type, the
+canonicalized immediate bits and the sign flag.
+
+An entry is only a hint. Lowering can retract a row
+(`ir_block_retract_tail`) or truncate a block's tail
+(`ir_block_truncate_after`) and then reuse the freed row and value IDs. So a
+hit must re-prove all of the following:
+
+- the cached value is still defined by its cached row;
+- the row is still the same `CONSTANT_INTEGER`;
+- the row lies in the builder's current block.
+
+A hit allocates no row, value or immediate. A failed proof builds the row as
+before and is counted as `stale`. Global initializers and the test hooks have
+no table. `-v` prints `C_CONSTANT_INTERN lookups hits stale`.
+
+### Four-arm comparison (diagnostic, not performance evidence)
+
+Measured on a hosted 4-vCPU container with a Clang-built Release `ide`
+(production code as in the commit that adds this section). The compile is
+self-host `ide.c` with tests off, `-g -march=native`, the default four FAST
+passes and `-v`. Compile wall time and peak RSS are medians of 7 interleaved
+runs per arm. Spill, reload and push counts come from `-v` and
+`llvm-objdump` of each object.
+
+| Arm | Wall s (min-max) | Peak RSS KiB | Rows into FAST | Rows after FAST | `.text` bytes | Spills | Reloads | Remats | `pushq` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| None | 5.299 (5.177-5.603) | 854,084 | 2,026,447 | 1,822,939 | 28,520,268 | 30,135 | 53,991 | 49,886 | 116,050 |
+| Interning | 5.292 (5.118-5.911) | 835,708 | 1,859,956 | 1,740,671 | 28,298,232 | 30,040 | 53,191 | 29,619 | 116,504 |
+| CSE table | 5.302 (5.130-5.692) | 852,412 | 2,026,447 | 1,729,373 | 28,265,508 | 31,786 | 54,829 | 35,302 | 116,720 |
+| Interning + table | 5.298 (5.143-5.396) | 835,256 | 1,859,956 | 1,716,648 | 28,259,145 | 31,938 | 54,973 | 33,319 | 116,811 |
+
+Interning reports 421,116 lookups, 166,402 hits and 75 stale entries. With
+interning, CSE still finds 25,384 hits, 25,347 of them constants that only
+become equal after folding. The CSE pass costs about 20 ms per compile;
+interning has no separate pass.
+
+Generated-code runtime: each arm's object was linked into a compiler. Each
+compiler then compiled the same input with default flags, 5 interleaved
+runs per arm.
+
+| Compiler built with | Wall s (min-max) | Peak RSS KiB |
+| --- | ---: | ---: |
+| None | 24.308 (23.678-25.540) | 860,524 |
+| Interning | 24.103 (22.971-25.238) | 860,248 |
+| CSE table | 23.551 (23.546-25.524) | 860,080 |
+| Interning + table | 24.330 (23.656-25.816) | 859,976 |
+
+All four compilers produced byte-identical objects. The compilers built with
+interning, and with interning plus CSE, each recompile themselves with the
+same flags to byte-identical output.
+
+What the data show:
+
+- **Rows and memory:** interning removes 8.2% of the rows entering FAST
+  before they are allocated. Peak RSS falls by about 18 MiB (2.2%), against
+  about 2 MiB for the late CSE pass.
+- **Code size:** after FAST, interning leaves 4.5% fewer rows and 0.78% less
+  `.text`. The late table gets 5.1% and 0.89%, because folding exposes about
+  25k further equal constants.
+- **Spills:** the late table raises spills by 5.5% and reloads by 1.6%.
+  Interning leaves both slightly lower. Both extend constant live ranges
+  across calls in the same block. That shows as more callee-saved pushes:
+  +0.4% with interning and +0.6% with the table. In a small Windows module
+  that change shows up directly in hand-checked frames.
+- **Time:** compile-time and generated-runtime differences are inside the
+  hosted run-to-run range. Neither is established here.
+
+Interning is therefore the cheaper way to obtain most of the constant reuse,
+with less memory and without the spill growth. Both stay opt-in. Adopting
+either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
+peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
+measures both flags on the 9700X; its method is in
+[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
+expect today's default, so enabling interning by default would also update
+those expectations.
 
 ## Tests
 
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
+`ir_fast_intern_tests` checks that interning shares a repeated constant
+within a block, never across blocks, types or signs, and that each hit is
+one row and one value never built. The driver test runs the shared fixture
+with interning and CSE on every backend.
 `ir_fast_cse_tests` runs each case under both strategies and checks the
 window boundary for distinct rows and for repeated hits. The cases cover
 commuted and ordered pairs, duplicate operands, block boundaries, excluded
@@ -376,7 +606,16 @@ A caller keeps its optional splices only when their planned row growth,
 shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (5), reaches its instruction
 rows; otherwise every optional site in it stays a call. The first splice
 relocates the caller's exactly sized tables and the arena keeps the old copy,
-so one tiny site in a large caller costs more memory than it saves. On the
+so one tiny site in a large caller costs more memory than it saves. The pass
+hands the complete pages of every abandoned table back to the OS
+(`ir_inline_cfg_discard_record`, `os_discard`); the range stays mapped and
+writable. It holds one open run per table kind: because the C frontend carves
+each kind out of one row stream in module order and callers are visited in that
+order, a relocated caller's range usually extends the run (freeing the page two
+neighbours share), and any other range first releases the run. The last runs
+are released after the final splice; the record takes no planning scratch.
+The verbose record reports the released bytes (#3854). The shift measurements
+below predate this release. On the
 unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
 1643, 2639, 3462 and 3739 of 3984 optional sites for +5, +11, +25, +42 and
 +52 MB of peak RSS over tiny-off (unbounded: +80 MB). Generated stage-2
@@ -417,16 +656,25 @@ alignment; that charge is an upper bound, because before a caller's first splice
 tables once to the planned final counts instead of doubling them. Relocating a
 touched caller's exactly sized frontend tables still retains the old copy in the
 arena: on the unity self-host source, tiny inlining touches 809 callers whose
-tables total 65.5 MB, which is most of its peak-RSS cost (#48). Callee payloads
+tables total 65.5 MB, which is most of its peak-RSS cost (#48). At the default
+shift, 639 table relocations abandon 34.6 MB, of which 29.3 MB lies in complete
+pages that the pass now releases; a local stage-1 tiny-on/off peak-RSS ratio
+fell from 1.049 to 1.019 (diagnostic, #3854). Callee payloads
 and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. Expansion checks
 strict canonical validity per function, never by a module-wide scan: each
-candidate's caller and callee once before they are read, and each spliced caller
-again after its last splice (an output failure reports the `inlining output`
-boundary). A mandatory call whose caller or callee is a legacy producer-certified
-shape that fails that check is diagnosed; an optional one stays a call. When FAST
+candidate's callee once before it is read, each mandatory candidate's caller
+likewise, an optional candidate's caller once its planned sites survive the
+caller relocation bound and before its first splice (so a large caller that
+the bound keeps as calls is never checked by this pass, #3854), and each
+spliced caller again after its last splice (an output failure reports the
+`inlining output` boundary). The strict validator does not check debug rows,
+so the planner checks a caller's debug-local scopes and scope parents once
+rather than once per site. A mandatory call whose caller or callee is a legacy producer-certified
+shape that fails that check is diagnosed; an optional one stays a call (all of
+an invalid caller's planned optional sites count as shape skips). When FAST
 is selected, a caller whose splices were all optional skips that output check:
 it is listed in `inline_unchecked_callers` and proven by the validation that
 follows anyway (the promotion output check of a checked build, else the FAST
@@ -438,7 +686,7 @@ from an uncapped tiny self-host compile under cachegrind (#48). Any other
 rewritten caller is checked at once, so the FAST input guard still checks all
 functions on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
-growth, rejection categories and visits. These counts are diagnostics, not a
+growth, rejection categories, visits and released relocation bytes. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first
 resource category, requested amount and applicable limit in the source diagnostic.
 

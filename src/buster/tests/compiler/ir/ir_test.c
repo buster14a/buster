@@ -1,7 +1,9 @@
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/os.h>
 #include <buster/lib/time.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opcode)
@@ -533,7 +535,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories_case(UnitT
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1091,7 +1093,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_case(UnitTestArgumen
         targets_unchanged &= targets[index].value == original_targets[index].value;
     }
     BUSTER_TEST(arguments, keys_unchanged && targets_unchanged);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1163,7 +1165,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_keys(UnitTestArgumen
         result.test_count += duplicate.test_count;
         result.succeeded_test_count += duplicate.succeeded_test_count;
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1319,7 +1321,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_parameter_validation(UnitTe
                     TemporalArena dirty = scratch_begin(0, 0);
                     u8* bytes = arena_allocate(dirty.arena, u8, 4096);
                     memset(bytes, 0xa5, 4096);
-                    scratch_end(dirty);
+                    c_test_scratch_end(dirty);
 #if BUSTER_BENCH_ALLOCATIONS
                     IrConstructionCounters before = ir_construction_counters();
 #endif
@@ -1985,7 +1987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_test_direct_call_count(defaults_program, defaults_caller, S8("small_leaf")) == 0);
             BUSTER_TEST(arguments, ir_validate_canonical_module(defaults_program, defaults_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(defaults_temporary);
+        c_test_scratch_end(defaults_temporary);
     }
 
     // With FAST selected, a caller whose splices were all optional defers its
@@ -2059,7 +2061,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
             }
         }
-        scratch_end(deferred_temporary);
+        c_test_scratch_end(deferred_temporary);
     }
 
     // A tiny site in a caller much larger than its growth stays a call by
@@ -2119,8 +2121,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, remaining == (variant ? 0u : 1u));
             BUSTER_TEST(arguments, bound_module->inlining.inlined == variant);
             BUSTER_TEST(arguments, variant || bound_module->inlining.budget_skips >= 1);
+            // Relocating the caller abandons its old instruction table, which
+            // spans whole pages here; the pass hands them back to the OS and
+            // the relocated caller still reads and validates (#3854). A caller
+            // the bound keeps as a call is never relocated.
+            u64 page_rows = os_get_page_size() / sizeof(IrInstruction);
+            BUSTER_TEST(arguments, !variant || !bound_caller || bound_caller->instruction_count < 2u * page_rows ||
+                                       bound_module->inlining.released_bytes >= os_get_page_size());
+            BUSTER_TEST(arguments, variant || bound_module->inlining.released_bytes == 0);
+            BUSTER_TEST(arguments, !bound_caller ||
+                                       ir_validate_canonical_module(bound_program, bound_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(bound_temporary);
+        c_test_scratch_end(bound_temporary);
     }
 
     // Mandatory sites must be budgeted before optional sites, even when
@@ -2209,8 +2221,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_test_direct_call_count(priority_program, optional_caller, S8("optional_leaf")) == 1);
             BUSTER_TEST(arguments, ir_validate_canonical_module(priority_program, priority_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(priority_temporary);
-        scratch_end(required_temporary);
+        c_test_scratch_end(priority_temporary);
+        c_test_scratch_end(required_temporary);
     }
 
     // A leading acyclic mandatory feeder must not hide a later required
@@ -2358,7 +2370,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
         }
-        scratch_end(cycle_temporary);
+        c_test_scratch_end(cycle_temporary);
     }
 
     // An explicit function-growth limit on a required call reports the
@@ -2444,7 +2456,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(refusal_program, refusal_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(refusal_temporary);
+        c_test_scratch_end(refusal_temporary);
     }
 
     // A real caller with substantial spare capacity must still admit a
@@ -2593,7 +2605,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
         }
-        scratch_end(capacity_temporary);
+        c_test_scratch_end(capacity_temporary);
     }
 
     // Optional tiny sites bound retained storage per caller, as FAST does.
@@ -2682,7 +2694,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(spread_program, spread_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(spread_temporary);
+        c_test_scratch_end(spread_temporary);
     }
 
     return result;
@@ -3131,7 +3143,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                     TemporalArena poison = arena_begin_temporal(scratch);
                     u8* bytes = arena_allocate(scratch, u8, BUSTER_KB(16));
                     memset(bytes, 0xa5, BUSTER_KB(16));
-                    scratch_end(poison);
+                    c_test_scratch_end(poison);
                 }
                 u64 classifications = fixture.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values;
                 IrAbiValue cached = ir_type_abi_value(&fixture, grown_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
@@ -3750,7 +3762,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, arguments->arena->position == abi_attempt.position);
         u8* discarded = arena_allocate(arguments->arena, u8, 16384);
         memset(discarded, 0xcc, 16384);
-        scratch_end(abi_attempt);
+        c_test_scratch_end(abi_attempt);
     }
     // Mutating a language layout invalidates all conventions and dependent
     // aggregate classifications through one explicit program operation.

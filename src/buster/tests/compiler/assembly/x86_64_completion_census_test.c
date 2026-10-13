@@ -4002,6 +4002,31 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, probe_form_id, false);
         BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // This process prepared every form before the tests ran; a fresh `ide`
+    // fills each per-form cache on first use, and the census command reaches
+    // some forms before buster_x86_metadata_prewarm. Every normalized form
+    // must still emit there (#53: facts prepared before the prewarm once lost
+    // their operand facts and blocked 1,977 forms).
+    {
+        String8 output = buster_test_temporary_path(arguments->arena, S8("x86-census-cold"), S8(".txt"));
+        String8 command[] = {program_state->input.arguments.pointer[0], S8("x86_64_completion_census"),
+                             string_format(arguments->arena, S8("--output={S8}"), output)};
+        ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                       .use_process_environment = 1};
+        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, child, 120000000);
+            String8 standard_output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+            BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS, standard_output);
+            String8 emitted = string_format(arguments->arena, S8(" emitted={u32} blocked=0 "),
+                                            (u32)BUSTER_X86_COMPLETION_CENSUS_EXPECTED_METADATA_EMITTED_COUNT);
+            BUSTER_TEST_RAW(arguments, string_first_sequence(standard_output, emitted) != BUSTER_STRING_NO_MATCH, standard_output);
+        }
+        (void)os_file_delete(output);
+    }
+#endif
 #else
     BUSTER_TEST(arguments, true);
 #endif

@@ -32,18 +32,81 @@ BUSTER_GLOBAL_LOCAL IrInlineCfgReserve ir_inline_cfg_reserve(IrFunction const* c
     };
     return result;
 }
+// Table kinds whose abandoned copies ir_inline_cfg_reserve_tables records.
+typedef enum IrInlineDiscardTable
+{
+    IR_INLINE_DISCARD_BLOCKS,
+    IR_INLINE_DISCARD_INSTRUCTIONS,
+    IR_INLINE_DISCARD_SOURCES,
+    IR_INLINE_DISCARD_VALUES,
+    IR_INLINE_DISCARD_EXTRA_INSTRUCTIONS,
+    IR_INLINE_DISCARD_EXTRAS,
+    IR_INLINE_DISCARD_TABLE_COUNT,
+} IrInlineDiscardTable;
+
+// The open run of abandoned caller-table bytes for each table kind. The arena
+// cannot free a relocated caller's old tables, but no pointer reads them
+// again, so their complete pages go back to the OS. The C frontend carves each
+// kind for every function out of one row stream in module order, and callers
+// are visited in that order, so consecutive relocated callers usually abut:
+// a range that extends the open run joins it (also freeing the page two
+// callers share), and any other range first releases the open run. Only one
+// run per kind is held, so the record needs no planning scratch (#3854).
+typedef struct IrInlineDiscard IrInlineDiscard;
+struct IrInlineDiscard
+{
+    u64 starts[IR_INLINE_DISCARD_TABLE_COUNT];
+    u64 ends[IR_INLINE_DISCARD_TABLE_COUNT];
+    u64 released_bytes;
+};
+
+BUSTER_GLOBAL_LOCAL void ir_inline_cfg_discard_flush(IrInlineDiscard* discard, IrInlineDiscardTable table)
+{
+    if (discard->ends[table] > discard->starts[table])
+    {
+        discard->released_bytes += os_discard((void*)discard->starts[table], discard->ends[table] - discard->starts[table]);
+    }
+    discard->starts[table] = 0;
+    discard->ends[table] = 0;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_inline_cfg_discard_record(IrInlineDiscard* discard, IrInlineDiscardTable table,
+                                                      void const* rows, u64 bytes)
+{
+    if (discard && rows && bytes)
+    {
+        u64 start = (u64)rows;
+        if (discard->ends[table] != start) ir_inline_cfg_discard_flush(discard, table);
+        if (discard->ends[table] == 0) discard->starts[table] = start;
+        discard->ends[table] = start + bytes;
+    }
+}
+
+// Releases every open run; returns the bytes handed back over the pass.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_discard_release(IrInlineDiscard* discard)
+{
+    for (u32 table = 0; table < IR_INLINE_DISCARD_TABLE_COUNT; table += 1)
+    {
+        ir_inline_cfg_discard_flush(discard, (IrInlineDiscardTable)table);
+    }
+    return discard->released_bytes;
+}
+
 // Grow the caller's block, instruction, value and extra tables once, to the
 // planned final counts, before its first splice. A frontend-built caller's
 // tables are exactly sized, so the first append would otherwise double each
 // one and leave both the original and the doubling slack in the arena (#48).
-// Counts that exceed a target still grow through the ordinary appenders.
+// Counts that exceed a target still grow through the ordinary appenders. Each
+// abandoned table is recorded in `discard` (when given) for release (#3854).
 BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* caller, u64 blocks, u64 instructions,
-                                                      u64 values, u64 extras)
+                                                      u64 values, u64 extras, IrInlineDiscard* discard)
 {
     if (blocks > caller->block_capacity && blocks <= UINT32_MAX)
     {
         IrBlock* rows = arena_allocate(arena, IrBlock, blocks);
         if (caller->block_count) memcpy(rows, caller->blocks, sizeof(*rows) * caller->block_count);
+        ir_inline_cfg_discard_record(discard, IR_INLINE_DISCARD_BLOCKS, caller->blocks,
+                                     sizeof(*rows) * caller->block_capacity);
         caller->blocks = rows;
         caller->block_capacity = (u32)blocks;
     }
@@ -57,6 +120,10 @@ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* 
         {
             memcpy(sources, caller->instruction_canonical_sources, sizeof(*sources) * caller->instruction_count);
         }
+        ir_inline_cfg_discard_record(discard, IR_INLINE_DISCARD_INSTRUCTIONS, caller->instructions,
+                                     sizeof(*rows) * caller->instruction_capacity);
+        ir_inline_cfg_discard_record(discard, IR_INLINE_DISCARD_SOURCES, caller->instruction_canonical_sources,
+                                     sizeof(*sources) * caller->instruction_capacity);
         caller->instructions = rows;
         caller->instruction_canonical_sources = sources;
         caller->instruction_capacity = (u32)instructions;
@@ -65,6 +132,8 @@ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* 
     {
         IrValue* rows = arena_allocate(arena, IrValue, values);
         if (caller->value_count) memcpy(rows, caller->values, sizeof(*rows) * caller->value_count);
+        ir_inline_cfg_discard_record(discard, IR_INLINE_DISCARD_VALUES, caller->values,
+                                     sizeof(*rows) * caller->value_capacity);
         caller->values = rows;
         caller->value_capacity = (u32)values;
     }
@@ -77,6 +146,10 @@ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* 
             memcpy(rows, caller->extra_instructions, sizeof(*rows) * caller->extra_count);
             memcpy(payloads, caller->extras, sizeof(*payloads) * caller->extra_count);
         }
+        ir_inline_cfg_discard_record(discard, IR_INLINE_DISCARD_EXTRA_INSTRUCTIONS, caller->extra_instructions,
+                                     sizeof(*rows) * caller->extra_capacity);
+        ir_inline_cfg_discard_record(discard, IR_INLINE_DISCARD_EXTRAS, caller->extras,
+                                     sizeof(*payloads) * caller->extra_capacity);
         caller->extra_instructions = rows;
         caller->extras = payloads;
         caller->extra_capacity = (u32)extras;
@@ -88,6 +161,7 @@ BUSTER_GLOBAL_LOCAL IrLocalId ir_inline_cfg_local(IrLocalId id, u32 base)
     return id.value == IR_ID_UNDERLYING_INVALID ? id : (IrLocalId){.value = base + id.value};
 }
 
+// Linear in the program's types: ir_inline_module resolves it once per pass.
 BUSTER_GLOBAL_LOCAL IrTypeId ir_inline_cfg_void_type(IrProgram* program)
 {
     IrTypeId result = IR_TYPE_ID_INVALID;
@@ -103,6 +177,19 @@ BUSTER_GLOBAL_LOCAL IrTypeId ir_inline_cfg_void_type(IrProgram* program)
         }
     }
     return result;
+}
+
+// Debug-local scopes name an existing scope and each scope's parent precedes
+// or is itself. The strict validator does not check these rows.
+BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_debug_rows_valid(IrFunction const* function)
+{
+    bool valid = (!function->debug_local_count || function->debug_locals) &&
+                 (!function->debug_scope_count || function->debug_scopes);
+    for (u32 i = 0; valid && i < function->debug_local_count; i += 1)
+        if (function->debug_locals[i].scope > function->debug_scope_count) valid = false;
+    for (u32 i = 0; valid && i < function->debug_scope_count; i += 1)
+        if (function->debug_scopes[i].parent > i) valid = false;
+    return valid;
 }
 
 // Retained payload one splice clones from the callee. Caller-proportional
@@ -315,8 +402,10 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
 }
 
 // `caller_checked` means the pass has already proven, once for the caller,
-// that every caller block ends in a terminator and that the caller's projected
-// edge count fits in u32; the per-site scans below then skip the caller.
+// that every caller block ends in a terminator, that the caller's projected
+// edge count fits in u32 and that its debug rows are well formed
+// (ir_inline_cfg_debug_rows_valid); the per-site scans below then skip the
+// caller.
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction* caller, IrBlockId call_block,
                                     IrInstructionId call_id, IrFunction const* callee, bool caller_checked,
                                     u32* copied_rows_out, u32* growth_out)
@@ -479,10 +568,9 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
     bool callee_has_debug = callee->debug_local_count != 0 || callee->debug_scope_count != 0;
     if (valid && callee_has_debug &&
         (u64)caller->debug_scope_count + callee->debug_scope_count + 1 > UINT32_MAX) valid = false;
-    for (u32 i = 0; valid && i < caller->debug_local_count; i += 1)
-        if (caller->debug_locals[i].scope > caller->debug_scope_count) valid = false;
-    for (u32 i = 0; valid && i < caller->debug_scope_count; i += 1)
-        if (caller->debug_scopes[i].parent > i) valid = false;
+    // A checked caller's debug rows were checked once by the planner
+    // (ir_inline_cfg_debug_rows_valid); splices preserve both invariants.
+    valid = valid && (caller_checked || ir_inline_cfg_debug_rows_valid(caller));
     for (u32 i = 0; valid && i < callee->debug_local_count; i += 1)
         if (callee->debug_locals[i].scope > callee->debug_scope_count) valid = false;
     for (u32 i = 0; valid && i < callee->debug_scope_count; i += 1)
@@ -607,10 +695,11 @@ BUSTER_GLOBAL_LOCAL IrValueId* ir_inline_cfg_local_values(Arena* arena, IrFuncti
 
 // Called only for a site ir_inline_module planned: the planner checked the
 // caller's block tails and projected edge count, and earlier splices into the
-// same caller keep every tail terminated.
+// same caller keep every tail terminated. `void_type` is the program's void
+// type (ir_inline_cfg_void_type), resolved once per pass rather than per site.
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, IrFunction* caller, IrBlockId call_block,
                                IrInstructionId call_id, IrFunction const* callee, IrInlineCfgReserve* reserve,
-                               u32* copied_rows_out)
+                               IrTypeId void_type, u32* copied_rows_out)
 {
     u32 copied = 0;
     u32 growth = 0;
@@ -620,7 +709,6 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
     IrInstruction call = caller->instructions[call_id.value];
     IrType* signature = ir_type_from_id(&program->types, callee->canonical_type);
     IrType* return_type = ir_type_from_id(&program->types, signature->return_type);
-    IrTypeId void_type = ir_inline_cfg_void_type(program);
     u32 old_block_count = caller->block_count;
     u32 old_local_count = caller->local_count;
     u32 old_instruction_count = caller->instruction_count;
@@ -791,6 +879,11 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         row.result = source->result.value == IR_ID_UNDERLYING_INVALID
                          ? IR_VALUE_ID_INVALID : value_map[source->result.value];
         row.canonical_local = ir_inline_cfg_local(source->canonical_local, old_local_count);
+#if BUSTER_BENCH_ALLOCATIONS
+        // The #3010 census keeps the callee's birth verdict on the clone and
+        // reports clone matches as their own split (fold_match_clone_*).
+        row.fold_birth = (u8)(row.fold_birth | IR_FAST_BIRTH_CLONE);
+#endif
         if (source->operand_count)
         {
             row.operands = arena_allocate(arena, IrValueId, source->operand_count);
@@ -983,9 +1076,15 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
     }
 
     // Existing outgoing edge arguments now originate at the continuation.
-    for (u32 b = 0; b < old_block_count; b += 1)
+    // Only a successor of the call block has an incoming edge from it, so
+    // walk the moved terminator's targets rather than every caller block. A
+    // repeated target finds nothing left to move and keeps its order.
+    IrInstruction const* moved_tail = caller->instructions + original_last.value;
+    for (u32 target = 0; target < moved_tail->target_count; target += 1)
     {
-        for (IrBlockParameter* parameter = caller->blocks[b].first_parameter; parameter; parameter = parameter->next)
+        u32 b = moved_tail->targets[target].value;
+        for (IrBlockParameter* parameter = b < old_block_count ? caller->blocks[b].first_parameter : 0; parameter;
+             parameter = parameter->next)
         {
             IrIncoming* new_first = 0;
             IrIncoming* new_last = 0;

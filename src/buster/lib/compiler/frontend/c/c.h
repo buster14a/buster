@@ -1394,6 +1394,22 @@ struct CDeferredStaticAssert
     CSourceSite location;
 };
 
+// The semantic answer for one deferred _Static_assert. Validation stores one
+// per row in CParseResult.deferred_static_assert_verdicts and lowering
+// consumes it instead of evaluating the assertion again (#2531). Unchecked
+// means validation did not run (the model-building entry points); lowering
+// then asks the same semantic evaluator (c_semantic_static_assert_verdict).
+typedef enum CStaticAssertVerdict
+{
+    C_STATIC_ASSERT_UNCHECKED,
+    C_STATIC_ASSERT_HOLDS,
+    C_STATIC_ASSERT_NOT_CONSTANT,
+    C_STATIC_ASSERT_FAILED,
+    // The assertion measured an oversized type; the size diagnostic stands
+    // for it.
+    C_STATIC_ASSERT_SIZE_REPORTED,
+} CStaticAssertVerdict;
+
 typedef enum CParserDeclarationKind
 {
     C_PARSER_DECLARATION_OBJECT,
@@ -1866,6 +1882,12 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // Natural expression endpoints, built backwards for one validated body.
+    // A query with an earlier bound clamps the endpoint to that bound.
+    CToken const* body_expression_tokens;
+    u32* body_expression_ends;
+    u32 body_expression_start;
+    u32 body_expression_count;
     // c_parse_scope_for_token's answer for every token of one function body
     // under one root scope (c_parse_body_scopes_build), installed while that
     // body's lowering constraints are checked so each query inside it is one
@@ -1929,6 +1951,37 @@ struct CTypeIdentityQuery
     u32 result_end;
 };
 
+#if BUSTER_INCLUDE_TESTS
+// A semantic answer for one scalar-integer `sizeof` expression operand, kept
+// only while the test-only handoff comparison is on (c_test_sizeof_handoff_set,
+// GitHub #2531). The key is the `sizeof` keyword's token; `scope` is the
+// scope the producer typed the operand in. The answer is the unqualified kind
+// (an enum's underlying kind) and its size, never a CTypeId, so no row can
+// name a type a rollback truncated.
+typedef enum CSizeofOperandProducer
+{
+    // c_parse_typed_constant folding a constant context (static assertion,
+    // array bound, case label, static initializer) in the normal mode.
+    C_SIZEOF_OPERAND_PRODUCER_CONSTANT,
+    // c_parse_validate_sizeof_operands, which asks for the operand's type
+    // only for this comparison.
+    C_SIZEOF_OPERAND_PRODUCER_VALIDATION,
+    C_SIZEOF_OPERAND_PRODUCER_COUNT,
+} CSizeofOperandProducer;
+
+typedef struct CSizeofOperandType CSizeofOperandType;
+struct CSizeofOperandType
+{
+    u32 keyword;
+    u32 operand_end;
+    CScopeId scope;
+    u8 kind;
+    u8 producer;
+    u8 size;
+    u8 reserved;
+};
+#endif
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1948,6 +2001,13 @@ struct CParseResult
     CTypeIdentityQuery* type_identity_queries;
     u32 type_identity_query_count;
     u32 type_identity_query_capacity;
+#if BUSTER_INCLUDE_TESTS
+    // Append-only like type_identity_queries, so a rollback drops the rows a
+    // speculative query added. Null unless the handoff comparison is on.
+    CSizeofOperandType* sizeof_operand_types;
+    u32 sizeof_operand_type_count;
+    u32 sizeof_operand_type_capacity;
+#endif
     CParameter* parameters;
     CMember* members;
     CEnumMember* enum_members;
@@ -1958,6 +2018,12 @@ struct CParseResult
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
     CEntityId* binding_by_symbol;
+    // One bit per interned symbol below binding_capacity, set when an entity
+    // with that symbol enters the lookup chains (c_parse_scope_add_entity)
+    // and never cleared. A clear bit proves no chain holds the symbol, so a
+    // lookup of it fails without walking the scopes (#2676); a set bit is
+    // only "maybe", because a rolled-back entity keeps its bit.
+    u64* symbol_bound_words;
     CParseBindingUndo* binding_undo;
     CScopeId binding_scope;
     // Borrowed while the lowering constraints are checked: the block-scope
@@ -2018,6 +2084,10 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
+    // One CStaticAssertVerdict per deferred row, written after parsing by
+    // c_parse_validate_deferred_assertions; null when validation did not run
+    // or nothing was deferred.
+    u8* deferred_static_assert_verdicts;
     // Sparse declaration-point widths and owned diagnostics from private type
     // queries. Snapshots roll these rows back with their parsed members.
     CDeferredBitFieldWidthDiagnostic* deferred_bit_field_width_diagnostics;
@@ -2114,6 +2184,10 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    // -fcanonical-intern-constants (#3011): reuse an integer constant already
+    // built earlier in the current block instead of building another row.
+    // Opt-in construction-time arm of the CSE census; off emits as before.
+    bool intern_block_constants;
     // Resolve every pending SSA parameter of a local initialized only at its
     // declaration through the general predecessor walk. The output must not
     // change; tests use it as the differential reference for the shortcut.
@@ -2157,10 +2231,23 @@ struct CIRDirectSsaStatistics
     u64 temporaries;
 };
 
+// Construction-time integer-constant interning (#3011). Lookups are integer
+// constants requested while interning was on; hits reused a constant built
+// earlier in the same block and allocated no row, value or immediate; stale
+// counts key matches whose row was retracted, truncated or rebound.
+typedef struct CIRConstantInternStatistics CIRConstantInternStatistics;
+struct CIRConstantInternStatistics
+{
+    u64 lookups;
+    u64 hits;
+    u64 stale;
+};
+
 typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
     CTypeLayoutStatistics type_layout;
     // Attempts the lowering's type-mapping passes made, retries included, so
     // a test can pin them to the unit's size (#3312).

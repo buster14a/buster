@@ -1,0 +1,11 @@
+callgrind/arm-A-base-default.out.gz	summary: 11141092796
+callgrind/arm-B-base-pilot.out.gz	summary: 9284062965
+callgrind/census-tag-references-only.out.gz	summary: 7816294
+callgrind/census.out.gz	summary: 9288623089
+callgrind/variant1-default.out.gz	summary: 11141420442
+callgrind/variant1-pilot.out.gz	summary: 9284951107
+callgrind/variant2-pilot.out.gz	summary: 9281772624
+callgrind/variant3-pilot.out.gz	summary: 9281526305
+callgrind/variant4-pilot.out.gz	summary: 9282581513
+callgrind/variant5-pilot.out.gz	summary: 9285864080
+callgrind/variant6-pilot.out.gz	summary: 9282315446

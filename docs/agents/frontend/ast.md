@@ -1185,7 +1185,9 @@ each case:
   `c_type_parse_root_finish` checks again.
 
 The machine remains the default path and the fallback for every run that is
-not read from the tree. Members' plain runs are read too ([members](#members));
+not read from the tree. A census of the root runs it hands back found no
+shape a read clears the gate with ([root specifier fallbacks](#root-specifier-fallbacks)).
+Members' plain runs are read too ([members](#members));
 the rest of a tag definition, declarator derivations and the type names typed
 inside machine frames (casts among them) still go through the machine.
 
@@ -1510,7 +1512,8 @@ It depends on two pieces:
   slice 1 landed with the [root-conditional index](#lowering-from-the-tree);
 - a per-body index from an evaluator core's token range to its node, which
   slice 2 owns and which has not landed. The root-conditional index maps
-  only `CONDITIONAL` nodes.
+  only `CONDITIONAL` nodes. The [token-to-node map](#token-to-node-map-for-lowering)
+  census prices that index.
 
 This section consumes both and does not rebuild them.
 
@@ -1712,6 +1715,96 @@ It changes no emission, so its differential compares one ordered list per
 core. Its first implementable revision is the one where slice 2's
 range-to-node index has landed; until then nothing in this section ships.
 
+## Token-to-node map for lowering
+
+**Status: census only.** No map is built. Lowering receives the tree in
+`CIRLowerOptions.syntax_tree`, but its queries arrive as token ranges. Each
+tree slice so far has built its own per-body index:
+- the [root-conditional records](#lowering-from-the-tree);
+- the [extent table](#statement-extents-in-lowering).
+
+This section asks whether one shared map, from a token range to the node
+whose span it is, would let more queries answer from the tree. Its census is
+audit [`2026-10-12T221903Z`](../../performance-audits/2026-10-12T221903Z.md),
+which is hosted and diagnostic only.
+
+**The map's contract.** A range maps to the node whose span it is exactly,
+after balanced outer parentheses are stripped. The span rules are the tree
+typer's (`c_ast_types_span`, `c_ast_types_locate`): a span is widened over
+the parentheses that wrap it exactly. Each node also needs two masks:
+- **The root region:** the `,`, assignment, `?:` and `&&`/`||` operators
+  outside every parenthesis, bracket and brace of the node. These are what
+  the token scans see at depth 0. An assignment in a conditional's second or
+  third operand is dropped, as the scans drop it.
+- **Anywhere:** the same operators anywhere in the subtree. A statement
+  expression, compound literal, initializer list, `_Generic` or a type's
+  `sizeof`/`alignof` makes it opaque, and the query then scans.
+
+The map holds token and node indices only, in a private per-body arena. No
+node id reaches the IR, and the tree is not written.
+
+**Coverage.** On the unity self-host under `-fc-ast-pilot`, the map resolves:
+- 98.2% of `c_ir_root_conditional`'s ranges;
+- 79 to 100% of the root-token predicates (`c_ir_has_root_comma`,
+  `_assignment`, `_question` and `_control_operator`), and 36% of
+  `c_ir_call_argument_separator`'s ranges;
+- every evaluator core, expression and logical frame, and every in-body
+  condition frame (52,607 of 52,629; the other 22 lie outside a body);
+- 44% of `c_ir_group_type_name`'s groups as an exact "no type name": the
+  group's interior is one expression node.
+
+Over about 1.97 M compared answers, the tree agreed with the scan every time.
+The range map does not fit two queries, and two more need facts lowering does
+not have:
+- `c_ir_unevaluated_operand_end` and `c_ir_unary_expression_end` take an
+  open-ended range;
+- `c_ir_query_execute` and the `sizeof` operand typer need C types, which
+  lowering does not keep.
+
+**The three designs.** All are lazy per body.
+
+| Design | Build | Lookup | Memory | Verdict |
+| --- | ---: | ---: | --- | --- |
+| A: dense start chain, built in lowering | 189.5 M Ir over 6,389 bodies, 109 Ir per body node | 48 Ir | at most 0.6 MB, per body | answers every query above; loses to its build |
+| B: sparse table of the nodes whose region holds an operator | 188.6 M | 108 Ir | 2.3 MB for the whole unit | dominated: the same pass, and it cannot prove a negative, which is almost every predicate answer |
+| C: keep the typer's per-body spans and chains for lowering | already paid by the typer's eager pass; masks not measured | about A's | about 34 MB for the whole unit, 4.7% of peak RSS | the only design with no new build; a lifetime change |
+
+**The net for each consumer of A.** Each query pays a lookup on every call,
+plus the scan on a miss:
+
+| Consumer | Net |
+| --- | ---: |
+| The five root-token predicates | ≈ 28.5 M |
+| Type-name negatives | ≈ 8 to 16 M |
+| The root conditional, replacing the records | ≤ 31.8 M |
+
+Together they net about 68 to 76 M, against a 189.5 M build. No single
+consumer clears a 5 M net gate, so nothing was built and no budgets were
+declared.
+
+**What needs no tree.** A per-body token count refuses most predicate ranges
+without a tree:
+- 703,748 calls holding no candidate token cost 71.8 M Ir;
+- after such a gate, the tree's share of the predicates is 9.6 M, less than
+  the map's lookups would cost.
+
+The same table also already counts `?`. Under the pilot,
+`c_ir_root_conditional` skips that count and takes the records' path for
+every call: 79.1 M, against 18.1 M of scan behind the count on the default
+path. Both leads are on the token path and are tracked in
+[#3924](https://github.com/buster14a/buster/issues/3924).
+
+**Recommendation:**
+- Land the token gates first. Their saving belongs to the token path, not
+  to the tree.
+- Build a map only together with [slice 5a](#order-of-slices), the first
+  consumer large enough to carry one, and budget 5a net of the map's build.
+- Prefer design C if the owner accepts about 34 MB kept for the unit. It
+  leaves 5a's ceiling of about 280 M nearly whole. Design A leaves at most
+  about 70 M before the walk's own cost.
+- Do not pursue design B.
+- Zen 5 validation stays incomplete (#2761).
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.
@@ -1724,7 +1817,7 @@ differential tests pass.
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
-| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
+| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification and the switch label scan stay on tokens: by census neither pays for a tree read ([keyword gate](#statement-keyword-gate-in-lowerings-classification)), and the classification skips its typedef probe for statement keywords instead. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
@@ -1761,6 +1854,13 @@ differential passes. The row is not retired, for three reasons:
   token;
 - `c_ir_control_substatement_position`, the switch's label scan, still reads
   tokens.
+
+Neither of the last two is planned for the tree. The census found that a
+tree read costs more than it replaces for both; the
+[keyword gate](#statement-keyword-gate-in-lowerings-classification) has the
+numbers. Retiring the row now waits on a token-to-node map, or on dropping the
+walkers as the default. The [map's census](#token-to-node-map-for-lowering)
+finds that a map pays only together with slice 5a.
 
 Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
 plain specifier run of a block declaration, a file-scope declaration, a
@@ -3609,6 +3709,147 @@ diagnostic only. Every budget passes, and the candidate ships:
 - Still open: designators, the 579 shape validations that re-walk an inferred
   list, and the scalar end scans.
 
+### Initializer element replay
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. [The initializer walk](#initializer-walk) left
+two items open: the shape validations that walk a list again after
+array-bound inference walked it, and the scalar element end scans.
+Designators stay with [#3579](https://github.com/buster14a/buster/issues/3579)
+and are not touched here.
+
+**Census.** It was taken on main `f0f84944` (tests-off `-march=x86-64-v3`
+Release, unity self-host input) from one Callgrind run per endpoint and a
+throwaway counting build, neither committed. Inference and validation are
+`c_parse_infer_file_array_bounds` and `c_parse_validate_initializer_shape`,
+both with `c_parse_infer_initializer_array_count_core` as the walk:
+- **The walks.** Inference reaches the walk's frame loop for 206 lists
+  (1,124,520 tokens). Its walks cost 305.4 M Ir inclusive, of which 112.4 M
+  is the string-literal count of `char x[] = "..."` lists, which never
+  reach the loop. Validation's walks cost 914.8 M on `-fsyntax-only`,
+  569.9 M of it in the element checks
+  (`c_parse_initializer_expression_constraint`).
+- **The repeat walks.** 580 validations walk a list whose bound was
+  inferred (1,197,700 tokens, 394,823 element checks). 374 of them have no
+  inference walk to reuse: their bound came from a string or from another
+  inference site.
+- **The exact share.** 94 lists (784,791 tokens, 326,329 element checks)
+  were walked by inference with no designator, no brace elision, no vector
+  and no array bound evaluated. The other 112 lists have designators (109)
+  or evaluate an array bound (3).
+- **Scalar ends.** `c_parse_initializer_value_end` runs for 966,972 scalar
+  elements (1,431,095 tokens). 913,180 of those elements are one token long.
+  The scan costs 48.1 M Ir, about 50 a call, plus 6.8 M at the call site.
+
+**Why there are two walks.** Inference runs in `c_analyze_semantics_core`
+before the function bodies are bound, with diagnostics off and, in 205 of
+the 206 walks, with `semantic_constant_queries` off. Its count fixes the
+array's type, and everything after it reads that type. Validation runs
+much later, in `c_parse_validate_static_initializers`: after every bound is
+final (`inferred_bounds_final`), with type interning on, and under
+`-fc-ast-pilot` inside the tree typer's initializer region. Its element
+checks type each value, append type rows and make the first diagnostic.
+Moving the checks into inference would type them before the bounds and
+rows they read are final, and in a different order. So the checks stay where
+they are.
+
+**One structural walk.** The design keeps one structural walk and moves
+nothing else:
+- **Inference records.** While inference walks a file-scope list, it writes
+  each element check it would make, as a destination type and a token
+  range, in walk order. It writes into the walk's scratch, at most one
+  entry for every two tokens. After a successful walk, the log is copied to
+  the phase arena with the list's range and inferred count, and the array
+  bound indexes it.
+- **Validation replays.** Validation looks the bound up. When the log is
+  there and its range and count still match, validation makes the same
+  element checks in the same order, with the same scope, destination and
+  diagnostic sink. It stops at the first failure, as the walk does. The
+  count and the verdict then come from the same structural walk.
+- **Where a log is refused.** The log is kept only when the walk's path
+  depends on nothing but tokens, the delimiter pair table, the member lists
+  of complete types and the bound being inferred. A walk that meets a
+  designator, brace elision, a vector, an array bound to evaluate, the
+  nested string branch or an aggregate-expression query keeps no log. So
+  does a walk whose log does not fit the scratch. Those lists, local
+  arrays and compound literals walk again, exactly as before.
+
+**What stays exact.**
+- **Same structure.** With the log's conditions, the validation walk takes
+  the same path. Its root has a bound equal to the inferred count, where
+  inference's root was unbounded. Every root element index is below that
+  count, and the root's element type is the same row, so no element changes.
+- **No structural diagnostics.** Inference succeeded on the same structure,
+  so the separator, slot and excess-element failures that only validation
+  can report cannot occur. The first diagnostic is the first failing
+  element check in either version, with the same token and container.
+- **Same queries.** The skipped walk makes no type query of its own on these
+  lists, so the typer, the type table and the pilot's region see the same
+  sequence of queries.
+- **Reference checks.** Debug and sanitized builds (`BUSTER_REFERENCE_CHECKS`)
+  run the skipped walk in a record-only mode behind every replay. They check
+  that it succeeds and that it records the same elements.
+
+**Scalar ends.** A scalar element of one token ends at the next token when
+that token is a comma or the list's limit, and the element's own token is
+not one of the scan's seven punctuators. The walk takes that end inline and
+calls the scan for every other element. The scan's answer is the same, so
+this part is exact by construction. Reference builds compare the two.
+
+**Budgets.** These budgets were declared before the measured runs. The base
+is main `f0f84944`. The input is the base checkout's unity self-host source,
+compiled with `-target x86_64-unknown-linux -march=znver5 -g0`, on
+`-fsyntax-only` and on `-c`. The four Callgrind arms (`--cache-sim=no
+--branch-sim=no`) are counted on tests-off `-march=x86-64-v3` Release builds,
+with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The budgets:
+- **Correctness:**
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference checks pass in Debug runs of the C frontend, AST and
+    driver tests, and in Debug compiles of the unity input with and without
+    `-fc-ast-pilot`;
+  - Release `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The floor (D against A, and C against B).** Each endpoint,
+  `-fsyntax-only` and `-c` (`-g0`), must run at least 5 M fewer
+  instructions, and more than the 0.05% rebuild noise fewer. If either
+  endpoint misses, the result is recorded as negative and the code does not
+  ship.
+- **Each part.** The replay and the inline scalar end must each remove at
+  least 5 M Ir net on both endpoints, judged from D against a throwaway
+  variant without that part. A part that does not is dropped and recorded.
+- **Memory.** The logs live in the phase arena, which the analysis
+  releases when it returns. They take at most 12 bytes per logged element
+  and one word per array bound. Their size is reported.
+- **Reported, not gated:** the inclusive Ir of the walk and of
+  `c_parse_validate_initializer_shape`, the calls and Ir of
+  `c_parse_initializer_value_end`, and the replayed lists and elements.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The replay's census is
+[`2026-10-12T210727Z`](../../performance-audits/2026-10-12T210727Z.md),
+diagnostic only. Its raw Callgrind outputs, patches and logs are kept under
+`evidence/2026-10-12T210727Z/`. The measuring session reported them, and
+nobody has reproduced them independently. By that evidence, every budget
+passes, and the candidate ships:
+- `-fsyntax-only` falls by 140.9 M Ir on the default path (−1.264%) and by
+  141.3 M under the pilot (−1.522%). `-c` falls by 139.8 M (−0.555%) and
+  140.2 M (−0.600%).
+- The parts: the replay −128.1 M, and the inline end −20.4 M (−19.7 M on
+  `-c`). Validation falls by 149.2 M, and inference pays 7.8 M for its
+  logs.
+- 94 validation walks become replays of 326,329 element checks. The logs
+  take 3.97 MB of phase arena.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- Still open: designated lists, which walk twice; lists that evaluate an
+  array bound; and the 45,232 end scans of longer elements.
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
@@ -3845,6 +4086,192 @@ default path's ±0.05% band in the same frame step. The segment frames,
 alignment frames, declarators and layout attributes stay with the machine.
 Zen 5 validation stays incomplete (#2761).
 
+**The one disagreement is benign.** The census left one member unidentified:
+the tree test admitted it and the token predicate rejected it. A later rerun
+of both instruments, audit
+[`2026-10-12T205005Z`](../../performance-audits/2026-10-12T205005Z.md), logged
+every segment frame where they disagree. It ran on main `f0f84944` over three
+inputs only: the unity self-host input under `-fc-ast-pilot`, `c_ast_tests` and
+`c_frontend_tests`. The audit keeps the instrument and the raw rows. The member is
+`u32 fallback_opcode_counts[IR_OPCODE_COUNT + 1];` in `CodegenStatistics`
+(`codegen.h`). Its tree is `(declarator_array (declarator_name ...) (add
+(identifier IR_OPCODE_COUNT) (number 1)))`. The member carries no decoration,
+so the tree is right. The token predicate is stricter than it needs to be: it
+admits only words, numbers, `*`, `[`, `]` and `,`, so an operator other than
+`*` in an array size fails it. So do the parentheses that the tree does not
+keep as nodes. The test corpora add only `char c[(68) - 4];`, which is the
+same case. On those inputs every other disagreement goes the other way,
+where the tree declines and the token predicate admits:
+- **Tagged specifiers.** These are `struct`, `union`, `enum` and
+  `_Atomic struct` heads. They have no word-only list, so the tree test does
+  not look at them.
+- **One fixture, `int first [[maybe_unused]];`.** The tree holds an
+  `ATTRIBUTE_LIST` there. The token predicate calls the member plain, because
+  a C23 `[[...]]` attribute is spelled only with tokens it admits. A read
+  gated on that predicate would skip a real attribute. The self-host rerun
+  logged no such row, so the census and the oracle's object identity stand.
+  The tree test is the one to ship.
+
+No AST construction defect was found on these inputs.
+
+### Statement-keyword gate in lowering's classification
+
+Two map-row follow-ups were left open after the
+[extent table](#statement-extents-in-lowering):
+- `c_ir_lower_body_advance`'s first-token classification;
+- `c_ir_control_substatement_position`, the switch label scan.
+
+A throwaway census build with noinline wrappers and counters ran on base main
+`b71dfc89` (unity self-host, `-g0 -c -fc-ast-pilot`, tests-off
+`-march=x86-64-v3` Release, Callgrind):
+- **The switch label scan's call:** 0.22 M Ir over 5,224 calls, none true.
+- **The classification:** 155,771 statements.
+  - The typedef probe costs 38.5 M. 65,611 first tokens take its scope
+    lookup, and 53,835 of them are statement keywords: `if`, `return` and
+    the like.
+  - `c_parse_type_word_for_dialect` costs 9.0 M.
+  - The label proof costs 5.7 M and finds 12 labels.
+
+A keyword is never a type word and never names an entity, so the probe's
+answer for one is always false. A token gate can skip the lookup for these
+keywords on both paths, with no tree.
+
+These budgets were declared before the measured runs. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at
+`-g -c` for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `b71dfc89`, which the candidate branches from. The budgets:
+- **Correctness.** The gate is exact by construction: the gated set
+  (`break`, `case`, `continue`, `default`, `do`, `for`, `goto`, `if`,
+  `return`, `switch`, `while`) is keywords in every dialect. Reference-check
+  builds (Debug and sanitized) run the skipped lookup behind every gated
+  token and check that it answers false. The `-c` objects (`-g0` and `-g`)
+  must be byte-identical across the four arms. `test_self_host` must keep
+  its fixed point, and `test_all` must pass.
+- **The probe (D against A, and C against B).** `c_ir_lower_body_advance`'s
+  calls to `c_parse_scope_for_token_near` fall from 65,611 to at most
+  11,776, the unbound first tokens that are not gated keywords.
+- **The whole compile.** `-c` (`-g0`) must fall by at least 0.05% Ir, both D
+  against A and C against B. `-fsyntax-only` runs no lowering, so it is not
+  measured.
+- **The tree reads.** Each is built only if its census ceiling, net of the
+  gate, clears 1 M and the cost of the per-body table that answers it. The
+  [extent table](#statement-extents-in-lowering) measured that cost at about
+  400 to 700 Ir per entry. A read that does not clear the bar is recorded as
+  a negative result, with no code.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
+The keyword gate's hosted census is
+[`2026-10-12T135905Z`](../../performance-audits/2026-10-12T135905Z.md), for
+the first candidate, and its follow-up
+[`2026-10-12T150330Z`](../../performance-audits/2026-10-12T150330Z.md), for
+the shipped one. Both are diagnostic only. There were two candidates:
+- **The first, `51036154`, missed the lookup budget by 77.** It gated the
+  eleven words declared above, and its lookups fell to 11,853, not 11,776.
+  The census had counted the reserved `_Static_assert` (75) and `__asm__`
+  (2) among the keywords. The first candidate left them out on a wrong
+  rationale: that some dialect spells them as ordinary identifiers. That is
+  true only of plain `asm`. `_Static_assert` is the spelling C23's
+  `static_assert` is respelled to, and an older dialect's `static_assert`
+  keeps its own symbol. `__asm` and `__asm__` are always asm keywords.
+- **The second, `028ad7e0`, ships.** It also gates those three reserved
+  spellings, and plain `asm` stays probed.
+  - **Correctness.** The objects are byte-identical across the four arms,
+    at `-g0` and at `-g`. The reference-check builds found no disagreement.
+  - **The lookup budget passes.** Lookups fall from 65,611 to exactly
+    11,776.
+  - **The compile falls by 23.62 M Ir on both paths.** That is −0.093% on
+    the default path and −0.100% under the pilot, which more than recovers
+    the extent table's +13.8 M. The gain is on the token path, not from the
+    tree.
+- **Neither tree read is built.**
+  - The switch label scan's call costs 0.22 M, which is under the 1 M bar.
+  - The classification's ceiling, net of the gate, is under 30 M. A
+    first-token table over its 155,771 statements would cost at least about
+    62 M at the extent table's per-entry cost.
+- Zen 5 validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+### Type-word test and label proof in lowering's classification
+
+After the [statement-keyword gate](#statement-keyword-gate-in-lowerings-classification),
+two pieces of `c_ir_lower_body_advance`'s first-token classification were
+left open: the type-word test (about 9.0 M Ir) and the label proof (about
+5.7 M). Those figures came from noinline census wrappers, so they include the
+wrappers' own calls.
+
+A throwaway census build of main `7bc92b2d` counted both on the unity
+self-host (`-g0 -c`, default flags, tests-off `-march=x86-64-v3` Release,
+Callgrind):
+- **The type-word test.** 103,554 calls spend 8.05 M Ir in
+  `c_parse_type_word_for_dialect`, about 78 Ir a call, matching the spelling
+  against a ladder of string compares.
+  - The declaration branch makes 98,569 calls. 86,724 are identifiers bound
+    to an entity, 6,990 are predefined symbols, and 6,876 answer true.
+  - The `declaration_statement` test makes 4,985 calls. All are bound
+    identifiers, and none answers true.
+  - `c_parse_type_word_for_dialect_token` answers every one of the 103,554
+    the same way. It reads the interned symbol's `word_bits`, which are
+    computed from the same spelling predicates, and every specifier spelling
+    is interned in the predefined range.
+- **The label proof.** Of 156,929 first tokens, 12 have the shape an
+  identifier followed by `:`. Only those 12 reach the out-of-line proof, and
+  all 12 are labels. The shape test is already inline and needs about two
+  token loads a statement, so there is nothing separate to gate. The
+  dead-code hop after a terminator, in the same function, calls
+  `c_ir_named_label_proven_at` 18,882 times (2.19 M). That is a different
+  question, and it is under the floor below.
+
+These budgets were declared before the measured runs. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at
+`-g -c` for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `7bc92b2d`, which the candidate branches from. The budgets:
+- **Correctness.** Both type-word sites read the token form instead of the
+  spelling. Reference-check builds (Debug and sanitized) compare the two
+  answers for every identifier first token. The `-c` objects (`-g0` and
+  `-g`) must be byte-identical across the four arms. `test_self_host` must
+  keep its fixed point, and `test_all` must pass.
+- **The test (D against A).** `c_ir_lower_body_advance` makes no call to
+  `c_parse_type_word_for_dialect`.
+- **The whole compile.** `-c` (`-g0`) must fall by at least 3 M Ir, both D
+  against A and C against B. Below that floor the result is recorded as
+  negative and no code ships. `-fsyntax-only` runs no lowering, so it is not
+  measured.
+- **The label proof.** A cut is built only if it removes at least 3 M. The
+  census above leaves none, so the result is recorded as negative, with no
+  code.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
+The hosted census is
+[`2026-10-12T220456Z`](../../performance-audits/2026-10-12T220456Z.md),
+diagnostic only:
+- **The type-word test ships on the token path.** Both arms fall by 8.98 M Ir
+  (−0.036% default, −0.039% pilot). `c_ir_lower_body_advance` makes no
+  spelling-ladder call, and the objects are byte-identical across the four
+  arms at `-g0` and `-g`.
+- **The label proof is negative.** No code ships for it.
+- **Leads, unclaimed:** the dead-code hop's proofs (2.19 M) and
+  `c_ir_query_execute`'s 48,392 spelling-ladder calls (4.98 M).
+- Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
 ### Settling the name checks, second cut
@@ -3909,4 +4336,127 @@ the same way and diagnostic only:
   recording marks in the eager pass.
 - Zen 5 validation stays incomplete (#2761).
 
+### Root specifier fallbacks
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [members](#members), the
+[declaration specifier read](#declaration-specifiers-from-the-tree) still
+hands 2,259 root runs back to the machine on the self-host unity input under
+`-fc-ast-pilot` (2,237 `input`, 22 `specifiers`). The census came first. It
+was a throwaway build of base main `f0f84944`, on the same input and flags as
+the [tag definition census](#tag-definition-machine-work). Each fallback ran
+the machine under one no-inline wrapper per caller and shape. The shape was
+read from the run's tokens, and the first match in the table's order wins:
+
+| Caller | Shape | Runs | Ir | Ir per run |
+| --- | --- | ---: | ---: | ---: |
+| file scope | tag reference (`struct S`, plain words beside it) | 1,160 | 6.90 M | 5,946 |
+| file scope | tag definition | 437 | 8.96 M | |
+| file scope | attribute | 342 | 1.22 M | 3,559 |
+| file scope | `__extension__`, `_Atomic`, other words | 22 | 0.17 M | |
+| parameter | tag reference | 132 | 0.70 M | 5,313 |
+| block | tag definition | 62 | 0.95 M | |
+| block | `typeof` | 40 | 0.24 M | |
+| block | tag reference | 42 | 0.22 M | 5,186 |
+| block | other words | 22 | 0.06 M | |
+
+Every tag reference is plain: its other specifiers are words the read already
+takes, with no attribute on the tag. The 19.4 M total splits as follows:
+- **Tag references.** 1,334 runs cost 7.82 M. Inside them, the work a read
+  must keep is the machine's own calls: `c_parse_tag_lookup` (0.67 M),
+  `c_parse_add_type` for a tag seen first (0.27 M),
+  `c_parse_type_identity_prepare` (0.04 M) and
+  `c_parse_apply_trailing_qualifiers` (0.05 M). The rest is the frames and the
+  scans: `c_parse_storage_classes_valid` alone is 2.28 M, and the attribute
+  and alignment skips are 2.13 M. With the declaration read's cost of about
+  550 Ir a run added, about **6 M** is removable. This is an estimate.
+- **Tag definitions.** 499 runs cost 9.91 M, most of it the body, which a
+  root read cannot take. At the tag reference's cost a run, the work outside
+  the body is at most about 3 M (estimate).
+- **Everything else.** Each row is below 1.3 M.
+
+Members' tag references (54 runs) and type-name fallbacks (28 runs) are
+smaller still ([member census](#member-specifier-runs)).
+
+The gate is the [member specifier runs](#member-specifier-runs)' **5 M** of
+Ir. Only tag references can clear it. The candidate reads a root run whose
+`DECL_SPECIFIERS` list is plain words followed by one `struct`, `union` or
+`enum` specifier with only a tag name. It makes the machine's calls in the
+machine's order, and does not apply to members. These budgets are declared
+before its measured runs. They use the same input, flags and four Callgrind
+arms (A to D) on tests-off `-march=x86-64-v3` builds, with main `f0f84944` as
+the base:
+- **Gate (C against B).** The whole compile falls by at least **5 M Ir** on
+  `-fsyntax-only`, with the wider index charged. Otherwise the result is
+  recorded as negative and no code ships.
+- **Correctness.**
+  - 0 model differences over the corpus and the frontend sources: the
+    analysis model field by field and the bindings, with the diagnostics;
+  - a one-off comparison of the same fields on the self-host unity input,
+    also with 0 differences;
+  - in verify mode, every tag reference read from the tree is first read by
+    the machine and rolled back. The two answers must match (type row, its
+    fields, the declarator start and the rows appended), with 0 mismatches.
+    A tree whose tag name is changed must make verify mode report a mismatch;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage (reported, not gated).** Tag references read, and the runs still
+  handed back by reason, from the `-v` counters.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761). The
+  pilot-default switch stays on hold.
+
+The result is
+[`2026-10-12T210633Z`](../../performance-audits/2026-10-12T210633Z.md),
+hosted and diagnostic only. It is **negative**, and no code ships:
+- **Coverage.** Each of six layouts read 1,333 of the 1,334 tag references,
+  with `-c` objects identical to the base's at `-g0` and `-g` where checked.
+- **What the read removes.** About 6.9 M of machine self cost disappears.
+- **What it costs.** Every layout pays at least 4.4 M back in code generation:
+  around the 124,934 plain reads, in their callers, or in the index pass.
+  - The best layout, with the tag path out of line, reached C − B of
+    **−2.54 M**, against the **5 M** gate.
+  - Keeping the plain read's source unchanged was worse: −1.48 M and −1.75 M.
+    One layout rose by 1.80 M once the index's append stopped being inlined.
+- **What was not run.** Verify mode and the model differential were not run,
+  since no candidate passed the gate.
+- **Evidence.** The raw material is in
+  [`evidence/2026-10-12T210633Z`](../../performance-audits/evidence/2026-10-12T210633Z/PROVENANCE.md),
+  pinned by `SHA256SUMS`. It holds every Callgrind output, the census and
+  variant 6 patches, which rebuild the measured binaries byte for byte, and
+  variant 3's `c_parse.c`. The sources of variants 1, 2, 4 and 5 were not
+  kept. Their figures rest on the retained Callgrind outputs and binary
+  hashes alone, and their code cannot be replayed.
+
+Tag definitions, attributes, `typeof` and the other rows stay below the gate,
+so all 2,259 runs stay with the machine.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+### Statement-expression interiors in lowering
+
+This section has its own anchor because other open AST branches append to
+the plan's end. [The extent table](#statement-extents-in-lowering) does not
+enter expressions. So a `({ ... })` body lowered by
+`c_ir_lower_statement_expression_step` asks the token walkers
+(`c_ir_lower_body_advance`, `c_ir_controlled_body_range`,
+`c_ir_statement_end*`), and its controlled substatements are walked as
+`shape`.
+
+The floor for extending the table to those bodies was declared on #3102
+before any measured run: 5 M Ir of walker work inside statement expressions,
+on the self-host unity input at `-g0 -c`, with and without `-fc-ast-pilot`.
+
+A census on main `7bc92b2d` reported **no statement expression** in that
+input, on either arm. It reported 0 statement-expression frames out of 6,389
+body frames lowered, and no `({` in the base's `-E` output. These counts are
+the census session's own observations. Its logs were not retained, and the
+counts have not been independently replayed. The 0 Ir of walker work is
+inferred from the zero frames, not measured with Callgrind. On that report
+the item is negative, and no code ships. The census is
+[`2026-10-12T213925Z`](../../performance-audits/2026-10-12T213925Z.md),
+diagnostic only. Its appended note lists what is retained: the full
+instrument patch, the positive control and the artifact hashes. A later attempt needs a workload that has statement
+expressions, such as a GNU-heavy compatibility input, and a floor declared
+on that workload. Zen 5 validation stays incomplete (#2761).

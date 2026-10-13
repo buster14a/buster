@@ -1102,6 +1102,7 @@ buster_register_module(compiler_aarch64_semantics "${BUSTER_SOURCE_DIR}/compiler
 buster_register_module(compiler_aarch64_system_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_system_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_syntax "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_syntax${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_semantic_vm "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_semantic_vm${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_simd_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_direct_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_direct_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_complex_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_complex_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_memory_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_memory_semantics${COMMON_EXTENSION}")
@@ -2174,6 +2175,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_semantics
     compiler_aarch64_system_semantics
     compiler_aarch64_semantic_vm
+    compiler_aarch64_simd_semantics
     compiler_aarch64_direct_simd
     compiler_aarch64_complex_simd
     compiler_aarch64_memory_semantics
@@ -2491,6 +2493,8 @@ endif()
 
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
     if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")
+        # Neither target takes the console pool: the superbuild's --parallel,
+        # chosen by build.c from host memory, decides whether the two overlap.
         add_custom_target(clang_analyze
             COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
                 clang_analyze
@@ -2498,7 +2502,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
                 --config "$<CONFIG>"
                 --quiet
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
             COMMENT "Running clang --analyze"
             VERBATIM
         )
@@ -2511,7 +2514,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
                 --config "$<CONFIG>"
                 --quiet
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
             COMMENT "Auditing optnone in the unity ide"
             VERBATIM
         )

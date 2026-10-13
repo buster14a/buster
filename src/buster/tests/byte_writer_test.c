@@ -142,6 +142,25 @@ UnitTestResult byte_writer_tests(UnitTestArguments* arguments)
     writer = (ByteWriter){.bytes = bytes, .count = 2, .capacity = 1};
     byte_writer_emit_zero(&writer, 0);
     BUSTER_TEST(arguments, writer.overflow && writer.count == 2 && !memcmp(bytes, expected, sizeof(bytes)));
+
+    // The reader twin accepts a field only when it lies wholly inside the
+    // span, including offsets whose end would wrap, and leaves its output
+    // untouched on failure.
+    ByteSlice span = {.pointer = source, .length = sizeof(source)};
+    u16 read16 = 0xa5a5;
+    u32 read32 = 0xa5a5a5a5u;
+    u64 read64 = UINT64_C(0xa5a5a5a5a5a5a5a5);
+    s64 read_signed = -1;
+    BUSTER_TEST(arguments, byte_slice_read_u16(span, 6, &read16) && read16 == 0x2837);
+    BUSTER_TEST(arguments, byte_slice_read_u32(span, 1, &read32) && read32 == 0x55647382u);
+    BUSTER_TEST(arguments, byte_slice_read_u64(span, 0, &read64) && read64 == UINT64_C(0x2837465564738291));
+    BUSTER_TEST(arguments, byte_slice_read_s64(span, 0, &read_signed) && read_signed == (s64)UINT64_C(0x2837465564738291));
+    BUSTER_TEST(arguments, !byte_slice_read_u16(span, 7, &read16) && read16 == 0x2837);
+    BUSTER_TEST(arguments, !byte_slice_read_u32(span, 5, &read32) && read32 == 0x55647382u);
+    BUSTER_TEST(arguments, !byte_slice_read_u64(span, 1, &read64) && read64 == UINT64_C(0x2837465564738291));
+    BUSTER_TEST(arguments, !byte_slice_read_s64(span, UINT64_MAX, &read_signed) && read_signed == (s64)UINT64_C(0x2837465564738291));
+    BUSTER_TEST(arguments, !byte_slice_read_u32(span, UINT64_MAX - 1, &read32) && !byte_slice_read_u16(span, 9, &read16));
+    BUSTER_TEST(arguments, !byte_slice_read_u16((ByteSlice){0}, 0, &read16) && read16 == 0x2837);
     return result;
 }
 #endif

@@ -35,20 +35,22 @@ changing the checker together with a workflow.
 
 ## Approved local CI evidence-upload composite action
 
-`./.github/actions/native-artifact-upload` is approved only for two Buster CI
-uses: the packed native evidence step after successful packaging, and the
-mobile log-retention step after `Mobile result and reproduction`. The mobile
-caller runs it under `!cancelled()`, so build, lifecycle, test, and coverage
-failures still retain the available logs. Its inputs preserve the mobile
-artifact name and path, the upload action's default compression level (6),
-`if-no-files-found: ignore`, and seven-day retention.
+`./.github/actions/native-artifact-upload` is approved only for these Buster
+CI uses: main-CI reuse evidence, the packed native evidence step after
+successful packaging, desktop and mobile log retention, and the desktop
+backend capability evidence reports (Linux/macOS and Windows, #3944). The log
+retention callers run under `!cancelled()`, so build, lifecycle, test, and
+coverage failures still retain the available logs. Callers preserve their
+artifact name, path, compression level, `if-no-files-found` policy, and
+seven-day retention; the backend capability reports keep the upload action's
+default compression level (6) and `if-no-files-found: error`.
 
 The composite uses the existing pinned upload-artifact v7 action for the
 initial attempt and one retry, tolerates only the initial failure, waits
 15 seconds, and sets `overwrite: true` on the blocking retry. Recovery and
 evidence loss are reported explicitly. A successful retry does not change any
 earlier build or coverage failure. Regression coverage in
-`tools/ci_native_observation_test.py` checks both callers, all three mobile
+`tools/ci_native_observation_test.py` checks the callers, all three mobile
 matrix entries, the matching retry inputs, cancellation, and the two-attempt
 limit.
 

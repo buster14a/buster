@@ -192,12 +192,31 @@ and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
-`compiler_parallel_prewarm()` prepares both native target families, including
-all x86 per-form caches and exact plans, before the first persistent worker.
-Both are needed because a later invocation may switch architectures while
-workers are parked. Embedding callers must call it before starting their own
-gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
-entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
+Before its first multi-lane cohort, the driver prepares only the
+invocation's native family (`compiler_driver_native_family_prepare`). For
+x86-64 that is the serial compile's own prewarm plus the forwarding and NOP
+recipes (`buster_x86_metadata_prewarm_for_lanes`): the per-form metadata
+caches, exact plans, TLS/GOT recipe groups, expansion shapes, dense tables,
+variable-memory cells and template rows are filled by the lanes that reach
+them, under once-claims (see the [parallelism guide](parallelism.md)), so a
+gang prepares the forms it emits instead of all 11,013 (#53). For AArch64 it
+is canonical-form validity and the semantic blobs. Prepared families are
+tracked in driver state.
+Parked workers count as live threads, so a later invocation on the same thread
+that needs a family not yet prepared first releases the parked gang with
+`lane_release()`, prewarms that family serially, and lets the next `lane_run`
+recreate the gang. This applies to a later cohort and to a serial compile of
+that family while a cohort's gang is parked. Only a transition to a family not
+yet prepared releases the gang; once both are prepared, alternating targets
+reuses the parked gang.
+A process that never runs a cohort keeps the serial lazy path. The end-to-end
+effect awaits the 9700X `scaling-v1` rows.
+
+`compiler_parallel_prewarm()` still prepares both families. Embedding callers
+must call it before starting their own gang, or before calling the driver from
+more than one thread, because the driver cannot release a gang it does not
+own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
+entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
@@ -585,6 +604,10 @@ The block-local CSE experiment (#3011) is selected only by
 `-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+`-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
+off the construction-time constant interning arm in C lowering (off by
+default, last one wins, independent of `-O` and FAST controls); see
+[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -612,8 +635,9 @@ see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,
-`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
-`visits`. It is compile-work telemetry, not generated-code runtime.
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, `visits`,
+and `released_bytes` (pages of relocated caller tables handed back to the OS).
+It is compile-work telemetry, not generated-code runtime.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last

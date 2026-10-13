@@ -125,13 +125,14 @@ census boundary.
 
 ## Desktop and lint scheduling
 
-Ordinary pull requests, tags and manual runs schedule desktop shards without
-waiting for full workflow lint. The only desktop prerequisites are the
-main-only reuse decision and the merge-group-only lint job; both are root jobs
-and skip outside their own events. Native remains independent of desktop/lint.
-Main pushes still wait for their exact-SHA reuse decision.
+No event schedules desktop shards behind full workflow lint. The only desktop
+prerequisites are the main-only reuse decision and the trusted no-code plan;
+native has the same prerequisites. Main pushes still wait for their exact-SHA
+reuse decision.
 
-Merge groups retain the full lint preflight before desktop execution. The two
+Merge groups run the full lint beside desktop rather than before it (#3912):
+the lint preflight held every desktop shard for about two minutes, while a lint
+failure still fails the group through `CI complete`. The two
 mutually exclusive lint jobs have equivalent explicit steps, enforced by a
 policy regression, so every event executes the same full lint workload once.
 The pinned actionlint and action-pin scanner do not support steps-list aliases. The executing job retains the

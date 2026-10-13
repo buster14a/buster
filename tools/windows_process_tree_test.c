@@ -99,7 +99,10 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
         TREE_TEST(count > 0 && count < TREE_COMMAND_CAPACITY);
         u64 now = 0;
         TREE_TEST(tree_test_now(tick_clock, &now));
-        u64 deadline = expired ? now - 1 : now + UINT64_C(1500000000);
+        // Cancel-during-startup's 3 s startup delay outlasts the usual 1.5 s deadline;
+        // its later deadline keeps cleanup starting first, with the whole budget left
+        // for publication.
+        u64 deadline = expired ? now - 1 : now + (cancel_startup ? UINT64_C(5000000000) : UINT64_C(1500000000));
         PROCESS_INFORMATION writer = {0};
         if (cancel_before)
         {
@@ -116,11 +119,18 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
             STARTUPINFOW startup_info = {.cb = sizeof(startup_info)};
             TREE_TEST(CreateProcessW(0, writer_command, 0, 0, FALSE, 0, 0, 0, &startup_info, &writer));
         }
-        tree_test_startup_delay_ms = startup ? 2000 : (cancel_startup ? 1000 : 0);
+        // The cancel writer must start and wait 250 ms inside this delay; loaded
+        // hosted Windows runners have taken longer than 1 s to do so.
+        tree_test_startup_delay_ms = startup ? 2000 : (cancel_startup ? 3000 : 0);
         tree_test_cleanup_delay_ms = cleanup ? 2000 : (late_cleanup ? 3500 : 0);
         tree_test_status_delay_ms = late_status ? 3500 : 0;
+        // Publication shares the cleanup budget. The separate-allowance case
+        // spends 2 s of simulated cleanup, and loaded hosted Windows runners
+        // have published for over 1 s (#3816), so it gets headroom past 3 s.
+        // The late cases keep 3 s so their 3.5 s delays still exceed it.
+        unsigned cleanup_budget_ms = cleanup ? 5000u : 3000u;
         if (!paths) tree_test_launch_context = (TreeTestLaunchContext){0};
-        int code = paths ? tree_launch(job, 3000, command, deadline, tick_clock, status) : TREE_EXIT_DRAIN_FAILED;
+        int code = paths ? tree_launch(job, cleanup_budget_ms, command, deadline, tick_clock, status) : TREE_EXIT_DRAIN_FAILED;
         int expected = late_cleanup || late_status ? TREE_EXIT_DRAIN_FAILED : (normal || cancel ? 0 : TREE_EXIT_RUNTIME_TIMEOUT);
         if (code != expected)
         {
@@ -128,13 +138,13 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
             TreeLaunchStatus const* observed = &context->status;
             fprintf(stderr,
                 "WINDOWS_PROCESS_TREE_TEST_CONTEXT case=%s clock=%s code=%d expected=%d paths=%u "
-                "startup_delay_ms=%u cleanup_delay_ms=%u status_delay_ms=%u cleanup_budget_ms=3000 "
+                "startup_delay_ms=%u cleanup_delay_ms=%u status_delay_ms=%u cleanup_budget_ms=%u "
                 "complete=%u clock_valid=%u cancelled=%u runtime_timed_out=%u root_status_known=%u root_returncode=%lu "
                 "runtime_deadline_ns=%llu root_finished_ns=%llu cleanup_started_ns=%llu cleanup_finished_ns=%llu "
                 "cleanup_limit_ns=%llu publication_started_ns=%llu publication_finished_ns=%llu "
                 "publication_clock_valid=%u publication_ok=%u publication_stage=%s win32_error_valid=%u win32_error=%lu\n",
                 mode, tick_clock ? "tick" : "qpc", code, expected, (unsigned)paths,
-                tree_test_startup_delay_ms, tree_test_cleanup_delay_ms, tree_test_status_delay_ms,
+                tree_test_startup_delay_ms, tree_test_cleanup_delay_ms, tree_test_status_delay_ms, cleanup_budget_ms,
                 (unsigned)observed->complete, (unsigned)observed->clock_valid, (unsigned)observed->cancelled,
                 (unsigned)observed->runtime_timed_out, (unsigned)observed->root_status_known,
                 (unsigned long)observed->root_returncode, (unsigned long long)observed->runtime_deadline_ns,

@@ -2,7 +2,8 @@
 // keeps its POSIX and Windows paths side by side inside one function
 // rather than in per-platform files, so the contract stays in one place:
 // virtual memory (os_reserve/os_commit/os_decommit, the advisory os_prefault
-// hint, and protection flags),
+// hint, os_discard for abandoned ranges inside a live mapping, and
+// protection flags),
 // threads, mutexes, and TLS, directory listing (os_directory_entry_names),
 // checked file IO (os_file_write_checked,
 // os_file_close_checked, os_file_flush), replacement publication
@@ -22,7 +23,8 @@
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
-// shape it exists to avoid.
+// shape it exists to avoid. lane_release joins a parked gang so its caller
+// can run serial initialization again.
 
 #include <buster/lib/os.h>
 #include <buster/lib/os_internal.h>
@@ -761,6 +763,31 @@ bool os_decommit(void* address, u64 size)
     return result;
 }
 
+u64 os_discard(void* address, u64 size)
+{
+    u64 page_size = os_get_page_size();
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    u64 start = ((u64)address + page_size - 1u) & ~(page_size - 1u);
+    u64 end = ((u64)address + size) & ~(page_size - 1u);
+    u64 result = 0;
+    if (address && size && end > start)
+    {
+        result = end - start;
+#if defined(__linux__) || defined(__APPLE__)
+        // The range stays mapped and writable. Linux refills it with zero
+        // pages on the next touch; Darwin may keep the old contents.
+        if (madvise((void*)start, result, MADV_DONTNEED) != 0) result = 0;
+#elif defined(_WIN32)
+        // MEM_RESET keeps the range committed and accessible with undefined
+        // contents; the pages need not be paged out or kept resident.
+        if (!VirtualAlloc((void*)start, (SIZE_T)result, MEM_RESET, PAGE_READWRITE)) result = 0;
+#else
+        result = 0;
+#endif
+    }
+    return result;
+}
+
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsHugePageTestCounters os_huge_pages_test_state;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_huge_pages_test_refusal;
@@ -1271,6 +1298,372 @@ u64 atomic_u64_decrement(AtomicU64* address)
     u64 result = atomic_u64_add(address, ~(u64)0);
     return result;
 }
+
+#if BUSTER_COMPILER_MSVC && !BUSTER_SINGLE_THREADED
+#include <intrin.h>
+#endif
+
+BUSTER_SHARED_INLINE u8 atomic_u8_load_acquire(u8 const* address)
+{
+    u8 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar8((unsigned __int8 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u8)__iso_volatile_load8((__int8 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE void atomic_u8_store_release(u8* address, u8 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    __stlr8((unsigned __int8 volatile*)address, value);
+#elif BUSTER_COMPILER_MSVC
+    _ReadWriteBarrier();
+    __iso_volatile_store8((__int8 volatile*)address, (__int8)value);
+#else
+    __atomic_store_n(address, value, __ATOMIC_RELEASE);
+#endif
+}
+
+BUSTER_SHARED_INLINE bool atomic_u8_compare_exchange(u8* address, u8 expected, u8 desired)
+{
+    bool result;
+#if BUSTER_SINGLE_THREADED
+    result = *address == expected;
+    if (result)
+    {
+        *address = desired;
+    }
+#elif BUSTER_COMPILER_MSVC
+    result = (u8)_InterlockedCompareExchange8((char volatile*)address, (char)desired, (char)expected) == expected;
+#else
+    result = __atomic_compare_exchange_n(address, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u16 atomic_u16_load_acquire(u16 const* address)
+{
+    u16 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar16((unsigned __int16 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)__iso_volatile_load16((__int16 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE void atomic_u16_store_release(u16* address, u16 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    __stlr16((unsigned __int16 volatile*)address, value);
+#elif BUSTER_COMPILER_MSVC
+    _ReadWriteBarrier();
+    __iso_volatile_store16((__int16 volatile*)address, (__int16)value);
+#else
+    __atomic_store_n(address, value, __ATOMIC_RELEASE);
+#endif
+}
+
+BUSTER_SHARED_INLINE u16 atomic_u16_load_relaxed(u16 const* address)
+{
+    u16 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)__iso_volatile_load16((__int16 const volatile*)address);
+#else
+    result = __atomic_load_n(address, __ATOMIC_RELAXED);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE void atomic_u16_store_relaxed(u16* address, u16 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC
+    __iso_volatile_store16((__int16 volatile*)address, (__int16)value);
+#else
+    __atomic_store_n(address, value, __ATOMIC_RELAXED);
+#endif
+}
+
+BUSTER_SHARED_INLINE bool atomic_u16_compare_exchange(u16* address, u16 expected, u16 desired)
+{
+    bool result;
+#if BUSTER_SINGLE_THREADED
+    result = *address == expected;
+    if (result)
+    {
+        *address = desired;
+    }
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)_InterlockedCompareExchange16((short volatile*)address, (short)desired, (short)expected) == expected;
+#else
+    result = __atomic_compare_exchange_n(address, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u16 atomic_u16_add(u16* address, u16 addend)
+{
+    u16 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+    *address = (u16)(result + addend);
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)_InterlockedExchangeAdd16((short volatile*)address, (short)addend);
+#else
+    result = __atomic_fetch_add(address, addend, __ATOMIC_ACQ_REL);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u32 atomic_u32_add(u32* address, u32 addend)
+{
+    u32 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+    *address = result + addend;
+#elif BUSTER_COMPILER_MSVC
+    result = (u32)_InterlockedExchangeAdd((long volatile*)address, (long)addend);
+#else
+    result = __atomic_fetch_add(address, addend, __ATOMIC_ACQ_REL);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u32 atomic_u32_load_acquire(u32 const* address)
+{
+    u32 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar32((unsigned __int32 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u32)__iso_volatile_load32((__int32 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u64 atomic_u64_load_acquire_plain(u64 const* address)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar64((unsigned __int64 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)__iso_volatile_load64((__int64 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u64 atomic_u64_or_release_plain(u64* address, u64 bits)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+    *address = result | bits;
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)_InterlockedOr64((__int64 volatile*)address, (__int64)bits);
+#else
+    result = __atomic_fetch_or(address, bits, __ATOMIC_RELEASE);
+#endif
+    return result;
+}
+
+// A waiter spins this many rounds before it starts yielding: a claim is held
+// for one entry's fill, which is usually shorter than a reschedule.
+#define ONCE_CLAIM_SPIN_ROUNDS 64u
+// The deepest chain of nested fills: a template row, a shape, a plan, facts,
+// a pattern, a row, a record and a memo slot take eight.
+#define ONCE_CLAIM_STACK_CAPACITY 16u
+
+// The once-claims this thread holds, innermost last.
+typedef struct OnceClaimStack OnceClaimStack;
+struct OnceClaimStack
+{
+    void const* states[ONCE_CLAIM_STACK_CAPACITY];
+    u32 levels[ONCE_CLAIM_STACK_CAPACITY];
+    u32 depth;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OnceClaimStack once_claim_stack;
+
+// Pushes a won claim. Claims nest only to strictly lower levels, which is
+// what makes waiting deadlock-free.
+BUSTER_GLOBAL_LOCAL void once_claim_push(void const* state, u32 level)
+{
+    OnceClaimStack* claims = &once_claim_stack;
+    if (claims->depth != 0 && level >= claims->levels[claims->depth - 1])
+    {
+        os_fail_message(S8("once-claim taken at a level not below the claim it is nested in"));
+    }
+    if (claims->depth >= ONCE_CLAIM_STACK_CAPACITY)
+    {
+        os_fail_message(S8("once-claims nested too deeply"));
+    }
+    claims->states[claims->depth] = state;
+    claims->levels[claims->depth] = level;
+    claims->depth += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void once_claim_pop(void const* state)
+{
+    OnceClaimStack* claims = &once_claim_stack;
+    if (claims->depth == 0 || claims->states[claims->depth - 1] != state)
+    {
+        os_fail_message(S8("once-claim published out of order or without a claim"));
+    }
+    claims->depth -= 1;
+}
+
+// A thread waiting on a claim it holds would wait forever.
+BUSTER_GLOBAL_LOCAL void once_claim_check_not_held(void const* state)
+{
+    OnceClaimStack* claims = &once_claim_stack;
+    for (u32 index = 0; index < claims->depth; index += 1)
+    {
+        if (claims->states[index] == state)
+        {
+            os_fail_message(S8("once-claim waited on by the thread that holds it"));
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void once_claim_backoff(u32 round)
+{
+#if BUSTER_SINGLE_THREADED
+    // Nobody else can finish a busy claim in a build without threads.
+    BUSTER_UNUSED(round);
+    os_fail_message(S8("once-claim busy in a single-threaded build"));
+#else
+    if (round >= ONCE_CLAIM_SPIN_ROUNDS)
+    {
+#if BUSTER_WINDOWS
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
+#endif
+}
+
+void once_wait_u8(u8 const* state, u8 busy)
+{
+    once_claim_check_not_held(state);
+    for (u32 round = 0; atomic_u8_load_acquire(state) == busy; round += 1)
+    {
+        once_claim_backoff(round);
+    }
+}
+
+bool once_claim_u8(u8* state, u8 pending, u8 busy, u32 level)
+{
+    bool claimed = false;
+    bool deciding = true;
+    while (deciding)
+    {
+        u8 value = atomic_u8_load_acquire(state);
+        if (value == pending)
+        {
+            claimed = atomic_u8_compare_exchange(state, pending, busy);
+            deciding = !claimed;
+        }
+        else if (value == busy)
+        {
+            once_wait_u8(state, busy);
+        }
+        else
+        {
+            deciding = false;
+        }
+    }
+    if (claimed)
+    {
+        once_claim_push(state, level);
+    }
+    return claimed;
+}
+
+void once_publish_u8(u8* state, u8 value)
+{
+    once_claim_pop(state);
+    atomic_u8_store_release(state, value);
+}
+
+void once_wait_u16(u16 const* state, u16 busy)
+{
+    once_claim_check_not_held(state);
+    for (u32 round = 0; atomic_u16_load_acquire(state) == busy; round += 1)
+    {
+        once_claim_backoff(round);
+    }
+}
+
+bool once_claim_u16(u16* state, u16 pending, u16 busy, u32 level)
+{
+    bool claimed = false;
+    bool deciding = true;
+    while (deciding)
+    {
+        u16 value = atomic_u16_load_acquire(state);
+        if (value == pending)
+        {
+            claimed = atomic_u16_compare_exchange(state, pending, busy);
+            deciding = !claimed;
+        }
+        else if (value == busy)
+        {
+            once_wait_u16(state, busy);
+        }
+        else
+        {
+            deciding = false;
+        }
+    }
+    if (claimed)
+    {
+        once_claim_push(state, level);
+    }
+    return claimed;
+}
+
+void once_publish_u16(u16* state, u16 value)
+{
+    once_claim_pop(state);
+    atomic_u16_store_release(state, value);
+}
+
+#if BUSTER_INCLUDE_TESTS
+u32 once_claim_depth(void)
+{
+    u32 result = once_claim_stack.depth;
+    return result;
+}
+#endif
 
 String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate)
 {
@@ -8340,6 +8733,19 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
         }
         lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }
+#endif
+}
+
+void lane_release(void)
+{
+#if !BUSTER_SINGLE_THREADED
+    ThreadContext* thread_context = thread_context_selected();
+    BUSTER_CHECK(thread_context != 0);
+    // Releasing from inside a region would join workers that are still
+    // running this caller's callback.
+    BUSTER_CHECK(thread_context->lane_context.lane_count == 1);
+    BUSTER_CHECK(!thread_context->lane_gang || !thread_context->lane_gang->running);
+    lane_gang_release(thread_context);
 #endif
 }
 
