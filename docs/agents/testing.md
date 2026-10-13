@@ -89,6 +89,12 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- The native GPU timeout log-retention assertion emits
+  `GPU_LOG_RETENTION_FAILURE_V1` only on failure: retained length/budget,
+  suffix/bound booleans, dropped/capture-truncation facts and at most 64 log
+  bytes in hex, with the omitted-byte count. This diagnoses #3780 without
+  changing its marker, one-second deadline or 27-byte retention budget;
+  a passing run does not explain the preserved original failure.
 - With a debugger attached, assertion failures stop through `os_fail()` after
   reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
   self-tests set `UnitTestArguments.suppress_debugger_break` only around their
@@ -335,6 +341,18 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   budget. The hosted Linux/macOS controls run in a separate five-minute lane,
   preserving the full lifecycle lane's ten-minute cap and artifact-retention
   headroom. No test selection, acceptance marker or process owner changes.
+  The launcher forwards `BUSTER_TEST_FIXTURE_TIMING=all` into each simulator
+  payload (#3585). Completed scopes retain `TEST_FIXTURE_TIMING_V1` and the
+  existing driver operation counters in the per-label console artifact.
+  Timed iOS module scopes also emit two module-named `BUSTER_IOS_LAUNCH_V1`
+  observations: entry before the starting scope clock, exit after the ending
+  clock and before cleanup/reporting. Pair observations by module name and
+  order; missing exits leave partial intervals. Query status must be zero for
+  usable clocks. Process CPU includes every app thread; concurrent modules
+  overlap, so neither CPU nor nested fixture intervals may be summed as
+  independent costs. The existing module wall-time series remains authoritative
+  for comparisons. These diagnostic clocks do not select tests or extend the
+  launch deadline.
   Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` for the launch-trace monitor to retain
   each case's output, complete console file, lifecycle receipts, registered
   child identities and case/collector timing before its private directory is

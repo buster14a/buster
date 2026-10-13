@@ -826,20 +826,20 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_suf
 
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_fcvt_suffix_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:FCVTL_asimdmisc_L"), UINT64_C(0x3605be7c9c5b5cdf), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID},
      BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 0},
     {S8_INITIALIZER("arm-a64@2026-06:FCVTL_asimdmisc_L"), UINT64_C(0x3605be7c9c5b5cdf), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID},
      BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 1},
     {S8_INITIALIZER("arm-a64@2026-06:FCVTN_asimdmisc_N"), UINT64_C(0x3fe51307652789ca), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID},
      BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 0},
     {S8_INITIALIZER("arm-a64@2026-06:FCVTN_asimdmisc_N"), UINT64_C(0x3fe51307652789ca), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID},
      BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 1},
 };
 
@@ -867,23 +867,23 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_sha1_bou
 
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_sha1_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:SHA1C_QSV_cryptosha3"), UINT64_C(0xc8bf61c1fbc4c68b), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_Q, BUSTER_A64_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_SIMD_ARRANGEMENT_4S, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SHA1H_SS_cryptosha2"), UINT64_C(0x527117bcf01c589e), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_S, BUSTER_A64_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SHA1M_QSV_cryptosha3"), UINT64_C(0xfe21fb23ee0af9be), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_Q, BUSTER_A64_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_SIMD_ARRANGEMENT_4S, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SHA1P_QSV_cryptosha3"), UINT64_C(0x6df8cac602cb80f6), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_Q, BUSTER_A64_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_SIMD_ARRANGEMENT_4S, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SHA1SU0_VVV_cryptosha3"), UINT64_C(0xe03e17b03ab0e566), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_4S, BUSTER_A64_SIMD_ARRANGEMENT_4S,
+      BUSTER_A64_SIMD_ARRANGEMENT_4S, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SHA1SU1_VV_cryptosha2"), UINT64_C(0x91788958671acea8), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_4S, BUSTER_A64_SIMD_ARRANGEMENT_4S,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 /* TBL/TBX expose a brace-delimited table list and a byte-vector index.  The
@@ -927,29 +927,29 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_tbl_tbx_
 
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_tbl_tbx_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L1_1"), UINT64_C(0x7217285bada5df77), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L2_2"), UINT64_C(0xb78a5bd0b06eeb02), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L3_3"), UINT64_C(0x1d93f8d9ed2b6dd8), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L4_4"), UINT64_C(0x0f24e509b0a9d450), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L1_1"), UINT64_C(0x804d68c24266e3c4), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L2_2"), UINT64_C(0xe298fbaad2ea6fd7), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L3_3"), UINT64_C(0x9f7c68cc37209c0f), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L4_4"), UINT64_C(0x2050b49463e72e5a), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 /* Final canonical direct-SIMD rows.  DUP exercises the mixed vector/GPR
@@ -977,14 +977,14 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_final3_b
 
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_final3_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:DUP_asimdins_DR_r"), UINT64_C(0xe6799413838aec2f), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:NOT_asimdmisc_R"), UINT64_C(0xb4fad81197ef56dd), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:ORR_asimdsame_only"), UINT64_C(0xc6e29afad4e09fb3), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 /* FHM AdvSIMD rows require LLVM's HasNEON && HasFP16FML predicate.  The
@@ -992,17 +992,17 @@ static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_f
  * reject FP16FML without its FULLFP16/NEON dependencies. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_fhm_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:FMLAL2_asimdsame_F"), UINT64_C(0x7cd436e3f3d6fb58), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FMLAL_asimdsame_F"), UINT64_C(0x424770611f6d4571), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FMLSL2_asimdsame_F"), UINT64_C(0x3a930821d594548d), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FMLSL_asimdsame_F"), UINT64_C(0x7c64660496445a9d), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 /* Independent llvm-mc 22.1.8 encodings (little-endian bytes), exhaustive for
@@ -1031,17 +1031,17 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fhm_boun
  * llvm-mc 22.1.8. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_frintts_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:FRINT32X_asimdmisc_R"), UINT64_C(0x418e0ab118cb28ba), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FRINT32Z_asimdmisc_R"), UINT64_C(0x8dede1d564313c59), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FRINT64X_asimdmisc_R"), UINT64_C(0x956ff9b673405173), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FRINT64Z_asimdmisc_R"), UINT64_C(0x89795480cfdf8cbf), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_frintts_cases[] = {
@@ -1071,11 +1071,11 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_frintts_
  * and source arrangements for each direct row. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_dotprod_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:SDOT_asimdsame2_D"), UINT64_C(0x1aab66d054562284), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:UDOT_asimdsame2_D"), UINT64_C(0xd40495bc9d9aacdf), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_dotprod_cases[] = {
@@ -1095,20 +1095,20 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_dotprod_
  * 2S/4S); these bytes are independent llvm-mc 22.1.8 encodings. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_rdm_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:SQRDMLAH_asimdsame2_only"), UINT64_C(0x3557225a108dda38), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SQRDMLSH_asimdsame2_only"), UINT64_C(0x03b0c5137f14528a), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_rdm_scalar_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:SQRDMLAH_asisdsame2_only"), UINT64_C(0x26cc7e6837d3c6f), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SQRDMLSH_asisdsame2_only"), UINT64_C(0x8f3f8e995448cec5), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_cases[] = {
@@ -1152,20 +1152,20 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_scal
  * selectors for every row. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_scalar_selector_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:FRECPE_asisdmisc_R"), UINT64_C(0x374ec904f3062ae6), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FRECPX_asisdmisc_R"), UINT64_C(0x8562c49063307536), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:FRSQRTE_asisdmisc_R"), UINT64_C(0xa8946616cf3a7d68), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SCVTF_asisdmisc_R"), UINT64_C(0x8fbf3a3a185ff928), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:UCVTF_asisdmisc_R"), UINT64_C(0x8a8e6b7c5213fb44), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_selector_cases[] = {
@@ -1199,14 +1199,14 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_s
  * metadata and llvm-mc 22.1.8. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_scalar_narrow_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:SQXTN_asisdmisc_N"), UINT64_C(0xaba6357972b5fd03), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SQXTUN_asisdmisc_N"), UINT64_C(0x947ecbd12b6c0cf8), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:UQXTN_asisdmisc_N"), UINT64_C(0xe02de395147ccab2), 2,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_narrow_cases[] = {
@@ -1238,14 +1238,14 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_n
  * to the canonical metadata and llvm-mc 22.1.8. */
 static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_scalar_widen_spellings[] = {
     {S8_INITIALIZER("arm-a64@2026-06:SQDMLAL_asisddiff_only"), UINT64_C(0xa880474b2d693e03), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SQDMLSL_asisddiff_only"), UINT64_C(0xf39ad3663eebb936), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("arm-a64@2026-06:SQDMULL_asisddiff_only"), UINT64_C(0x5eaf349cfe4c58fa), 3,
-     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+     {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}},
 };
 
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_widen_cases[] = {
@@ -3060,6 +3060,154 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_stack(UnitTestArgu
             AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[row], (AssemblyEncodeOptions){.target = targets[target]});
             BUSTER_TEST(arguments, unit.diagnostic_count >= 1);
         }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment_max_skip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    u8 aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
+    u32 limits[] = {0, 1, 7, 10, 14, 15, 16, UINT32_MAX};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 directives[] = {S8(".p2align 4"), S8(".balign 16"), target ? S8(".align 16") : S8(".align 4")};
+        for (u32 directive = 0; directive < BUSTER_ARRAY_LENGTH(directives); directive += 1)
+        {
+            for (u32 prefix = 1; prefix <= 16; prefix += 1)
+            {
+                for (u32 limit = 0; limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
+                {
+                    for (u32 policy = 0; policy < 3; policy += 1)
+                    {
+                        bool text = policy != 2;
+                        bool explicit_fill = policy == 1;
+                        String8 source = string_format(arguments->arena,
+                            S8("{S8}\n.zero {u32}\n{S8},{S8},{u32}\n.byte 85\n"),
+                            text ? S8(".text") : S8(".data"), prefix, directives[directive],
+                            explicit_fill ? S8("165") : S8(""), limits[limit]);
+                        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+                        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1);
+                        if (!unit.diagnostic_count && unit.section_count == 1)
+                        {
+                            u32 padding = (16 - prefix) & 15;
+                            if (limits[limit] && padding > limits[limit]) padding = 0;
+                            ByteSlice bytes = unit.sections[0].data;
+                            BUSTER_TEST(arguments, bytes.length == prefix + padding + 1 && unit.sections[0].alignment == 16);
+                            if (bytes.length == prefix + padding + 1)
+                            {
+                                bool correct = bytes.pointer[prefix + padding] == 85;
+                                for (u32 offset = 0; offset < prefix + padding; offset += 1)
+                                {
+                                    u8 expected = 0;
+                                    if (offset >= prefix)
+                                    {
+                                        expected = explicit_fill ? 165 : (!text ? 0 : (target ? 0x90 :
+                                            (offset < ((prefix + 3) & ~3u) ? 0 : aarch64_nop[offset & 3])));
+                                    }
+                                    correct = correct && bytes.pointer[offset] == expected;
+                                }
+                                BUSTER_TEST(arguments, correct);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        String8 rejected[] = {
+            S8(".p2align 4,,-1"), S8(".p2align 4,,4294967296"), S8(".p2align 4,,missing"),
+            S8(".p2align 4,,1+"), S8(".p2align 4,,"), S8(".p2align 4,256,10"),
+            S8(".p2align 4,-1,10"), S8(".p2align 4,missing,10"), S8(".p2align 4,,10,1"),
+            S8(".p2align ,0,10"), S8(".p2align 21,,10"),
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[row], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count != 0);
+        }
+        for (u32 limit = 14; limit <= 15; limit += 1)
+        {
+            String8 source = string_format(arguments->arena, S8(".bss\n.zero 1\n.p2align 4,,{u32}\n.zero 1\n"), limit);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1 &&
+                unit.sections[0].zero_size == (limit == 14 ? 2 : 17) && !unit.sections[0].data.length && unit.sections[0].alignment == 16);
+        }
+        AssemblyUnitResult expression = assembly_unit_encode(arguments->arena,
+            S8(".data\n.byte 85\n.balign 16+0, 0xa0+5, 14+1\n.byte 102\n"), (AssemblyEncodeOptions){.target = targets[target]});
+        u8 expected[] = {85, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 102};
+        BUSTER_TEST(arguments, !expression.diagnostic_count && expression.section_count == 1 &&
+            assembly_test_bytes_equal(expression.sections[0].data, expected, BUSTER_ARRAY_LENGTH(expected)));
+    }
+    // Growing the jump from two to five bytes changes padding from suppressed
+    // (14 > 12) to admitted (11 <= 12); replay must recompute the limit.
+    AssemblyUnitResult relaxed = assembly_unit_encode(arguments->arena,
+        S8(".text\njmp .Lend\n.p2align 4,165,12\n.zero 128\n.Lend: ret\n"), (AssemblyEncodeOptions){.target = targets[1]});
+    BUSTER_TEST(arguments, !relaxed.diagnostic_count && relaxed.section_count == 1);
+    if (!relaxed.diagnostic_count && relaxed.section_count == 1)
+    {
+        ByteSlice bytes = relaxed.sections[0].data;
+        u8 jump[] = {0xe9, 0x8b, 0, 0, 0};
+        BUSTER_TEST(arguments, bytes.length == 145 && bytes.pointer[144] == 0xc3);
+        if (bytes.length == 145)
+        {
+            BUSTER_TEST(arguments, memcmp(bytes.pointer, jump, sizeof(jump)) == 0);
+            for (u32 offset = 5; offset < 144; offset += 1)
+            {
+                BUSTER_TEST(arguments, bytes.pointer[offset] == (offset < 16 ? 165 : 0));
+            }
+        }
+    }
+    return result;
+}
+
+// Pristine GCC 16.2.1 -O2 -S output, including its omitted-fill max skip.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_gcc_alignment_listing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Keep the exact fixture text in the portable test: mobile runners have
+    // no repository filesystem. Provenance lives beside gcc_alignment_spin.s.
+    String8 source = S8(
+        "\t.file\t\"spin.c\"\n"
+        "\t.text\n"
+        "\t.p2align 4\n"
+        "\t.globl\tspin\n"
+        "\t.type\tspin, @function\n"
+        "spin:\n"
+        ".LFB0:\n"
+        "\t.cfi_startproc\n"
+        "\tjmp\t.L8\n"
+        "\t.p2align 4\n"
+        "\t.p2align 4,,10\n"
+        "\t.p2align 3\n"
+        ".L3:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\tmovl\t%eax, (%rdi)\n"
+        ".L8:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\ttestl\t%eax, %eax\n"
+        "\tjne\t.L3\n"
+        "\tret\n"
+        "\t.cfi_endproc\n"
+        ".LFE0:\n"
+        "\t.size\tspin, .-spin\n"
+        "\t.ident\t\"GCC: (GNU) 16.2.1 20260810\"\n"
+        "\t.section\t.note.GNU-stack,\"\",@progbits\n");
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count >= 1);
+    if (!unit.diagnostic_count && unit.section_count >= 1)
+    {
+        // GNU as 2.47 puts the store-loop body at 16 and the test at 20. Buster preserves
+        // its single-byte NOP fill rather than GNU's multibyte NOP spelling.
+        u8 expected[] = {0xeb, 0x12, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                         0x8b, 0x07, 0x89, 0x07, 0x8b, 0x07, 0x85, 0xc0, 0x75, 0xf6, 0xc3};
+        BUSTER_TEST(arguments, assembly_test_bytes_equal(unit.sections[0].data, expected, BUSTER_ARRAY_LENGTH(expected)) &&
+                               unit.sections[0].alignment == 16 && unit.relocation_count == 0);
     }
     return result;
 }
@@ -5788,9 +5936,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x86_common_source_forms(UnitTes
     return result;
 }
 
+// GNU as 2.47 byte oracles for GCC's PAUSE spelling, its F3 aliases, and
+// neighbouring prefixes. Operands must not disappear during normalization.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x86_rep_nop(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct RepNopCase
+    {
+        String8 att;
+        String8 intel;
+        u8 bytes[5];
+        u32 length;
+    } const cases[] = {
+        {S8("rep nop\n"), S8("rep nop\n"), {0xf3, 0x90}, 2},
+        {S8("repe nop\n"), S8("repe nop\n"), {0xf3, 0x90}, 2},
+        {S8("repz nop\n"), S8("repz nop\n"), {0xf3, 0x90}, 2},
+        {S8("REP NOP\n"), S8("REP NOP\n"), {0xf3, 0x90}, 2},
+        {S8("\trep\t nop  \n"), S8("\trep\t nop  \n"), {0xf3, 0x90}, 2},
+        {S8("nop\n"), S8("nop\n"), {0x90}, 1},
+        {S8("rep movsb\n"), S8("rep movsb\n"), {0xf3, 0xa4}, 2},
+        {S8("rep bsfq %rdi, %rbx\n"), S8("rep bsf rbx, rdi\n"), {0xf3, 0x48, 0x0f, 0xbc, 0xdf}, 5},
+        {S8("repne scasb\n"), S8("repne scasb\n"), {0xf2, 0xae}, 2},
+        {S8("rep nop %xmm0\n"), S8("rep nop xmm0\n"), {0}, 0},
+        {S8("rep nop $1\n"), S8("rep nop 1\n"), {0}, 0},
+        {S8("rep nop %eax, %ebx\n"), S8("rep nop eax, ebx\n"), {0}, 0},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        struct RepNopCase test = cases[index];
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            String8 source = dialect ? test.intel : test.att;
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = target, .syntax = dialect ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT});
+            bool valid = test.length ? encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                assembly_test_bytes_equal(encoded.bytes, test.bytes, test.length) : encoded.diagnostic_count != 0 && encoded.bytes.length == 0;
+            BUSTER_TEST_RAW(arguments, valid, source);
+            String8 unit_source = string_format(arguments->arena,
+                dialect ? S8(".intel_syntax noprefix\n.text\n{S8}") : S8(".text\n{S8}"), source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, unit_source, (AssemblyEncodeOptions){.target = target});
+            bool unit_valid = test.length ? unit.diagnostic_count == 0 && unit.section_count != 0 &&
+                assembly_test_bytes_equal(unit.sections[0].data, test.bytes, test.length) : unit.diagnostic_count != 0;
+            BUSTER_TEST_RAW(arguments, unit_valid, source);
+        }
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_alignment_max_skip);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_gcc_alignment_listing);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_stack_note);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
@@ -5813,6 +6011,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_simd_source_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_gpr_feature_generic_targets);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_x86_common_source_forms);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_x86_rep_nop);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_accumulator_alu_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
@@ -5869,14 +6068,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
 
     for (u32 row_index = 0; row_index < direct_simd_row_count; row_index += 1)
     {
-        BusterA64DirectSIMDRowInfo row = {0};
+        BusterA64SIMDRowInfo row = {0};
         bool row_valid = buster_a64_direct_simd_row(row_index, &row) && row.row_index == row_index && row.executable &&
                          row.source_digest != 0 && row.id.length != 0 && row.operand_count > 0 &&
                          row.operand_count <= BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS;
         BUSTER_TEST(arguments, row_valid);
         for (u32 prior_index = 0; prior_index < row_index; prior_index += 1)
         {
-            BusterA64DirectSIMDRowInfo prior = {0};
+            BusterA64SIMDRowInfo prior = {0};
             bool prior_valid = buster_a64_direct_simd_row(prior_index, &prior);
             bool unique = !prior_valid || !row_valid ||
                           (prior.source_digest != row.source_digest && !string_equal(prior.id, row.id));
@@ -5964,15 +6163,15 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                  is_h ? UINT64_C(0x942ac11ca7582058) : UINT64_C(0x39955c862311f855);
             BusterA64DirectSIMDRequirement expected_requirement = is_h ? BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16
                                                                        : BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP;
-            BusterA64DirectSIMDArrangement expected_arrangement = is_d ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D
-                                                                        : is_h ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H
-                                                                               : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S;
+            BusterA64SIMDArrangement expected_arrangement = is_d ? BUSTER_A64_SIMD_ARRANGEMENT_D
+                                                                        : is_h ? BUSTER_A64_SIMD_ARRANGEMENT_H
+                                                                               : BUSTER_A64_SIMD_ARRANGEMENT_S;
             direct_simd_fcsel_rows_exact = direct_simd_fcsel_rows_exact && spelling.source_digest == expected_digest &&
                                            spelling.requirement == expected_requirement && spelling.operand_count == 4 &&
                                            spelling.arrangements[0] == expected_arrangement &&
                                            spelling.arrangements[1] == expected_arrangement &&
                                            spelling.arrangements[2] == expected_arrangement &&
-                                           spelling.arrangements[3] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                                           spelling.arrangements[3] == BUSTER_A64_SIMD_ARRANGEMENT_INVALID;
         }
         for (u32 prior_index = 0; prior_index < spelling_index; prior_index += 1)
         {
@@ -5992,7 +6191,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         }
 
         u32 row_index = UINT32_MAX;
-        BusterA64DirectSIMDRowInfo row = {0};
+        BusterA64SIMDRowInfo row = {0};
         BusterA64SemanticForm row_form = {0};
         u32 public_operand_count = 0;
         bool has_condition_operand = false;
@@ -6036,7 +6235,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                 for (u32 operand_index = 0; operand_index < 4; operand_index += 1)
                 {
                     arrangements_valid = arrangements_valid &&
-                                          spelling.arrangements[operand_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                                          spelling.arrangements[operand_index] == BUSTER_A64_SIMD_ARRANGEMENT_INVALID;
                 }
             }
             else
@@ -6053,28 +6252,28 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                     if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
                     {
                         arrangements_valid = arrangements_valid && public_index < 4 &&
-                                              spelling.arrangements[public_index] > BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
-                                              spelling.arrangements[public_index] < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT;
+                                              spelling.arrangements[public_index] > BUSTER_A64_SIMD_ARRANGEMENT_INVALID &&
+                                              spelling.arrangements[public_index] < BUSTER_A64_SIMD_ARRANGEMENT_COUNT;
                         public_index += 1;
                     }
                     else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
                     {
                         arrangements_valid = arrangements_valid && public_index < 4 &&
-                                              spelling.arrangements[public_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                                              spelling.arrangements[public_index] == BUSTER_A64_SIMD_ARRANGEMENT_INVALID;
                         public_index += 1;
                     }
                     else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_CONDITION &&
                              (operand.flags & BUSTER_A64_SEMANTIC_FLAG_CONDITION_FIELD) != 0)
                     {
                         arrangements_valid = arrangements_valid && public_index < 4 &&
-                                              spelling.arrangements[public_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                                              spelling.arrangements[public_index] == BUSTER_A64_SIMD_ARRANGEMENT_INVALID;
                         public_index += 1;
                     }
                 }
                 for (u32 operand_index = public_index; operand_index < 4; operand_index += 1)
                 {
                     arrangements_valid = arrangements_valid &&
-                                          spelling.arrangements[operand_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                                          spelling.arrangements[operand_index] == BUSTER_A64_SIMD_ARRANGEMENT_INVALID;
                 }
             }
         }
@@ -6141,44 +6340,44 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
     static AssemblyA64DirectSIMDSpellingExpectation const m1_collision_spellings[] = {
         {S8_INITIALIZER("arm-a64@2026-06:ADD_asimdsame_only"), UINT64_C(0x979101fa1dd62d38), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:ADD_asisdsame_only"), UINT64_C(0x1f1182a2f55aaad9), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_D, BUSTER_A64_SIMD_ARRANGEMENT_D,
+          BUSTER_A64_SIMD_ARRANGEMENT_D, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:AND_asimdsame_only"), UINT64_C(0x52df93db3d4db99d), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:BIC_asimdsame_only"), UINT64_C(0x70338c1f69cbc030), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:CLS_asimdmisc_R"), UINT64_C(0xc9168638e385e157), 2,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:CLZ_asimdmisc_R"), UINT64_C(0x0b1fe309be6bba71), 2,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:EOR_asimdsame_only"), UINT64_C(0xa6d57e7ad7709737), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:ORN_asimdsame_only"), UINT64_C(0xfb87dd553345428c), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:RBIT_asimdmisc_R"), UINT64_C(0x15375b291dd8409f), 2,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:REV16_asimdmisc_R"), UINT64_C(0x85e55f83cf9406e7), 2,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:REV32_asimdmisc_R"), UINT64_C(0x6be39e0e8b2edb2c), 2,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:SUB_asimdsame_only"), UINT64_C(0x9353fa8f698b9abb), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
         {S8_INITIALIZER("arm-a64@2026-06:SUB_asisdsame_only"), UINT64_C(0x5d1dde1d88b9da52), 3,
-         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D,
-          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+         {BUSTER_A64_SIMD_ARRANGEMENT_D, BUSTER_A64_SIMD_ARRANGEMENT_D,
+          BUSTER_A64_SIMD_ARRANGEMENT_D, BUSTER_A64_SIMD_ARRANGEMENT_INVALID}, 0, 0},
     };
     u32 m1_collision_first_spelling = UINT32_MAX;
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(m1_collision_spellings); expected_index += 1)
@@ -10876,7 +11075,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fcvt_gpr_case.bytes, 4));
 
         u32 semantic_row_index = UINT32_MAX;
-        BusterA64DirectSIMDRowInfo semantic_row = {0};
+        BusterA64SIMDRowInfo semantic_row = {0};
         BusterA64SemanticForm semantic_form = {0};
         BusterA64SemanticOperand gpr_operand = {0};
         BusterA64SemanticOperand simd_operand = {0};
@@ -10915,12 +11114,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                        : BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP);
                 found_spelling = string_equal(spelling.semantic_id, fcvt_gpr_case.semantic_id) &&
                                  spelling.operand_count == 2 &&
-                                 spelling.arrangements[0] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
+                                 spelling.arrangements[0] == BUSTER_A64_SIMD_ARRANGEMENT_INVALID &&
                                  spelling.arrangements[1] ==
-                                     (half_precision ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H
+                                     (half_precision ? BUSTER_A64_SIMD_ARRANGEMENT_H
                                                       : fcvt_gpr_case.source.pointer[fcvt_gpr_case.source.length - 3] == 'd'
-                                                            ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D
-                                                            : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S) &&
+                                                            ? BUSTER_A64_SIMD_ARRANGEMENT_D
+                                                            : BUSTER_A64_SIMD_ARRANGEMENT_S) &&
                                  requirement_ok;
                 break;
             }

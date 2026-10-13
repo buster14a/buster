@@ -243,11 +243,16 @@ its separate compiler-rt lookup and fallback policy.
 function must never inherit that: #1376 found 156 of them running at -O0 when
 the region was a `#pragma clang attribute` that also marked declarations. The
 audit replays the database row for `ide.c` through the Clang frontend only
-(LLVM IR, no optimization or code generation; about ten seconds) and fails
+(LLVM IR, no optimization or code generation; 20-26 s on hosted runners) and fails
 when a function defined outside `src/buster/tests/` carries `optnone`. The
 `optnone_audit` CMake target runs it on the same canonical unsanitized
 optimized Clang tree as `clang_analyze`, in the same superbuild step (the
-direct matrix schedules the command beside `clang_analyze` too). A production
+direct matrix schedules the command beside `clang_analyze` too). Neither
+target takes the console pool: `matrix_superbuild_analyze_jobs` passes
+`--parallel 2` to that step on hosts with at least three logical CPUs and
+`MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY` (12 GiB), so the audit runs while
+the analyzer's longest shard leaves a worker idle; smaller hosts, including
+the 7 GiB macOS runners, keep `--parallel 1` (#3912). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
@@ -417,16 +422,17 @@ remaining compiles (up to about twice the CPU count in nominal workers) in
 exchange for no idle CPUs during a long sanitized test tail. Before #2657 this
 applied to the grouped hosted checks shards (sanitized Debug and Release
 tests); since #2657 every hosted desktop shard has at most one test tree, so
-serialization remains only for multi-test-tree local selections. Sanitized
-Clang CI trees and Windows AArch64 Release run `test_all` through the existing
+serialization remains only for multi-test-tree local selections. Every Clang CI
+tree, sanitized or not, runs `test_all` through the existing
 isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
 four-worker quota into two two-worker processes and runs the ordinary invocation
 below four. The `primary` group owns `c_frontend_tests` on every partitioned
 tree except Windows AArch64, where it owns `compiler_driver_tests`; `rest`
 owns every other enabled module.
 The parent independently checks both complete inventories and their exact
-disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
-canonical producers retain their standard configure arguments.
+disjoint union. The option only selects `test_all`'s unit launcher and changes no
+compile or link input, so it is the one argument a canonical artifact-fanout
+producer may add to its standard configure arguments (#3912).
 See [Windows critical-path attribution](../windows-ci-critical-path.md). Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
@@ -458,6 +464,14 @@ consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
 environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
 process, and remains disabled for the direct scheduler and unsupported platforms.
+The worker deletes its private bootstrap executable after stage-one linking.
+Only Windows sharing/access deletion errors get a bounded cleanup retry (at most
+500 ms and 51 attempts, matching generated-test executable cleanup); permanent
+locks, read-only files and other native errors still fail. Any initial failure
+records the path, first/final native errors, attempts and elapsed cleanup time.
+Artifact-fanout preflight covers actual Windows held/released handles, read-only
+files and invalid names; the released-handle control is explicitly skipped in a
+single-lane bootstrap. Self-host and CI timeouts are unchanged.
 Each self-host stage and the stage-2 benchmark are bounded at ten minutes
 (`SELF_HOST_TIMEOUT_SECONDS`): the work is fixed and costs seconds, so a stage
 that does not finish is a compiler that never will, and waiting on one wedges

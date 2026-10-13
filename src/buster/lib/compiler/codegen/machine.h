@@ -1308,8 +1308,11 @@ BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
 // System V x86-64 needs two parts; an AArch64 HFA can contain four.
 #define MACHINE_VA_ARG_PART_LIMIT 4
 // Largest alignment of a SysV x86-64 MEMORY-class aggregate that VA_ARG rounds
-// the overflow area up to: the widest vector the target stores in one slot.
-#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 64u
+// the overflow area up to. The rounding is `add alignment - 1` and
+// `and -alignment` with sign-extended imm32 operands, which encode every power
+// of two up to 2^31; a u32-sized aggregate is a multiple of its alignment, so
+// this admits every alignment such an aggregate can have.
+#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 0x80000000u
 // ELF AAPCS64: three pointers followed by two independent signed 32-bit offsets.
 // Darwin and Windows use their separate one-pointer va_list representations.
 #define MACHINE_A64_VA_STACK_OFFSET 0u

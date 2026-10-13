@@ -2195,6 +2195,242 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* ar
     return result;
 }
 
+// Once-claims (os.h): lanes race the first fill of every entry of a shared
+// table in different orders.  Each entry's fill also claims a lower-level
+// leaf, as an x86 form's facts claim its operand views, and a u16 table
+// stands for the claims whose state doubles as the published value.  Lanes
+// only record; the caller checks that every entry was filled exactly once,
+// every reader saw the winner's value, and no claim stayed open.
+enum
+{
+    OS_TEST_ONCE_ENTRY_COUNT = 4096,
+    OS_TEST_ONCE_LEAF_COUNT = OS_TEST_ONCE_ENTRY_COUNT / 4,
+    OS_TEST_ONCE_LEVEL_LEAF = 1,
+    OS_TEST_ONCE_LEVEL_ENTRY = 2,
+    OS_TEST_ONCE_PENDING = 0,
+    OS_TEST_ONCE_READY = 1,
+    OS_TEST_ONCE_BUSY = 2,
+    OS_TEST_ONCE_WIDE_BUSY = UINT16_MAX,
+};
+
+typedef struct OsTestOnceState OsTestOnceState;
+struct OsTestOnceState
+{
+    u8 entry_states[OS_TEST_ONCE_ENTRY_COUNT];
+    u64 entry_values[OS_TEST_ONCE_ENTRY_COUNT];
+    u32 entry_fills[OS_TEST_ONCE_ENTRY_COUNT];
+    u8 leaf_states[OS_TEST_ONCE_LEAF_COUNT];
+    u64 leaf_values[OS_TEST_ONCE_LEAF_COUNT];
+    u32 leaf_fills[OS_TEST_ONCE_LEAF_COUNT];
+    u16 wide_states[OS_TEST_ONCE_ENTRY_COUNT];
+    u64 wide_values[OS_TEST_ONCE_ENTRY_COUNT];
+    u32 wide_fills[OS_TEST_ONCE_ENTRY_COUNT];
+    u64 mismatches[OS_TEST_LANE_MAX_COUNT];
+    u64 open_claims[OS_TEST_LANE_MAX_COUNT];
+};
+
+BUSTER_GLOBAL_LOCAL u64 os_test_once_value(u64 index, u64 salt)
+{
+    u64 result = (index + 1) * UINT64_C(0x9e3779b97f4a7c15) ^ salt;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 os_test_once_leaf(OsTestOnceState* state, u64 leaf)
+{
+    if (atomic_u8_load_acquire(&state->leaf_states[leaf]) != OS_TEST_ONCE_READY &&
+        once_claim_u8(&state->leaf_states[leaf], OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_LEAF))
+    {
+        state->leaf_values[leaf] = os_test_once_value(leaf, 0x1eaf);
+        (void)atomic_u32_add(&state->leaf_fills[leaf], 1);
+        once_publish_u8(&state->leaf_states[leaf], OS_TEST_ONCE_READY);
+    }
+    u64 result = atomic_u8_load_acquire(&state->leaf_states[leaf]) == OS_TEST_ONCE_READY ? state->leaf_values[leaf] : 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_once_lane(void* argument)
+{
+    OsTestOnceState* state = (OsTestOnceState*)argument;
+    u64 lane = lane_index();
+    u64 lanes = lane_count();
+    lane_sync();
+    u64 mismatches = 0;
+    for (u64 step = 0; step < OS_TEST_ONCE_ENTRY_COUNT; step += 1)
+    {
+        // Odd lanes walk backwards, so every entry is contended from both
+        // ends as well as by lanes walking the same direction.
+        u64 offset = (step + lane * (OS_TEST_ONCE_ENTRY_COUNT / lanes)) % OS_TEST_ONCE_ENTRY_COUNT;
+        u64 index = lane & 1 ? OS_TEST_ONCE_ENTRY_COUNT - 1 - offset : offset;
+        if (atomic_u8_load_acquire(&state->entry_states[index]) != OS_TEST_ONCE_READY &&
+            once_claim_u8(&state->entry_states[index], OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY))
+        {
+            state->entry_values[index] = os_test_once_value(index, os_test_once_leaf(state, index % OS_TEST_ONCE_LEAF_COUNT));
+            (void)atomic_u32_add(&state->entry_fills[index], 1);
+            once_publish_u8(&state->entry_states[index], OS_TEST_ONCE_READY);
+        }
+        u64 expected = os_test_once_value(index, os_test_once_value(index % OS_TEST_ONCE_LEAF_COUNT, 0x1eaf));
+        mismatches += atomic_u8_load_acquire(&state->entry_states[index]) != OS_TEST_ONCE_READY || state->entry_values[index] != expected;
+
+        u16 wide_ready = (u16)(index + 1);
+        if (atomic_u16_load_acquire(&state->wide_states[index]) != wide_ready &&
+            once_claim_u16(&state->wide_states[index], 0, OS_TEST_ONCE_WIDE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY))
+        {
+            state->wide_values[index] = os_test_once_value(index, 0x31de);
+            (void)atomic_u32_add(&state->wide_fills[index], 1);
+            once_publish_u16(&state->wide_states[index], wide_ready);
+        }
+        mismatches += atomic_u16_load_acquire(&state->wide_states[index]) != wide_ready ||
+                      state->wide_values[index] != os_test_once_value(index, 0x31de);
+    }
+    state->mismatches[lane] = mismatches;
+    state->open_claims[lane] = once_claim_depth();
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_once_claims(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+
+    // The serial contract: a claim is won once, an abandoned claim (published
+    // back to pending) is won again, and a final state is never claimed.
+    {
+        u8 state = OS_TEST_ONCE_PENDING;
+        BUSTER_TEST(arguments, once_claim_u8(&state, OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY));
+        BUSTER_TEST(arguments, once_claim_depth() == 1);
+        once_publish_u8(&state, OS_TEST_ONCE_PENDING);
+        BUSTER_TEST(arguments, once_claim_depth() == 0);
+        BUSTER_TEST(arguments, once_claim_u8(&state, OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY));
+        u8 leaf = OS_TEST_ONCE_PENDING;
+        BUSTER_TEST(arguments, once_claim_u8(&leaf, OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_LEAF));
+        BUSTER_TEST(arguments, once_claim_depth() == 2);
+        once_publish_u8(&leaf, OS_TEST_ONCE_READY);
+        once_publish_u8(&state, OS_TEST_ONCE_READY);
+        BUSTER_TEST(arguments, !once_claim_u8(&state, OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY));
+        BUSTER_TEST(arguments, once_claim_depth() == 0 && state == OS_TEST_ONCE_READY && leaf == OS_TEST_ONCE_READY);
+        u16 wide = 0;
+        BUSTER_TEST(arguments, once_claim_u16(&wide, 0, OS_TEST_ONCE_WIDE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY));
+        once_publish_u16(&wide, 7);
+        BUSTER_TEST(arguments, !once_claim_u16(&wide, 0, OS_TEST_ONCE_WIDE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY) && wide == 7);
+    }
+
+    // The race, on a temporary gang owner so its parked workers are joined
+    // before later modules' serially checked globals initialize.
+    {
+        ThreadContext* main_context = thread_context_selected();
+        ThreadContext* lane_owner_context = thread_context_allocate();
+        thread_context_select(lane_owner_context);
+#if BUSTER_SINGLE_THREADED
+        u64 lanes = 1;
+#else
+        u64 lanes = BUSTER_MIN((u64)OS_TEST_LANE_MAX_COUNT, (u64)os_get_logical_thread_count());
+        String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
+        if (jobs_text.length)
+        {
+            IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text);
+            if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == jobs_text.length && parsed.value)
+            {
+                lanes = BUSTER_MIN(lanes, parsed.value);
+            }
+        }
+        lanes = BUSTER_MAX(lanes, (u64)1);
+#endif
+        for (u32 round = 0; round < 4; round += 1)
+        {
+            OsTestOnceState* state = arena_allocate(arena, OsTestOnceState, 1);
+            memset(state, 0, sizeof(*state));
+            lane_run(lanes, &os_test_once_lane, state);
+            u64 bad_entries = 0;
+            for (u64 index = 0; index < OS_TEST_ONCE_ENTRY_COUNT; index += 1)
+            {
+                bad_entries += state->entry_fills[index] != 1 || state->wide_fills[index] != 1;
+            }
+            for (u64 leaf = 0; leaf < OS_TEST_ONCE_LEAF_COUNT; leaf += 1)
+            {
+                bad_entries += state->leaf_fills[leaf] != 1;
+            }
+            u64 mismatches = 0;
+            u64 open_claims = 0;
+            for (u64 lane = 0; lane < lanes; lane += 1)
+            {
+                mismatches += state->mismatches[lane];
+                open_claims += state->open_claims[lane];
+            }
+            BUSTER_TEST(arguments, bad_entries == 0);
+            BUSTER_TEST(arguments, mismatches == 0);
+            BUSTER_TEST(arguments, open_claims == 0);
+        }
+        thread_context_release(lane_owner_context);
+        thread_context_select(main_context);
+    }
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // A claim nested at a level that is not lower, and a wait on a claim the
+    // thread holds, would deadlock under contention; both fail at once.
+    {
+        String8 modes[] = {S8("once-level"), S8("once-self-wait")};
+        String8 messages[] = {S8("once-claim taken at a level not below the claim it is nested in"),
+                              S8("once-claim waited on by the thread that holds it")};
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
+        {
+            SliceString8 inherited_keys = program_state->input.environment_keys;
+            SliceString8 inherited_values = program_state->input.environment_values;
+            String8* keys = arena_allocate(arena, String8, inherited_keys.length + 2);
+            String8* values = arena_allocate(arena, String8, inherited_keys.length + 2);
+            keys[0] = S8("BUSTER_OS_FATAL_OUTPUT_MODE");
+            values[0] = modes[index];
+            keys[1] = S8("BUSTER_TEST_JOBS");
+            values[1] = S8("1");
+            u64 count = 2;
+            for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+            {
+                if (!string_equal(inherited_keys.pointer[inherited], keys[0]) && !string_equal(inherited_keys.pointer[inherited], keys[1]))
+                {
+                    keys[count] = inherited_keys.pointer[inherited];
+                    values[count] = inherited_values.pointer[inherited];
+                    count += 1;
+                }
+            }
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){keys, count},
+                                                        (SliceString8){values, count},
+                                                        (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+                String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+                BUSTER_TEST(arguments, string_starts_with_sequence(error, messages[index]));
+            }
+        }
+    }
+#endif
+
+    arena_set_position(arena, position);
+    return result;
+}
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+// The child side of os_test_once_claims' failure checks: neither returns.
+BUSTER_GLOBAL_LOCAL void os_test_once_claim_fault(bool self_wait)
+{
+    u8 outer = OS_TEST_ONCE_PENDING;
+    u8 inner = OS_TEST_ONCE_PENDING;
+    (void)once_claim_u8(&outer, OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY);
+    if (self_wait)
+    {
+        once_wait_u8(&outer, OS_TEST_ONCE_BUSY);
+    }
+    else
+    {
+        (void)once_claim_u8(&inner, OS_TEST_ONCE_PENDING, OS_TEST_ONCE_BUSY, OS_TEST_ONCE_LEVEL_ENTRY);
+    }
+    os_exit(126);
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -2204,6 +2440,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
+    if (string_equal(fatal_mode, S8("once-level")) || string_equal(fatal_mode, S8("once-self-wait")))
+    {
+        os_test_once_claim_fault(string_equal(fatal_mode, S8("once-self-wait")));
+    }
     if (fatal_mode.length)
     {
         if (string_ends_with_sequence(fatal_mode, S8("closed")))
@@ -2230,6 +2470,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, os_test_environment_lookup);
+    BUSTER_TEST_FIXTURE(arguments, os_test_once_claims);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_replay);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_storage);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_limits);
@@ -2774,6 +3015,41 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             bool failed = os_commit(reservation, page_size, (ProtectionFlags){.read = true, .write = true}, true);
             BUSTER_TEST(arguments, !failed);
             BUSTER_TEST(arguments, os_prefault_test_counters().requests == before_failure.requests);
+        }
+    }
+
+    // os_discard releases only the complete pages inside an abandoned range
+    // and leaves the whole mapping writable: the partial pages at either end
+    // keep their bytes, and the released page accepts new writes (#3854).
+    {
+        u64 page_size = os_get_page_size();
+        u64 size = 4 * page_size;
+        u8* reservation = (u8*)os_reserve(0, size, (ProtectionFlags){0},
+                                          (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+        BUSTER_TEST(arguments, reservation != 0);
+        if (reservation)
+        {
+            bool committed = os_commit(reservation, size, (ProtectionFlags){.read = true, .write = true}, false);
+            BUSTER_TEST(arguments, committed);
+            if (committed)
+            {
+                memset(reservation, 0x5a, size);
+                BUSTER_TEST(arguments, os_discard(0, size) == 0);
+                BUSTER_TEST(arguments, os_discard(reservation + 1, page_size - 2) == 0);
+                // From mid first page to mid third page: only page two is whole.
+                u64 released = os_discard(reservation + page_size / 2, 2 * page_size);
+                BUSTER_TEST(arguments, released == 0 || released == page_size);
+                BUSTER_TEST(arguments, reservation[page_size - 1] == 0x5a && reservation[2 * page_size] == 0x5a);
+                BUSTER_TEST(arguments, reservation[0] == 0x5a && reservation[size - 1] == 0x5a);
+                reservation[page_size] = 0xc3;
+                reservation[2 * page_size - 1] = 0x3c;
+                BUSTER_TEST(arguments, reservation[page_size] == 0xc3 && reservation[2 * page_size - 1] == 0x3c);
+#if defined(__linux__)
+                BUSTER_TEST(arguments, released == page_size);
+                BUSTER_TEST(arguments, reservation[page_size + 1] == 0);
+#endif
+            }
+            BUSTER_TEST(arguments, os_unreserve(reservation, size));
         }
     }
 
@@ -3331,8 +3607,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // A held unread proc descriptor must classify a reaped task as vanished;
     // empty, oversized and invalid-descriptor reads remain ordinary failures.
     BUSTER_TEST(arguments, os_linux_proc_read_self_test());
-    // An unrelated PID disappearing between readdir and stat is ordinary
-    // host churn and cannot invalidate a stable target-group proof.
+    // Unrelated PIDs disappearing between readdir and stat, once or in every
+    // snapshot, are ordinary host churn and cannot invalidate a stable
+    // target-group proof or consume a retry.
     BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
 #endif
 

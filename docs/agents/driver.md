@@ -192,12 +192,31 @@ and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
-`compiler_parallel_prewarm()` prepares both native target families, including
-all x86 per-form caches and exact plans, before the first persistent worker.
-Both are needed because a later invocation may switch architectures while
-workers are parked. Embedding callers must call it before starting their own
-gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
-entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
+Before its first multi-lane cohort, the driver prepares only the
+invocation's native family (`compiler_driver_native_family_prepare`). For
+x86-64 that is the serial compile's own prewarm plus the forwarding and NOP
+recipes (`buster_x86_metadata_prewarm_for_lanes`): the per-form metadata
+caches, exact plans, TLS/GOT recipe groups, expansion shapes, dense tables,
+variable-memory cells and template rows are filled by the lanes that reach
+them, under once-claims (see the [parallelism guide](parallelism.md)), so a
+gang prepares the forms it emits instead of all 11,013 (#53). For AArch64 it
+is canonical-form validity and the semantic blobs. Prepared families are
+tracked in driver state.
+Parked workers count as live threads, so a later invocation on the same thread
+that needs a family not yet prepared first releases the parked gang with
+`lane_release()`, prewarms that family serially, and lets the next `lane_run`
+recreate the gang. This applies to a later cohort and to a serial compile of
+that family while a cohort's gang is parked. Only a transition to a family not
+yet prepared releases the gang; once both are prepared, alternating targets
+reuses the parked gang.
+A process that never runs a cohort keeps the serial lazy path. The end-to-end
+effect awaits the 9700X `scaling-v1` rows.
+
+`compiler_parallel_prewarm()` still prepares both families. Embedding callers
+must call it before starting their own gang, or before calling the driver from
+more than one thread, because the driver cannot release a gang it does not
+own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
+entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
@@ -401,8 +420,8 @@ preprocessing (`-E`, including `-dM`) and frontend-only validation
 LLVM output and links—is deliberately refused with an explicit #3654
 diagnostic. I386 is supported only for Linux and freestanding targets; an
 execution-mode option on an x86 target with another OS is refused using the
-pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
-tracked separately by #3458.
+pre-mode target triple in its diagnostic. `-m64` switches back to the existing
+x86-64 target as described above.
 
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
@@ -579,6 +598,16 @@ explicit control of each bit wins. Level/alias policy, fixed pass order and
 budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
 Verbose output reports disabled as well as enabled passes. Timing is separate
 (`-ftime-canonical-fast -v`); register allocation selection is independent.
+The block-local CSE experiment (#3011) is selected only by
+`-fcanonical-fast-cse`; no level or whole-pipeline control enables it, and
+`-fcanonical-fast`/`-fno-canonical-fast` clear an earlier selection.
+`-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
+hash-table arm (default `table`; the last one given wins). See
+[opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+`-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
+off the construction-time constant interning arm in C lowering (off by
+default, last one wins, independent of `-O` and FAST controls); see
+[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -591,16 +620,24 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `ir.inline-required` error. Positive 32-bit per-invocation limits are set with
 `-fcanonical-inline-max-callee=N`,
 `-fcanonical-inline-function-growth=N`,
-`-fcanonical-inline-module-growth=N`, and
-`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+`-fcanonical-inline-module-growth=N`,
+`-fcanonical-inline-call-sites=N`, and
+`-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
 tiny inlining; zero is rejected and zero-valued API options normalize to the
 named defaults. Budgets cap callee instruction count, added instructions per
-caller, added instructions per module, and accepted call sites, respectively.
+caller, added instructions per module, and accepted call sites, respectively;
+the shift sets the caller relocation bound described below.
+Without an explicit module limit, the module budget is relative: the larger of
+4096 rows and 1/32 of the module's lowered canonical instruction rows
+(`ir_inline_module_growth_limit`). A caller keeps optional splices only when
+their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
+see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,
-`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
-`visits`. It is compile-work telemetry, not generated-code runtime.
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, `visits`,
+and `released_bytes` (pages of relocated caller tables handed back to the OS).
+It is compile-work telemetry, not generated-code runtime.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
@@ -942,7 +979,8 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
-X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+X86 source forms also include baseline `pause`, operand-free `rep nop` (also
+`repe nop` and `repz nop`), `prefetcht0`/`prefetcht1`/
 `prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
 an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
 SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
@@ -966,6 +1004,9 @@ AVX-512 profiles and malformed neighbours. The driver's
 Buster listings with byte-identical text and captured pristine GCC 16.2.1
 `-O2 -S` scalar conversions. These bounded witnesses do not claim every
 metadata form or arbitrary external listing is source-complete (#2931).
+`assembly_test_x86_rep_nop` checks the operand-free REP-NOP aliases and
+malformed operands in both dialects; `compiler_driver_test_gcc_pause_listing`
+assembles the pristine GCC PAUSE loop with its maximum-skip alignment directives.
 
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:
@@ -1139,7 +1180,15 @@ retain relocations because a linker can replace their addresses.
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
 is zero-filled before the NOPs; explicit fills remain repeated bytes on both
-targets. Data alignment defaults to zero fill.
+targets. Data alignment defaults to zero fill. `.p2align`, `.balign`, and
+`.align` accept `alignment[, fill[, maximum_skip]]`, including an omitted
+fill (`.p2align 4,,10`). A nonzero maximum suppresses the gap when the required
+padding exceeds it; equality permits padding and zero means unlimited. The
+section retains its requested alignment even when padding is suppressed.
+Maximum-skip expressions must be absolute and in 0..4294967295; malformed or
+out-of-range operands are diagnosed. Every branch-relaxation layout replay
+recomputes the gap and limit. `.align` keeps its target-specific interpretation:
+bytes on x86-64 ELF, a power of two on AArch64.
 
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
@@ -1291,8 +1340,8 @@ The parser reserves one operation record per expanded argument; the native
 consumer walks it without another allocation. API-built invocations with a
 zero `link_operation_count` retain the explicit legacy order of all inputs
 followed by all libraries. Non-link output actions retain their prior order.
-Group/whole-archive and dynamic-library as-needed/interposition policy are
-unchanged.
+Group and whole-archive requests remain unsupported. Shared-symbol
+interposition retains its existing behavior.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
@@ -1526,6 +1575,30 @@ The object writer already carries that requirement into the section metadata
 (GitHub #225).
 
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
+Undefined ELF `STT_NOTYPE` references carry explicit `undefined_untyped`
+provenance in `ObjectSymbol`; TLS identity is independent. A typed reference
+wins over an untyped one in either object order. Both ELF object writers keep
+untyped assembly references `STT_NOTYPE`, even when a call relocation proves
+their callable use. Before any Linux or Android image writer, the selected
+library definition's `st_type` classifies an import: `STT_FUNC` and
+`STT_GNU_IFUNC` are functions, and `STT_OBJECT` remains data even without a
+storage-table entry. An untyped address reference with no usable definition,
+or a definition of unknown type, fails with its symbol and input named;
+it cannot become a guessed copy relocation. A call relocation proves use,
+not the providing definition's type: missing target exports refuse untyped
+calls and address references alike. Recognized `__tls_get_addr` companion
+calls retain the existing dynamic-loader ABI contract, including calls the
+writer relaxes away.
+An absent weak reference still follows the existing zero-resolution rule.
+
+Android reads `libc.so` and explicitly requested libraries through the same
+export reader. Its roots use `x86_64-linux-android` or
+`aarch64-linux-android` under the supplied sysroot, plus its generic
+`lib64`, `usr/lib64`, `lib` and `usr/lib` roots and explicit `-L` paths.
+Native Android also searches `/system/lib64`; cross Android links never
+search host GNU libc roots. Supply an API-specific NDK library directory
+with `-L` when needed. Missing target exports retain the refusal above.
+
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
 `lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
@@ -2005,6 +2078,38 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux driver links: `--as-needed` and `--no-as-needed` select
+  subsequent `-l` requests and automatic-language direct `.so` / `.so.N`
+  operands in input order (the default is no-as-needed). Explicit `-x` source
+  inputs retain their selected language. A DSO
+  is retained when it satisfies a strong unresolved reference from preceding
+  objects, or from a previously retained DSO when the candidate is absent
+  from every retained DSO's DT_NEEDED list (matched by SONAME identity).
+  DSO-only dependencies already named there remain indirect; a regular-object
+  demand still keeps them. Later objects and weak references do not keep it. The driver consumes these switches before the native image API,
+  which receives the selected library list and still refuses raw policy flags
+  without an ordered driver request. GNU linker-script `AS_NEEDED` remains
+  unsupported.
+- x86-64 Linux ELF links: `-O1` permits the native writer's existing layout and
+  hash policy; it does not request generated-code optimization. `--sort-common`
+  is accepted because there are no admitted common symbols to sort: the object
+  reader continues to refuse `SHN_COMMON`, and assembly `.comm` definitions
+  are already ordinary zero-filled definitions.
+- x86-64 Linux executables, PIEs and shared objects: `-z relro`, `-z now` and
+  `-z noexecstack` request RELRO, eager binding and a non-executable stack.
+  The fixed-address dynamic writer already seals its GOT and binds eagerly.
+  `-z now` extends a PIE/shared object's sealed range to include its PLT GOT
+  and emits both NOW flags. These requests select a dynamic executable even
+  without source imports, so their metadata is present on trivial programs.
+- x86-64 Linux ELF links: `-z pack-relative-relocs` converts eligible PIE/shared
+  `R_X86_64_RELATIVE` relocations to `DT_RELR` with direct addresses and bitmaps,
+  storing their implicit addends in the target words. Unaligned and zero-fill
+  locations retain RELA, as do symbolic, TLS, COPY and IRELATIVE relocations.
+  glibc's `GLIBC_ABI_DT_RELR` version dependency is recorded and must be present
+  in the selected libc's version definitions; an incompatible libc is refused.
+  Fixed-address executables have no load-bias-relative relocations to pack.
+  The existing layout reservation stays as padding; this promises RELR
+  semantics, not a smaller artifact or a compiler-throughput improvement.
 - x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
   `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
   Repeated paths are joined with `:` in command-line order. The default and

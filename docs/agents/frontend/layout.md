@@ -805,7 +805,17 @@ target and the member it is handed, so it adds no agenda prerequisite.
   [whole-unit pass scaling](semantic-validation.md#whole-unit-pass-scaling).
   An idle machine's cold member-offset query finishes its pending list once,
   so subsequent offset queries use committed dependencies instead of rebuilding
-  the whole table for each member.
+  the whole table for each member. An attempt that stops after reading an open
+  type waits on it (`c_parse_layout_pass_wait`, the last open read is the
+  blocker), and that type's publish readies it ahead of the rest of the pass.
+  A type listed before what it contains -- an outer record before its nested
+  ones, a record before the array type of its member -- therefore resolves in
+  the same pass, so a chain of D such links takes O(D) attempts instead of D
+  passes (#3312). A retry only moves an attempt earlier than the next pass would
+  make it, so the passes still stop on a pass without progress. Lowering's
+  type-mapping passes in `c_lower_to_ir_reserved_run` retry the same way
+  (`c_ir_type_mapping_next`, `c_ir_type_mapping_blocker`), so an array type is
+  not re-evaluated pass after pass while its element record waits for a layout.
 - **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used
   for queries with no cache and no type-parse machine: enumerator `sizeof`
   folds and other machineless constant evaluation. A member-offset query of a

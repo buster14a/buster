@@ -1,0 +1,3864 @@
+{
+  "source_commit": "9a5378eabf0d92a8eff27b9e05e5c518efbaed09",
+  "binaries": {
+    "base": "aded0d09820d89dfe27d0a6dc60880e618e7c02a360a7480be99f7c149bcbe74",
+    "probe": "3751483000cb8d511586dd7c8edf55c6e2e5a8a0f5eb63bfb0da7651291e0410"
+  },
+  "units": [
+    {
+      "name": "buster-unity",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/frozen/src/buster/apps/ide/ide.c",
+      "source_sha256": "b15207abd855400abf62dfd23ff11da3d2b12abf109806589f11e4c762366264",
+      "flags": [
+        "-I../frozen/src",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-I../frozen/src",
+          "-Ibuild/generated",
+          "-DBUSTER_UNITY_BUILD=1",
+          "-DBUSTER_INCLUDE_TESTS=0",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/frozen/src/buster/apps/ide/ide.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b206022ef34f7773719bc595edb44f067f768ab22523407077b9ef931b9a4b39",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-I../frozen/src",
+          "-Ibuild/generated",
+          "-DBUSTER_UNITY_BUILD=1",
+          "-DBUSTER_INCLUDE_TESTS=0",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/frozen/src/buster/apps/ide/ide.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b206022ef34f7773719bc595edb44f067f768ab22523407077b9ef931b9a4b39",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity.probe.log"
+      },
+      "paste": {
+        "calls": 27176,
+        "chains": 27664,
+        "joins": 27984,
+        "retained_joined_bytes": 451779,
+        "final_bytes": 414931,
+        "max_joins": 2,
+        "max_joined_length": 60,
+        "histogram": {
+          "1": 27344,
+          "2": 320
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 9184
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 35347726,
+        "lexed.bytes": 35415658,
+        "preprocessed.tokens": 4365420,
+        "preprocessed.spelling_bytes": 39685512
+      },
+      "intermediate_fraction": 0.0002314194661265804
+    },
+    {
+      "name": "buster-unity-tests",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/frozen/src/buster/apps/ide/ide.c",
+      "source_sha256": "b15207abd855400abf62dfd23ff11da3d2b12abf109806589f11e4c762366264",
+      "flags": [
+        "-I../frozen/src",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=1"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-I../frozen/src",
+          "-Ibuild/generated",
+          "-DBUSTER_UNITY_BUILD=1",
+          "-DBUSTER_INCLUDE_TESTS=1",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity-tests.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/frozen/src/buster/apps/ide/ide.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity-tests.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "2ce12d8a8edda144b8001344b971964d61df449c8798d0f806c9a2b416c97d40",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity-tests.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-I../frozen/src",
+          "-Ibuild/generated",
+          "-DBUSTER_UNITY_BUILD=1",
+          "-DBUSTER_INCLUDE_TESTS=1",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity-tests.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/frozen/src/buster/apps/ide/ide.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity-tests.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "2ce12d8a8edda144b8001344b971964d61df449c8798d0f806c9a2b416c97d40",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/buster-unity-tests.probe.log"
+      },
+      "paste": {
+        "calls": 59140,
+        "chains": 34340,
+        "joins": 34796,
+        "retained_joined_bytes": 561656,
+        "final_bytes": 514092,
+        "max_joins": 2,
+        "max_joined_length": 62,
+        "histogram": {
+          "1": 33884,
+          "2": 456
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 13224
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 57034200,
+        "lexed.bytes": 57106321,
+        "preprocessed.tokens": 14948306,
+        "preprocessed.spelling_bytes": 106124842
+      },
+      "intermediate_fraction": 0.0001246079593692116
+    },
+    {
+      "name": "lua-lapi",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lapi.c",
+      "source_sha256": "6afef609bc1d93280a1da898c82734b14ca94d98f72d786c397c5988e6cc6e98",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lapi.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lapi.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lapi.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ee9ee7b93271e110ae211b5bf3f665e669c21feea1d60db3bd8bc0d152c19520",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lapi.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lapi.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lapi.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lapi.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ee9ee7b93271e110ae211b5bf3f665e669c21feea1d60db3bd8bc0d152c19520",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lapi.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 400113,
+        "lexed.bytes": 425778,
+        "preprocessed.tokens": 27931,
+        "preprocessed.spelling_bytes": 461804
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lauxlib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lauxlib.c",
+      "source_sha256": "50ef12f21926fa3b80d1e9e611c5e4669012efe792b5a3515fd5a7ee1cc796e3",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lauxlib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lauxlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lauxlib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0caaa8446174ef16ac282a1e64de4c8761c6809339a46b357723d37679efdbce",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lauxlib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lauxlib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lauxlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lauxlib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0caaa8446174ef16ac282a1e64de4c8761c6809339a46b357723d37679efdbce",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lauxlib.probe.log"
+      },
+      "paste": {
+        "calls": 119,
+        "chains": 87,
+        "joins": 87,
+        "retained_joined_bytes": 1959,
+        "final_bytes": 1872,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 87
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 460063,
+        "lexed.bytes": 499802,
+        "preprocessed.tokens": 16642,
+        "preprocessed.spelling_bytes": 519632
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lbaselib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lbaselib.c",
+      "source_sha256": "5dc9a64468c1ac31e59066c7d3597eeb8ea4ac8fc19a257a74c431624300b487",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lbaselib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lbaselib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lbaselib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "8ace92261db3b8b3771fd3ad0b8cd0714ce3139062ec3489bc538139754891e0",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lbaselib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lbaselib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lbaselib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lbaselib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "8ace92261db3b8b3771fd3ad0b8cd0714ce3139062ec3489bc538139754891e0",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lbaselib.probe.log"
+      },
+      "paste": {
+        "calls": 103,
+        "chains": 73,
+        "joins": 73,
+        "retained_joined_bytes": 1840,
+        "final_bytes": 1767,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 73
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 378537,
+        "lexed.bytes": 413346,
+        "preprocessed.tokens": 12914,
+        "preprocessed.spelling_bytes": 431366
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lcode",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lcode.c",
+      "source_sha256": "2cf13c7f8205e9f07c2ccf1fedc3f0f0a05d238c194b176c72cc22b2cc96210e",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcode.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lcode.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcode.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "204859a0921ec34f99357fa870ad7e0a380d5040a9e7d58c448a4c9b0e122c09",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcode.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcode.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lcode.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcode.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "204859a0921ec34f99357fa870ad7e0a380d5040a9e7d58c448a4c9b0e122c09",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcode.probe.log"
+      },
+      "paste": {
+        "calls": 797,
+        "chains": 641,
+        "joins": 641,
+        "retained_joined_bytes": 8101,
+        "final_bytes": 7460,
+        "max_joins": 1,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 641
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 590351,
+        "lexed.bytes": 661270,
+        "preprocessed.tokens": 32697,
+        "preprocessed.spelling_bytes": 720295
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lcorolib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lcorolib.c",
+      "source_sha256": "5408ccec737678d045d421f84a56e1ce03192a42c55440ffef07bec356aaec89",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcorolib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lcorolib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcorolib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b3dd5ba12e8ca9b884a1509b91c4d989b242337cfe8ee8d9476e57c1bee071aa",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcorolib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcorolib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lcorolib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcorolib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b3dd5ba12e8ca9b884a1509b91c4d989b242337cfe8ee8d9476e57c1bee071aa",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lcorolib.probe.log"
+      },
+      "paste": {
+        "calls": 84,
+        "chains": 56,
+        "joins": 56,
+        "retained_joined_bytes": 1478,
+        "final_bytes": 1422,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 56
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 333502,
+        "lexed.bytes": 361958,
+        "preprocessed.tokens": 8659,
+        "preprocessed.spelling_bytes": 374607
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lctype",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lctype.c",
+      "source_sha256": "3e21ae6a8faab3ed470ae0de19360da6b4e21a0a0f8572f502f7e13d590186f8",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lctype.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lctype.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lctype.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "d76325bea7d0af0dd3840cfd29c271d0dea028e876e1bc3f396f178381007890",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lctype.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lctype.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lctype.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lctype.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "d76325bea7d0af0dd3840cfd29c271d0dea028e876e1bc3f396f178381007890",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lctype.probe.log"
+      },
+      "paste": {
+        "calls": 15,
+        "chains": 15,
+        "joins": 15,
+        "retained_joined_bytes": 385,
+        "final_bytes": 370,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 15
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 207317,
+        "lexed.bytes": 219234,
+        "preprocessed.tokens": 2919,
+        "preprocessed.spelling_bytes": 223778
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ldblib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldblib.c",
+      "source_sha256": "349afd63c8be2cb8a522e4a04e9f444b65ed1fc7f4dabba5b4b61fd8c11d0c42",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldblib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldblib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldblib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "4a8acde10fbc84a9976a062a7cebf910c92a264479cd9231fb4419576203dbdc",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldblib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldblib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldblib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldblib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "4a8acde10fbc84a9976a062a7cebf910c92a264479cd9231fb4419576203dbdc",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldblib.probe.log"
+      },
+      "paste": {
+        "calls": 103,
+        "chains": 73,
+        "joins": 73,
+        "retained_joined_bytes": 1840,
+        "final_bytes": 1767,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 73
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 363268,
+        "lexed.bytes": 398077,
+        "preprocessed.tokens": 11759,
+        "preprocessed.spelling_bytes": 414220
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ldebug",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldebug.c",
+      "source_sha256": "06d065d1f26c29546cc74b61a50267cb70567ae538691f190bf15ca5cd29d308",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldebug.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldebug.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldebug.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "2e8140a70057d921bf5307c53a80fade27fb780fac0a8a8995df0651d550df4a",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldebug.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldebug.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldebug.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldebug.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "2e8140a70057d921bf5307c53a80fade27fb780fac0a8a8995df0651d550df4a",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldebug.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 418243,
+        "lexed.bytes": 445975,
+        "preprocessed.tokens": 19783,
+        "preprocessed.spelling_bytes": 469471
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ldo",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldo.c",
+      "source_sha256": "ff588c58143d3dd75157004a5a785044beb9a6746378ccc6e46d4b3a303657c2",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldo.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldo.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldo.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "e50bea5d4cc5734d547ba5e3e4223edc1ba219d1ad385ff17be0e136ed66c37b",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldo.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldo.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldo.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldo.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "e50bea5d4cc5734d547ba5e3e4223edc1ba219d1ad385ff17be0e136ed66c37b",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldo.probe.log"
+      },
+      "paste": {
+        "calls": 79,
+        "chains": 73,
+        "joins": 73,
+        "retained_joined_bytes": 1615,
+        "final_bytes": 1542,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 73
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 493803,
+        "lexed.bytes": 529256,
+        "preprocessed.tokens": 21192,
+        "preprocessed.spelling_bytes": 557410
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ldump",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldump.c",
+      "source_sha256": "3c05402c5e282e06c2218f2469b1f38e1b84c783b9387aec7740c60b287d82c9",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldump.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldump.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldump.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6269d912e4d44599ba02beb0b1c822a1f2fba5ec4106ead0a66cf3429cb26b6e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldump.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldump.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ldump.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldump.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6269d912e4d44599ba02beb0b1c822a1f2fba5ec4106ead0a66cf3429cb26b6e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ldump.probe.log"
+      },
+      "paste": {
+        "calls": 31,
+        "chains": 29,
+        "joins": 29,
+        "retained_joined_bytes": 504,
+        "final_bytes": 475,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 29
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 324307,
+        "lexed.bytes": 345686,
+        "preprocessed.tokens": 8077,
+        "preprocessed.spelling_bytes": 354912
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lfunc",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lfunc.c",
+      "source_sha256": "38809428b76fafa79db9f65b7248cc0c02c9b696e7410fc4ab1699940768f1b2",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lfunc.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lfunc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lfunc.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "1e82ba7480989408b663a0cabaef354c8679d5413ca6b29fe66d4b5ccbc88e6d",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lfunc.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lfunc.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lfunc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lfunc.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "1e82ba7480989408b663a0cabaef354c8679d5413ca6b29fe66d4b5ccbc88e6d",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lfunc.probe.log"
+      },
+      "paste": {
+        "calls": 31,
+        "chains": 29,
+        "joins": 29,
+        "retained_joined_bytes": 504,
+        "final_bytes": 475,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 29
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 340649,
+        "lexed.bytes": 362028,
+        "preprocessed.tokens": 10618,
+        "preprocessed.spelling_bytes": 375820
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lgc",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lgc.c",
+      "source_sha256": "bf28b521954d66ba02a49569c0f7bf37ebdd4f0a62fde4312284e817fb1e42fe",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lgc.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lgc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lgc.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "c3044318790847fd1ba9255b154aba646e1a746eabc7f7498a26f195b218fcf0",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lgc.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lgc.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lgc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lgc.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "c3044318790847fd1ba9255b154aba646e1a746eabc7f7498a26f195b218fcf0",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lgc.probe.log"
+      },
+      "paste": {
+        "calls": 91,
+        "chains": 61,
+        "joins": 61,
+        "retained_joined_bytes": 1229,
+        "final_bytes": 1168,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 61
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 470538,
+        "lexed.bytes": 503924,
+        "preprocessed.tokens": 25468,
+        "preprocessed.spelling_bytes": 535863
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-linit",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/linit.c",
+      "source_sha256": "3578568e27b9c1e2f4a7f9a53fdb4bc8ac095db75cc86e966bb1deec2792158e",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-linit.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/linit.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-linit.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6868f6ca2a7d875f3ac8aaec73fe0ae9d3a9863437adea4d40b19fce82628dcf",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-linit.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-linit.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/linit.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-linit.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6868f6ca2a7d875f3ac8aaec73fe0ae9d3a9863437adea4d40b19fce82628dcf",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-linit.probe.log"
+      },
+      "paste": {
+        "calls": 56,
+        "chains": 30,
+        "joins": 30,
+        "retained_joined_bytes": 748,
+        "final_bytes": 718,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 30
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 262097,
+        "lexed.bytes": 283802,
+        "preprocessed.tokens": 5398,
+        "preprocessed.spelling_bytes": 291826
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-liolib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/liolib.c",
+      "source_sha256": "bd3176d1c5d30d61fdfc2aa17d7af0819f2da51694942a24b6c185ef797f0060",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-liolib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/liolib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-liolib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "83e0cb4034630775c33cbf60a04e99b9c2c945df0052b81eebd7d4eabf4c4535",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-liolib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-liolib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/liolib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-liolib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "83e0cb4034630775c33cbf60a04e99b9c2c945df0052b81eebd7d4eabf4c4535",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-liolib.probe.log"
+      },
+      "paste": {
+        "calls": 103,
+        "chains": 73,
+        "joins": 73,
+        "retained_joined_bytes": 1840,
+        "final_bytes": 1767,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 73
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 404840,
+        "lexed.bytes": 441716,
+        "preprocessed.tokens": 14292,
+        "preprocessed.spelling_bytes": 461404
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-llex",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/llex.c",
+      "source_sha256": "5cfbaabf3dc0d75835aaafc37fcd87a92f3dba451e002732747b602fda122958",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-llex.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/llex.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-llex.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "41f2ea9450b1e5f1c056c1f0d1f4dbb28b78baf109d02f36143e4efa5c0c8bc4",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-llex.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-llex.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/llex.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-llex.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "41f2ea9450b1e5f1c056c1f0d1f4dbb28b78baf109d02f36143e4efa5c0c8bc4",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-llex.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 392026,
+        "lexed.bytes": 419758,
+        "preprocessed.tokens": 15664,
+        "preprocessed.spelling_bytes": 440329
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lmathlib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lmathlib.c",
+      "source_sha256": "da5c7d74cffce22f0a9eb468e6e7e80b543ea6bec5c21aefb8cf285a3556722a",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmathlib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lmathlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmathlib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "40f8bc1a2061f7b2593ce0ea44b4a2157c2235f59ef9483845824847b6e94913",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmathlib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmathlib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lmathlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmathlib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "40f8bc1a2061f7b2593ce0ea44b4a2157c2235f59ef9483845824847b6e94913",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmathlib.probe.log"
+      },
+      "paste": {
+        "calls": 829,
+        "chains": 649,
+        "joins": 649,
+        "retained_joined_bytes": 8466,
+        "final_bytes": 7817,
+        "max_joins": 1,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 649
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 474596,
+        "lexed.bytes": 547336,
+        "preprocessed.tokens": 16983,
+        "preprocessed.spelling_bytes": 592098
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lmem",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lmem.c",
+      "source_sha256": "6154c2865bec97e61a92d8284be7e8ba21818f6edc95f5d72adb5dcf3e9532ca",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmem.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lmem.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmem.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ebf4e14c1e9e8d429c6b36981b5a0624a0111d34ee91a5cdd0fe212ae5dad28d",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmem.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmem.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lmem.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmem.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ebf4e14c1e9e8d429c6b36981b5a0624a0111d34ee91a5cdd0fe212ae5dad28d",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lmem.probe.log"
+      },
+      "paste": {
+        "calls": 31,
+        "chains": 29,
+        "joins": 29,
+        "retained_joined_bytes": 504,
+        "final_bytes": 475,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 29
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 336692,
+        "lexed.bytes": 358071,
+        "preprocessed.tokens": 8415,
+        "preprocessed.spelling_bytes": 369265
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-loadlib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/loadlib.c",
+      "source_sha256": "f21cafa3258669d6f8c4f09195c654a4a588ab402f5e976c731918658b747a5b",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loadlib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/loadlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loadlib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6c672930f366ee6cf680d0312bb2295ecc2696030aee7412aab721bf581c0786",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loadlib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loadlib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/loadlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loadlib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6c672930f366ee6cf680d0312bb2295ecc2696030aee7412aab721bf581c0786",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loadlib.probe.log"
+      },
+      "paste": {
+        "calls": 103,
+        "chains": 73,
+        "joins": 73,
+        "retained_joined_bytes": 1840,
+        "final_bytes": 1767,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 73
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 384336,
+        "lexed.bytes": 421212,
+        "preprocessed.tokens": 12310,
+        "preprocessed.spelling_bytes": 438656
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lobject",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lobject.c",
+      "source_sha256": "7a9748e38c52e45bc468cae74ccea08b98f8c53a523c1b0f9a117e5cf162c921",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lobject.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lobject.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lobject.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "029003cac9ebaaa4972f1c74d846d930006415c256919312e94cb2c13679c852",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lobject.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lobject.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lobject.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lobject.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "029003cac9ebaaa4972f1c74d846d930006415c256919312e94cb2c13679c852",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lobject.probe.log"
+      },
+      "paste": {
+        "calls": 856,
+        "chains": 672,
+        "joins": 672,
+        "retained_joined_bytes": 8813,
+        "final_bytes": 8141,
+        "max_joins": 1,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 672
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 594657,
+        "lexed.bytes": 680747,
+        "preprocessed.tokens": 24466,
+        "preprocessed.spelling_bytes": 737564
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lopcodes",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lopcodes.c",
+      "source_sha256": "bdc9d39fd8bf1a350c0249f726c5f61bef64b122b93a0fbc172b0328dc01f594",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lopcodes.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lopcodes.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lopcodes.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "079630c5261e7499668387957e552b48fda100a19f0328fd0932c10db289ffe6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lopcodes.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lopcodes.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lopcodes.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lopcodes.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "079630c5261e7499668387957e552b48fda100a19f0328fd0932c10db289ffe6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lopcodes.probe.log"
+      },
+      "paste": {
+        "calls": 15,
+        "chains": 15,
+        "joins": 15,
+        "retained_joined_bytes": 385,
+        "final_bytes": 370,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 15
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 220234,
+        "lexed.bytes": 232151,
+        "preprocessed.tokens": 6422,
+        "preprocessed.spelling_bytes": 240641
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-loslib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/loslib.c",
+      "source_sha256": "474f2a3ee7ca8083e4552177da426ea159be82b4b34f3bd2151239810b57bb0e",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loslib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/loslib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loslib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "457c64a7fc3b2bae38d106c2d585305aee57ed62a3e083e5c9cb4d9621efa0ca",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loslib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loslib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/loslib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loslib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "457c64a7fc3b2bae38d106c2d585305aee57ed62a3e083e5c9cb4d9621efa0ca",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-loslib.probe.log"
+      },
+      "paste": {
+        "calls": 120,
+        "chains": 78,
+        "joins": 78,
+        "retained_joined_bytes": 1935,
+        "final_bytes": 1857,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 78
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 490129,
+        "lexed.bytes": 531537,
+        "preprocessed.tokens": 13626,
+        "preprocessed.spelling_bytes": 551204
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lparser",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lparser.c",
+      "source_sha256": "c5507307586c1a2336a7722229f7b350ae9c548b854933b370ad150e9e6e7f84",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lparser.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lparser.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lparser.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "22735f1768e1ff20c60300ed4d7924aedd6db91e9373be02cb9d5cb3a73d7e8d",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lparser.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lparser.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lparser.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lparser.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "22735f1768e1ff20c60300ed4d7924aedd6db91e9373be02cb9d5cb3a73d7e8d",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lparser.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 438818,
+        "lexed.bytes": 464483,
+        "preprocessed.tokens": 24070,
+        "preprocessed.spelling_bytes": 488525
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lstate",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstate.c",
+      "source_sha256": "5b2003a6bd7c8d98af10f4851ced899581130d5ba9db831cedcc7ac53314e806",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstate.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstate.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstate.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "14b78d8116b08b28b574912d1c917a6a5f90bc64c42a6dd43655b4a31e90f8db",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstate.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstate.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstate.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstate.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "14b78d8116b08b28b574912d1c917a6a5f90bc64c42a6dd43655b4a31e90f8db",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstate.probe.log"
+      },
+      "paste": {
+        "calls": 55,
+        "chains": 51,
+        "joins": 51,
+        "retained_joined_bytes": 961,
+        "final_bytes": 910,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 51
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 392757,
+        "lexed.bytes": 422556,
+        "preprocessed.tokens": 14121,
+        "preprocessed.spelling_bytes": 441717
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lstring",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstring.c",
+      "source_sha256": "b6162f3a65735a902911ffafcafe1db0994c3b0df441581dcbb04dca6bc0b71d",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstring.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstring.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstring.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "a5e9736ea1ba32d30a0e932b7ca7d66befeedceaa6b3b6b82a7b74c9a1f07c81",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstring.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstring.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstring.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstring.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "a5e9736ea1ba32d30a0e932b7ca7d66befeedceaa6b3b6b82a7b74c9a1f07c81",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstring.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 360967,
+        "lexed.bytes": 386632,
+        "preprocessed.tokens": 11053,
+        "preprocessed.spelling_bytes": 401962
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lstrlib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstrlib.c",
+      "source_sha256": "3257cd857653560773947d70b65c8b8bf8ef43f920ed449587fa662224d859e1",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstrlib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstrlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstrlib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0e10cb095d0c2590c6a0606444b11fe626ce18af760186c902f4e7a50b87760b",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstrlib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstrlib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lstrlib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstrlib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0e10cb095d0c2590c6a0606444b11fe626ce18af760186c902f4e7a50b87760b",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lstrlib.probe.log"
+      },
+      "paste": {
+        "calls": 841,
+        "chains": 659,
+        "joins": 659,
+        "retained_joined_bytes": 8709,
+        "final_bytes": 8050,
+        "max_joins": 1,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 659
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 532217,
+        "lexed.bytes": 613377,
+        "preprocessed.tokens": 27545,
+        "preprocessed.spelling_bytes": 666662
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ltable",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltable.c",
+      "source_sha256": "27a711276b1e22aaea3b9182e2d17693f598cfe9bc7fd203c05d400df6673853",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltable.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltable.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltable.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b6e101e182688cc4062265aa51504408b431ef662547b8d0f4931a9831277a28",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltable.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltable.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltable.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltable.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b6e101e182688cc4062265aa51504408b431ef662547b8d0f4931a9831277a28",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltable.probe.log"
+      },
+      "paste": {
+        "calls": 768,
+        "chains": 614,
+        "joins": 614,
+        "retained_joined_bytes": 7358,
+        "final_bytes": 6744,
+        "max_joins": 1,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 614
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 481942,
+        "lexed.bytes": 544441,
+        "preprocessed.tokens": 22514,
+        "preprocessed.spelling_bytes": 594932
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ltablib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltablib.c",
+      "source_sha256": "3d430a6f9cde66d0b791444c6164e7559ccf62b7cdc3a6325882408c6806e26c",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltablib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltablib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltablib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "d38038592c10c79314845abc2e5a5387d3aebbfaf5bb181c0f2cb276fbb2fc20",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltablib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltablib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltablib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltablib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "d38038592c10c79314845abc2e5a5387d3aebbfaf5bb181c0f2cb276fbb2fc20",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltablib.probe.log"
+      },
+      "paste": {
+        "calls": 80,
+        "chains": 52,
+        "joins": 52,
+        "retained_joined_bytes": 1205,
+        "final_bytes": 1153,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 52
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 318413,
+        "lexed.bytes": 348538,
+        "preprocessed.tokens": 9516,
+        "preprocessed.spelling_bytes": 361552
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-ltm",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltm.c",
+      "source_sha256": "7cbe645ed7e1161d31eb32ea467d8220b592c0acfa6107f0194487f0ddbf954b",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltm.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltm.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltm.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "bee7202b0508f8d843d2c2724022f56f7698fdee11e7533801a3d5c524c7bda5",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltm.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltm.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/ltm.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltm.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "bee7202b0508f8d843d2c2724022f56f7698fdee11e7533801a3d5c524c7bda5",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-ltm.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 368259,
+        "lexed.bytes": 393924,
+        "preprocessed.tokens": 12849,
+        "preprocessed.spelling_bytes": 412211
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lua",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lua.c",
+      "source_sha256": "d2c482b9f389699ee6eb0018a20a2d7be66a94a26b2c8554725a79f846ca7596",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lua.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lua.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lua.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0153e5ffb25b805d7833eb2eb0ddeb471d8fd96054b0059672e3d22faf4f1ab5",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lua.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lua.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lua.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lua.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0153e5ffb25b805d7833eb2eb0ddeb471d8fd96054b0059672e3d22faf4f1ab5",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lua.probe.log"
+      },
+      "paste": {
+        "calls": 131,
+        "chains": 87,
+        "joins": 87,
+        "retained_joined_bytes": 1959,
+        "final_bytes": 1872,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 87
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 512624,
+        "lexed.bytes": 554828,
+        "preprocessed.tokens": 15474,
+        "preprocessed.spelling_bytes": 576624
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-luac",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/luac.c",
+      "source_sha256": "3a424e6cb4177886c8790821cf15345f488764bc215eb29719c80002ef24cdc1",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-luac.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/luac.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-luac.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "4f6b89a56d394945590a98a10ec0fe3d1059d95fff15a54516f9c71742cee256",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-luac.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-luac.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/luac.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-luac.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "4f6b89a56d394945590a98a10ec0fe3d1059d95fff15a54516f9c71742cee256",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-luac.probe.log"
+      },
+      "paste": {
+        "calls": 119,
+        "chains": 87,
+        "joins": 87,
+        "retained_joined_bytes": 1959,
+        "final_bytes": 1872,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 87
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 514224,
+        "lexed.bytes": 560164,
+        "preprocessed.tokens": 19995,
+        "preprocessed.spelling_bytes": 585226
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lundump",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lundump.c",
+      "source_sha256": "7f7b078026e162161d402feba73a69cbe66a98558ec0745a445a595f42eac688",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lundump.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lundump.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lundump.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "5021d0189b1d00ba3a66d7f5cf2af749e879bf96977b4b4f04eec9d34bf01a06",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lundump.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lundump.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lundump.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lundump.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "5021d0189b1d00ba3a66d7f5cf2af749e879bf96977b4b4f04eec9d34bf01a06",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lundump.probe.log"
+      },
+      "paste": {
+        "calls": 53,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 363876,
+        "lexed.bytes": 389541,
+        "preprocessed.tokens": 12622,
+        "preprocessed.spelling_bytes": 407034
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lutf8lib",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lutf8lib.c",
+      "source_sha256": "ed24c3faa8abda78ee6df53f011475ab9565a2e3ace64e714bd412c90160742c",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lutf8lib.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lutf8lib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lutf8lib.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0edad113b1c8ec0d8c0bb9a9769315928a3f814ae7be602d6a27602838ae7638",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lutf8lib.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lutf8lib.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lutf8lib.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lutf8lib.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0edad113b1c8ec0d8c0bb9a9769315928a3f814ae7be602d6a27602838ae7638",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lutf8lib.probe.log"
+      },
+      "paste": {
+        "calls": 105,
+        "chains": 75,
+        "joins": 75,
+        "retained_joined_bytes": 1878,
+        "final_bytes": 1803,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 75
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 365363,
+        "lexed.bytes": 400172,
+        "preprocessed.tokens": 10438,
+        "preprocessed.spelling_bytes": 415993
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lvm",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lvm.c",
+      "source_sha256": "88b10a2f1f539cdfbefac818c64ceee59ac1b5f55038643637109a98834bb926",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lvm.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lvm.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lvm.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "9b8f6eeeb27d4b9d269c2866108a693e4aaa7dd83fa676a3a49d53f6f1d377e6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lvm.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lvm.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lvm.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lvm.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "9b8f6eeeb27d4b9d269c2866108a693e4aaa7dd83fa676a3a49d53f6f1d377e6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lvm.probe.log"
+      },
+      "paste": {
+        "calls": 952,
+        "chains": 768,
+        "joins": 768,
+        "retained_joined_bytes": 9907,
+        "final_bytes": 9139,
+        "max_joins": 1,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 768
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 650268,
+        "lexed.bytes": 734291,
+        "preprocessed.tokens": 73463,
+        "preprocessed.spelling_bytes": 863437
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "lua-lzio",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lzio.c",
+      "source_sha256": "fba61ceeeb257a3fe5f63310f21e14fc26c4be647583dcf8e74cbc7fb7e43e8a",
+      "flags": [
+        "-DLUA_USE_LINUX"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lzio.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lzio.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lzio.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "e5ea99f1ccee4581eeacd191561913460cf359f19c9915977b5eba6fb3b0c364",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lzio.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DLUA_USE_LINUX",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lzio.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/lua-5.4.8/src/lzio.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lzio.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "e5ea99f1ccee4581eeacd191561913460cf359f19c9915977b5eba6fb3b0c364",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/lua-lzio.probe.log"
+      },
+      "paste": {
+        "calls": 50,
+        "chains": 46,
+        "joins": 46,
+        "retained_joined_bytes": 866,
+        "final_bytes": 820,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 46
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 341211,
+        "lexed.bytes": 366876,
+        "preprocessed.tokens": 7752,
+        "preprocessed.spelling_bytes": 377635
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "sqlite-sqlite3",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/sqlite-amalgamation-3530400/sqlite3.c",
+      "source_sha256": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189",
+      "flags": [
+        "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+        "-DSQLITE_ENABLE_COLUMN_METADATA"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+          "-DSQLITE_ENABLE_COLUMN_METADATA",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-sqlite3.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/sqlite-amalgamation-3530400/sqlite3.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-sqlite3.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b57f7cbe7da0429b1e1948fa84a17885b8d89341af4e2bab0a07f5981711d23e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-sqlite3.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+          "-DSQLITE_ENABLE_COLUMN_METADATA",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-sqlite3.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/sqlite-amalgamation-3530400/sqlite3.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-sqlite3.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b57f7cbe7da0429b1e1948fa84a17885b8d89341af4e2bab0a07f5981711d23e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-sqlite3.probe.log"
+      },
+      "paste": {
+        "calls": 3738,
+        "chains": 3226,
+        "joins": 3312,
+        "retained_joined_bytes": 40619,
+        "final_bytes": 36725,
+        "max_joins": 2,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 3140,
+          "2": 86
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 668
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 10286287,
+        "lexed.bytes": 10473523,
+        "preprocessed.tokens": 708745,
+        "preprocessed.spelling_bytes": 10923117
+      },
+      "intermediate_fraction": 6.115470519999008e-05
+    },
+    {
+      "name": "sqlite-shell",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/sqlite-amalgamation-3530400/shell.c",
+      "source_sha256": "8011ed018aa12969f93573b7bb1eae2d939d64d0f451b297ff847a0211c85179",
+      "flags": [
+        "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+        "-DSQLITE_ENABLE_COLUMN_METADATA"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+          "-DSQLITE_ENABLE_COLUMN_METADATA",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-shell.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/sqlite-amalgamation-3530400/shell.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-shell.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "cf2f87935d84610002042bc1ff7d13e6abc3955e4c542fc1bdb8dce779dc0a07",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-shell.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+          "-DSQLITE_ENABLE_COLUMN_METADATA",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-shell.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/sqlite-amalgamation-3530400/shell.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-shell.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "cf2f87935d84610002042bc1ff7d13e6abc3955e4c542fc1bdb8dce779dc0a07",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/sqlite-shell.probe.log"
+      },
+      "paste": {
+        "calls": 1112,
+        "chains": 780,
+        "joins": 784,
+        "retained_joined_bytes": 10138,
+        "final_bytes": 9322,
+        "max_joins": 2,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 776,
+          "2": 4
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 36
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 2617341,
+        "lexed.bytes": 2832310,
+        "preprocessed.tokens": 199835,
+        "preprocessed.spelling_bytes": 2989582
+      },
+      "intermediate_fraction": 1.2041817217256458e-05
+    },
+    {
+      "name": "quickjs-quickjs",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/quickjs.c",
+      "source_sha256": "a00762d2eee42316cecbc9c15efc4549b715ec500461845cd91b2a6c38190d08",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/quickjs.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "c67558609bc6fbeee6ca5b2b7f35c9544913d21459ab2b1631ee1d7bfe20e3c4",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/quickjs.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "c67558609bc6fbeee6ca5b2b7f35c9544913d21459ab2b1631ee1d7bfe20e3c4",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs.probe.log"
+      },
+      "paste": {
+        "calls": 4930,
+        "chains": 4517,
+        "joins": 4603,
+        "retained_joined_bytes": 61394,
+        "final_bytes": 56209,
+        "max_joins": 2,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 4431,
+          "2": 86
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 668
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 2697077,
+        "lexed.bytes": 2953303,
+        "preprocessed.tokens": 469321,
+        "preprocessed.spelling_bytes": 3509202
+      },
+      "intermediate_fraction": 0.0001903566679832053
+    },
+    {
+      "name": "quickjs-dtoa",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/dtoa.c",
+      "source_sha256": "af5abd68fa9806d1a19bdd5f2daef00d5fd0990ae56311382dfed4700343f074",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-dtoa.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/dtoa.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-dtoa.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "478623fcccefc190110bf8f40a65386a765e0ab1d9c40b8b73988f93c5d702ff",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-dtoa.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-dtoa.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/dtoa.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-dtoa.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "478623fcccefc190110bf8f40a65386a765e0ab1d9c40b8b73988f93c5d702ff",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-dtoa.probe.log"
+      },
+      "paste": {
+        "calls": 3423,
+        "chains": 3120,
+        "joins": 3206,
+        "retained_joined_bytes": 38616,
+        "final_bytes": 34828,
+        "max_joins": 2,
+        "max_joined_length": 35,
+        "histogram": {
+          "1": 3034,
+          "2": 86
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 668
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 509473,
+        "lexed.bytes": 679181,
+        "preprocessed.tokens": 52979,
+        "preprocessed.spelling_bytes": 871480
+      },
+      "intermediate_fraction": 0.0007665121402671318
+    },
+    {
+      "name": "quickjs-libregexp",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/libregexp.c",
+      "source_sha256": "fdfcf86167029ab2c39c35730d4ae6875b7bbeb9406a0fcc886de4e9b1f5e2ac",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libregexp.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/libregexp.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libregexp.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "a8e39831f89a5fe04cd0b721786f489afb599e767a967c146ba9f3daebbb2b53",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libregexp.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libregexp.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/libregexp.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libregexp.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "a8e39831f89a5fe04cd0b721786f489afb599e767a967c146ba9f3daebbb2b53",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libregexp.probe.log"
+      },
+      "paste": {
+        "calls": 167,
+        "chains": 120,
+        "joins": 120,
+        "retained_joined_bytes": 2648,
+        "final_bytes": 2528,
+        "max_joins": 1,
+        "max_joined_length": 36,
+        "histogram": {
+          "1": 120
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 460751,
+        "lexed.bytes": 493763,
+        "preprocessed.tokens": 34780,
+        "preprocessed.spelling_bytes": 530776
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "quickjs-libunicode",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/libunicode.c",
+      "source_sha256": "26203ae888c0582e7d0e2113f13db0c9b39dc7b0b3836d68fa308c54f7a0898c",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libunicode.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/libunicode.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libunicode.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ff8911fb6880ec8cf2da0a508553a8b0729380b77cbb657c012371c9cc17feaa",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libunicode.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libunicode.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/libunicode.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libunicode.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ff8911fb6880ec8cf2da0a508553a8b0729380b77cbb657c012371c9cc17feaa",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-libunicode.probe.log"
+      },
+      "paste": {
+        "calls": 230,
+        "chains": 181,
+        "joins": 181,
+        "retained_joined_bytes": 3355,
+        "final_bytes": 3174,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 181
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 658027,
+        "lexed.bytes": 686085,
+        "preprocessed.tokens": 94304,
+        "preprocessed.spelling_bytes": 725211
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "quickjs-cutils",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/cutils.c",
+      "source_sha256": "b73a403a59da30726257ddbdf5e399298941c1def997782ee0d4d33f796a80a2",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-cutils.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/cutils.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-cutils.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "06132fb27406fd7d80910042de269ade4234a646d992779b14c7eac3e8697223",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-cutils.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-cutils.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/cutils.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-cutils.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "06132fb27406fd7d80910042de269ade4234a646d992779b14c7eac3e8697223",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-cutils.probe.log"
+      },
+      "paste": {
+        "calls": 112,
+        "chains": 72,
+        "joins": 72,
+        "retained_joined_bytes": 1779,
+        "final_bytes": 1707,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 72
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 346434,
+        "lexed.bytes": 374492,
+        "preprocessed.tokens": 17655,
+        "preprocessed.spelling_bytes": 398859
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "quickjs-quickjs-libc",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/quickjs-libc.c",
+      "source_sha256": "8c6c42619ab4edf1548b051c73bb2bee670003415b1de30d2910d71917859bce",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs-libc.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/quickjs-libc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs-libc.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "611b65fe919ae18d1698c694c388772e2ed1bde6670362de25679c3c4a6a158a",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs-libc.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs-libc.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/quickjs-libc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs-libc.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "611b65fe919ae18d1698c694c388772e2ed1bde6670362de25679c3c4a6a158a",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-quickjs-libc.probe.log"
+      },
+      "paste": {
+        "calls": 185,
+        "chains": 88,
+        "joins": 88,
+        "retained_joined_bytes": 2137,
+        "final_bytes": 2049,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 88
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 991025,
+        "lexed.bytes": 1050191,
+        "preprocessed.tokens": 64163,
+        "preprocessed.spelling_bytes": 1123028
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "quickjs-qjs",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/qjs.c",
+      "source_sha256": "dc855952aaf58e9db1d091225d28439b1f832412e156a1968a9504935cd4e448",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjs.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/qjs.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjs.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "d9822ac0c602f0179b3bc94efbad20be00aa7dbbbe86d74326bda527f7410fb8",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjs.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjs.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/qjs.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjs.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "d9822ac0c602f0179b3bc94efbad20be00aa7dbbbe86d74326bda527f7410fb8",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjs.probe.log"
+      },
+      "paste": {
+        "calls": 122,
+        "chains": 81,
+        "joins": 81,
+        "retained_joined_bytes": 1954,
+        "final_bytes": 1873,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 81
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 590909,
+        "lexed.bytes": 627633,
+        "preprocessed.tokens": 28205,
+        "preprocessed.spelling_bytes": 661856
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "quickjs-qjsc",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/qjsc.c",
+      "source_sha256": "e3e44bef9930982232d8c7dba71df7bd370b0a00ef1738fa9ab39b477e23bb0c",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjsc.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/qjsc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjsc.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "5861b1cd594aab4f6dac185e03616169c5b7f6158b39ab827a57920532c9d6ac",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjsc.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjsc.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/qjsc.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjsc.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "5861b1cd594aab4f6dac185e03616169c5b7f6158b39ab827a57920532c9d6ac",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-qjsc.probe.log"
+      },
+      "paste": {
+        "calls": 117,
+        "chains": 76,
+        "joins": 76,
+        "retained_joined_bytes": 1859,
+        "final_bytes": 1783,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 76
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 574328,
+        "lexed.bytes": 609781,
+        "preprocessed.tokens": 29570,
+        "preprocessed.spelling_bytes": 644032
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "quickjs-run-test262",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/run-test262.c",
+      "source_sha256": "58f37e301f36b2b630a247d59105fc373953340c691667b28822cd703d8f203e",
+      "flags": [
+        "-D_GNU_SOURCE",
+        "-DCONFIG_VERSION=\"2026-06-04\"",
+        "-DCONFIG_CC=\"clang\"",
+        "-DCONFIG_PREFIX=\"/usr/local\""
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-run-test262.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/run-test262.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-run-test262.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "1e5a0299d5dbb3197ebdbfc41cfb3cfbd002cd47c283847de50c12da7b88c1f6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-run-test262.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-D_GNU_SOURCE",
+          "-DCONFIG_VERSION=\"2026-06-04\"",
+          "-DCONFIG_CC=\"clang\"",
+          "-DCONFIG_PREFIX=\"/usr/local\"",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-run-test262.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/inputs/quickjs/run-test262.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-run-test262.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "1e5a0299d5dbb3197ebdbfc41cfb3cfbd002cd47c283847de50c12da7b88c1f6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/quickjs-run-test262.probe.log"
+      },
+      "paste": {
+        "calls": 129,
+        "chains": 81,
+        "joins": 81,
+        "retained_joined_bytes": 1954,
+        "final_bytes": 1873,
+        "max_joins": 1,
+        "max_joined_length": 33,
+        "histogram": {
+          "1": 81
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 762286,
+        "lexed.bytes": 802271,
+        "preprocessed.tokens": 47595,
+        "preprocessed.spelling_bytes": 854393
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "control-basic_c_macro_comment_bitfields",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_comment_bitfields.c",
+      "source_sha256": "a8b34e1ff38b82a6f052a3d5ee2f618a0fcb14763d01e53a07fc04eca1fc6649",
+      "flags": [
+        "-Isrc",
+        "-Ibuild/generated"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_comment_bitfields.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_comment_bitfields.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_comment_bitfields.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ccde213b4eb0e7df86c2d4b4c12b1e420495a68fc848897bc4249212ac077400",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_comment_bitfields.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_comment_bitfields.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_comment_bitfields.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_comment_bitfields.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "ccde213b4eb0e7df86c2d4b4c12b1e420495a68fc848897bc4249212ac077400",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_comment_bitfields.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 4,
+        "joins": 4,
+        "retained_joined_bytes": 43,
+        "final_bytes": 39,
+        "max_joins": 1,
+        "max_joined_length": 12,
+        "histogram": {
+          "1": 4
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 779,
+        "lexed.bytes": 779,
+        "preprocessed.tokens": 62,
+        "preprocessed.spelling_bytes": 3540
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "control-basic_c_macro_empty_paste",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_empty_paste.c",
+      "source_sha256": "6aeb0f170a61e5f8de26662c1e1677418836976f5d48bab76b96c9b189423d56",
+      "flags": [
+        "-Isrc",
+        "-Ibuild/generated"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_empty_paste.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_empty_paste.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_empty_paste.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b24f2ae52e695ee8372797f8329bdc1fc994cabcf8e9d30459f1f7eefe70449e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_empty_paste.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_empty_paste.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_empty_paste.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_empty_paste.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "b24f2ae52e695ee8372797f8329bdc1fc994cabcf8e9d30459f1f7eefe70449e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_empty_paste.probe.log"
+      },
+      "paste": {
+        "calls": 34,
+        "chains": 9,
+        "joins": 10,
+        "retained_joined_bytes": 39,
+        "final_bytes": 27,
+        "max_joins": 2,
+        "max_joined_length": 10,
+        "histogram": {
+          "1": 8,
+          "2": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 3
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 2435,
+        "lexed.bytes": 2435,
+        "preprocessed.tokens": 310,
+        "preprocessed.spelling_bytes": 5257
+      },
+      "intermediate_fraction": 0.0005706676811869887
+    },
+    {
+      "name": "control-basic_c_macro_options",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_options.c",
+      "source_sha256": "9e2a324abafbbe1b94ebc2dad8746ce04f711773f5f1ad2e6fd8c0b607fcfc81",
+      "flags": [
+        "-Isrc",
+        "-Ibuild/generated"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_options.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_options.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_options.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "bcb1dc2e62cf13b04f29a467b325123c4c74bbf815d27df1a5d96fe872f8b10e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_options.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_options.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_options.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_options.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "bcb1dc2e62cf13b04f29a467b325123c4c74bbf815d27df1a5d96fe872f8b10e",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_options.probe.log"
+      },
+      "paste": {
+        "calls": 0,
+        "chains": 0,
+        "joins": 0,
+        "retained_joined_bytes": 0,
+        "final_bytes": 0,
+        "max_joins": 0,
+        "max_joined_length": 0,
+        "histogram": {},
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 660,
+        "lexed.bytes": 660,
+        "preprocessed.tokens": 6,
+        "preprocessed.spelling_bytes": 3318
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "control-basic_c_macro_self_reference",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_self_reference.c",
+      "source_sha256": "0d6b67b8f081cd5a3d2600cef8e3898b9a813975f30e90c1558378d575eae5d1",
+      "flags": [
+        "-Isrc",
+        "-Ibuild/generated"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_self_reference.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_self_reference.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_self_reference.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0fc4a9203bf8fca57980c9baaee3335fe75b4baff3bc5aea60c471154319668b",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_self_reference.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_self_reference.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_self_reference.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_self_reference.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "0fc4a9203bf8fca57980c9baaee3335fe75b4baff3bc5aea60c471154319668b",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_self_reference.probe.log"
+      },
+      "paste": {
+        "calls": 0,
+        "chains": 0,
+        "joins": 0,
+        "retained_joined_bytes": 0,
+        "final_bytes": 0,
+        "max_joins": 0,
+        "max_joined_length": 0,
+        "histogram": {},
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 3752,
+        "lexed.bytes": 3752,
+        "preprocessed.tokens": 261,
+        "preprocessed.spelling_bytes": 6575
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "control-basic_c_macro_task_batches",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_task_batches.c",
+      "source_sha256": "ab7c10f28f105c012f3624b624193c5e37da51b59350d71f355b48f565fb62e0",
+      "flags": [
+        "-Isrc",
+        "-Ibuild/generated"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_task_batches.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_task_batches.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_task_batches.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "eb12203df4994118ecfc7a8c26453fc5cbc0644a77d1092b0ad4717157846912",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_task_batches.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_task_batches.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_macro_task_batches.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_task_batches.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "eb12203df4994118ecfc7a8c26453fc5cbc0644a77d1092b0ad4717157846912",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_macro_task_batches.probe.log"
+      },
+      "paste": {
+        "calls": 4,
+        "chains": 1,
+        "joins": 1,
+        "retained_joined_bytes": 11,
+        "final_bytes": 10,
+        "max_joins": 1,
+        "max_joined_length": 10,
+        "histogram": {
+          "1": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 1927,
+        "lexed.bytes": 1927,
+        "preprocessed.tokens": 2302,
+        "preprocessed.spelling_bytes": 6812
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "control-basic_c_variadic_comma_paste",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_variadic_comma_paste.c",
+      "source_sha256": "387cccf14f1a7c73bada10b4203657cc3bd6099c06c42f3d80a5e9a68543ac5c",
+      "flags": [
+        "-Isrc",
+        "-Ibuild/generated"
+      ],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_variadic_comma_paste.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_variadic_comma_paste.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_variadic_comma_paste.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6f3f552e97906b4b7745d615d178a444180aebf8137c6f581936ced3f508cf39",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_variadic_comma_paste.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=gnu17",
+          "-E",
+          "-Isrc",
+          "-Ibuild/generated",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_variadic_comma_paste.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/tests/basic_c_variadic_comma_paste.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_variadic_comma_paste.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "6f3f552e97906b4b7745d615d178a444180aebf8137c6f581936ced3f508cf39",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/control-basic_c_variadic_comma_paste.probe.log"
+      },
+      "paste": {
+        "calls": 6,
+        "chains": 0,
+        "joins": 0,
+        "retained_joined_bytes": 0,
+        "final_bytes": 0,
+        "max_joins": 0,
+        "max_joined_length": 0,
+        "histogram": {},
+        "failed_chains": 0,
+        "intermediate_bytes": 0
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 1420,
+        "lexed.bytes": 1420,
+        "preprocessed.tokens": 101,
+        "preprocessed.spelling_bytes": 4143
+      },
+      "intermediate_fraction": 0.0
+    },
+    {
+      "name": "synthetic-1000",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-1000.c",
+      "source_sha256": "2ed796328a15e47f995aec269a77384fedb419e8f1934f8a3c57beaaaab9c248",
+      "flags": [],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-1000.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-1000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-1000.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "2d0dff699d8e0a69179922c9ff80205f9cbcfae959079b27e4c9c3ef37c70974",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-1000.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-1000.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-1000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-1000.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "2d0dff699d8e0a69179922c9ff80205f9cbcfae959079b27e4c9c3ef37c70974",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-1000.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 1,
+        "joins": 999,
+        "retained_joined_bytes": 501498,
+        "final_bytes": 1000,
+        "max_joins": 999,
+        "max_joined_length": 1000,
+        "histogram": {
+          "999": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 500497
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 3011,
+        "lexed.bytes": 3011,
+        "preprocessed.tokens": 1,
+        "preprocessed.spelling_bytes": 508162
+      },
+      "intermediate_fraction": 0.9849162275022533
+    },
+    {
+      "name": "synthetic-2000",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-2000.c",
+      "source_sha256": "604565ef81d2600f59206544ef1cd477e5388a750a80b398b3c1e5c079639f59",
+      "flags": [],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-2000.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-2000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-2000.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "4cb682a656ffc525c9c34fe2bcf66bf56118129b820a0e62d208db22e986be70",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-2000.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-2000.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-2000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-2000.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "4cb682a656ffc525c9c34fe2bcf66bf56118129b820a0e62d208db22e986be70",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-2000.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 1,
+        "joins": 1999,
+        "retained_joined_bytes": 2002998,
+        "final_bytes": 2000,
+        "max_joins": 1999,
+        "max_joined_length": 2000,
+        "histogram": {
+          "1999": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 2000997
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 6011,
+        "lexed.bytes": 6011,
+        "preprocessed.tokens": 1,
+        "preprocessed.spelling_bytes": 2013662
+      },
+      "intermediate_fraction": 0.9937104638216344
+    },
+    {
+      "name": "synthetic-4000",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-4000.c",
+      "source_sha256": "54e44678ce8172787122d2270271117888bcbe5ccba18ca7054936aaf20fea38",
+      "flags": [],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-4000.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-4000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-4000.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "c7dd7fa1466969d5e211e829bcd21773a13e630220d64cf2721b62690cae1900",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-4000.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-4000.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-4000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-4000.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "c7dd7fa1466969d5e211e829bcd21773a13e630220d64cf2721b62690cae1900",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-4000.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 1,
+        "joins": 3999,
+        "retained_joined_bytes": 8005998,
+        "final_bytes": 4000,
+        "max_joins": 3999,
+        "max_joined_length": 4000,
+        "histogram": {
+          "3999": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 8001997
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 12011,
+        "lexed.bytes": 12011,
+        "preprocessed.tokens": 1,
+        "preprocessed.spelling_bytes": 8024662
+      },
+      "intermediate_fraction": 0.9971755819746676
+    },
+    {
+      "name": "synthetic-8000",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-8000.c",
+      "source_sha256": "c35df17df87709466326125ff46ed642d3ee3ed76de830d153d70bc99a5a8078",
+      "flags": [],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-8000.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-8000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-8000.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "86c4b5364b668bec526682f02d6ba06b8ab1903613454c6c949b63f5552693bf",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-8000.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-8000.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-8000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-8000.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "86c4b5364b668bec526682f02d6ba06b8ab1903613454c6c949b63f5552693bf",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-8000.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 1,
+        "joins": 7999,
+        "retained_joined_bytes": 32011998,
+        "final_bytes": 8000,
+        "max_joins": 7999,
+        "max_joined_length": 8000,
+        "histogram": {
+          "7999": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 32003997
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 24011,
+        "lexed.bytes": 24011,
+        "preprocessed.tokens": 1,
+        "preprocessed.spelling_bytes": 32046662
+      },
+      "intermediate_fraction": 0.9986686600932103
+    },
+    {
+      "name": "synthetic-16000",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-16000.c",
+      "source_sha256": "e0deed284111e64612c8519d3a6c9fb1d2f0ed5525b646761595510954a68939",
+      "flags": [],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-16000.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-16000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-16000.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "9f09bbb04e308bbb8c8ca12188d3328b502d4a40a21256c4b60ede0d3e85c7d4",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-16000.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-16000.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-16000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-16000.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "9f09bbb04e308bbb8c8ca12188d3328b502d4a40a21256c4b60ede0d3e85c7d4",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-16000.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 1,
+        "joins": 15999,
+        "retained_joined_bytes": 128023998,
+        "final_bytes": 16000,
+        "max_joins": 15999,
+        "max_joined_length": 16000,
+        "histogram": {
+          "15999": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 128007997
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 48011,
+        "lexed.bytes": 48011,
+        "preprocessed.tokens": 1,
+        "preprocessed.spelling_bytes": 128090662
+      },
+      "intermediate_fraction": 0.9993546367962405
+    },
+    {
+      "name": "synthetic-32000",
+      "input": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-32000.c",
+      "source_sha256": "0b23a6c5bcaede6feb9ee29c62cb6ff0c8f27ea4c7790ba8ef56eff825c4d0b2",
+      "flags": [],
+      "base": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Release/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-32000.base.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-32000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-32000.base.i"
+        ],
+        "exit": 0,
+        "output_sha256": "01ae58c20eb05c0095214ae13b5e39f87826d9e43c29bce76f9804f3d4222cc6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-32000.base.log"
+      },
+      "probe": {
+        "command": [
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/current/build/Debug/ide",
+          "cc",
+          "-std=c17",
+          "-E",
+          "-fsource-metrics=/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-32000.probe.metrics",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/paste-32000.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-32000.probe.i"
+        ],
+        "exit": 0,
+        "output_sha256": "01ae58c20eb05c0095214ae13b5e39f87826d9e43c29bce76f9804f3d4222cc6",
+        "log": "/home/david/Documents/Codex/2026-10-12/solve-2/work/census-results/synthetic-32000.probe.log"
+      },
+      "paste": {
+        "calls": 1,
+        "chains": 1,
+        "joins": 31999,
+        "retained_joined_bytes": 512047998,
+        "final_bytes": 32000,
+        "max_joins": 31999,
+        "max_joined_length": 32000,
+        "histogram": {
+          "31999": 1
+        },
+        "failed_chains": 0,
+        "intermediate_bytes": 512015997
+      },
+      "outputs_identical": true,
+      "metrics": {
+        "unique.bytes": 96011,
+        "lexed.bytes": 96011,
+        "preprocessed.tokens": 1,
+        "preprocessed.spelling_bytes": 512178662
+      },
+      "intermediate_fraction": 0.9996824057461418
+    }
+  ],
+  "groups": {
+    "buster-unity": {
+      "units": 1,
+      "chains": 27664,
+      "joins": 27984,
+      "joined_bytes": 451779,
+      "final_bytes": 414931,
+      "intermediate_bytes": 9184,
+      "spelling_bytes": 39685512,
+      "max_joins": 2,
+      "max_chain_spelling": 60,
+      "max_intermediate_fraction": 0.0002314194661265804,
+      "histogram": {
+        "1": 27344,
+        "2": 320
+      }
+    },
+    "buster-unity-tests": {
+      "units": 1,
+      "chains": 34340,
+      "joins": 34796,
+      "joined_bytes": 561656,
+      "final_bytes": 514092,
+      "intermediate_bytes": 13224,
+      "spelling_bytes": 106124842,
+      "max_joins": 2,
+      "max_chain_spelling": 62,
+      "max_intermediate_fraction": 0.0001246079593692116,
+      "histogram": {
+        "1": 33884,
+        "2": 456
+      }
+    },
+    "lua": {
+      "units": 34,
+      "chains": 5517,
+      "joins": 5517,
+      "joined_bytes": 84850,
+      "final_bytes": 79333,
+      "intermediate_bytes": 0,
+      "spelling_bytes": 16155675,
+      "max_joins": 1,
+      "max_chain_spelling": 35,
+      "max_intermediate_fraction": 0,
+      "histogram": {
+        "1": 5517
+      }
+    },
+    "sqlite": {
+      "units": 2,
+      "chains": 4006,
+      "joins": 4096,
+      "joined_bytes": 50757,
+      "final_bytes": 46047,
+      "intermediate_bytes": 704,
+      "spelling_bytes": 13912699,
+      "max_joins": 2,
+      "max_chain_spelling": 35,
+      "max_intermediate_fraction": 6.115470519999008e-05,
+      "histogram": {
+        "1": 3916,
+        "2": 90
+      }
+    },
+    "quickjs": {
+      "units": 9,
+      "chains": 8336,
+      "joins": 8508,
+      "joined_bytes": 115696,
+      "final_bytes": 106024,
+      "intermediate_bytes": 1336,
+      "spelling_bytes": 9318837,
+      "max_joins": 2,
+      "max_chain_spelling": 36,
+      "max_intermediate_fraction": 0.0007665121402671318,
+      "histogram": {
+        "1": 8164,
+        "2": 172
+      }
+    },
+    "control": {
+      "units": 6,
+      "chains": 14,
+      "joins": 15,
+      "joined_bytes": 93,
+      "final_bytes": 76,
+      "intermediate_bytes": 3,
+      "spelling_bytes": 29645,
+      "max_joins": 2,
+      "max_chain_spelling": 12,
+      "max_intermediate_fraction": 0.0005706676811869887,
+      "histogram": {
+        "1": 13,
+        "2": 1
+      }
+    }
+  }
+}

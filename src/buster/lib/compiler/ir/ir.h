@@ -674,15 +674,6 @@ typedef struct IrPublishedCfg IrPublishedCfg;
 struct IrPublishedCfg
 {
     Arena* arena;
-    // Null means instruction IDs were already in block order. Otherwise this
-    // is the one map from prepublication IDs to the published dense rows.
-    IrInstructionId const* instruction_remap;
-    IrValueId const* operand_pool;
-    IrBlockId const* target_pool;
-    u64 const* immediate_pool;
-    u64 operand_count;
-    u64 target_count;
-    u64 immediate_count;
     IrCfgBlock const* blocks;
     IrCfgEdge const* edges;
     u32 const* predecessors;
@@ -859,16 +850,28 @@ struct IrLocalPromotionStatistics
 // FAST is opt-in until the paired end-to-end acceptance gate passes. Each
 // selected pass runs at most once per module preparation. Budgets are per
 // function, deterministic, and never reject valid source when exhausted.
+// Enumerators are option bits; ir_fast_function runs CSE between ADDRESS and
+// DCE. IR_FAST_ALL is the adopted four-pass recipe; the CSE experiment (#3011)
+// is outside it and is selected only by its own -fcanonical-fast-cse control.
 typedef enum IrFastPass
 {
     IR_FAST_FOLD,
     IR_FAST_ADDRESS,
     IR_FAST_DCE,
     IR_FAST_PARAMETERS,
+    IR_FAST_CSE,
     IR_FAST_PASS_COUNT,
 } IrFastPass;
 #define IR_FAST_PASS_BIT(pass) (1u << (u32)(pass))
-#define IR_FAST_ALL ((1u << IR_FAST_PASS_COUNT) - 1)
+#define IR_FAST_ALL (IR_FAST_PASS_BIT(IR_FAST_FOLD) | IR_FAST_PASS_BIT(IR_FAST_ADDRESS) | IR_FAST_PASS_BIT(IR_FAST_DCE) | \
+                     IR_FAST_PASS_BIT(IR_FAST_PARAMETERS))
+#define IR_FAST_PASS_MASK ((1u << IR_FAST_PASS_COUNT) - 1)
+// One generation-tagged CSE table per module preparation, at most three
+// quarters full per block, with a bounded probe sequence. The window is the
+// census's linear arm: the number of recent keyed rows it compares.
+#define IR_FAST_CSE_SLOTS 256u
+#define IR_FAST_CSE_PROBES 8u
+#define IR_FAST_CSE_WINDOW 8u
 #define IR_FAST_SCRATCH_BUDGET ((u64)16 * 1024 * 1024)
 #define IR_FAST_RETAINED_BUDGET ((u64)8 * 1024 * 1024)
 #define IR_FAST_PARAMETER_SWEEPS 4u
@@ -881,12 +884,45 @@ struct IrFastPassStatistics
     u64 visits;
     u64 changes;
 };
+typedef struct IrFastDecline IrFastDecline;
 typedef struct IrFastStatistics IrFastStatistics;
+// Census of the opt-in CSE pass (#3011). Candidates are admitted rows
+// (constants included; constant_hits is the share of hits that are constants).
+// A window hit is a hit at most IR_FAST_CSE_WINDOW candidates after the
+// matched entry's recorded ordinal. Units differ by strategy. A table entry
+// keeps its insertion ordinal, so the distance runs from the representative's
+// first occurrence. A window slot is rewritten by every matching occurrence,
+// so the distance runs from the previous one, and the representative itself
+// can be older. Neither counter bounds a representative's age or live range.
+// Declines leave the row unchanged: metadata means an exact key
+// match whose result facts differ, saturation a full table or probe budget.
+// table_bytes counts every table byte initialized; the block maximum is a max.
+typedef struct IrFastCseStatistics IrFastCseStatistics;
+struct IrFastCseStatistics
+{
+    u64 blocks;
+    u64 candidates;
+    u64 hits;
+    u64 window_hits;
+    u64 commuted_hits;
+    u64 constant_hits;
+    u64 probes;
+    u64 collisions;
+    u64 metadata_declines;
+    u64 saturation_declines;
+    u64 table_bytes;
+    u64 max_block_candidates;
+};
+
 struct IrFastStatistics
 {
     IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
+    IrFastCseStatistics cse;
     u64 functions;
+    // Counts lowered functions declined, including each function in a scope failure.
     u64 validation_skips;
+    IrFastDecline* declines;
+    u64 decline_count;
     u64 budget_skips;
     u64 provenance_skips;
     u64 parameter_budget_hits;
@@ -899,9 +935,22 @@ struct IrFastStatistics
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
 // Zero option limits select these defaults; limits count canonical rows/sites.
+// A zero module limit is relative to the module: the larger of
+// IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
+// shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
+// module cap starves optional sites in large translation units, because
+// callers are visited in module order rather than by profit (#48).
 #define IR_INLINE_TINY_INSTRUCTIONS 16u
 #define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
 #define IR_INLINE_MODULE_GROWTH 4096u
+#define IR_INLINE_MODULE_GROWTH_SHIFT 5u
+// Optional splices into a caller are kept only when their planned row growth,
+// shifted left by this amount, reaches the caller's instruction rows: the
+// first splice relocates the caller's tables and the arena retains the old
+// copy, so a few tiny sites in a large caller cost more memory than they save.
+// IrInlineOptions.caller_growth_shift overrides it; zero selects this default
+// and values of 32 or more keep every planned site.
+#define IR_INLINE_CALLER_GROWTH_SHIFT 5u
 #define IR_INLINE_CALL_SITES 64u
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -912,7 +961,11 @@ struct IrInlineOptions
     u32 max_function_growth;
     u32 max_module_growth;
     u32 max_call_sites;
+    u32 caller_growth_shift;
 };
+
+// Effective module row-growth limit for `module_rows` lowered canonical rows.
+BUSTER_F_DECL u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows);
 
 typedef enum IrInlineBudgetReason
 {
@@ -939,6 +992,8 @@ struct IrInlineStatistics
     u64 linkage_skips;
     u64 recursion_skips;
     u64 visits;
+    // Bytes of relocated caller tables handed back to the OS (os_discard).
+    u64 released_bytes;
     IrInlineBudgetReason required_budget_reason;
     u64 required_budget_demand;
     u64 required_budget_limit;
@@ -988,6 +1043,11 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
     bool inline_complete;
     IrInlineStatistics inlining;
+    // Callers whose splices were all optional and whose strict output check
+    // ir_inline_module deferred to preparation's next module-wide scan. Cleared
+    // once that scan proves them; see ir_prepare_canonical_module.
+    u32* inline_unchecked_callers;
+    u32 inline_unchecked_count;
     bool fast_complete;
     IrFastStatistics fast;
 };
@@ -1045,6 +1105,9 @@ struct IrProgram
     IrInlineOptions inline_options;
     u32 fast_passes;
     bool measure_fast_passes;
+    // Selects the CSE census's linear recent-row window arm instead of its
+    // hash table (#3011). Only meaningful when IR_FAST_CSE is selected.
+    bool fast_cse_window;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
@@ -1094,6 +1157,15 @@ struct IrValidationResult
     // Direct verifier calls and unchecked certified preparation leave this
     // UNSPECIFIED. This is diagnostic context, not a persistent certificate.
     IrValidationBoundary boundary;
+};
+
+// Retained only for declines, in function order. A scope failure keeps the
+// invalid function ID in validation while function_name names the declined body.
+struct IrFastDecline
+{
+    IrValidationResult validation;
+    String8 function_name;
+    String8 source; // Filled by the driver before ordered multi-input publication.
 };
 
 // The result of proving that every instruction of a function belongs to
@@ -1280,7 +1352,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE IrInstructionId ir_block_ne
                                    : function->instructions[instruction.value].next;
 }
 
-BUSTER_F_DECL void ir_function_invalidate_cfg(IrFunction* function);
+BUSTER_F_DECL void ir_function_reopen_cfg(IrFunction* function);
+
+// Every value, block and row append calls this, and almost none of them find a
+// published CFG, so the test stays inline and only a reopen pays for a call.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE void ir_function_invalidate_cfg(IrFunction* function)
+{
+    if (function && function->published_cfg)
+    {
+        ir_function_reopen_cfg(function);
+    }
+}
 BUSTER_F_DECL IrCfgEdge const* ir_function_cfg_edge(IrFunction const* function, IrBlockId source, IrBlockId destination);
 
 
@@ -1448,6 +1530,28 @@ struct IrSemanticCounters
 };
 
 BUSTER_F_DECL void ir_semantic_record(IrSemanticCounter counter, u64 amount);
+// Returns the previous state; a suppressed thread records no semantic work.
+BUSTER_F_DECL bool ir_semantic_suppress(bool suppressed);
+// The construction side of the scalar-fold census (#3010), under
+// ir_construction.fold_birth_*: whether the row just committed as `id` would
+// already fold under ir_fast_fold's rules. Changes nothing.
+BUSTER_F_DECL void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id);
+// The end-of-body half (ir_construction.fold_net_*, fold_form_*, fold_size_*):
+// a function's committed rows before SSA finish. `uses` counts every reader of
+// each value and `marks` holds per-value census state. Both are zeroed per
+// begin, from a thread-local arena the allocation observer does not see.
+typedef struct IrFoldCensus IrFoldCensus;
+struct IrFoldCensus
+{
+    u32* uses;
+    u8* marks;
+    u32 value_count;
+};
+BUSTER_F_DECL IrFoldCensus ir_construction_fold_census_begin(IrFunction* function);
+// A frontend-held read of `value` outside the rows: a pending SSA store or
+// read replacement. Counts as a use and attributes the value to a store.
+BUSTER_F_DECL void ir_construction_fold_census_hold(IrFoldCensus* census, IrValueId value);
+BUSTER_F_DECL void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, IrFoldCensus* census);
 // One top-level evaluation of source range [start, end) of the token array at
 // `base`; a range any evaluator saw before counts as repeated work.
 BUSTER_F_DECL void ir_semantic_census_range(IrSemanticEvaluator evaluator, void const* base, u32 start, u32 end);

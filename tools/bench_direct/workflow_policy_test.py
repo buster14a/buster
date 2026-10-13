@@ -107,6 +107,12 @@ DIRECT_AUTHORIZE_IF = "    if: ${{ " + " && ".join(DIRECT_TERMS) + " }}"
 DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.workloads == 'true'")) + " }}"
 # The pull-request compiler comparison (#2769) shares the direct gate.
 PULL_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.compare == 'true'")) + " }}"
+# The host is dispatched only for an admitted or named historical corpus harness (#3714);
+# the check writer and publisher still run so an unsupported base gets its explicit check.
+PULL_COMPARE_IF = PULL_RUN_IF.replace(
+    "needs.authorize.outputs.compare == 'true' }}",
+    "needs.authorize.outputs.compare == 'true' && (needs.authorize.outputs.harness_admission == 'admitted' || "
+    "needs.authorize.outputs.harness_admission == 'historical') }}")
 PULL_PUBLISH_IF = "    if: ${{ " + " && ".join(("always()", *DIRECT_TERMS, "needs.authorize.outputs.compare == 'true'")) + " }}"
 DIRECT_TRIGGER = (
     "on:",
@@ -360,7 +366,6 @@ COMPILER_CHECKOUTS = (
         "        with:",
         "          ref: ${{ github.sha }}",
         "          path: trusted",
-        "          sparse-checkout: tools",
         "          persist-credentials: false",
     ),
     (
@@ -386,6 +391,7 @@ COMPILER_RUN_SCRIPT = [
     "            [[ \"$commit\" =~ ^[0-9a-f]{40}$ ]]",
     "          done",
     "          [[ \"$BQ_PULL\" =~ ^[0-9]+$ ]]",
+    "          [[ \"$BQ_REQUEST_ATTEMPT\" =~ ^[1-9][0-9]*$ ]]",
     "          [[ \"$(git -C candidate rev-parse HEAD)\" == \"$BQ_HEAD_COMMIT\" ]]",
     "          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode main \\",
     "            --candidate candidate --lab trusted/tools/uarch_lab.py \\",
@@ -393,7 +399,8 @@ COMPILER_RUN_SCRIPT = [
     "            --summary \"$GITHUB_STEP_SUMMARY\" --repository \"$BQ_REPOSITORY\" --ref refs/heads/main \\",
     "            --pull \"$BQ_PULL\" --pull-head \"$BQ_PULL_HEAD\" --base \"$BQ_BASE_COMMIT\" --base-tree \"$BQ_BASE_TREE\" \\",
     "            --head \"$BQ_HEAD_COMMIT\" --head-tree \"$BQ_HEAD_TREE\" --trusted-revision \"$BQ_TRUSTED_REVISION\" \\",
-    "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\"",
+    "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\" \\",
+    "            --request-attempt \"$BQ_REQUEST_ATTEMPT\"",
 ]
 
 # MAIN keeps the historical literal recipe above for disabled routing and pull
@@ -499,6 +506,9 @@ PULL_RUN_SCRIPT = [line.replace("--mode main", "--mode pull")
                    .replace("--pull-head \"$BQ_PULL_HEAD\"", "--pull-head \"$BQ_HEAD_COMMIT\"")
                    .replace(" \"$BQ_PULL_HEAD\" \"$BQ_TRUSTED_REVISION\"", " \"$BQ_TRUSTED_REVISION\"")
                    for line in COMPILER_RUN_SCRIPT]
+PULL_RUN_SCRIPT[5:5] = ["          [[ \"$BQ_HARNESS_ADMISSION\" =~ ^(admitted|historical)$ ]]"]
+PULL_RUN_SCRIPT[-1] += " \\"
+PULL_RUN_SCRIPT.append("            --harness-admission \"$BQ_HARNESS_ADMISSION\"")
 # A main measurement in progress is never cancelled; pull requests coalesce.
 DIRECT_CONCURRENCY = (
     "concurrency:",
@@ -507,12 +517,14 @@ DIRECT_CONCURRENCY = (
 )
 PULL_RUN_LINES = (
     "    needs: authorize",
-    PULL_RUN_IF,
+    PULL_COMPARE_IF,
     "    runs-on:",
     "      group: buster-9700x-service-dispatch",
     "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
     "      BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}",
     "      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}",
+    "      BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}",
+    "      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}",
 )
 PULL_CHECKOUTS = (
     COMPILER_CHECKOUTS[0],
@@ -527,14 +539,20 @@ PULL_CHECKOUTS = (
     ),
     COMPILER_CHECKOUTS[2],
 )
+# The pull publisher verifies sealed raw evidence (#2918) with the full trusted
+# tree's native driver, bootstrapped by the same pinned TinyCC as MAIN.
 PULL_PUBLISH_BLOCKS = (
     ("    needs: [authorize, compare-pull]", PULL_PUBLISH_IF, "    runs-on: ubuntu-24.04",
      "    permissions:", "      actions: read", "      checks: write", "    timeout-minutes: 10"),
-    TRUSTED_TOOLS_CHECKOUT,
+    ("        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "        with:",
+     "          ref: ${{ github.sha }}", "          persist-credentials: false"),
+    MAIN_TINYCC_CHECKOUT,
+    ("        working-directory: .tools/tinycc", "        shell: bash", "        run: |", *MAIN_TINYCC_SCRIPT),
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}",
      "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}",
-     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}"),
+     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}",
+     "          BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}"),
     ("        run: python3 -B tools/bench_direct/compiler_publish.py",),
 )
 COMPILER_PUBLISH_BLOCKS = (
@@ -1319,7 +1337,7 @@ def check_compiler_path(errors: list[str]) -> None:
     for line in PULL_RUN_LINES:
         if line not in compare_pull:
             errors.append(f"pull compare job is missing exact line: {line.strip()}")
-    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_RUN_IF]:
+    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_COMPARE_IF]:
         errors.append("pull compare job is missing its exact condition")
     for marker in ("GH_TOKEN", "github.token", "curl ", "api.github.com", "permissions:", "sudo",
                    "environment:", "buster-bench", "secrets.", "--sudo", "--profile-steps"):
@@ -1333,9 +1351,11 @@ def check_compiler_path(errors: list[str]) -> None:
     for block in PULL_PUBLISH_BLOCKS:
         if not contains_block(publish_pull, block):
             errors.append(f"pull publish job is missing exact block starting: {block[0].strip()}")
-    if len([line for line in publish_pull if "uses:" in line]) != 1 or \
-            len([line for line in publish_pull if "run:" in line]) != 1:
-        errors.append("pull publish job must be one trusted checkout and one publisher call")
+    if len([line for line in publish_pull if "uses:" in line]) != 2 or \
+            len([line for line in publish_pull if "run:" in line]) != 2 or \
+            run_scripts(publish_pull) != [list(MAIN_TINYCC_SCRIPT)] or \
+            any("sparse-checkout:" in line for line in publish_pull):
+        errors.append("pull publish job must be one full trusted checkout, pinned TinyCC and one publisher call")
     for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "path: candidate", "contents: write",
                    "pull-requests: write", "actions: write", "statuses: write"):
         if any(marker in line for line in publish_pull):

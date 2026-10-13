@@ -130,6 +130,46 @@ in both frontend forms.
   `c_parse_expression_next_conditional` on the parse side) instead of
   rescanning the rest of the chain. `c_test_tall_expression_types` types
   10,000-operand chains.
+- **Lowering never guesses an expression type.** `c_ir_predict_expression_type`
+  answers the strict operand walk's type or the invalid type; the scan that
+  kept the widest identifier or literal in the range and defaulted to `int` is
+  gone (GitHub #2531). A caller that needs the type -- the `sizeof`/`_Alignof`
+  lowering, the conditional selection worklist, the arithmetic-plus nested
+  conditional and the comma controlling-expression check -- reports it through
+  `c_ir_report_untyped_expression`. So do the callers that read the type only
+  to choose a form: overload ranking between several `__overloadable__`
+  candidates (a sole arity-matching candidate is taken without ranking), the
+  `(*q)(...)` dereference strip, and the Windows `__builtin_va_end` cursor
+  test (`c_test_prediction_caller_checks`). The aggregate-initializer test
+  alone treats it as "not this shape". A braced list is
+  not an expression, so the initializer test no longer predicts one. The walk
+  has leaves for the shapes the scan still answered: atomic builtins (void,
+  `_Bool`, or the pointed-to object's unqualified type), `va_arg`,
+  `__builtin_expect` (`long`, as GCC's prototype says), `object_size`,
+  `strlen`, `assume_aligned`, `frame_address`/`return_address`,
+  `__builtin_complex`, GNU vector arithmetic, C23 `true`/`false`/`nullptr`,
+  `__func__` and `*` on a function designator. A storage-only `__fp16` type
+  has no IR type, so when the IR mapping is missing for a `sizeof`/`_Alignof`
+  operand whose type is `__fp16` or an array or GNU vector of it,
+  `c_semantic_storage_half_operand_layout` answers from the C type layout
+  (Clang's 2, and the vector's own size); the scan once folded 4. Only these
+  unevaluated operands are answered; an evaluated `__fp16` value keeps its
+  canonical-lowering refusal. `c_test_untyped_operand_diagnostics` runs the
+  leaves and the `__fp16` sizes natively and requires the evaluated refusals.
+- **The parser's expression typer gives builtins the same results.**
+  `c_parse_expression_leaf_without_cast` answers `__builtin_expect` as `long`,
+  `object_size`, `strlen` and `__builtin_offsetof` as `size_t`,
+  `assume_aligned`, `frame_address`/`return_address` and `alloca` as
+  `void *`, and the `__builtin_mem*`/`__builtin_str*` forms from lowering's
+  prototype table (`c_semantic_memory_builtin_result`). An atomic builtin's
+  leaf frame types the first argument in a child frame
+  (`C_TYPE_PARSE_STAGE_ATOMIC_OBJECT`) and answers what
+  `c_semantic_atomic_builtin_result` classifies, the same rule lowering's
+  `C_IR_SIZEOF_OP_ATOMIC_OBJECT` frame reads. Without these, `__typeof__` of
+  such a call declared nothing and a `_Static_assert` over its `sizeof` was
+  rejected in both `-fsyntax-only` and `-c` (GitHub #2531).
+  `c_test_builtin_result_types` checks every form through semantic-only
+  analysis and both lowering forms on three target layouts.
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place
@@ -263,6 +303,24 @@ in both frontend forms.
   alignment to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
+- SysV i386 uses `IR_ABI_CONVENTION_SYSTEMV_I386`, selected independently of
+  x86-64 by `ir_abi_convention_for_target`. Its baseline cdecl classifier
+  (`ir_i386_abi_value`) carries scalar and aggregate arguments as by-value
+  memory images. Stack placement must round those images to four-byte slots;
+  the classifier retains their exact object sizes. Integer results occupy
+  EAX, or EDX:EAX for 64-bit values; pointers and the pointer-shaped i386
+  `va_list` occupy EAX. Scalar float, double and twelve-byte x87 long double
+  results have one X87 part, describing ST(0) and the value's storage size.
+  Struct/union results, including GNU empty records, use a four-byte hidden
+  pointer; the callee must return that pointer in EAX and pop its stack word.
+  `_Complex float` returns its real and imaginary bit images in EAX/EDX;
+  wider complex types use the hidden-pointer convention. Vector transport and
+  scalar formats outside this baseline retain an empty unsupported shape.
+  The rules follow [Intel386 psABI 1.1, section 2.2.3 and table 2.4](https://github.com/hjl-tools/x86-psabi/wiki/intel386-psABI-1.1.pdf).
+  `ir_test_i386_abi` covers independent transport expectations and cache reuse;
+  the existing interleaved ABI cache/reference matrix includes i386. This
+  classification is a prerequisite for #3692: the native i386 backend and
+  ELF32 path are still absent, and all i386 artifact actions remain refused.
 - System V x86-64 padding-only eightbytes retain NO_CLASS and consume no
   argument or result register. `ir_classify_abi_value` publishes only live
   pieces, preserving their offsets in the complete aggregate storage image;

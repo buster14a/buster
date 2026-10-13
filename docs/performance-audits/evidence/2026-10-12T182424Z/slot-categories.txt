@@ -1,0 +1,10 @@
+== sqlite (-g0): coalescing functions=727 rows=200837 slots=1665
+   slot categories: {'static': 4, 'addr_unsafe': 1010, 'unproven': 0, 'untouched': 0, 'shareable': 651}
+   no-shareable fns=396 rows=71761; their slot categories: {'static': 3, 'addr_unsafe': 612, 'unproven': 0, 'untouched': 0, 'shareable': 0}
+   fns whose every slot is statically fixed: 1 rows=49
+   fns whose every slot is static or address-escaping (census skipped): 396 rows=71761
+== self (-g0): coalescing functions=5034 rows=2028995 slots=145598
+   slot categories: {'static': 12, 'addr_unsafe': 17820, 'unproven': 8455, 'untouched': 155, 'shareable': 119156}
+   no-shareable fns=161 rows=20068; their slot categories: {'static': 3, 'addr_unsafe': 229, 'unproven': 30, 'untouched': 7, 'shareable': 0}
+   fns whose every slot is statically fixed: 1 rows=24
+   fns whose every slot is static or address-escaping (census skipped): 143 rows=16450
