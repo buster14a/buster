@@ -960,8 +960,14 @@ struct IrFastStatistics
 // shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
 // module cap starves optional sites in large translation units, because
 // callers are visited in module order rather than by profit (#48).
-#define IR_INLINE_TINY_INSTRUCTIONS 16u
-#define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
+// The 13-row callee limit keeps the one-line field predicates that carry the
+// measured self-host benefit (an 11-row token-punctuator test and a 13-row
+// shape test) and drops the 14-16-row band, whose sites added growth and
+// compile work for almost no executed calls (#3854). The per-caller growth
+// stays twice the 64-site times 16-row budget it was sized from, leaving
+// headroom for mandatory checked-arithmetic expansions.
+#define IR_INLINE_TINY_INSTRUCTIONS 13u
+#define IR_INLINE_FUNCTION_GROWTH 2048u
 #define IR_INLINE_MODULE_GROWTH 4096u
 #define IR_INLINE_MODULE_GROWTH_SHIFT 5u
 // Optional splices into a caller are kept only when their planned row growth,

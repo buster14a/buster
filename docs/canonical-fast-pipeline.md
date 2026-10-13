@@ -593,7 +593,7 @@ address is observed. Cloned instruction ranges preserve supported source line
 information; the debug model does not gain inline call-stack records.
 
 Positive decimal limits are configurable through
-`-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
+`-fcanonical-inline-max-callee=N` (default 13 canonical instructions),
 `-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
 `-fcanonical-inline-module-growth=N` (default: the larger of 4096 copied rows
 and 1/32 of the module's lowered canonical instruction rows), and
@@ -625,10 +625,43 @@ memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are ne
 dropped. `-fcanonical-inline-caller-growth-shift=N` and
 `IrInlineOptions.caller_growth_shift` override the shift (a zero API field
 selects the default, 32 or more keeps every planned site).
-The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
-headroom for larger mandatory checked-arithmetic expansions; the module, work
-and storage guards still independently bound expansion.
+The caller default stays 2048 rows, twice the 64-site times 16-row tiny-body
+budget it was sized from. This leaves headroom for larger mandatory
+checked-arithmetic expansions; the module, work and storage guards still
+independently bound expansion.
 Zero numeric fields in embedding options normalize to those defaults.
+
+The 13-row callee default comes from a per-callee census of the unity
+self-host source (#3854). Most optional callees are one-line field predicates
+that lower to 10-16 promoted rows (arguments, address, load, casts, compare,
+return); a limit of 10 or less keeps almost none of them. One 11-row callee,
+`c_token_is_punctuator`, took 2072 of 3586 spliced sites and 55% of the row
+growth, and 409 M of the generated compiler's 1.65 G calls to optional
+callees when it self-hosts. A 13-row shape test added 25 M calls from 4 sites.
+The 12-row band (184 sites) and the 14-16-row band (337 sites, 4224 rows)
+together took about 3 M calls: mostly backends an x86-64 self-host never
+runs. Row shape does not separate those from the hot predicates, so no
+sharper static rule was found. Under cachegrind at `-march=x86-64-v3`
+(diagnostic only; 9700X qualification is separate), against tiny-off:
+
+| Callee limit, caller shift | Compiler instructions with the flags | Generated stage-2 instructions | `.text` growth |
+|---|---|---|---|
+| 16, 5 (previous default) | 1.0106 | 0.9853 | +0.76% |
+| 13, 5 (default) | 1.0097 | 0.9845 | +0.65% |
+| 12, 5 | 1.0096 | 0.9861 | +0.63% |
+| 11, 5 | 1.0090 | 0.9855 | +0.59% |
+| 11, 4 | 1.0061 | 0.9878 | +0.43% |
+| 11, 6 | 1.0103 | 0.9862 | +0.63% |
+| 13, 4 | 1.0067 | 0.9869 | +0.48% |
+| 13, 6 | 1.0111 | 0.9852 | +0.69% |
+
+The first column is a fixed no-inline compiler compiling the unity source with
+each setting; the second runs that setting's own stage-1 compiler with the
+same flags. The 13-row limit drops the 14-16-row band's growth and the work
+of splicing it, so it improves on 16 in every column. At 13 rows, shift 4 cuts the
+compiler's added instructions by a third but keeps only 89% of the stage-2
+saving; shift 6 is worse than 5 in every column.
+
 Mandatory calls are processed before optional tiny candidates across the module;
 both phases share the same row-growth, call-site and per-caller limits. Mandatory
 planning and splicing share one module-wide work and retained-storage budget.

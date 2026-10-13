@@ -626,7 +626,9 @@ inlining is disabled; an impossible requirement produces a source-mapped
 tiny inlining; zero is rejected and zero-valued API options normalize to the
 named defaults. Budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
-the shift sets the caller relocation bound described below.
+the shift sets the caller relocation bound described below. The callee limit
+defaults to 13 canonical rows (`IR_INLINE_TINY_INSTRUCTIONS`, 16 before
+#3854); the FAST pipeline contract records the per-callee census behind it.
 Without an explicit module limit, the module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when
