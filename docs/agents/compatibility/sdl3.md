@@ -235,6 +235,23 @@ Artifact11734742728 has archive SHA-256
 the owner records fourteen-day retention. These are reported observations,
 not a new exact-head execution by this guide update.
 
+Both blockers were repaired on main by #3715 and #3722. A later local cloud-container
+intake, with the unchanged tool and fixtures, ran on PR merge head `56423abbb13a7526d3a775591d7c0be9690c49ef`
+(main `897275fb9e3c6d92eab85cacc1641ecb5b51a939`). It found the
+XOpenDisplay and HAVE_XFIXES_H checks succeeding and a feature summary
+identical to the reference (`SDL_X11_XFIXES=ON`). The remaining probe
+differences are compile-only `-Wl,--enable-new-dtags`, `-fcolor-diagnostics`
+and `-fcomment-block-commands` refusals ([#4041](https://github.com/buster14a/buster/issues/4041)).
+The candidate build passes `-idirafter` and produces 259 of the reference's
+265 objects. Six still fail: `-std=c90` in four test targets
+([#1418](https://github.com/buster14a/buster/issues/1418)), the `"%rax"`/`"%rcx"`
+clobber spelling in `SDL_cpuinfo.c` ([#1415](https://github.com/buster14a/buster/issues/1415)),
+and an unknown MMX builtin in Clang's `mmintrin.h` reached from `SDL_stb.c`
+([#1419](https://github.com/buster14a/buster/issues/1419)).
+Candidate tests and candidate-library ABI cells remain unexecuted. That run
+was not the main-only hosted route; its results are diagnostic, and exact
+records are on #3449.
+
 Keep #3188 open until the matched candidate build/tests, four ABI cells,
 negative-oracle controls, complete C-action/target/license closure,
 durable raw archival and required cost/performance evidence are complete.
