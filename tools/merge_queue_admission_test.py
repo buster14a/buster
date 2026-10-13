@@ -950,6 +950,35 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(groups[self.g1]["state"], "published")
         self.assertEqual(len(self.writer.sent), 2)
 
+    def test_coalesced_deliveries_rederive_successor_failure_after_landing(self):
+        # An early delivery sees incomplete G1. Gate completions may coalesce
+        # before the next pass; that pass must collect current facts twice.
+        self.collected = [([], ["CI complete: workflow still running"])]
+        groups, _ = self.reconcile()
+        self.assertEqual(groups[self.g1]["state"], "pending")
+        self.collected = [(self.evidence, []), (self.evidence, [])]
+        groups, _ = self.reconcile()
+        self.assertEqual(groups[self.g1]["state"], "admitted")
+        # The landing push and a successor's failed gate can also coalesce.
+        # No payload is replayed: the next pass discovers G2 and its failure.
+        self.move_main(self.g1)
+        with patch.object(gate, "collect", side_effect=gate.AdmissionError(
+                "CI complete: cancelled, skipped, neutral or invalid workflow")):
+            arguments = SimpleNamespace(repo_root=self.trusted, repository="buster14a/buster",
+                                        details_url="https://example.invalid/sweep")
+            with patch.object(gate, "GitHub", return_value=self.reader), \
+                    patch.object(gate, "CheckWriter", return_value=self.writer), \
+                    patch.object(gate, "live_ruleset", return_value={"id": gate.RULESET_ID}), \
+                    patch.object(gate, "retirement_admission", return_value=self.native):
+                report = gate.reconcile(arguments)
+        groups = {group["head"]: group for group in report["groups"]}
+        self.assertEqual(groups[self.g1]["state"], "landed")
+        self.assertEqual(groups[self.g2]["state"], "rejected")
+        _, body = self.writer.sent[-1]
+        self.assertEqual((body["head_sha"], body["conclusion"]), (self.g2, "failure"))
+        self.assertTrue(all(body["head_sha"] != self.g2 or body.get("conclusion") != "success"
+                            for _, body in self.writer.sent if "head_sha" in body))
+
     def native_group(self, native_job):
         gate.git(self.work, "checkout", "-q", "-b", "native-policy", self.main)
         path = self.work / gate.RETIREMENT_WORKFLOW
@@ -1243,6 +1272,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", text)
         self.assertIn("timeout-minutes: 10\n", text)
         self.assertIn("cancel-in-progress: false", text)
+        self.assertIn("queue: single", text)
+        self.assertIn("7-59/15 * * * *", text)
         self.assertIn("github.event.workflow_run.event == 'merge_group'", text)
         self.assertNotIn("sleep", text)
         for filename in {**gate.CHECKS, **gate.RECONSTRUCTION_CHECK}:

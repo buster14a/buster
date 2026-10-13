@@ -124,7 +124,8 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
                     self.assertEqual(len(re.findall(r"^\s+queue:", text, re.MULTILINE)), len(locked))
                     continue
                 concurrency = top_level_section(text, "concurrency")
-                self.assertIn("  queue: max\n", concurrency)
+                policy = "single" if path.name == "merge-queue-reconcile.yml" else "max"
+                self.assertIn(f"  queue: {policy}\n", concurrency)
                 self.assertIn("  cancel-in-progress: false\n", concurrency)
                 self.assertEqual(len(re.findall(r"^\s+queue:", text, re.MULTILINE)), 1)
                 group = re.search(r"^  group: (.*)$", concurrency, re.MULTILINE).group(1)
