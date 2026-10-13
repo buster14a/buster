@@ -94,6 +94,9 @@
 //                                                 and deferred past unresolved
 //                                                 bounds
 //   c_parse_static_assert_diagnostic_message      immediate/deferred messages;
+//   c_parse_deferred_assertion_verdict,           one verdict per deferred
+//   c_semantic_static_assert_verdict              assertion, which lowering
+//                                                 consumes (CStaticAssertVerdict)
 //   c_parse_token_range_text                      one-line expression quotes
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
@@ -39358,40 +39361,98 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
     scratch_end(temporary);
 }
 
+// One deferred assertion's semantic verdict. Validation and lowering's
+// unchecked-row query both come here, so they resolve names in the same scope
+// and evaluate in the same context: C17 6.6 integer-constant truth through the
+// typed evaluator. It reports nothing itself.
+BUSTER_C_INTERNAL CStaticAssertVerdict c_parse_deferred_assertion_verdict(CTypeParseMachine* machine, CParseResult* result,
+                                                                         CPreprocessResult preprocess, u32 row)
+{
+    CDeferredStaticAssert assertion = result->deferred_static_asserts[row];
+    // A member assertion is deferred from its aggregate's scope; the
+    // innermost block enclosing it is where its names bind.
+    CScopeId scope = c_parse_scope_for_token(result, assertion.scope, assertion.token_start);
+    CDeclaration declaration = {.token_start = assertion.token_start, .token_count = assertion.token_count};
+    u32 start = 0;
+    u32 end = 0;
+    u64 mark = machine->scratch_arena->position;
+    u64 oversized_before = c_parse_oversized_layout_count(result);
+    CParseConstant value = {.type = C_TYPE_ID_INVALID};
+    if (c_parse_static_assert_expression_range(preprocess, declaration, &start, &end))
+    {
+        value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, start, end);
+    }
+    arena_set_position(machine->scratch_arena, mark);
+    CStaticAssertVerdict verdict = C_STATIC_ASSERT_HOLDS;
+    // This assertion measured an oversized type; the size validation around
+    // this pass reports it (see c_parse_static_assert_check).
+    if (c_parse_oversized_layout_count(result) != oversized_before)
+    {
+        verdict = C_STATIC_ASSERT_SIZE_REPORTED;
+    }
+    else if (!value.valid)
+    {
+        verdict = C_STATIC_ASSERT_NOT_CONSTANT;
+    }
+    else if (value.is_float || !c_parse_constant_truth(value))
+    {
+        verdict = C_STATIC_ASSERT_FAILED;
+    }
+    return verdict;
+}
+
+// Each verdict is stored after its query has returned and rewound, outside
+// any speculative frame, in an array the result snapshots do not copy, so no
+// rollback can remove it; parsing appended every row before this pass.
 BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                CPreprocessResult preprocess)
 {
+    u8* verdicts = result->deferred_static_assert_count ? arena_allocate(result->arena, u8, result->deferred_static_assert_count) : 0;
     for (u32 index = 0; index < result->deferred_static_assert_count; index += 1)
     {
+        CStaticAssertVerdict verdict = c_parse_deferred_assertion_verdict(machine, result, preprocess, index);
+        verdicts[index] = (u8)verdict;
         CDeferredStaticAssert assertion = result->deferred_static_asserts[index];
-        // A member assertion is deferred from its aggregate's scope; the
-        // innermost block enclosing it is where its names bind.
-        assertion.scope = c_parse_scope_for_token(result, assertion.scope, assertion.token_start);
         CDeclaration declaration = {.token_start = assertion.token_start, .token_count = assertion.token_count};
-        u32 start = 0;
-        u32 end = 0;
-        u64 mark = machine->scratch_arena->position;
-        u64 oversized_before = c_parse_oversized_layout_count(result);
-        CParseConstant value = {.type = C_TYPE_ID_INVALID};
-        if (c_parse_static_assert_expression_range(preprocess, declaration, &start, &end))
+        if (verdict == C_STATIC_ASSERT_NOT_CONSTANT || verdict == C_STATIC_ASSERT_FAILED)
         {
-            value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, assertion.scope, start, end);
-        }
-        arena_set_position(machine->scratch_arena, mark);
-        // This assertion measured an oversized type; the size validation
-        // around this pass reports it (see c_parse_static_assert_check).
-        bool size_reported = c_parse_oversized_layout_count(result) != oversized_before;
-        if (!size_reported && !value.valid)
-        {
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
-        }
-        else if (!size_reported && (value.is_float || !c_parse_constant_truth(value)))
-        {
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
+            CDiagnosticKind kind = verdict == C_STATIC_ASSERT_FAILED ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), kind,
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, kind));
         }
     }
+    result->deferred_static_assert_verdicts = verdicts;
+}
+
+// The verdict for a deferred row that validation did not check: lowering
+// reached through c_parse / c_analyze_semantics, which skip it. The same
+// semantic evaluator answers on private scratch machine storage, as in
+// c_semantic_type_identity_query, and the result is restored afterwards, as
+// a speculative checkpoint is, so the query leaves lowering's model no type
+// rows (lowering indexes its type map by type_count), interning entries or
+// diagnostics. A row it cannot evaluate is NOT_CONSTANT, never a guess.
+BUSTER_C_SHARED CStaticAssertVerdict c_semantic_static_assert_verdict(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 row)
+{
+    CStaticAssertVerdict verdict = C_STATIC_ASSERT_NOT_CONSTANT;
+    if (row < result->deferred_static_assert_count)
+    {
+        CDeferredStaticAssert assertion = result->deferred_static_asserts[row];
+        u64 mark = scratch->position;
+        CParseResult checkpoint = *result;
+        u32 capacity = assertion.token_count + 64;
+        CTypeParseMachine machine = {
+            .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
+            .frame_checkpoints = arena_allocate(scratch, CParseResult, capacity),
+            .mutations = arena_allocate(scratch, CTypeMutation, capacity),
+            .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
+            .scratch_arena = scratch,
+            .frame_capacity = capacity, .mutation_capacity = capacity, .expression_task_capacity = capacity,
+        };
+        verdict = c_parse_deferred_assertion_verdict(&machine, result, preprocess, row);
+        *result = checkpoint;
+        arena_set_position(scratch, mark);
+    }
+    return verdict;
 }
 
 // The diagnostic text for one evaluated bit-field width, empty when the width

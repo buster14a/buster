@@ -44991,6 +44991,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
     return result;
 }
 
+// Lowering takes a deferred _Static_assert's verdict from the semantic typer
+// instead of evaluating it again with its own (GitHub #2531). Every source
+// here is deferred (an enumerator, _Generic, offsetof, a compatibility
+// builtin or an initializer-inferred array). Routes: 0 lowers c_parse's
+// model, which validation never checked, so lowering asks
+// c_semantic_static_assert_verdict; 1 is c_analyze_with_options (-c), whose
+// validation stored every verdict; 2 is semantic-only analysis
+// (-fsyntax-only). All three must agree on each case, on three data layouts
+// and both frontend forms. Before this, route 1 rejected the first case,
+// which route 2 accepted.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_semantic_verdict(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestStaticAssertVerdictCase
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } CTestStaticAssertVerdictCase;
+    CTestStaticAssertVerdictCase const cases[] = {
+        {S8("int f(int i) { _Static_assert(__builtin_choose_expr(1, 1, 0) && _Generic(i, int: 1), \"choice\"); return i; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("#define T4(x) x + x + x + x\n"
+            "#define T16(x) T4(x) + T4(x) + T4(x) + T4(x)\n"
+            "#define T64(x) T16(x) + T16(x) + T16(x) + T16(x)\n"
+            "int f(int i, unsigned long u) {\n"
+            "    _Static_assert(sizeof(T64(i) + (int)u) == sizeof(int) && _Generic(T64(i) + (int)u, int: 1), \"tall\");\n"
+            "    return i;\n"
+            "}\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(void) {\n"
+            "    int x = 0;\n"
+            "    { long x = 0; _Static_assert(sizeof x == sizeof(long) && _Generic(x, long: 1), \"inner\"); }\n"
+            "    _Static_assert(sizeof x == sizeof(int) && _Generic(x, int: 1), \"outer\");\n"
+            "    return x;\n"
+            "}\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(void) { const volatile short s = 0; _Static_assert(sizeof s == sizeof(short) && _Generic(s + 0, int: 1), \"qualified\"); return s; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("struct B { unsigned bf : 3; };\n"
+            "int f(struct B v) { _Static_assert(sizeof(v.bf + 0) == sizeof(int) && _Generic(v.bf + 0, int: 1), \"promoted\"); return v.bf; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("struct M { int a; _Static_assert(_Generic(0, int: 1), \"member\"); };\nint f(struct M m) { return m.a; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("enum { E = 3 };\n_Static_assert(E == 3, \"enumerator\");\n"
+            "struct O { char c; long l; };\n_Static_assert(__builtin_offsetof(struct O, l) == sizeof(long), \"offset\");\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(long l) { _Static_assert(__builtin_types_compatible_p(__typeof__(l), long), \"compatible\"); return 0; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int a[] = {1, 2, 3};\n"
+            "int f(void) { int l[] = {1, 2}; _Static_assert(sizeof a == 3 * sizeof(int) && sizeof l == 2 * sizeof(int), \"inferred\"); return a[0] + l[0]; }\n"),
+         C_DIAGNOSTIC_KIND_COUNT},
+        {S8("int f(int i) { _Static_assert(__builtin_choose_expr(1, 0, 1) && _Generic(i, int: 1), \"false choice\"); return i; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(int i) { _Static_assert(_Generic(i, int: 0, default: 1), \"false generic\"); return i; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(int n) { enum { L = 1 }; _Static_assert(L + n, \"runtime\"); return n; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+    };
+    Target const targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            for (u32 route = 0; route < 3; route += 1)
+            {
+                u32 form_count = route == 2 ? 1 : 2;
+                for (u32 form = 0; form < form_count; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    Target target = targets[target_index];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
+                    CIRLowerOptions options = {.disable_direct_ssa = form != 0};
+                    CDiagnostic* diagnostics = 0;
+                    u32 diagnostic_count = 0;
+                    if (route == 0)
+                    {
+                        CParseResult parse = c_parse(temporary.arena, tokens);
+                        // The model-building entry point validates nothing,
+                        // so every deferred row reaches lowering unchecked.
+                        BUSTER_TEST(arguments, parse.deferred_static_assert_count && !parse.deferred_static_assert_verdicts);
+                        diagnostics = parse.diagnostics;
+                        diagnostic_count = parse.diagnostic_count;
+                        if (!diagnostic_count)
+                        {
+                            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("static-assert-verdict.c"), tokens, parse, target, options);
+                            diagnostics = lowered.diagnostics;
+                            diagnostic_count = lowered.diagnostic_count;
+                        }
+                    }
+                    else
+                    {
+                        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                        BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0, cases[case_index].source);
+                        if (route == 1)
+                        {
+                            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("static-assert-verdict.c"), tokens, syntax, target, options);
+                            diagnostics = analyzed.diagnostics;
+                            diagnostic_count = analyzed.diagnostic_count;
+                            if (!diagnostic_count && BUSTER_REQUIRE(arguments, analyzed.program && analyzed.program->module_count == 1))
+                            {
+                                BUSTER_TEST(arguments, ir_validate_canonical_module(analyzed.program, analyzed.program->modules).error == IR_VALIDATION_NONE);
+                            }
+                        }
+                        else
+                        {
+                            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                            diagnostics = semantic.diagnostics;
+                            diagnostic_count = semantic.diagnostic_count;
+                            // Validation stored one verdict per deferred row.
+                            bool stored = semantic.deferred_static_assert_count && semantic.deferred_static_assert_verdicts;
+                            for (u32 row = 0; stored && row < semantic.deferred_static_assert_count; row += 1)
+                            {
+                                stored = semantic.deferred_static_assert_verdicts[row] != C_STATIC_ASSERT_UNCHECKED;
+                            }
+                            BUSTER_TEST_RAW(arguments, stored, cases[case_index].source);
+                        }
+                    }
+                    u32 expected_count = cases[case_index].kind == C_DIAGNOSTIC_KIND_COUNT ? 0 : 1;
+                    BUSTER_TEST_RAW(arguments, diagnostic_count == expected_count && (!expected_count || diagnostics[0].kind == cases[case_index].kind),
+                        string_format(temporary.arena, S8("target={u32} route={u32} form={u32}: {S8} source={S8}"), target_index, route, form,
+                            diagnostic_count ? diagnostics[0].message : S8("no diagnostic"), cases[case_index].source));
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // The parser's semantic expression typer answers the builtins that have no
 // function entity with the result lowering's strict operand walk gives them
 // (GitHub #2531): `__builtin_expect` is long; object_size, strlen and offsetof
@@ -65956,6 +66091,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
+    C_TEST_FIXTURE(arguments, c_test_static_assert_semantic_verdict);
     C_TEST_FIXTURE(arguments, c_test_sizeof_semantic_handoff);
     C_TEST_FIXTURE(arguments, c_test_untyped_operand_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_builtin_result_types);

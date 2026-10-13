@@ -48260,62 +48260,6 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
     return (String8){0};
 }
 
-BUSTER_C_INTERNAL bool c_ir_static_assert_expression_range(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start_out,
-                                                              u32* expression_end_out)
-{
-    if (start + 2 >= end || end > builder->preprocess.token_count || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER ||
-        !c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[start], C_SYMBOL_WELL_KNOWN_STATIC_ASSERT) ||
-        !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        return false;
-    }
-    u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    if (close >= end)
-    {
-        return false;
-    }
-    u32 comma = close;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    for (u32 index = start + 2; index < close; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-        {
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            comma = index;
-            break;
-        }
-    }
-    *expression_start_out = start + 2;
-    *expression_end_out = comma < close ? comma : close;
-    return *expression_start_out < *expression_end_out;
-}
-
 // First index into the builder's label-candidate positions whose token
 // position is >= position; label_candidate_count when none is.
 BUSTER_C_INTERNAL u32 c_ir_label_candidate_lower_bound(CIntegerIrBuilder* builder, u32 position)
@@ -64840,54 +64784,39 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
         };
     }
+    // Deferred assertions are the semantic typer's to decide (#2531). Through
+    // c_analyze_with_options validation has already stored every verdict and
+    // lowering runs only when each one held; the model-building entry points
+    // leave the rows unchecked and the same semantic evaluator answers them
+    // here. Lowering never evaluates an assertion with its own typer, so
+    // -fsyntax-only and -c cannot disagree on one.
     for (u32 deferred_index = 0; deferred_index < parse.deferred_static_assert_count; deferred_index += 1)
     {
         CDeferredStaticAssert deferred = parse.deferred_static_asserts[deferred_index];
-        CDeclaration declaration = {
-            .token_start = deferred.token_start,
-            .token_count = deferred.token_count,
-            .scope = deferred.scope,
-            .location = deferred.location,
-        };
-        u32 declaration_end = deferred.token_start + deferred.token_count;
-        // A name the parse left unbound -- one in a member assertion --
-        // resolves in the innermost scope enclosing it, not at file scope.
-        CScopeId assertion_scope = c_parse_scope_for_token(&parse, deferred.scope, deferred.token_start);
-        for (u32 token_index = deferred.token_start; token_index < declaration_end && token_index < preprocess.token_count; token_index += 1)
+        CStaticAssertVerdict verdict = parse.deferred_static_assert_verdicts ? (CStaticAssertVerdict)parse.deferred_static_assert_verdicts[deferred_index]
+                                                                             : C_STATIC_ASSERT_UNCHECKED;
+        if (verdict == C_STATIC_ASSERT_UNCHECKED)
         {
-            if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && !token_entities_plus_one[token_index])
-            {
-                CEntityId entity = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, assertion_scope, &preprocess.tokens[token_index]);
-                token_entities_plus_one[token_index] = entity.value + 1;
-            }
+            // The constant builder's copy is the newest: its own identity
+            // queries may have appended rows past parse's counts.
+            CParseResult query = constant_builder.parse;
+            verdict = c_semantic_static_assert_verdict(temporary_arena, preprocess, &query, deferred_index);
         }
-        u32 expression_start = 0;
-        u32 expression_end = 0;
-        CIrConstantValue assertion = {0};
-        bool expression_valid = c_ir_static_assert_expression_range(&constant_builder, declaration.token_start, declaration_end, &expression_start, &expression_end);
-        bool constant = expression_valid && c_ir_constant_evaluate(&constant_builder, expression_start, expression_end, &assertion);
-        if (!expression_valid || !constant)
+        if (verdict != C_STATIC_ASSERT_HOLDS && result.diagnostic_count < parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
         {
-            if (result.diagnostic_count >= parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
-            {
-                continue;
-            }
-            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT),
-                .location = c_preprocess_site_location(&preprocess, declaration.location),
-                .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+            // An oversized measured type has no size diagnostic of its own on
+            // this path, so it is reported as a non-constant assertion.
+            CDiagnosticKind kind = verdict == C_STATIC_ASSERT_FAILED ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+            CDeclaration declaration = {
+                .token_start = deferred.token_start,
+                .token_count = deferred.token_count,
+                .scope = deferred.scope,
+                .location = deferred.location,
             };
-        }
-        else if (assertion.kind != C_IR_CONSTANT_INTEGER || c_ir_constant_truth(&constant_builder, &assertion) != C_IR_CONSTANT_TRUTH_TRUE)
-        {
-            if (result.diagnostic_count >= parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
-            {
-                continue;
-            }
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED),
+                .message = c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, kind),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
-                .kind = C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+                .kind = kind,
             };
         }
     }
