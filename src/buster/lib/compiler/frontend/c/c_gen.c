@@ -33,16 +33,13 @@
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
 // replay).
-// c_ir_root_conditional refuses a body range that holds no
-// `?` through the per-body token prefix table c_ir_token_prefix_build, before
-// its scan. The same table lets c_ir_lower_expression_core_step skip a control
+// c_ir_root_conditional refuses a body range that holds no `?` through the
+// per-body token prefix table c_ir_token_prefix_build, before its scan or,
+// under -fc-ast-pilot, before the tree's records when the range is non-empty
+// (#3924). The same table lets c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_range_may_prepare_control), a call prepass
 // (c_ir_range_may_prepare_calls) or a postfix probe
-// (c_ir_range_may_hold_update) that cannot find anything, and lets the
-// root-token predicates (c_ir_has_root_comma, _assignment, _control_operator,
-// _question and c_ir_call_argument_separator) refuse a range holding none of
-// their candidate tokens before their scans (#3924). Under -fc-ast-pilot, the
-// refusal of a non-empty range comes before the tree's records.
+// (c_ir_range_may_hold_update) that cannot find anything.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -3413,11 +3410,6 @@ struct CIrTokenPrefix
     // `?`, `&&`, `||` and the assignment operators: every group the control
     // prepass prepares holds one of them.
     u32 controls;
-    // The assignment operators alone; controls less assignments counts the
-    // root-control candidates `?`, `&&` and `||`.
-    u32 assignments;
-    // `,`.
-    u32 commas;
     // `(`: every call the call prepass discovers is a token followed by one.
     u32 parentheses;
     // `++` and `--`.
@@ -3758,9 +3750,7 @@ struct CIntegerIrBuilder
     // offset o (body_token_count + 1 entries), filled by
     // c_ir_token_prefix_build the first time a range probe asks
     // (c_ir_range_may_hold_question, c_ir_range_may_prepare_control,
-    // c_ir_range_may_prepare_calls, c_ir_range_may_hold_update and the
-    // root-token predicates' c_ir_range_may_hold_comma, _assignment and
-    // _logical). A null
+    // c_ir_range_may_prepare_calls, c_ir_range_may_hold_update). A null
     // pointer (any builder without a body) answers every range by the scan.
     CIrTokenPrefix* token_prefix;
     bool token_prefix_built;
@@ -4848,10 +4838,8 @@ BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
 // The classes CIrTokenPrefix counts, by punctuator id. Each is the test the
 // scan it answers for applies to one token: c_token_is_punctuator for `?`,
 // `(`, `++` and `--`, c_ir_assignment_operator and the control operators of
-// c_ir_has_control_operator_anywhere for the control class,
-// c_ir_assignment_operator for the assignment class, c_token_is_punctuator
-// for `,`, and the punctuator ids c_ir_build_delimiter_index pairs for the
-// groups.
+// c_ir_has_control_operator_anywhere for the control class, and the
+// punctuator ids c_ir_build_delimiter_index pairs for the groups.
 typedef enum CIrTokenPrefixClass
 {
     C_IR_TOKEN_PREFIX_QUESTION = 1,
@@ -4860,25 +4848,23 @@ typedef enum CIrTokenPrefixClass
     C_IR_TOKEN_PREFIX_UPDATE = 8,
     C_IR_TOKEN_PREFIX_OPEN = 16,
     C_IR_TOKEN_PREFIX_CLOSE = 32,
-    C_IR_TOKEN_PREFIX_ASSIGNMENT = 64,
-    C_IR_TOKEN_PREFIX_COMMA = 128,
 } CIrTokenPrefixClass;
 
 BUSTER_C_INTERNAL const u8 c_ir_token_prefix_classes[C_PUNCTUATOR_COUNT] = {
     [C_PUNCTUATOR_QUESTION] = C_IR_TOKEN_PREFIX_QUESTION | C_IR_TOKEN_PREFIX_CONTROL,
     [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_TOKEN_PREFIX_CONTROL,
     [C_PUNCTUATOR_PIPE_PIPE] = C_IR_TOKEN_PREFIX_CONTROL,
-    [C_PUNCTUATOR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_STAR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_SLASH_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_PERCENT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_PLUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_MINUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_SHIFT_LEFT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_AMPERSAND_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_CARET_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
-    [C_PUNCTUATOR_PIPE_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL | C_IR_TOKEN_PREFIX_ASSIGNMENT,
+    [C_PUNCTUATOR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_STAR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SLASH_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PERCENT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PLUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_MINUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SHIFT_LEFT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_AMPERSAND_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_CARET_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PIPE_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
     [C_PUNCTUATOR_LEFT_PARENTHESIS] = C_IR_TOKEN_PREFIX_PARENTHESIS | C_IR_TOKEN_PREFIX_OPEN,
     [C_PUNCTUATOR_LEFT_BRACKET] = C_IR_TOKEN_PREFIX_OPEN,
     [C_PUNCTUATOR_LEFT_BRACE] = C_IR_TOKEN_PREFIX_OPEN,
@@ -4887,7 +4873,6 @@ BUSTER_C_INTERNAL const u8 c_ir_token_prefix_classes[C_PUNCTUATOR_COUNT] = {
     [C_PUNCTUATOR_RIGHT_BRACE] = C_IR_TOKEN_PREFIX_CLOSE,
     [C_PUNCTUATOR_PLUS_PLUS] = C_IR_TOKEN_PREFIX_UPDATE,
     [C_PUNCTUATOR_MINUS_MINUS] = C_IR_TOKEN_PREFIX_UPDATE,
-    [C_PUNCTUATOR_COMMA] = C_IR_TOKEN_PREFIX_COMMA,
 };
 
 BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
@@ -4911,13 +4896,9 @@ BUSTER_C_INTERNAL void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
         BUSTER_CHECK(((classes & C_IR_TOKEN_PREFIX_CONTROL) != 0) ==
                      (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
                       c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE) || c_ir_assignment_operator(token)));
-        BUSTER_CHECK(((classes & C_IR_TOKEN_PREFIX_ASSIGNMENT) != 0) == c_ir_assignment_operator(token));
-        BUSTER_CHECK(((classes & C_IR_TOKEN_PREFIX_COMMA) != 0) == c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
 #endif
         running.questions += (classes & C_IR_TOKEN_PREFIX_QUESTION) != 0;
         running.controls += (classes & C_IR_TOKEN_PREFIX_CONTROL) != 0;
-        running.assignments += (classes & C_IR_TOKEN_PREFIX_ASSIGNMENT) != 0;
-        running.commas += (classes & C_IR_TOKEN_PREFIX_COMMA) != 0;
         running.parentheses += (classes & C_IR_TOKEN_PREFIX_PARENTHESIS) != 0;
         running.updates += (classes & C_IR_TOKEN_PREFIX_UPDATE) != 0;
         if (classes & C_IR_TOKEN_PREFIX_OPEN)
@@ -5011,135 +4992,6 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_update(CIntegerIrBuilde
 {
     CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
     return !first || first[end - start].updates != first[0].updates;
-}
-
-// Whether [start, end) may hold a `?`. Only a range inside the body is
-// answered by the token prefix table; any other range may. The table's test is
-// the scan's own (the punctuator field alone), so a range it calls empty is
-// one the scan would find no `?` in.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
-    return !first || first[end - start].questions != first[0].questions;
-}
-
-// Whether [start, end) may hold a `,`, by the same table and test.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
-    return !first || first[end - start].commas != first[0].commas;
-}
-
-// Whether [start, end) may hold an assignment operator (c_ir_assignment_operator).
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
-    return !first || first[end - start].assignments != first[0].assignments;
-}
-
-// Whether [start, end) may hold a `?`, `&&` or `||`: a control token that is
-// not an assignment operator. Both counts only grow, so the range holds one
-// exactly when the difference of the two counts changes across it.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_logical(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
-    return !first || first[end - start].controls - first[end - start].assignments != first[0].controls - first[0].assignments;
-}
-
-// The root-token predicates. Each scan can answer other than its fixed answer
-// only at a candidate token inside its range, so a body range that holds none
-// is answered in O(1) from the token prefix table: most of the self-host's
-// ranges hold none (#3924). Inline, so the refusal costs no call frame and the
-// scans stay out of line; reference-check builds run the skipped scan.
-BUSTER_C_INTERNAL bool c_ir_has_root_comma_scan(CIntegerIrBuilder* builder, u32 start, u32 end);
-BUSTER_C_INTERNAL bool c_ir_has_root_assignment_scan(CIntegerIrBuilder* builder, u32 start, u32 end);
-BUSTER_C_INTERNAL bool c_ir_has_root_control_operator_scan(CIntegerIrBuilder* builder, u32 start, u32 end);
-BUSTER_C_INTERNAL bool c_ir_has_root_question_scan(CIntegerIrBuilder* builder, u32 start, u32 end);
-BUSTER_C_INTERNAL u32 c_ir_call_argument_separator_scan(CIntegerIrBuilder* builder, u32 index, u32 end);
-
-// A `,` at the root of the range, outside a conditional's middle operand.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    bool result = false;
-    if (c_ir_range_may_hold_comma(builder, start, end))
-    {
-        result = c_ir_has_root_comma_scan(builder, start, end);
-    }
-#if BUSTER_REFERENCE_CHECKS
-    else
-    {
-        BUSTER_CHECK(!c_ir_has_root_comma_scan(builder, start, end));
-    }
-#endif
-    return result;
-}
-
-// An assignment operator at the root of the range, before any root `?`.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    bool result = false;
-    if (c_ir_range_may_hold_assignment(builder, start, end))
-    {
-        result = c_ir_has_root_assignment_scan(builder, start, end);
-    }
-#if BUSTER_REFERENCE_CHECKS
-    else
-    {
-        BUSTER_CHECK(!c_ir_has_root_assignment_scan(builder, start, end));
-    }
-#endif
-    return result;
-}
-
-// A binary `&&`, a `||`, or a `:` after a `?` at the root of the range.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    bool result = false;
-    if (c_ir_range_may_hold_logical(builder, start, end))
-    {
-        result = c_ir_has_root_control_operator_scan(builder, start, end);
-    }
-#if BUSTER_REFERENCE_CHECKS
-    else
-    {
-        BUSTER_CHECK(!c_ir_has_root_control_operator_scan(builder, start, end));
-    }
-#endif
-    return result;
-}
-
-// A `?` at the root of the range.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_has_root_question(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    bool result = false;
-    if (c_ir_range_may_hold_question(builder, start, end))
-    {
-        result = c_ir_has_root_question_scan(builder, start, end);
-    }
-#if BUSTER_REFERENCE_CHECKS
-    else
-    {
-        BUSTER_CHECK(!c_ir_has_root_question_scan(builder, start, end));
-    }
-#endif
-    return result;
-}
-
-// The first top-level comma of [index, end), or end.
-BUSTER_C_INTERNAL BUSTER_INLINE u32 c_ir_call_argument_separator(CIntegerIrBuilder* builder, u32 index, u32 end)
-{
-    u32 result = end;
-    if (c_ir_range_may_hold_comma(builder, index, end))
-    {
-        result = c_ir_call_argument_separator_scan(builder, index, end);
-    }
-#if BUSTER_REFERENCE_CHECKS
-    else
-    {
-        BUSTER_CHECK(c_ir_call_argument_separator_scan(builder, index, end) == end);
-    }
-#endif
-    return result;
 }
 
 // An operand that only runs when a branch is taken -- either arm of a
@@ -18436,6 +18288,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_group_is_statement_expression(CIntegerIrBuilder* builder, u32 start, u32 end);
 
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
                                              IrSourceRange source, IrTypeId cast_type);
@@ -24033,7 +23886,7 @@ BUSTER_C_INTERNAL bool c_ir_selection_answer(CIntegerIrBuilder* builder, u32 tok
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_has_root_control_operator_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     u32 parentheses = 0;
     u32 brackets = 0;
@@ -24098,7 +23951,7 @@ BUSTER_C_INTERNAL bool c_ir_has_root_control_operator_scan(CIntegerIrBuilder* bu
 
 BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
 
-BUSTER_C_INTERNAL bool c_ir_has_root_assignment_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     bool result = false;
     // An assignment after a top-level `?` belongs to one of the
@@ -24134,7 +23987,7 @@ BUSTER_C_INTERNAL bool c_ir_has_root_assignment_scan(CIntegerIrBuilder* builder,
 
 // A `?` at the root of the range. Groups are hopped over whole, as in
 // c_ir_has_root_assignment, so this is the classifying pass's root token test.
-BUSTER_C_INTERNAL bool c_ir_has_root_question_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_has_root_question(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     bool found = false;
     for (u32 index = start; index < end && !found; index += 1)
@@ -24866,7 +24719,7 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
 // The first top-level comma of [index, end), or end. Groups are hopped over
 // whole, so splitting the arguments of `f(g(h(...)))` at every level of the
 // nesting stays linear in the arguments' top-level tokens.
-BUSTER_C_INTERNAL u32 c_ir_call_argument_separator_scan(CIntegerIrBuilder* builder, u32 index, u32 end)
+BUSTER_C_INTERNAL u32 c_ir_call_argument_separator(CIntegerIrBuilder* builder, u32 index, u32 end)
 {
     u32 separator = end;
     for (; index < end && separator == end; index += 1)
@@ -39012,6 +38865,16 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
 BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
                                                     u32* expression_end);
 
+// Whether [start, end) may hold a `?`. Only a range inside the body is
+// answered by the token prefix table; any other range may. The table's test is
+// the scan's own (the punctuator field alone), so a range it calls empty is
+// one the scan would find no `?` in.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+    return !first || first[end - start].questions != first[0].questions;
+}
+
 // Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
 // tree when lowering has one for this body (c_ir_tree_root_conditional), else
 // by the token scan. A non-empty body range that holds no `?` is refused in
@@ -39314,7 +39177,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
 // Conditions and nested operands still obey comma precedence. Only commas outside
 // delimiter groups and the middle operand of ?: belong to its root. The full
 // expression machine already owns their ordered evaluation and result type.
-BUSTER_C_INTERNAL bool c_ir_has_root_comma_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     bool found = false;
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
