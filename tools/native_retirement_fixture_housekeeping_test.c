@@ -188,24 +188,32 @@ BUSTER_GLOBAL_LOCAL int hk_auto_argv(const CmJson *json, unsigned node,
     HkReport *report)
 {
     int valid = node && node <= json->count && json->tokens[node].kind == 'a';
+    unsigned words = 0;
     int automatic = 0, detached = 0;
     const char *before = "", *previous = "";
     if (valid)
     {
         for (unsigned item = json->tokens[node].child; item; item = json->tokens[item].next)
         {
-            valid = json->tokens[item].kind == 's';
+            valid = valid && json->tokens[item].kind == 's' &&
+                json->tokens[item].text != NULL;
             if (valid)
             {
                 const char *word = json->tokens[item].text;
-                if ((cm_equal(before, "maintenance") && cm_equal(previous, "run") &&
-                        cm_equal(word, "--auto")) ||
-                    (cm_equal(previous, "gc") && cm_equal(word, "--auto"))) automatic = 1;
-                if (cm_equal(word, "--detach")) detached = 1;
-                before = previous;
-                previous = word;
+                valid = words != 0 || word[0] != 0;
+                if (valid)
+                {
+                    if ((cm_equal(before, "maintenance") && cm_equal(previous, "run") &&
+                            cm_equal(word, "--auto")) ||
+                        (cm_equal(previous, "gc") && cm_equal(word, "--auto"))) automatic = 1;
+                    if (cm_equal(word, "--detach")) detached = 1;
+                    before = previous;
+                    previous = word;
+                    ++words;
+                }
             }
         }
+        valid = valid && words != 0;
     }
     if (valid)
     {
@@ -463,12 +471,30 @@ BUSTER_GLOBAL_LOCAL int hk_trace_parser_controls(void)
         "{\"event\":\"child_start\",\"sid\":\"s3\",\"child_id\":1,\"argv\":[\"git\",\"maintenance\",\"run\",\"--auto\"]}\n"
         "{\"event\":\"exit\",\"sid\":\"s3\",\"code\":0}\n"
         "{\"event\":\"atexit\",\"sid\":\"s3\",\"code\":0}\n";
+    const char *wrong_argv_type =
+        "{\"event\":\"version\",\"sid\":\"s4\",\"exe\":\"git\"}\n"
+        "{\"event\":\"start\",\"sid\":\"s4\",\"argv\":[\"git\",7,\"version\"]}\n"
+        "{\"event\":\"exit\",\"sid\":\"s4\",\"code\":0}\n"
+        "{\"event\":\"atexit\",\"sid\":\"s4\",\"code\":0}\n";
+    const char *empty_argv =
+        "{\"event\":\"version\",\"sid\":\"s5\",\"exe\":\"git\"}\n"
+        "{\"event\":\"start\",\"sid\":\"s5\",\"argv\":[]}\n"
+        "{\"event\":\"exit\",\"sid\":\"s5\",\"code\":0}\n"
+        "{\"event\":\"atexit\",\"sid\":\"s5\",\"code\":0}\n";
+    const char *empty_argv0 =
+        "{\"event\":\"version\",\"sid\":\"s6\",\"exe\":\"git\"}\n"
+        "{\"event\":\"start\",\"sid\":\"s6\",\"argv\":[\"\",\"version\"]}\n"
+        "{\"event\":\"exit\",\"sid\":\"s6\",\"code\":0}\n"
+        "{\"event\":\"atexit\",\"sid\":\"s6\",\"code\":0}\n";
     const char *malformed = "{\"event\":\n";
     HkReport report = {0};
     int valid = hk_parse_trace_data(complete, strlen(complete), &report) &&
         report.sessions == 1 && report.events == 4;
     valid = valid && !hk_parse_trace_data(missing_end, strlen(missing_end), &report);
     valid = valid && !hk_parse_trace_data(incomplete_child, strlen(incomplete_child), &report);
+    valid = valid && !hk_parse_trace_data(wrong_argv_type, strlen(wrong_argv_type), &report);
+    valid = valid && !hk_parse_trace_data(empty_argv, strlen(empty_argv), &report);
+    valid = valid && !hk_parse_trace_data(empty_argv0, strlen(empty_argv0), &report);
     valid = valid && !hk_parse_trace_data(complete, strlen(complete) - 1, &report);
     valid = valid && !hk_parse_trace_data(malformed, strlen(malformed), &report);
     return valid;
