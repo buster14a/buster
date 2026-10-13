@@ -18710,6 +18710,15 @@ struct CIrLowerBodyState
     u32 switch_control_start;
     u32 switch_body_start;
     u32 switch_statement_start;
+    // When the switch's first case label stands inside a statement of its
+    // body, that statement and the items after it, up to the next label that
+    // owns statements, lower from a block no edge enters: the label is a
+    // dispatch target inside them. Its item, plus one (0 for none), and the
+    // bound of that task.
+    u32 switch_prefix_item_plus_one;
+    u32 switch_prefix_item_count;
+    u32 switch_prefix_stop_plus_one;
+    u32 switch_prefix_end;
     u32 vla_alignment;
     CIrLowerBodyContinuation continuation;
     u64 temporary_mark;
@@ -45079,6 +45088,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
     CIrSwitchCase* cases = state->switch_cases;
     u32 case_count = 0;
     u32 ranged_cursor = 0;
+    state->switch_prefix_item_plus_one = 0;
     bool has_default = false;
     u32 last_ranged_case = UINT32_MAX;
     for (u32 key = 0; result && key < key_count; key += 1)
@@ -45093,11 +45103,28 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
         result = !(is_default && has_default) && case_count < state->switch_case_capacity;
         if (result && !ranged && !case_count)
         {
-            // With no enclosing case there is no statement stream that
-            // reaches it.
-            builder->failure_message = S8("case label inside a block precedes every case of its switch");
-            builder->failure_token_index = label_start;
-            result = false;
+            // The first label stands inside a statement: that statement's
+            // item opens the prefix task. Items tile the body in node order,
+            // so it is the first whose root is at or past the label.
+            u32 low = 0;
+            u32 high = list->count;
+            while (low < high)
+            {
+                u32 middle = low + (high - low) / 2;
+                if (list->items[middle] < label)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            result = low < list->count;
+            state->switch_prefix_item_plus_one = low + 1;
+            state->switch_prefix_item_count = list->count;
+            state->switch_prefix_stop_plus_one = 0;
+            state->switch_prefix_end = list->end;
         }
         if (!result)
         {
@@ -45125,6 +45152,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
                 cases[last_ranged_case].content_end = label_start;
                 cases[last_ranged_case].item_count = item + 1;
                 cases[last_ranged_case].stop_plus_one = label + 1;
+            }
+            else if (state->switch_prefix_item_plus_one)
+            {
+                state->switch_prefix_end = label_start;
+                state->switch_prefix_item_count = item + 1;
+                state->switch_prefix_stop_plus_one = label + 1;
             }
             last_ranged_case = case_count;
         }
@@ -48805,6 +48838,46 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .item_count = switch_cases[current].item_count,
                     .stop_plus_one = switch_cases[current].stop_plus_one,
                     .block = switch_cases[current].block,
+                    .continuation = fallthrough,
+                    .break_block = merge,
+                    .continue_block = task.continue_block,
+                };
+                tasks[task_count - 1].break_scope = switch_break_scope;
+                tasks[task_count - 1].continue_scope = task.continue_scope;
+                tasks[task_count - 1].break_token = switch_break_token;
+                tasks[task_count - 1].continue_token = task.continue_token;
+                tasks[task_count - 1].continue_checkpoint = task.continue_checkpoint;
+                tasks[task_count - 1].has_continue_checkpoint = task.has_continue_checkpoint;
+            }
+            if (state->switch_prefix_item_plus_one)
+            {
+                // The statements the first case label stands inside, from a
+                // block no edge enters; the dispatch reaches the label's own
+                // block inside them, and they fall through to the first case
+                // that owns statements.
+                IrBlockId prefix_block = c_ir_block_create(builder);
+                IrBlockId fallthrough = merge;
+                for (u32 next = 0; next < state->switch_case_count; next += 1)
+                {
+                    if (!switch_cases[next].in_substatement)
+                    {
+                        fallthrough = switch_cases[next].block;
+                        break;
+                    }
+                }
+                u32 item = state->switch_prefix_item_plus_one - 1;
+                if (prefix_block.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                tasks[task_count++] = (CIrBodyTask){
+                    .start = c_ir_node_list_first(builder, state->switch_list, item),
+                    .end = state->switch_prefix_end,
+                    .list = state->switch_list,
+                    .item = item,
+                    .item_count = state->switch_prefix_item_count,
+                    .stop_plus_one = state->switch_prefix_stop_plus_one,
+                    .block = prefix_block,
                     .continuation = fallthrough,
                     .break_block = merge,
                     .continue_block = task.continue_block,

@@ -1357,7 +1357,11 @@ statement from the cursor and dispatches on its kind:
   nodes of its body, nested switches excluded (`c_ir_lower_switch_cases`). A
   label reached from a body item through label prefixes alone owns the
   statements up to the next such label; any other is a dispatch target inside
-  them (`if (c) case 1: ...`, Duff's device).
+  them (`if (c) case 1: ...`, Duff's device). When the first label stands
+  inside a statement (`switch (x) { if (y) case 1: ...`), that statement and
+  the items after it, up to the next label that owns statements, lower from
+  a block no edge enters, and the dispatch reaches the label inside them. The
+  token walker flattened the `if` shape and refused the block shape.
 - **Dead code** after a terminator is skipped statement by statement unless
   the statement holds a label (`c_ir_node_holds_label`). A block opens as
   usual and its own walk skips up to the label; any other statement with a

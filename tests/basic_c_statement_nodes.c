@@ -133,6 +133,36 @@ labelled_out:
     return -9;
 }
 
+// A switch whose first case label stands inside a statement: that statement
+// and what follows it lower from a block no edge enters, and the dispatch
+// reaches the label inside them.
+static int leading_case(int x, int y)
+{
+    int r = 0;
+    switch (x)
+    {
+        if (y) case 1: r = 1;
+    case 2:
+        r += 2;
+    }
+    return r;
+}
+
+static int leading_block_case(int x)
+{
+    int r = 0;
+    switch (x)
+    {
+        {
+        case 1:
+            r = 5;
+        }
+    case 2:
+        r += 1;
+    }
+    return r;
+}
+
 static int nested_switch(int x, int y)
 {
     int r = 0;
@@ -294,5 +324,7 @@ int main(void)
     calls = 0;
     if (statement_expressions(1) != 2 + 4 + 3 + 2 + 3 || calls != 2) return 14;
     if (attributes(1) != 3 || attributes(2) != 2) return 15;
+    if (leading_case(1, 0) != 3 || leading_case(2, 0) != 2 || leading_case(3, 1) != 0) return 16;
+    if (leading_block_case(1) != 6 || leading_block_case(2) != 1 || leading_block_case(0) != 0) return 17;
     return 0;
 }
