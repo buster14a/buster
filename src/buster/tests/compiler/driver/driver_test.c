@@ -2802,8 +2802,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pointer_sign(UnitTestArg
         "    total += back(c)[0];\n"
         "    return !(total == 0x100u && *uv == 0xffffffffu && signed_text[0] == -128 && u[1] == 1);\n"
         "}\n");
-    // Seven conversions: signed_text, back's return, u = buffer, uv, u = c, first(c) and back(c).
-    u32 conversions = 7;
+    // Six conversions: signed_text, back's return, u = buffer, uv, u = c and first(c).
+    u32 conversions = 6;
     String8 marker = S8("differ in signedness");
     String8 tag = S8("[-Werror=pointer-sign]");
     String8 input = buster_test_temporary_path(arena, S8("buster-pointer-sign"), S8(".c"));
@@ -6099,7 +6099,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("void g(long *p) { unsigned long long *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("void g(const char *p) { unsigned char *q = p; (void)q; }\n"), false, false, S8("cannot convert from 'const char *' to 'unsigned char *'"), S8("-std=c17")},
         {S8("void g(_Bool *p) { unsigned char *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
-        {S8("enum E { X }; void g(enum E *p) { unsigned *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
+        {S8("enum E { X }; void g(enum E *p) { int *q = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("void g(char (*p)[3]) { unsigned char (*q)[3] = p; (void)q; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("void g(int *p) { float *q = p; (void)q; }\n"), false, false, S8("cannot convert from 'int *' to 'float *': incompatible pointer types"), S8("-std=c17")},
         {S8("struct S { char name[8]; int x; }; struct S s = { { \"abc\" }, 1 };\n"), true, false, {0}, S8("-std=c17")},
