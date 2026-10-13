@@ -988,8 +988,23 @@ general-dynamic TLS access keeps its padding as data (`.byte 0x66` before
 matching those bytes. `-g` and `-fPIC` listings therefore assemble with GNU as
 and Clang to the same section contents, symbol bindings and visibilities, and
 relocations as `-c`; the one difference is that a section symbol an assembler
-supplies replaces `ctor`-style local references to offset 0. Buster's own
-assembler accepts the `-g` listing but still has no `@TLSGD`. The listing is
+supplies replaces `ctor`-style local references to offset 0. Buster's standalone assembler now accepts the x86-64 ELF modifiers printed on
+these relocation fields: `@GOTPCREL`, `@TLSGD`, `@TLSLD`, `@GOTTPOFF`,
+`@TPOFF` and `@DTPOFF`. GOTPCREL instruction operands are limited to
+RIP-relative MOV r32/r64, so the opcode and REX prefix determine whether the
+object records GOTPCRELX or REX_GOTPCRELX; other GOTPCREL instruction shapes
+receive a named unsupported-modifier diagnostic. TLSGD/TLSLD/GOTTPOFF require
+a 32-bit PC-relative field; TPOFF requires a 32-bit absolute field, and
+DTPOFF accepts 32- or 64-bit absolute fields. The modifier must name the
+field's sole relocation symbol; repeated modifiers, multiple-symbol integer
+expressions and wrong-width fields are refused with a named diagnostic.
+This support is for x86-64 ELF only. An independent assembler sees the
+printed `.long` field without its instruction boundary, so it may retain
+generic GOTPCREL instead of a relaxable GOTPCRELX form. The registered
+`compiler_driver_x86_elf_modifier_roundtrip` fixture accepts that GOT family
+only for the system-assembler object and proves equivalent behavior by
+linking and running it. Buster reassembly is compared with the direct object
+and retains the exact MOV-derived relaxation kind. The listing is
 always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
 is not supported with -S"), while `-masm=att` with `-c` or with an assembly
 input (where it names the dialect the input is read in) is unchanged.
