@@ -159,7 +159,7 @@ DiskBuilderReferenceResult disk_builder_reference_read(Arena* arena, String8 pat
                 {
                     allocation_attempted = true;
                     result.status = DISK_BUILDER_REFERENCE_ALLOCATION_FAILED;
-                    u8* bytes = arena_allocate_bytes(arena, DISK_BUILDER_IMAGE_SIZE, DISK_BUILDER_SECTOR_SIZE);
+                    u8* bytes = (u8*)arena_allocate_bytes(arena, DISK_BUILDER_IMAGE_SIZE, DISK_BUILDER_SECTOR_SIZE);
                     if (bytes)
                     {
                         result.status = DISK_BUILDER_REFERENCE_READ_FAILED;
