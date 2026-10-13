@@ -449,6 +449,7 @@ struct CPreprocessDependency
     bool system;
 };
 
+typedef struct CMacroPrefixMap CMacroPrefixMap;
 typedef struct CPreprocessDetail CPreprocessDetail;
 enum
 {
@@ -496,6 +497,10 @@ struct CPreprocessDetail
     u64 macro_expansion_peak_bytes;
 #endif
     u32 lexed_file_count;
+    // Caller-arena-owned copy that survives option-array expiry through
+    // parser/lowering source-name expansion.
+    CMacroPrefixMap* macro_prefix_maps;
+    u32 macro_prefix_map_count;
 };
 
 typedef struct CLexResult CLexResult;
@@ -563,7 +568,6 @@ struct CPreprocessorOperation
 
 // Literal, case-sensitive filename prefix substitutions in command-line order.
 // The last matching entry wins once; replacements are not remapped.
-typedef struct CMacroPrefixMap CMacroPrefixMap;
 struct CMacroPrefixMap
 {
     String8 old_prefix;
@@ -1120,6 +1124,8 @@ typedef struct CTypeAlignment CTypeAlignment;
 struct CTypeAlignment
 {
     u32 type_index;
+    // The type row whose written request this row inherits; self for its owner.
+    u32 source_type_index;
     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
     u32 alignment_start;
     u32 alignment_count;
@@ -1385,8 +1391,8 @@ struct CDeclaration
     bool is_variadic;
     bool is_constexpr;
     bool is_identifier_list_definition;
-    // A GNU `extern inline` function definition: its body is only for
-    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    // An externally linked GNU `extern inline` definition: its body is only
+    // for inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than

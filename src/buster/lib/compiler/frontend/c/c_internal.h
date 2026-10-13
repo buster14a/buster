@@ -806,7 +806,8 @@ BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin,
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 BUSTER_C_EXTERN bool c_semantic_source_location_builtin(CSymbolBuiltin builtin);
 BUSTER_C_EXTERN u32 c_semantic_source_line(CPreprocessResult const* preprocess, u32 token_index);
-BUSTER_C_EXTERN String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index);
+BUSTER_C_EXTERN u32 c_macro_prefix_map_index(String8 path, CMacroPrefixMap const* mappings, u32 mapping_count);
+BUSTER_C_EXTERN String8 c_semantic_source_file(Arena* arena, CPreprocessResult const* preprocess, u32 token_index);
 BUSTER_C_EXTERN CTypeId c_semantic_source_name_type(CParseResult* result, Target target);
 
 typedef enum CIntegerTransformOperation

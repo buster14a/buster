@@ -1,0 +1,9 @@
+{
+  "observed_utc": "2026-10-13T16:07:24Z",
+  "numeric_proc_entries": 557,
+  "groups": {
+    "zero": 285,
+    "positive": 272,
+    "query_failed": 0
+  }
+}

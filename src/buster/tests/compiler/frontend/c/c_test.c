@@ -12883,7 +12883,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("struct S0 { char c[3]; }; struct S1 { _Alignas(sizeof(struct S0)) char c; };"), S8("not a power of two"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct A { _Alignas(sizeof(struct A *)) char c; struct A *next; }; typedef struct A TA; struct B { _Alignas(sizeof(const TA) + 0 * sizeof(int)) char c; }; struct C { _Alignas(sizeof(struct B) * 2) char c; }; _Static_assert(sizeof(struct B) == 16 && _Alignof(struct C) == 32, \"fold\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("void g(void) { struct X { char c[3]; }; { struct X { char c[64]; }; struct Y { _Alignas(sizeof(struct X)) char c; }; _Static_assert(_Alignof(struct Y) == 64, \"inner\"); } struct Z { _Alignas(sizeof(struct X) + 1) char c; }; _Static_assert(_Alignof(struct Z) == 4, \"outer\"); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); struct V { _Alignas(_Alignof(const A16)) char c; }; _Static_assert(_Alignof(struct V) == 16, \"v\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("typedef int A16 __attribute__((aligned(16))); struct V { _Alignas(_Alignof(const A16) + 0) char c; }; _Static_assert(_Alignof(struct V) == 16, \"v\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); typedef int A32 __attribute__((aligned(32))); struct V16 { _Alignas(_Alignof(const A16)) char c; }; struct V32 { _Alignas(_Alignof(const A32)) char c; }; _Static_assert(_Alignof(struct V16) == 16 && _Alignof(struct V32) == 32, \"distinct alias alignment\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); struct VPlain { _Alignas(_Alignof(A16)) char c; }; struct VVolatile { _Alignas(_Alignof(volatile A16)) char c; }; struct VPointer { _Alignas(_Alignof(const A16 *)) char c; }; struct VNatural { _Alignas(_Alignof(const int)) char c; }; _Static_assert(_Alignof(struct VPlain) == 16 && _Alignof(struct VVolatile) == 16, \"qualified alias\"); _Static_assert(_Alignof(struct VPointer) == _Alignof(void *), \"pointer\"); _Static_assert(_Alignof(struct VNatural) == _Alignof(int), \"natural\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         // Only a type that reaches itself is refused, however deep a chain of
         // distinct types runs.
         {S8("struct S0 { double d; }; struct S1 { _Alignas(sizeof(struct S0)) char c; }; struct S2 { _Alignas(sizeof(struct S1)) char c; }; struct S3 { _Alignas(sizeof(struct S2)) char c; }; struct S4 { _Alignas(sizeof(struct S3)) char c; }; struct S5 { _Alignas(sizeof(struct S4)) char c; }; struct S6 { _Alignas(sizeof(struct S5)) char c; }; struct S7 { _Alignas(sizeof(struct S6)) char c; }; _Static_assert(sizeof(struct S7) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -12987,6 +12990,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
             }
             c_test_scratch_end(temporary);
         }
+    }
+    // The qualified-copy alignment path reads an inherited CTypeAlignment
+    // row outside the active solve's type columns. Keep the invariant across
+    // both 64-bit data layouts, including pointer and natural-type controls.
+    String8 aligned_qualified_source = S8(
+        "typedef int A16 __attribute__((aligned(16)));"
+        " typedef int A32 __attribute__((aligned(32)));"
+        " struct VPlain { _Alignas(_Alignof(A16)) char c; };"
+        " struct VConst { _Alignas(_Alignof(const A16)) char c; };"
+        " struct VExpression { _Alignas(_Alignof(const A16) + 0) char c; };"
+        " struct VVolatile { _Alignas(_Alignof(volatile A16)) char c; };"
+        " struct VConst32 { _Alignas(_Alignof(const A32)) char c; };"
+        " struct VPointer { _Alignas(_Alignof(const A16 *)) char c; };"
+        " struct VNatural { _Alignas(_Alignof(const int)) char c; };"
+        " _Static_assert(_Alignof(struct VPlain) == 16 && _Alignof(struct VConst) == 16 &&"
+        " _Alignof(struct VExpression) == 16 && _Alignof(struct VVolatile) == 16, \"qualified aliases\");"
+        " _Static_assert(_Alignof(struct VConst32) == 32, \"distinct alias alignment\");"
+        " _Static_assert(_Alignof(struct VPointer) == _Alignof(void *), \"pointer\");"
+        " _Static_assert(_Alignof(struct VNatural) == _Alignof(int), \"natural\");");
+    for (u32 target_index = 0; target_index < 2; target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Target target = target_native;
+        target.cpu_arch = target_index ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        CPreprocessResult tokens = c_preprocess(temporary.arena, aligned_qualified_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+                               semantic.analysis_complete && semantic.diagnostic_count == 0);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("qualified-aligned-typedef.c"), tokens, syntax, target,
+                                                          (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -18158,8 +18200,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
 // declared `static` keeps internal linkage for a later declaration without a
 // storage class. An `inline` definition after such a prototype is an ordinary
 // internal definition that a call needs, not a C99 inline-only definition that
-// leaves the call unresolved. An inline-only body (every declaration `inline`,
-// none `extern`) and a plain prototype before the body keep their meanings.
+// leaves the call unresolved. Under GNU inline semantics, `extern inline` after
+// the prototype is also an internal definition; unused bodies are still dropped.
+// A true inline-only body and a plain prototype before its body keep their meanings.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_declaration_inline_definition(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18229,6 +18272,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_declaration_inline_definition(U
         IrSymbol* only_symbol = only ? ir_symbol_from_id(&lowered.program->symbols, only->symbol) : 0;
         BUSTER_TEST(arguments, only && only->state != IR_FUNCTION_LOWERED && !only->block_count);
         BUSTER_TEST(arguments, only_symbol && !only_symbol->is_definition && only_symbol->linkage == IR_LINKAGE_EXTERNAL);
+    }
+    struct
+    {
+        String8 source;
+        String8 used_name;
+        String8 unused_name;
+        CPreprocessDialect dialect;
+    } gnu_inline_cases[] = {
+        {
+            S8("static int gnu89_used(void);\n"
+               "extern inline int gnu89_used(void) { return 11; }\n"
+               "static int gnu89_unused(void);\n"
+               "extern inline int gnu89_unused(void) { return 13; }\n"
+               "int gnu89_caller(void) { return gnu89_used(); }\n"),
+            S8("gnu89_used"),
+            S8("gnu89_unused"),
+            C_PREPROCESS_DIALECT_GNU89,
+        },
+        {
+            S8("static int gnu_attribute_used(void);\n"
+               "extern inline __attribute__((gnu_inline)) int gnu_attribute_used(void) { return 17; }\n"
+               "static int gnu_attribute_unused(void);\n"
+               "extern inline __attribute__((gnu_inline)) int gnu_attribute_unused(void) { return 19; }\n"
+               "int gnu_attribute_caller(void) { return gnu_attribute_used(); }\n"),
+            S8("gnu_attribute_used"),
+            S8("gnu_attribute_unused"),
+            C_PREPROCESS_DIALECT_GNU17,
+        },
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(gnu_inline_cases); case_index += 1)
+    {
+        CPreprocessResult gnu_tokens = c_preprocess(temporary.arena, gnu_inline_cases[case_index].source,
+                                                    (CPreprocessOptions){
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                        .dialect = gnu_inline_cases[case_index].dialect,
+                                                    });
+        CParseResult gnu_parse = c_parse(temporary.arena, gnu_tokens);
+        CIRLowerResult gnu_lowered = c_lower_to_ir(temporary.arena, S8("gnu-inline-static-linkage.c"), gnu_tokens, gnu_parse,
+                                                   target_native);
+        BUSTER_TEST(arguments, gnu_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, gnu_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, gnu_lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, gnu_lowered.program != 0))
+        {
+            IrModule* gnu_module = gnu_lowered.program->modules;
+            BUSTER_TEST(arguments, gnu_module->rejected_function_count == 0);
+            IrFunction* used = c_test_find_ir_function(gnu_module, gnu_inline_cases[case_index].used_name);
+            IrSymbol* used_symbol = used ? ir_symbol_from_id(&gnu_lowered.program->symbols, used->symbol) : 0;
+            BUSTER_TEST(arguments, used && used->state == IR_FUNCTION_LOWERED && used->block_count);
+            BUSTER_TEST(arguments, used_symbol && used_symbol->is_definition && used_symbol->linkage == IR_LINKAGE_INTERNAL);
+            IrFunction* unused = c_test_find_ir_function(gnu_module, gnu_inline_cases[case_index].unused_name);
+            BUSTER_TEST(arguments, unused && unused->state == IR_FUNCTION_NOT_LOWERED && !unused->block_count);
+        }
     }
     // The opposite order gives one identifier both linkages and stays an
     // error whichever declaration carries the body.
@@ -24583,6 +24680,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArgum
         BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
         scratch_end(temporary);
     }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        char8 old_prefix[] = "source-location/";
+        char8 new_prefix[] = "mapped/";
+        CMacroPrefixMap map = {
+            .old_prefix = {.pointer = old_prefix, .length = sizeof(old_prefix) - 1},
+            .new_prefix = {.pointer = new_prefix, .length = sizeof(new_prefix) - 1},
+        };
+        CPreprocessOptions options = {
+            .macro_prefix_maps = &map,
+            .macro_prefix_map_count = 1,
+            .source_path = S8("source-location/probe.c"),
+            .target = targets[0],
+            .data_layout = target_data_layout(targets[0]),
+            .dialect = C_PREPROCESS_DIALECT_GNU17,
+        };
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("const char* probe_file = __builtin_FILE();\n"), options);
+        old_prefix[0] = 'X';
+        new_prefix[0] = 'X';
+        map.old_prefix = (String8){0};
+        map.new_prefix = (String8){0};
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("source-location-probe.c"), preprocess, syntax, targets[0],
+            (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count);
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, &map, (char8*)&map + sizeof(map)) == 0);
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, old_prefix, old_prefix + sizeof(old_prefix)) == 0);
+        BUSTER_TEST(arguments, c_test_preprocess_references_range(&preprocess, new_prefix, new_prefix + sizeof(new_prefix)) == 0);
+        bool mapped_file = false;
+        if (lowered.program && lowered.program->module_count == 1)
+        {
+            IrModule* module = lowered.program->modules;
+            IrGlobal* file = c_test_find_ir_global(module, lowered.program, S8("probe_file"));
+            if (file && file->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS)
+            {
+                for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                {
+                    IrGlobal* literal = module->globals + global_index;
+                    if (literal->symbol.value == file->initializer_symbol.value &&
+                        literal->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
+                    {
+                        String8 expected = S8("mapped/probe.c");
+                        mapped_file = literal->bytes.pointer && literal->bytes.length == expected.length + 1 &&
+                                      !literal->bytes.pointer[expected.length] &&
+                                      !memcmp(literal->bytes.pointer, expected.pointer, expected.length);
+                        break;
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, mapped_file);
+        c_preprocess_release(&preprocess);
+        scratch_end(temporary);
+    }
 #if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -24651,6 +24802,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArgum
                                     references[reference], run.platform_status, (u32)run.timed_out));
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+        String8 source_paths[] = {
+            S8("/source-location/absolute.c"),
+            S8("source-location/relative.c"),
+            S8("/source-location/absolute.c"),
+            S8("source-location/relative.c"),
+        };
+        String8 expected_paths[] = {
+            S8("mapped/absolute.c"),
+            S8("mapped/relative.c"),
+            S8("/source-location/absolute.c"),
+            S8("source-location/relative.c"),
+        };
+        String8 map_prefixes[] = {
+            S8("/source-location/"),
+            S8("source-location/"),
+            {0},
+            {0},
+        };
+        bool map_enabled[] = {true, true, false, false};
+        for (u32 map_case = 0; map_case < BUSTER_ARRAY_LENGTH(source_paths); map_case += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 mapped_source = string_format(temporary.arena,
+                S8("#line 1 \"{S8}\"\n"
+                   "static int same(const char* a, const char* b) {{ while (*a && *a == *b) {{ a += 1; b += 1; }} return *a == *b; }}\n"
+                   "#define FILE_HERE() __builtin_FILE()\n"
+                   "static const char* builtin_file = __builtin_FILE();\n"
+                   "static const char* macro_builtin_file = FILE_HERE();\n"
+                   "static const char* macro_file = __FILE__;\n"
+                   "int main(void) {{ return !(same(builtin_file, macro_builtin_file) && same(builtin_file, macro_file) && "
+                   "same(__builtin_FILE(), \"{S8}\")); }}\n"),
+                source_paths[map_case], expected_paths[map_case]);
+            bool source_written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(mapped_source));
+            if (BUSTER_REQUIRE(arguments, source_written))
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+                    {
+                        String8 output = buster_test_temporary_path(temporary.arena,
+                            string_format(temporary.arena, S8("source-location-map-{u32}-{u32}-{u32}"), map_case, mode, form), S8(".exe"));
+                        CompilerDriverInvocation invocation = {0};
+                        if (map_enabled[map_case])
+                        {
+                            String8 map_argument = string_format(temporary.arena, S8("-fmacro-prefix-map={S8}=mapped/"), map_prefixes[map_case]);
+                            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
+                                S8("-fverify-codegen"), map_argument, S8("-o"), output, input};
+                            invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        }
+                        else
+                        {
+                            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
+                                S8("-fverify-codegen"), S8("-o"), output, input};
+                            invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        }
+                        invocation.reject_machine_fallback = true;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("source-location prefix map case={u32} mode={u32} form={u32}: {S8}"),
+                                map_case, mode, form, compiled.diagnostic));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 command_line[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena,
+                                        S8("source-location prefix map case={u32} mode={u32} form={u32} status={u32} timeout={u32} expected={S8}"),
+                                        map_case, mode, form, run.platform_status, (u32)run.timed_out, expected_paths[map_case]));
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
                     }
                 }
             }

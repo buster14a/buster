@@ -3574,6 +3574,7 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
         operand_parse.deferred_bit_field_width_diagnostic_capacity = operand_parse.deferred_bit_field_width_diagnostic_count;
         CScopeId scope = c_parse_scope_for_token(result, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, start);
         u32 type_end = start;
+        u32 alignment_count_before = operand_parse.type_alignment_count;
         // The machineless reader takes exactly the typedef names, tags and
         // primitives the fold measures, and never reenters the caller's
         // declaration machine.
@@ -3591,13 +3592,20 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
             type_end += named;
         }
         CType named_type = named ? operand_parse.types[type.value] : (CType){0};
-        // A qualified copy the name parse appended past this solve's table
-        // (`const struct S`) has its base's layout, though `_Atomic` may
-        // promote it. A qualified copy of an aligned alias names the alias's
-        // own base, and the solve's row for such a copy does not carry the
-        // alias's alignment either, so in a unit with any aligned alias every
-        // qualified copy is left to the typed query.
-        bool aliased_copy = named_type.has_unqualified_type && operand_parse.type_alignment_count;
+        CTypeAlignment const* qualified_alignment = 0;
+        if (named && operand_parse.type_alignment_count > alignment_count_before)
+        {
+            CTypeAlignment const* appended_alignment = operand_parse.type_alignments + operand_parse.type_alignment_count - 1;
+            if (appended_alignment->type_index == type.value)
+            {
+                qualified_alignment = appended_alignment;
+            }
+        }
+        // The layout columns are a snapshot taken before this operand's
+        // qualified copy was appended. Its inherited CTypeAlignment row
+        // identifies the matching in-column alias fact, whose size and
+        // replacement alignment this copy shares.
+        bool qualified_copy = !pointer && type.value >= context->type_count && qualified_alignment;
         u32 layout_type = type.value;
         if (named && !pointer && type.value >= context->type_count && named_type.has_unqualified_type && !named_type.is_atomic &&
             named_type.unqualified_type.value < context->type_count)
@@ -3606,7 +3614,7 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
         }
         u64 builtin_size = 0;
         u32 builtin_alignment = 0;
-        if (!named || (!pointer && (aliased_copy || named_type.kind == C_TYPE_VOID || named_type.kind == C_TYPE_FUNCTION)))
+        if (!named || (!pointer && (named_type.kind == C_TYPE_VOID || named_type.kind == C_TYPE_FUNCTION)))
         {
             fold = C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
         }
@@ -3615,6 +3623,29 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
             *size_out = c_preprocess_detail(preprocess)->data_layout.pointer.size;
             *alignment_out = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
             fold = C_LAYOUT_ALIGNMENT_FOLD_VALUE;
+        }
+        else if (qualified_copy)
+        {
+            // The sparse row points directly at the alias that owns this
+            // request; reuse its exact solver fact, including any wait state.
+            u32 source_type = qualified_alignment->source_type_index;
+            if (source_type >= context->type_count)
+            {
+                fold = C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+            }
+            else if (!c_parse_layout_resolved(context, agenda, source_type))
+            {
+                fold = C_LAYOUT_ALIGNMENT_FOLD_WAIT;
+            }
+            else
+            {
+                // The original alias row already applied its inherited
+                // request (including atomic padding); reuse that solve fact.
+                *size_out = c_parse_layout_size(context, agenda, source_type);
+                *alignment_out = c_parse_layout_alignment(context, agenda, source_type);
+                *provisional_out |= c_parse_layout_provisional(context, agenda, source_type);
+                fold = C_LAYOUT_ALIGNMENT_FOLD_VALUE;
+            }
         }
         else if (layout_type < context->type_count)
         {
@@ -3851,6 +3882,7 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
             {
                 u32 type_start = specifier.token_start + 2;
                 u32 type_end = specifier_end - 1;
+                u32 alignment_count_before = context->result->type_alignment_count;
                 u32 aligned_type_index = type_start;
                 CTypeId aligned_type = c_parse_type_name_specifiers(context->machine, context->result, context->preprocess,
                                                                        context->result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, type_start,
@@ -3863,7 +3895,39 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                 // 0 answers, 1 waits for a type of the table, 2 needs the typed query.
                 u32 spelled = 2;
                 u32 spelled_index = aligned_type.value;
-                while (aligned_type_index == type_end && spelled == 2 && spelled_index < context->result->type_count)
+                // A qualified copy of an aligned typedef is outside this
+                // solve's layout columns but carries the inherited sparse
+                // record. It was appended while parsing this type name, so the
+                // last alignment row is a constant-time lookup.
+                CTypeAlignment const* inherited_alignment = 0;
+                if (context->result->type_alignment_count > alignment_count_before)
+                {
+                    CTypeAlignment const* appended_alignment =
+                        context->result->type_alignments + context->result->type_alignment_count - 1;
+                    if (appended_alignment->type_index == aligned_type.value)
+                    {
+                        inherited_alignment = appended_alignment;
+                    }
+                }
+                bool inherited_copy = aligned_type_index == type_end && aligned_type.value >= context->type_count &&
+                                      aligned_type.value < context->result->type_count && inherited_alignment;
+                if (inherited_copy)
+                {
+                    u64 ignored_size = 0;
+                    u32 folded_alignment = 0;
+                    CLayoutAlignmentFold inherited_fold = c_parse_layout_alignment_fold_operand(
+                        context, agenda, type_start, type_end, &ignored_size, &folded_alignment, provisional_out);
+                    if (inherited_fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE)
+                    {
+                        requested_alignment = folded_alignment;
+                        spelled = 0;
+                    }
+                    else if (inherited_fold == C_LAYOUT_ALIGNMENT_FOLD_WAIT)
+                    {
+                        spelled = 1;
+                    }
+                }
+                while (!inherited_copy && aligned_type_index == type_end && spelled == 2 && spelled_index < context->result->type_count)
                 {
                     u64 builtin_size = 0;
                     u32 builtin_alignment = 0;
@@ -9836,10 +9900,28 @@ BUSTER_C_SHARED u32 c_semantic_source_line(CPreprocessResult const* preprocess, 
 }
 
 // The presumed file name of that expansion point, which `#line` can rename.
-BUSTER_C_SHARED String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index)
+BUSTER_C_SHARED String8 c_semantic_source_file(Arena* arena, CPreprocessResult const* preprocess, u32 token_index)
 {
+    String8 result = {0};
     u32 file = c_preprocess_token_location(preprocess, preprocess->tokens[token_index]).file;
-    return file < preprocess->file_count ? preprocess->files[file] : (String8){0};
+    if (file < preprocess->file_count)
+    {
+        result = preprocess->files[file];
+        // Successful preprocessing retains option maps in detail. A hand-built
+        // result has no command-line maps; a no-arena result has no tokens to lower.
+        CPreprocessDetail const* detail = preprocess->detail;
+        u32 mapping_count = detail ? detail->macro_prefix_map_count : 0;
+        CMacroPrefixMap const* mappings = detail ? detail->macro_prefix_maps : 0;
+        u32 mapping_index =
+            c_macro_prefix_map_index(result, mappings, mapping_count);
+        if (mapping_index < mapping_count)
+        {
+            CMacroPrefixMap mapping = mappings[mapping_index];
+            String8 suffix = string_slice(result, mapping.old_prefix.length, result.length);
+            result = string_format(arena, S8("{S8}{S8}"), mapping.new_prefix, suffix);
+        }
+    }
+    return result;
 }
 
 // __builtin_FILE() and __builtin_FUNCTION() answer `const char *`.
@@ -11515,6 +11597,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CType
     }
     result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
         .type_index = aligned.value,
+        .source_type_index = aligned.value,
         .alignment_start = alignment_start,
         .alignment_count = alignment_count,
     };
@@ -13785,6 +13868,7 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
         CTypeAlignment const* base_alignment = result->type_alignment_count && !atomic_applied ? c_parse_type_alignment(result, base) : 0;
         u32 alignment_start = base_alignment ? base_alignment->alignment_start : 0;
         u32 alignment_count = base_alignment ? base_alignment->alignment_count : 0;
+        u32 source_type_index = base_alignment ? base_alignment->source_type_index : UINT32_MAX;
         // Room is taken and the range read out before the copy is added: the
         // growth reallocates the table the record points into.
         bool inherit = alignment_count && c_parse_reserve_type_alignment(result);
@@ -13793,6 +13877,7 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
         {
             result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
                 .type_index = qualified_id.value,
+                .source_type_index = source_type_index,
                 .alignment_start = alignment_start,
                 .alignment_count = alignment_count,
             };
@@ -43404,6 +43489,342 @@ BUSTER_C_INTERNAL void c_parse_validate_storage_half_declarations(CTypeParseMach
     return;
 }
 
+// A tentative file-scope object needs a complete object type at the end of the
+// translation unit. Pointers stop the walk: their pointed-to type may remain
+// incomplete. Arrays carry completeness in their separate bound rows.
+BUSTER_C_INTERNAL bool c_parse_type_is_incomplete_object(CParseResult* result, CTypeId type)
+{
+    bool incomplete = false;
+    bool walking = result && type.value < result->type_count;
+    while (walking && !incomplete)
+    {
+        CType const* current = result->types + type.value;
+        if (current->kind == C_TYPE_ARRAY)
+        {
+            if (current->array_bound >= result->array_bound_count)
+            {
+                incomplete = true;
+                walking = false;
+            }
+            else if (c_parse_type_is_incomplete_array(result, type))
+            {
+                incomplete = true;
+                walking = false;
+            }
+            else
+            {
+                type = current->element_type;
+                walking = type.value < result->type_count;
+                incomplete = !walking;
+            }
+        }
+        else if (current->kind == C_TYPE_STRUCT || current->kind == C_TYPE_UNION || current->kind == C_TYPE_ENUM)
+        {
+            incomplete = !current->is_complete;
+            walking = false;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return incomplete;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_is_complete_object(CParseResult* result, CTypeId type)
+{
+    bool complete = false;
+    bool walking = result && type.value < result->type_count;
+    while (walking && !complete)
+    {
+        CType const* current = result->types + type.value;
+        if (current->kind == C_TYPE_ARRAY)
+        {
+            if (current->array_bound < result->array_bound_count)
+            {
+                CArrayBound bound = result->array_bounds[current->array_bound];
+                walking = (bound.token_count || bound.has_inferred_count || bound.is_star) && !bound.has_invalid_element_type;
+                if (walking)
+                {
+                    type = current->element_type;
+                    walking = type.value < result->type_count;
+                }
+            }
+            else
+            {
+                walking = false;
+            }
+        }
+        else if (current->kind == C_TYPE_STRUCT || current->kind == C_TYPE_UNION || current->kind == C_TYPE_ENUM)
+        {
+            complete = current->is_complete;
+            walking = false;
+        }
+        else
+        {
+            switch (current->kind)
+            {
+                case C_TYPE_BOOL:
+                case C_TYPE_CHAR:
+                case C_TYPE_SIGNED_CHAR:
+                case C_TYPE_UNSIGNED_CHAR:
+                case C_TYPE_SHORT:
+                case C_TYPE_UNSIGNED_SHORT:
+                case C_TYPE_INT:
+                case C_TYPE_UNSIGNED_INT:
+                case C_TYPE_LONG:
+                case C_TYPE_UNSIGNED_LONG:
+                case C_TYPE_LONG_LONG:
+                case C_TYPE_UNSIGNED_LONG_LONG:
+                case C_TYPE_INT128:
+                case C_TYPE_UNSIGNED_INT128:
+                case C_TYPE_FLOAT16:
+                case C_TYPE_BFLOAT16:
+                case C_TYPE_FLOAT:
+                case C_TYPE_DOUBLE:
+                case C_TYPE_LONG_DOUBLE:
+                case C_TYPE_FLOAT16_COMPLEX:
+                case C_TYPE_FLOAT_COMPLEX:
+                case C_TYPE_DOUBLE_COMPLEX:
+                case C_TYPE_LONG_DOUBLE_COMPLEX:
+                case C_TYPE_VA_LIST:
+                case C_TYPE_NULLPTR:
+                case C_TYPE_POINTER:
+                case C_TYPE_VECTOR:
+                case C_TYPE_FP16_STORAGE:
+                    complete = true;
+                    walking = false;
+                    break;
+                default:
+                    walking = false;
+                    break;
+            }
+        }
+    }
+    return complete;
+}
+
+// Track initialized incomplete arrays by entity during source-order binding. Their
+// inferred bounds are unknown until c_parse_infer_file_array_bounds.
+BUSTER_C_INTERNAL u32 c_parse_prior_inferred_array_definition_plus_one(CParseResult* result, const CDeclaration* declaration,
+                                                                        const CEntity* entity,
+                                                                        const u32* prior_by_entity)
+{
+    u32 prior_declaration_plus_one = 0;
+    if (result && result->declarations && result->entities && prior_by_entity && declaration && entity &&
+        declaration >= result->declarations && declaration < result->declarations + result->declaration_count &&
+        entity >= result->entities && entity < result->entities + result->entity_count && entity->type.value < result->type_count)
+    {
+        u32 declaration_index = (u32)(declaration - result->declarations);
+        u32 entity_index = (u32)(entity - result->entities);
+        CType const* entity_type = result->types + entity->type.value;
+        bool candidate = entity_type->kind == C_TYPE_ARRAY && entity_type->array_bound < result->array_bound_count;
+        prior_declaration_plus_one = prior_by_entity[entity_index];
+        candidate = candidate && prior_declaration_plus_one && prior_declaration_plus_one - 1 < declaration_index;
+        if (candidate)
+        {
+            CArrayBound bound = result->array_bounds[entity_type->array_bound];
+            CDeclaration const* prior = result->declarations + (prior_declaration_plus_one - 1);
+            candidate = !bound.token_count && !bound.has_inferred_count && !bound.is_star && !bound.has_invalid_element_type &&
+                        c_parse_type_is_complete_object(result, entity_type->element_type) &&
+                        prior->entity.value == entity_index && prior->kind == C_DECLARATION_OBJECT && prior->is_definition &&
+                        prior->type.value < result->type_count;
+            if (candidate)
+            {
+                CType const* prior_type = result->types + prior->type.value;
+                candidate = prior_type->kind == C_TYPE_ARRAY && prior_type->array_bound == entity_type->array_bound &&
+                            prior_type->element_type.value == entity_type->element_type.value;
+            }
+        }
+        if (!candidate)
+        {
+            prior_declaration_plus_one = 0;
+        }
+    }
+    return prior_declaration_plus_one;
+}
+
+BUSTER_C_INTERNAL void c_parse_record_prior_inferred_array_definition(CParseResult* result, const CDeclaration* declaration,
+                                                                      const CEntity* entity, u32* prior_by_entity)
+{
+    if (result && result->declarations && result->entities && prior_by_entity && declaration && entity &&
+        declaration >= result->declarations && declaration < result->declarations + result->declaration_count &&
+        entity >= result->entities && entity < result->entities + result->entity_count &&
+        declaration->kind == C_DECLARATION_OBJECT && declaration->is_definition && entity->kind == C_ENTITY_OBJECT &&
+        declaration->entity.value == (u32)(entity - result->entities) && declaration->type.value < result->type_count &&
+        entity->type.value < result->type_count)
+    {
+        u32 entity_index = (u32)(entity - result->entities);
+        CType const* declared_type = result->types + declaration->type.value;
+        CType const* entity_type = result->types + entity->type.value;
+        bool candidate = declared_type->kind == C_TYPE_ARRAY && entity_type->kind == C_TYPE_ARRAY &&
+                         declared_type->array_bound < result->array_bound_count &&
+                         declared_type->array_bound == entity_type->array_bound &&
+                         declared_type->element_type.value == entity_type->element_type.value;
+        if (candidate)
+        {
+            CArrayBound bound = result->array_bounds[declared_type->array_bound];
+            candidate = !bound.token_count && !bound.has_inferred_count && !bound.is_star && !bound.has_invalid_element_type &&
+                        c_parse_type_is_complete_object(result, declared_type->element_type);
+        }
+        if (candidate)
+        {
+            u32 declaration_index = (u32)(declaration - result->declarations);
+            prior_by_entity[entity_index] = declaration_index + 1;
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_validate_deferred_internal_tentative_array_declarations(CParseResult* result,
+                                                                                       CPreprocessResult preprocess,
+                                                                                       const u32* prior_declaration_plus_one)
+{
+    if (result && prior_declaration_plus_one)
+    {
+        for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
+        {
+            u32 prior_plus_one = prior_declaration_plus_one[declaration_index];
+            bool complete_at_declaration = false;
+            if (prior_plus_one && prior_plus_one - 1 < result->declaration_count)
+            {
+                CDeclaration const* prior = result->declarations + (prior_plus_one - 1);
+                if (prior->kind == C_DECLARATION_OBJECT && prior->is_definition && prior->type.value < result->type_count)
+                {
+                    CType const* prior_type = result->types + prior->type.value;
+                    if (prior_type->kind == C_TYPE_ARRAY && prior_type->array_bound < result->array_bound_count)
+                    {
+                        CArrayBound bound = result->array_bounds[prior_type->array_bound];
+                        complete_at_declaration = bound.has_inferred_count && c_parse_type_is_complete_object(result, prior->type);
+                    }
+                }
+            }
+            if (prior_plus_one && !complete_at_declaration)
+            {
+                CDeclaration const* declaration = result->declarations + declaration_index;
+                String8 message = c_parse_message(
+                    result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location),
+                                   C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+            }
+        }
+    }
+}
+
+// Check an internal tentative declaration against the composite type visible at this point.
+// The declaration row keeps its source-spelled type; the entity carries compatible redeclaration merging.
+BUSTER_C_INTERNAL void c_parse_validate_internal_tentative_object_declaration(CParseResult* result, CPreprocessResult preprocess,
+                                                                              const CDeclaration* declaration, const CEntity* entity,
+                                                                              u32* prior_declaration_plus_one, const u32* prior_by_entity)
+{
+    bool incomplete_tentative = entity && entity->kind == C_ENTITY_OBJECT && entity->has_internal_linkage && declaration &&
+                                !declaration->is_definition &&
+                                !c_parse_declaration_declares_no_storage(preprocess, declaration) &&
+                                c_parse_type_is_incomplete_object(result, entity->type);
+    if (incomplete_tentative)
+    {
+        u32 prior_index_plus_one = c_parse_prior_inferred_array_definition_plus_one(result, declaration, entity, prior_by_entity);
+        u32 declaration_index = result->declarations && declaration ? (u32)(declaration - result->declarations) : UINT32_MAX;
+        bool deferred = prior_index_plus_one && prior_declaration_plus_one &&
+                        declaration_index < result->declaration_capacity;
+        if (deferred)
+        {
+            prior_declaration_plus_one[declaration_index] = prior_index_plus_one;
+        }
+        else
+        {
+            String8 message = c_parse_message(
+                result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location),
+                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+        }
+    }
+}
+// Resolve tentative definitions only after every ordinary source expression
+// has been checked. An external incomplete array is completed on a fresh
+// per-object declarator copy; the typedef and declaration-point type stay open.
+BUSTER_C_INTERNAL void c_parse_validate_tentative_object_completeness(CTypeParseMachine* machine, CParseResult* result,
+                                                                       CPreprocessResult preprocess, u32* completed_type_start)
+{
+    if (completed_type_start)
+    {
+        *completed_type_start = UINT32_MAX;
+    }
+    bool valid = machine && result && completed_type_start && !result->diagnostic_count &&
+                 result->declarations_by_entity_offsets && result->declarations_by_entity;
+    for (u32 entity_index = 0; valid && entity_index < result->entity_count; entity_index += 1)
+    {
+        CEntity* entity = result->entities + entity_index;
+        if (entity->kind != C_ENTITY_OBJECT || entity->scope.value != 0 || entity->is_definition ||
+            entity->type.value >= result->type_count)
+        {
+            continue;
+        }
+        CDeclaration* tentative_site = 0;
+        u32 start = result->declarations_by_entity_offsets[entity_index];
+        u32 end = result->declarations_by_entity_offsets[entity_index + 1];
+        for (u32 position = start; position < end && !tentative_site; position += 1)
+        {
+            CDeclaration* declaration = result->declarations + result->declarations_by_entity[position];
+            if (declaration->kind == C_DECLARATION_OBJECT && !declaration->is_definition &&
+                !c_parse_declaration_declares_no_storage(preprocess, declaration))
+            {
+                tentative_site = declaration;
+            }
+        }
+        if (!tentative_site || !c_parse_type_is_incomplete_object(result, entity->type))
+        {
+            continue;
+        }
+        CType* object_type = result->types + entity->type.value;
+        bool external_incomplete_array = !entity->has_internal_linkage && object_type->kind == C_TYPE_ARRAY &&
+                                         object_type->array_bound < result->array_bound_count &&
+                                         c_parse_type_is_incomplete_array(result, entity->type);
+        bool complete_element = external_incomplete_array &&
+                                !result->array_bounds[object_type->array_bound].has_invalid_element_type &&
+                                c_parse_type_is_complete_object(result, object_type->element_type);
+        bool completed = false;
+        bool resource_error = false;
+        if (complete_element)
+        {
+            CTypeId completed_type = C_TYPE_ID_INVALID;
+            if (c_parse_clone_incomplete_array_declarator(machine, result, entity->type, &completed_type) &&
+                completed_type.value < result->type_count)
+            {
+                CType* final_type = result->types + completed_type.value;
+                if (final_type->kind == C_TYPE_ARRAY && final_type->array_bound < result->array_bound_count &&
+                    c_parse_type_is_incomplete_array(result, completed_type))
+                {
+                    CArrayBound* bound = result->array_bounds + final_type->array_bound;
+                    bound->inferred_count = 1;
+                    bound->has_inferred_count = true;
+                    final_type->is_complete = true;
+                    final_type->has_unqualified_type = false;
+                    final_type->unqualified_type = C_TYPE_ID_INVALID;
+                    entity->type = completed_type;
+                    *completed_type_start = BUSTER_MIN(*completed_type_start, completed_type.value);
+                    completed = true;
+                }
+            }
+            if (!completed)
+            {
+                resource_error = true;
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, tentative_site->location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("compiler resource limit while completing tentative array declaration"));
+            }
+        }
+        if (!completed && !resource_error)
+        {
+            String8 message = entity->has_internal_linkage
+                                  ? c_parse_message(result->arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"),
+                                                    entity->name)
+                                  : c_parse_message(result->arena, S8("tentative definition of '{S8}' has incomplete type at end of translation unit"),
+                                                    entity->name);
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, tentative_site->location),
+                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
+        }
+    }
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                CPreprocessResult preprocess)
 {
@@ -43736,6 +44157,14 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // Expression/type-name validation can append members after the initial
     // declarations were bound; inspect the final member table before lowering.
     c_parse_validate_member_types(machine, result, preprocess);
+    // Final array completion is deliberately after point-of-use sizeof and all
+    // bound constraints; it only supplies the translation-unit object layout.
+    u32 completed_type_start = UINT32_MAX;
+    c_parse_validate_tentative_object_completeness(machine, result, preprocess, &completed_type_start);
+    if (completed_type_start != UINT32_MAX && !result->diagnostic_count)
+    {
+        c_parse_validate_array_object_sizes(machine, result, preprocess, completed_type_start);
+    }
     result->expression_scalar_types = 0;
     result->scope_cursor = 0;
 }
@@ -43883,6 +44312,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // -fc-ast-pilot; they stay until the analysis ends.
     c_parse_specifier_index_prepare(&machine, phase_arena);
     result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
+    // Deferred until initializer array-bound inference: only a prior initialized
+    // unsized array can make a later internal tentative [] type complete.
+    u32* deferred_tentative_prior_initializer_plus_one = arena_allocate(arena, u32, result.declaration_capacity);
+    if (deferred_tentative_prior_initializer_plus_one)
+    {
+        memset(deferred_tentative_prior_initializer_plus_one, 0, sizeof(*deferred_tentative_prior_initializer_plus_one) * result.declaration_capacity);
+    }
     result.type_capacity = token_count * 2 + 1;
     result.parameter_capacity = comma_count + open_parenthesis_count + 1;
     result.member_capacity = identifier_count + semicolon_count + 1;
@@ -43893,6 +44329,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // translation unit fills a handful of them or none at all.
     result.aggregate_attribute_capacity = open_brace_count + 1;
     result.entity_capacity = identifier_count + 1;
+    u32* prior_inferred_array_definition_plus_one_by_entity = arena_allocate(arena, u32, result.entity_capacity);
+    if (prior_inferred_array_definition_plus_one_by_entity)
+    {
+        memset(prior_inferred_array_definition_plus_one_by_entity, 0,
+               sizeof(*prior_inferred_array_definition_plus_one_by_entity) * result.entity_capacity);
+    }
     // The file scope, one scope per `{` (a block or a statement expression's
     // body), one per `for` clause, and one per C_DECLARATION_FUNCTION row. A
     // function need not bring a `(` of its own -- `typedef void H(int);
@@ -44305,6 +44747,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = existing_index,
             };
+            // GNU extern-inline bodies are inline-only only for externally linked entities.
+            // C17 6.2.2p4 keeps an extern declaration internally linked after a visible static prototype.
+            if (declaration->is_gnu_inline_only && existing->has_internal_linkage)
+            {
+                declaration->is_gnu_inline_only = false;
+            }
             u32 conflicting_hint_token = UINT32_MAX;
             if (declaration_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE))
             {
@@ -44390,6 +44838,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     }
                 }
             }
+            c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, existing,
+                                                                   deferred_tentative_prior_initializer_plus_one,
+                                                                   prior_inferred_array_definition_plus_one_by_entity);
+            c_parse_record_prior_inferred_array_definition(&result, declaration, existing,
+                                                          prior_inferred_array_definition_plus_one_by_entity);
             continue;
         }
         if (conflicting && !(kind == C_DECLARATION_FUNCTION && conflicting->kind == C_ENTITY_FUNCTION && overloadable))
@@ -44466,6 +44919,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                      .value = 0,
                                  },
                                  entity, declaration_symbol);
+        c_parse_validate_internal_tentative_object_declaration(&result, preprocess, declaration, result.entities + entity.value,
+                                                                deferred_tentative_prior_initializer_plus_one,
+                                                                prior_inferred_array_definition_plus_one_by_entity);
+        c_parse_record_prior_inferred_array_definition(&result, declaration, result.entities + entity.value,
+                                                      prior_inferred_array_definition_plus_one_by_entity);
     }
     if (result.enum_member_count)
     {
@@ -44570,6 +45028,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         }
     }
     c_parse_infer_file_array_bounds(&machine, arena, preprocess, &result);
+    c_parse_validate_deferred_internal_tentative_array_declarations(&result, preprocess,
+                                                                       deferred_tentative_prior_initializer_plus_one);
     for (CParserDeclaration* syntax_declaration = syntax.first_declaration; syntax_declaration; syntax_declaration = syntax_declaration->next)
     {
         if (syntax_declaration->kind != C_PARSER_DECLARATION_STATIC_ASSERT)

@@ -15,6 +15,8 @@
 // (os_process_spawn_pipe_create), just before os_process_spawn.
 // Opt-in child resource witnesses in os_process_wait_deadline retain native
 // accounting scope; they do not alter process ownership or cleanup.
+// Linux group cleanup filters unrelated tasks in os_linux_process_group_stat_at
+// before its complete procfs member-state and namespace checks.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
 // from native observations in os_process_wait_deadline; its private replay
 // contract lives in os_internal.h, without process-group identity changes.
@@ -5896,6 +5898,34 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_status_at(int proc_descriptor, pid_t p
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool os_linux_process_group_stat_at(OsLinuxProcContext* context, pid_t process_id, pid_t proc_leader,
+                                                         pid_t* process_group, char* state, bool* vanished)
+{
+    // NSpid has one coordinate only when procfs uses the caller's active PID
+    // namespace. Ancestor-mounted procfs must keep using its own numeric IDs.
+    pid_t observed_group = -1;
+    if (context->current_namespace_depth == 1 && context->current_namespace_index == 0)
+    {
+        observed_group = getpgid(process_id);
+    }
+    bool unrelated = observed_group >= 0 && observed_group != proc_leader;
+    bool result;
+    if (unrelated)
+    {
+        // This includes kernel tasks in group zero. Group members still need
+        // their full stat/status checks; a failed query is never absence proof.
+        *process_group = observed_group;
+        *state = 0;
+        *vanished = false;
+        result = true;
+    }
+    else
+    {
+        result = os_linux_process_stat_at(context->descriptor, process_id, process_group, state, vanished);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool os_linux_process_pid_namespace_at(int proc_descriptor, pid_t process_id, struct stat* identity,
                                                             bool* vanished)
 {
@@ -6089,7 +6119,7 @@ BUSTER_GLOBAL_LOCAL OsLinuxProcessGroupCensus os_linux_process_group_census(Aren
             bool vanished = false;
             OsLinuxProcessStatus status = {0};
             bool include_member = false;
-            bool stat_valid = os_linux_process_stat_at(context->descriptor, process_id, &process_group, &state, &vanished);
+            bool stat_valid = os_linux_process_group_stat_at(context, process_id, proc_leader, &process_group, &state, &vanished);
 #if BUSTER_INCLUDE_TESTS
             bool vanish_unrelated = os_linux_process_group_test_vanish_unrelated && process_id != proc_leader;
             if (process_id == os_linux_process_group_test_vanishing_process || vanish_unrelated)
@@ -6246,6 +6276,52 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool os_linux_process_group_filter_self_test(void)
+{
+    pid_t process_id = getpid();
+    pid_t own_group = getpgrp();
+    pid_t other_group = own_group == 1 ? 2 : 1;
+    // A valid non-directory descriptor makes a relative stat open fail.
+    // Only a known unrelated group in the same PID coordinate can skip it.
+    int descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    u32 coordinates[][2] = {{1, 0}, {2, 1}, {2, 0}, {0, 0}, {1, 1}};
+    // A new PID namespace can inherit a group outside its visible namespace,
+    // so getpgrp legitimately returns zero until it creates a local group.
+    bool result = descriptor >= 0 && process_id > 0 && own_group >= 0;
+    if (descriptor >= 0)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coordinates); index += 1)
+        {
+            OsLinuxProcContext context = {
+                .descriptor = descriptor,
+                .current_namespace_depth = coordinates[index][0],
+                .current_namespace_index = coordinates[index][1],
+            };
+            pid_t group = -1;
+            char state = '?';
+            bool vanished = true;
+            bool accepted = os_linux_process_group_stat_at(&context, process_id, other_group, &group, &state, &vanished);
+            bool expected = index == 0;
+            bool observed = expected ? accepted && group == own_group && state == 0 && !vanished :
+                !accepted && group == -1 && state == '?' && !vanished && errno == ENOTDIR;
+            result = observed && result;
+        }
+        OsLinuxProcContext context = {.descriptor = descriptor, .current_namespace_depth = 1};
+        pid_t group = -1;
+        char state = '?';
+        bool vanished = true;
+        bool member = !os_linux_process_group_stat_at(&context, process_id, own_group, &group, &state, &vanished) &&
+            !vanished && errno == ENOTDIR;
+        // getpgid(-1) fails; the stat fallback must still run, not report success
+        // or disappearance based on the failed membership query.
+        bool failed_query = !os_linux_process_group_stat_at(&context, -1, other_group, &group, &state, &vanished) &&
+            !vanished && errno == ENOTDIR;
+        bool closed = close(descriptor) == 0;
+        result = member && failed_query && closed && result;
+    }
+    return result;
+}
+
 bool os_linux_proc_read_self_test(void)
 {
     char bytes[4096];

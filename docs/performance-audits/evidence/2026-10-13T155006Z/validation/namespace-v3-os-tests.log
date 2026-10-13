@@ -1,0 +1,17 @@
+TEST_TEMPORARY_ROOT_PRESERVED status=failed path=/tmp/buster-tests-1-5-32605019427356
+ownedFailed to poll process pipes: Cannot allocate memory
+Failed to read from process pipe: Bad file descriptor
+Failed to read from process pipe: Bad file descriptor
+PROCESS_TREE_READINESS_V1 phase=negative-control ready=0 polls=2 spawn_handle=1 spawn_group=1 spawn_error=0 result=1 platform_status=9 timed_out=1 termination_requested=1 forcibly_terminated=1 cleanup_failed=0 ready_path=/tmp/buster-tests-1-6-32605020697051/process-tree-missing-ready-1.txt release_path= escaped_path= stdout= stderr=
+OS_LINUX_PROCESS_GROUP_CHURN_TEST_V1 group=1 unrelated=1 observed=1 single=1 consumed=0 attempts=1 skipped=0 acquired=1 context=1 resolved=1 proven=1 fatal=0 exited=1 persistent=1 vanished=1156 attempts=1 skipped=1156 acquired=1 context=1 resolved=1 proven=1 fatal=0 exited=1 leader_reaped=1 unrelated_reaped=1
+os_linux_process_group_churn_self_test(arguments->arena) failed at /home/david/Documents/Codex/2026-10-13/ana/work/buster/src/buster/tests/os_test.c:os_tests:3618
+okTEST_FIXTURE_WATCHDOG_CHILD_V1 duration_ns=1003996369 timed_out=0 platform_status=31744 stdout_bytes=427 stderr_bytes=0
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=0 duration_ns=2078661 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=0 duration_ns=3015321 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=1 duration_ns=2400566 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=1 duration_ns=2408492 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=2 duration_ns=2052050 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=2 duration_ns=2047592 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+[2045/2046] Unit tests (1 of 63 modules selected)
+[0/1] Module tests
+[0/0] External tests
