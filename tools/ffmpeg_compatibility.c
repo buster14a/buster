@@ -742,6 +742,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
         }
         bool claimed = valid;
         bool configured[2] = {0};
+        bool manifest_valid[2] = {0};
         bool profile_valid[2] = {0};
         bool built[2] = {0};
         bool checkasm[2] = {0};
@@ -787,7 +788,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
             ready = os_make_directory_exclusive(ledger).created && ready;
             String8 cc_command = i == 0 ? clang : string_format(arena, S8("{S8} test_ffmpeg --cc {S8} {S8}"), driver, ide, ledger);
             configured[i] = ready && ffmpeg_configure(arena, checkout, directories[i], cc_command, clang, optimized, nasm);
-            profile_valid[i] = configured[i] && (!optimized || ffmpeg_optimized_profile(arena, directories[i], nasm));
+            manifest_valid[i] = optimized && configured[i] && ffmpeg_optimized_profile(arena, directories[i], nasm);
+            profile_valid[i] = configured[i] && (!optimized || manifest_valid[i]);
             string_print(S8("FFMPEG_CONFIGURE compiler={S8} profile={S8} status={S8}\n"), compiler_names[i], optimized ? S8("assembly-enabled") : S8("portable"),
                          profile_valid[i] ? S8("pass") : S8("fail"));
             if (profile_valid[i])
@@ -840,27 +842,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
         {
             bool pristine = ffmpeg_pristine(arena, checkout);
             String8 receipt = string_format(arena, S8("BUSTER_FFMPEG_CENSUS_V1\nupstream={S8}\nconfiguration={S8}\n"
-                                                     "nasm_path={S8}\nreference_configure={u32}\nreference_profile_manifest={u32}\nreference_build={u32}\n"
+                                                     "nasm_path={S8}\nreference_configure={u32}\nreference_profile_manifest={S8}\nreference_build={u32}\n"
                                                      "reference_checkasm_status={S8}\nreference_checkasm_attempted={u32}\nreference_checkasm_function_pointers={u64}\nreference_media={u32}\nreference_no_sample_fate={u32}\n"
-                                                     "buster_configure={u32}\nbuster_profile_manifest={u32}\nbuster_build={u32}\n"
+                                                     "buster_configure={u32}\nbuster_profile_manifest={S8}\nbuster_build={u32}\n"
                                                      "buster_checkasm_status={S8}\nbuster_checkasm_attempted={u32}\nbuster_checkasm_function_pointers={u64}\nbuster_media={u32}\nbuster_no_sample_fate={u32}\n"
                                                      "cross_compiler_checkasm_count_comparison={S8}\nmatching_configurations={u32}\npristine_after={u32}\n"
                                                      "sample_fate=not-run\nproduction_dispatch=not-run\nper_function_denominator=unknown\n"
                                                      "video_media=not-run\nperformance_qualified=0\nwhole_issue_qualified=0\n"),
                                             S8(BUSTER_FFMPEG_COMMIT), optimized ? S8("assembly-enabled-software") : S8("portable-software"), nasm,
-                                            (u32)configured[0], (u32)profile_valid[0], (u32)built[0],
+                                            (u32)configured[0],
+                                            (optimized ? (configured[0] ? (manifest_valid[0] ? S8("pass") : S8("fail")) : S8("not-run")) : S8("not-applicable")),
+                                            (u32)built[0],
                                             (checkasm_attempted[0] ? (checkasm[0] ? S8("pass") : S8("fail")) : S8("not-run")),
                                             (u32)checkasm_attempted[0], checkasm_functions[0], (u32)media[0], (u32)fate[0],
-                                            (u32)configured[1], (u32)profile_valid[1], (u32)built[1],
+                                            (u32)configured[1],
+                                            (optimized ? (configured[1] ? (manifest_valid[1] ? S8("pass") : S8("fail")) : S8("not-run")) : S8("not-applicable")),
+                                            (u32)built[1],
                                             (checkasm_attempted[1] ? (checkasm[1] ? S8("pass") : S8("fail")) : S8("not-run")),
                                             (u32)checkasm_attempted[1], checkasm_functions[1],
                                             (u32)media[1], (u32)fate[1], checkasm_count_comparison, (u32)matching, (u32)pristine);
             bool written = clang_suite_write(arena, path_join(arena, output, S8("receipt.txt")), receipt);
-            bool checkasm_valid = !optimized || (checkasm[0] && checkasm[1]);
+            bool checkasm_counts_match = !optimized || (checkasm_attempted[0] && checkasm_attempted[1] &&
+                                                         ffmpeg_checkasm_counts_match(checkasm_functions[0], checkasm_functions[1]));
+            bool checkasm_valid = !optimized || (checkasm[0] && checkasm[1] && checkasm_counts_match);
             valid = written && pristine && configured[0] && configured[1] && profile_valid[0] && profile_valid[1] &&
                     built[0] && built[1] && checkasm_valid && media[0] && media[1] && fate[0] && fate[1] && matching && valid;
-            string_print(S8("FFMPEG_RESULT profile={S8} census={S8} production_dispatch=not-run full_qualification=pending artifacts={S8}\n"),
-                         optimized ? S8("assembly-enabled") : S8("portable"), valid ? S8("pass") : S8("fail"), output);
+            string_print(S8("FFMPEG_RESULT profile={S8} census={S8} checkasm_count_comparison={S8} production_dispatch=not-run full_qualification=pending artifacts={S8}\n"),
+                         optimized ? S8("assembly-enabled") : S8("portable"), valid ? S8("pass") : S8("fail"),
+                         checkasm_count_comparison, output);
         }
         result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 #else

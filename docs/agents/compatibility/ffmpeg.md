@@ -120,6 +120,8 @@ requires the generated `X86ASM` and `DEPX86ASM` entries in
 configure's fallback to another assembler. The run retains NASM's version
 output and SHA-256 identity. The SSE2 macro is only FFmpeg's configure probe;
 it does not prove that every intrinsic lowered to the intended instructions.
+The receipt marks the manifest `not-applicable` for the portable control and
+reports configure and manifest status independently for the optimized profile.
 
 ## Correctness and evidence
 
@@ -145,9 +147,10 @@ grouped reports, not named implementation witnesses. A per-compiler checkasm
 status is `not-run` until the checkasm executable is invoked; an earlier
 configure, library build or checkasm-target build failure stays `not-run`,
 with a matching not-run ledger. The receipt reports whether the two aggregate
-pointer counts are equal, different or not run. A difference leaves that
-comparison unqualified and does not identify a compiler fault; equality is
-diagnostic only and does not prove the same functions or implementations ran.
+pointer counts are equal, different or not run. An unequal count fails the
+matched optimized census conservatively and is recorded as unqualified; it does
+not diagnose a compiler fault. Equal counts are diagnostic only and do not
+prove the same functions or implementations ran.
 These checks compare optimized functions to C references inside each compiler's
 build; they do not prove cross-compiler equivalence or production dispatch. The
 receipt therefore records `production_dispatch=not-run` and
