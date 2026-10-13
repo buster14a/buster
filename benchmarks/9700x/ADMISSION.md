@@ -378,7 +378,10 @@ request's verified head, never the trusted harness revision `github.sha`.
   `preparation-publish` adds the same failed rows and the worker's
   non-complete `preparation.tsv` state from the retained artifact to the
   check's `problems`. These are diagnostics only: the attempt stays
-  incomplete and unqualified, and publication is still refused.
+  incomplete and unqualified, and publication is still refused. The TCC
+  bootstrap check runs `--self-test-preparation-failed-phase`, which fails a
+  named fixture phase through the production emission, and replays that
+  evidence and log into the check with `--preparation-failed-phase`.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads
