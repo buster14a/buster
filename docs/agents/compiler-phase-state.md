@@ -16,10 +16,11 @@ preprocess + parse
   -> codegen_generate_canonical_module_with_trace
        target/ABI preparation + canonical IR validation
        -> per-attempt global layout/images + module capacity reservation
-       -> each function:
+       -> bounded function cohorts (optional lanes):
             machine selection -> optional MIR verification
-            -> placement + optional quality scheduling
-            -> encoding, relocations, unwind and debug publication
+            -> placement + optional quality scheduling -> private encoding
+       -> ordered code, relocation, unwind and debug publication
+          (one lane selects/allocates through the same kernel, encodes in place)
        -> remaining assembly, relocation check, code image publication
   -> CodegenModule
 ```
@@ -42,8 +43,11 @@ preprocess + parse
 
 The per-attempt arena owns global images, descriptors, relocations, code bytes
 and debug arrays. The wrapper owns the ABI and slot-cost caches across attempts;
-the machine path uses a per-function scratch arena. A failed attempt is discarded
-by rewinding the arena. Every retained native allocator spelling uses MIR;
+the one-lane machine path uses a per-function scratch arena. Function gangs
+own separate ABI/signature caches across retries and bounded output arenas
+reused only after ordered publication consumes the cohort. A failed attempt is
+discarded by rewinding the module arena; the wrapper releases every owned
+worker arena on success and error. Every retained native allocator spelling uses MIR;
 `none` aliases MIR_STACK.
 A machine failure fails the complete module. The wrapper clears unpublished
 code, data, relocations and debug/unwind tables while preserving diagnostics,
