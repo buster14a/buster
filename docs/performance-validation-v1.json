@@ -215,6 +215,17 @@
       }
     },
     {
+      "id": "uarch_lab:compare@process-floor",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #1125 fixed process-floor-v1: one candidate-HEAD ide in fresh processes on int main(void){return 0;}, A the x86-64 -g0 -c compile and B the same command (A/A), -target aarch64-unknown-linux -c, or -fsyntax-only, 100 ABBA pairs per cell, wall time with 95% CI, task-clock, compiler wall_ns, available retired instructions and peak RSS, byte-identical A/A objects, identical diagnostics and the issue's A/A stop rule; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
       "id": "uarch_lab:retirement",
       "kind": "lab-mode",
       "validation": "performance",

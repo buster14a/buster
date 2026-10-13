@@ -80,6 +80,7 @@ prepare_historical_harness (#3714 named historical corpus), measure_throughput (
 scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
 constant_reuse_request_selection and measure_constant_reuse (#3011 opt-in flag pairs),
+process_floor_request_selection and measure_process_floor (#1125 per-process floor),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
@@ -116,6 +117,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
                               CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
                               validate_constant_reuse_acceptance,
+                              PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_CELLS,
+                              validate_process_floor_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -157,6 +160,8 @@ INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
 AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
 # Two -c cells of 20 ABBA pairs each, the size of the ast-pilot object cell.
 CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+# Three cells of tiny compiles, each bounded by process_floor_acceptance.COMPARE_TIMEOUT_SECONDS.
+PROCESS_FLOOR_TIMEOUT_SECONDS = 60 * 60
 # Measured: the whole leg (42 passes over its six cells) took 508 s on a hosted
 # 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 REAL_SOURCE_TIMEOUT_SECONDS = 1800
@@ -1246,6 +1251,18 @@ def constant_reuse_request_selection(candidate: Path, head: str) -> tuple[bool, 
     return True, ""
 
 
+def process_floor_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #1125's fixed profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, PROCESS_FLOOR_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the process-floor selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the process-floor selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def real_source_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #2761's real-source profile only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
@@ -1613,6 +1630,11 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append(reuse_problem)
     elif getattr(arguments, "constant_reuse_requested", False):
         reasons.append(f"{selected_profile['name']} cannot be combined with the constant-reuse acceptance selector")
+    floor_problem = getattr(arguments, "process_floor_request_problem", "")
+    if floor_problem:
+        reasons.append(floor_problem)
+    elif getattr(arguments, "process_floor_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the process-floor selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
@@ -1950,6 +1972,40 @@ def measure_constant_reuse(arguments: argparse.Namespace, candidate: Path, binar
         errors.extend(validate_constant_reuse_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
     if status != 0:
         errors.append(f"issue #3011 constant-reuse acceptance exited {status}")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+PROCESS_FLOOR_REQUIRED = ("acceptance.json",
+                          *(f"{cell}/{name}" for cell in PROCESS_FLOOR_CELLS
+                            for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+
+def measure_process_floor(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
+                          receipt: dict) -> None:
+    """Run #1125's fixed per-process floor profile on the frozen candidate build and record it in the receipt."""
+    mark(receipt, evidence, "process-floor")
+    output = work / "process-floor"
+    helper = Path(__file__).with_name("process_floor_acceptance.py").resolve()
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(helper),
+                  "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                  "--repo-root", str(candidate), "--head-revision", arguments.head,
+                  "--cpu", str(PROCESS_FLOOR_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "process-floor.log", PROCESS_FLOOR_TIMEOUT_SECONDS)
+    receipt["timings"]["process_floor_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["process_floor"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "process_floor", evidence, EVIDENCE_IGNORE, PROCESS_FLOOR_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "process_floor" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #1125 process-floor receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_process_floor_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
+    if status != 0:
+        errors.append(f"issue #1125 process-floor profile exited {status}")
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
 
@@ -2624,6 +2680,18 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
                 linker_requested or link_tls_requested or selfhost_requested or reuse_requested:
             reasons.append("frontend-nesting-v1 cannot be combined with another opt-in leg")
+    floor_requested = arguments.mode == "pull" and getattr(arguments, "process_floor_requested", False)
+    problem = getattr(arguments, "process_floor_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if floor_requested:
+        receipt["process_floor"] = {"requested": True, "request_line": PROCESS_FLOOR_REQUEST_LINE,
+                                    "profile": PROCESS_FLOOR_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles. The #48 inline leg
+        # is not an opt-in here: its line is in main's request history, so it rides every pull compare.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested:
+            reasons.append("process-floor-v1 cannot be combined with another opt-in leg")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
@@ -2631,7 +2699,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
                   or inline_requested or linker_requested or link_tls_requested or reuse_requested
-                  or selfhost_requested or nesting_requested
+                  or selfhost_requested or nesting_requested or floor_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2706,6 +2774,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     measure_ast_pilot(arguments, candidate, binary, work, evidence, receipt)
                 if role == "candidate" and reuse_requested:
                     measure_constant_reuse(arguments, candidate, binary, work, evidence, receipt)
+                if role == "candidate" and floor_requested:
+                    measure_process_floor(arguments, candidate, binary, work, evidence, receipt)
                 if selfhost_requested:
                     mark(receipt, evidence, f"selfhost-inline-stage1-{role}")
                     build_selfhost_inline_stage1(role, binary, candidate, commit, work, evidence, receipt)
@@ -2857,6 +2927,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("issue #3011 constant-reuse acceptance was requested but did not reach its candidate-build phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if floor_requested:
+        record = receipt["process_floor"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #1125 process-floor profile was requested but did not reach its candidate-build phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
     if real_requested:
         record = receipt["throughput_real_source"]
         reasons.extend(record.get("errors", []))
@@ -2948,6 +3026,8 @@ def main(argv: list[str] | None = None) -> int:
         ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.constant_reuse_requested, arguments.constant_reuse_request_problem = (
         constant_reuse_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.process_floor_requested, arguments.process_floor_request_problem = (
+        process_floor_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.real_source_requested, arguments.real_source_request_problem = (
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.historical_requested, arguments.historical_request_problem = (
