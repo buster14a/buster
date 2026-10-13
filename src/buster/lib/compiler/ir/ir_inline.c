@@ -1651,11 +1651,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         bool proven = proof_base && ir_validate_canonical_splice(program, caller, &region).error == IR_VALIDATION_NONE;
                         module->inlining.splice_proofs += proven;
                         module->inlining.splice_fallbacks += !proven;
-                        IrValidationResult output = ir_validation_ok();
-                        if (!proven || BUSTER_IR_TRANSFORM_CHECKS)
-                        {
-                            output = ir_validate_canonical_function(program, caller);
-                        }
+                        IrValidationResult output = !proven || BUSTER_IR_TRANSFORM_CHECKS ? ir_validate_canonical_function(program, caller)
+                                                                                          : ir_validation_ok();
                         strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
                         if (output.error != IR_VALIDATION_NONE)
                         {
