@@ -250,7 +250,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_exhaustion(Uni
 {
     UnitTestResult result = {0};
     CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
-    String8 statements[64];
+    // Its first per-token array must exceed the earlier body's retained
+    // typing service, so the cap targets main while id still fits.
+    String8 statements[96];
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statements); index += 1)
     {
         statements[index] = S8("x += 1;");
@@ -438,8 +440,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitT
         String8 bad_message = recovering_open.messages[0];
         CTestBodyScratchRun recovered = c_test_body_scratch_run(arguments, recovering, cap, trace);
         BUSTER_TEST(arguments, c_test_body_scratch_refused(trace, recovered.trace_count) == big_copy);
-        BUSTER_TEST(arguments, recovered.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &recovered, 0, S8("big")) &&
-                                   string_equal(recovered.messages[1], bad_message));
+        BUSTER_TEST_RAW(arguments, recovered.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &recovered, 0, S8("big")) &&
+                                   string_equal(recovered.messages[1], bad_message),
+            string_format(arguments->arena, S8("body scratch recovery diagnostics={u32} first='{S8}' next='{S8}' third='{S8}' expected='{S8}'"),
+                          recovered.diagnostic_count, recovered.messages[0], recovered.messages[1], recovered.messages[2], bad_message));
     }
 
     // Typed constants: a case label of terms left-associative additions
@@ -585,8 +589,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_type_query_model(UnitT
     u64 invalid_peak = c_test_body_scratch_model_peak(trace, invalid_open.trace_count, 0, &first);
     BUSTER_TEST(arguments, invalid_peak != 0);
     CTestBodyScratchRun both = c_test_body_scratch_model_run(arguments, invalid_later, invalid_peak - 1, trace);
-    BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
-                               string_equal(both.messages[1], invalid_open.messages[0]));
+    BUSTER_TEST_RAW(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
+                               string_equal(both.messages[1], invalid_open.messages[0]),
+        string_format(arguments->arena, S8("body query recovery diagnostics={u32} first='{S8}' next='{S8}' third='{S8}' expected='{S8}'"),
+                      both.diagnostic_count, both.messages[0], both.messages[1], both.messages[2], invalid_open.messages[0]));
     return result;
 }
 
