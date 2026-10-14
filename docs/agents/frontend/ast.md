@@ -27,6 +27,15 @@ declaration and initializer ownership, selections and numeric facts. Tokens
 remain available to preprocessing and semantics; lowering receives source
 spelling and diagnostic sites through `CSourceAnchor`.
 
+Alignment records retain their exact operand node and the standard/GNU
+classification through lowering. Global declaration merging reads that
+finished classification, including the initialized-definition constraint;
+missing alignment columns refuse admission. The source guard rejects
+`c_alignment_*` grammar callbacks as well as token access. The focused global
+alignment fixture preserves numeric/type/zero requests, tentative and
+initialized definitions, GNU requests below natural alignment, and located
+refusals after token classifications are poisoned.
+
 ## Representation
 
 The tree is stored in postorder. Each subtree is one contiguous interval of

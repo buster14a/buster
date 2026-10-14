@@ -194,6 +194,7 @@ def violations(source: str) -> list[Token]:
             or word.startswith(("C_TOKEN_", "C_PUNCTUATOR_", "c_token_", "c_punctuator_", "c_preprocess_token_"))
             or word.startswith("c_parse_") and word not in MODEL_READS and word not in LOCAL_INDEX_BUILDS
             or word.startswith(("c_parser_", "c_type_parse_")) and word not in SCALAR_READS
+            or word.startswith("c_alignment_")
             or word.startswith("c_semantic_") and word not in SEMANTIC_READS
         )
         if word in {"tokens", "token_shapes"} and index and lexed[index - 1].spelling in {".", "->"}:

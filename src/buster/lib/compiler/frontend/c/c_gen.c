@@ -48343,17 +48343,6 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
     return status;
 }
 
-// GNU `_Alignof`/`__alignof__` over an object answers the object's alignment,
-// not only its type's: GCC and Clang both fold `_Alignas(32) int g;
-// _Alignof(g)` to 32. When the operand, under redundant parentheses, is one
-// name bound to an object, raises `*alignment` -- the type's answer -- by the
-// runs c_alignof_object_next_run names, each evaluated as the object's
-// storage evaluates it. c_parse_alignof_object_alignment answers the same
-// question for the parse-time folds, and the two must agree. False when a run
-// does not resolve, or when evaluating runs nests past
-// C_ALIGNOF_OBJECT_DEPTH_LIMIT anywhere below this operand: a run may itself
-// spell `_Alignof(object)` and reach this function again through a nested
-// constant query.
 // Marks every array type that some struct uses as its flexible array member.
 // The answer is a property of the whole type table, so it is collected in one
 // pass and read back by index; asking it per array type rescans every
@@ -50634,7 +50623,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             for (u32 specifier_index = 0; specifier_index < declaration->alignment_count; specifier_index += 1)
             {
                 has_standard_alignment |=
-                    c_alignment_specifier_is_standard(preprocess, parse.alignments[declaration->alignment_start + specifier_index]);
+                    c_ast_facts_alignment_is_standard(options.syntax_facts, declaration->alignment_start + specifier_index);
             }
             object_alignment = declaration_alignment;
             has_alignment = true;
@@ -52031,6 +52020,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 so
     if (arena && !parse.diagnostic_count && parse.analysis_complete)
     {
         bool assertions_complete = !parse.deferred_static_assert_count || parse.deferred_static_assert_verdicts;
+        bool alignments_complete = !parse.alignment_count ||
+            (options.syntax_facts && options.syntax_facts->alignment_count == parse.alignment_count &&
+             options.syntax_facts->alignment_nodes && options.syntax_facts->alignment_standard);
         u32 incomplete_assertion = 0;
         for (u32 row = 0; assertions_complete && row < parse.deferred_static_assert_count; row += 1)
         {
@@ -52038,7 +52030,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 so
             incomplete_assertion = row;
         }
         if (!parse.lowering_validated || !options.syntax_tree || !options.syntax_facts ||
-            !parse.declaration_bindings_complete || !assertions_complete ||
+            !parse.declaration_bindings_complete || !assertions_complete || !alignments_complete ||
             (preprocess.token_count && options.syntax_facts && !options.syntax_facts->matches))
         {
             *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){

@@ -8317,6 +8317,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_operand_admission(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_global_alignment_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 alignment;
+    } const accepted[] = {
+        {S8("_Alignas(16) extern int x; _Alignas(16) int x=3; int main(void) { return x!=3; }"), 16},
+        {S8("_Alignas(16) int x; int main(void) { return x!=0; }"), 16},
+        {S8("extern int x __attribute__((aligned(16))); int x=3; int main(void) { return x!=3; }"), 16},
+        {S8("int x __attribute__((aligned(2)))=3; int main(void) { return x!=3; }"), 4},
+        {S8("_Alignas(int) int x=3; int main(void) { return x!=3; }"), 4},
+        {S8("_Alignas(0) int x=3; int main(void) { return x!=3; }"), 4},
+    };
+    String8 const invalid[] = {
+        S8("_Alignas(16) extern int x; int x=3; int main(void) { return x; }"),
+        S8("_Alignas(2) int x=3; int main(void) { return x; }"),
+        S8("_Alignas(3) int x=3; int main(void) { return x; }"),
+        S8("_Alignas(16) int x; _Alignas(32) int x=3; int main(void) { return x; }"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(accepted) + BUSTER_ARRAY_LENGTH(invalid); row += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            bool valid = row < BUSTER_ARRAY_LENGTH(accepted);
+            String8 source = valid ? accepted[row].source : invalid[row - BUSTER_ARRAY_LENGTH(accepted)];
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+            CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, !preprocess.error_count && analysis.analysis_complete, source);
+            CIRLowerOptions options = {.disable_direct_ssa = form != 0};
+            CIRLowerResult original = c_lower_to_ir_with_options(temporary.arena, S8("global-alignment-facts.c"), preprocess, analysis, target_native, options);
+            BUSTER_TEST_RAW(arguments, valid ? original.program && !original.diagnostic_count && original.canonical_ir_certified :
+                original.diagnostic_count && !original.canonical_ir_certified,
+                original.diagnostic_count ? original.diagnostics[0].message : source);
+            // Keep the exact source bytes and anchors but make token grammar
+            // unavailable after analysis. Alignment's standard/GNU answer is
+            // retained alongside its exact node, never rediscovered here.
+            for (u32 token = 0; token < preprocess.token_count; token += 1)
+            {
+                preprocess.tokens[token].kind = C_TOKEN_INVALID;
+                preprocess.tokens[token].symbol = UINT32_MAX;
+                preprocess.tokens[token].punctuator = C_PUNCTUATOR_ELLIPSIS;
+            }
+            CIRLowerResult poisoned = c_lower_to_ir_with_options(temporary.arena, S8("global-alignment-facts.c"), preprocess, analysis, target_native, options);
+            BUSTER_TEST(arguments, poisoned.diagnostic_count == original.diagnostic_count &&
+                poisoned.canonical_ir_certified == original.canonical_ir_certified);
+            for (u32 diagnostic = 0; diagnostic < original.diagnostic_count && diagnostic < poisoned.diagnostic_count; diagnostic += 1)
+                BUSTER_TEST(arguments, original.diagnostics[diagnostic].kind == poisoned.diagnostics[diagnostic].kind &&
+                    string_equal(original.diagnostics[diagnostic].message, poisoned.diagnostics[diagnostic].message) &&
+                    !memcmp(&original.diagnostics[diagnostic].location, &poisoned.diagnostics[diagnostic].location, sizeof(CSourceLocation)));
+            if (valid && poisoned.program)
+            {
+                u32 found = 0;
+                IrModule const* module = poisoned.program->modules;
+                for (u32 global = 0; global < module->global_count; global += 1)
+                {
+                    IrGlobal const* object = module->globals + global;
+                    IrSymbol const* symbol = ir_symbol_from_id(&poisoned.program->symbols, object->symbol);
+                    if (symbol && string_equal(symbol->name, S8("x")))
+                    {
+                        found += 1;
+                        BUSTER_TEST(arguments, object->alignment == accepted[row].alignment);
+                    }
+                }
+                BUSTER_TEST(arguments, found == 1);
+            }
+            if (!row && analysis.ast_facts)
+            {
+                CAstFacts missing = *analysis.ast_facts;
+                missing.alignment_standard = 0;
+                options.syntax_facts = &missing;
+                CIRLowerResult refused = c_lower_to_ir_with_options(temporary.arena, S8("missing-alignment-facts.c"), preprocess, analysis, target_native, options);
+                BUSTER_TEST(arguments, refused.diagnostic_count == 1 && !refused.program && !refused.canonical_ir_certified);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vla_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9817,6 +9899,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_operand_admission);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vla_alignment);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_global_alignment_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_plan_object_contract);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
