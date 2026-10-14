@@ -4439,6 +4439,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
 
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
+BUSTER_C_INTERNAL void c_ir_initializer_plan_node_state_release(CIntegerIrBuilder* builder, void* state);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate_node(CIntegerIrBuilder* builder, u32 node, u64* value_out);
 BUSTER_C_INTERNAL bool c_ir_global_complex_real_value_node(CIntegerIrBuilder* builder, IrType* type, IrTypeId type_id, u32 node,
@@ -4663,6 +4664,19 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
                 machine->chain_next[machine->completed_count] = machine->chain_heads[bucket];
                 machine->completed[machine->completed_count++] = completed;
                 machine->chain_heads[bucket] = machine->completed_count;
+            }
+        }
+        // Pending object tasks own a private context arena. Release inner
+        // objects first so their enclosing guard is restored before its owner.
+        for (u32 pending = machine->frame_count; pending > frame_start; pending -= 1)
+        {
+            CIrQueryFrame* frame = machine->frames + pending - 1;
+            CIrNodeQueryFrame* task = &frame->node_task;
+            if (frame->kind == C_IR_QUERY_FRAME_NODE_TASK && task->kind == C_IR_NODE_QUERY_CONSTANT && task->state && builder->syntax_tree &&
+                task->node < builder->syntax_tree->node_count && builder->syntax_tree->kinds[task->node] == C_AST_COMPOUND_LITERAL)
+            {
+                c_ir_initializer_plan_node_state_release(builder, task->state);
+                task->state = 0;
             }
         }
         machine->frame_count = frame_start;
@@ -48508,7 +48522,6 @@ typedef enum CIrStaticCompoundLiteral
     C_IR_STATIC_COMPOUND_LITERAL_REJECTED,
 } CIrStaticCompoundLiteral;
 
-BUSTER_C_INTERNAL CIrConstantValue c_ir_static_compound_literal_object_node(CIntegerIrBuilder* builder, u32 node, IrTypeId literal_type, bool guarded);
 
 BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(CIntegerIrBuilder* builder, u32 start, u32 end, IrSymbolId* symbol_out,
                                                                                s64* addend_out);
@@ -54393,7 +54406,7 @@ BUSTER_C_INTERNAL bool c_ir_static_compound_literal_node_attempt(CIntegerIrBuild
                 task->previous_literal_active = previous;
                 task->contexts[0].storage.relocation_count = &task->object_relocation_count;
                 task->contexts[0].storage.relocation_index.published_count = &task->object_relocation_count;
-                builder->static_literal_object_active = true;
+                builder->static_literal_object_active = guarded;
                 frame->state = task;
             }
         }
@@ -54946,23 +54959,6 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_static_compound_literal_object(CIntegerI
     builder->static_literal_object_active = previous;
     return result;
 }
-
-// The F3 scheduler owns this frame while the static plan suspends for a leaf.
-// The final shared protocol caller uses the attempt directly and retires this
-// signature adapter with the remaining constant-range callers.
-BUSTER_C_INTERNAL CIrConstantValue c_ir_static_compound_literal_object_node(CIntegerIrBuilder* builder, u32 node,
-                                                                          IrTypeId literal_type, bool guarded)
-{
-    CIrConstantValue result = {.type = IR_TYPE_ID_INVALID, .symbol = IR_SYMBOL_ID_INVALID};
-    CIrQueryMachine* machine = builder->queries;
-    if (machine && machine->frame_count)
-    {
-        CIrQueryFrame* current = machine->frames + machine->frame_count - 1;
-        c_ir_static_compound_literal_node_attempt(builder, &current->node_task, node, literal_type, guarded, &result);
-    }
-    return result;
-}
-
 
 BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(CIntegerIrBuilder* builder, u32 start, u32 end, IrSymbolId* symbol_out,
                                                                                s64* addend_out)
@@ -59362,9 +59358,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                            ((target->kind == IR_TYPE_STRUCT || target->kind == IR_TYPE_UNION) && !target->is_complex));
             if (object)
             {
-                value.real = c_ir_static_compound_literal_object_node(builder, node, type.result_type, builder->function != 0);
+                admitted = c_ir_static_compound_literal_node_attempt(builder, frame, node, type.result_type, builder->function != 0, &value.real);
                 value.type = value.real.type;
-                admitted = value.real.kind == C_IR_CONSTANT_LVALUE;
+                admitted = admitted && value.real.kind == C_IR_CONSTANT_LVALUE;
             }
             else if (admitted && kind == C_AST_COMPOUND_LITERAL && target->is_complex &&
                      ast->kinds[c_ast_child_at(ast, node, 1)] == C_AST_INITIALIZER_LIST &&

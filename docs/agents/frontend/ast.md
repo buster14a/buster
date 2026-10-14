@@ -2876,6 +2876,27 @@ this is not a claim that every expression in the unit has a fact. The
 lowering consumer migration remains open and this producer checkpoint does
 not claim retirement of the query machine.
 
+Exact-node constant tasks distinguish ordinary values from addressed compound
+objects with `C_IR_AST_CONSTANT_LVALUE`. Extension and member/index bases
+retain that view through the task key. Numeric complex compound literals
+keep two component values; addressed scalar literals request static objects.
+Identifier and callable builtin identities come from BOUND facts and semantic
+recipes. Integer builtin operands remain child node tasks even when the call
+has an integer fact, preserving nested cast and sizeof constructor effects.
+Static compound objects suspend on retained initializer-plan leaves and are
+published only when their task completes. The scheduler releases any active
+object context arenas on failure, restoring nested guards from the inside out.
+
+The runtime offsetof core consumes the ordered numeric path and a CONSTANT
+task result. That task evaluates each index once for folding, retaining only
+nonconstant step ordinals in private checked query scratch. The root copies
+those ordinals to function scratch before releasing query state. Runtime
+expression frames carry each step's exact index node and scale by its retained
+element size. No token designator, bracket or member walk remains in this
+runtime core, and the private node metadata never reaches canonical IR. The
+old constant range evaluator and its offsetof query family remain migration
+residuals until their remaining callers move.
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.
