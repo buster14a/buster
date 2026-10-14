@@ -2992,7 +2992,10 @@ lowering consumer migration remains open and this producer checkpoint does
 not claim retirement of the query machine.
 
 Exact-node constant tasks distinguish ordinary values from addressed compound
-objects with `C_IR_AST_CONSTANT_LVALUE`. Extension and member/index bases
+objects with `C_IR_AST_CONSTANT_LVALUE`. A direct whole initializer's literal
+address route uses `C_IR_AST_CONSTANT_WHOLE_ADDRESS`, preserving the legacy
+nested-object admission; general conditional/arithmetic probes retain their
+nested-object refusal. Extension and member/index bases
 retain that view through the task key. Numeric complex compound literals
 keep two component values; addressed scalar literals request static objects.
 Identifier and callable builtin identities come from BOUND facts and semantic

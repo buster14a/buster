@@ -1802,6 +1802,7 @@ typedef enum CIrAstTypeView
     C_IR_AST_TYPE_PROMOTED,
     C_IR_AST_TYPE_PREDICTED,
     C_IR_AST_CONSTANT_LVALUE,
+    C_IR_AST_CONSTANT_WHOLE_ADDRESS,
 } CIrAstTypeView;
 
 typedef enum CIrNodeQueryKind
@@ -57880,11 +57881,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             admitted = c_ir_node_query_request(builder, key, &type) && type.success;
             IrType* target = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
             bool object = target && kind == C_AST_COMPOUND_LITERAL &&
-                          (frame->view == C_IR_AST_CONSTANT_LVALUE || target->kind == IR_TYPE_ARRAY ||
+                          ((frame->view == C_IR_AST_CONSTANT_LVALUE || frame->view == C_IR_AST_CONSTANT_WHOLE_ADDRESS) || target->kind == IR_TYPE_ARRAY ||
                            ((target->kind == IR_TYPE_STRUCT || target->kind == IR_TYPE_UNION) && !target->is_complex));
             if (object)
             {
-                admitted = c_ir_static_compound_literal_node_attempt(builder, frame, node, type.result_type, builder->function != 0, &value.real);
+                admitted = c_ir_static_compound_literal_node_attempt(builder, frame, node, type.result_type, builder->function != 0 || frame->view != C_IR_AST_CONSTANT_WHOLE_ADDRESS, &value.real);
                 value.type = value.real.type;
                 admitted = admitted && value.real.kind == C_IR_CONSTANT_LVALUE;
             }
@@ -57977,7 +57978,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         {
             CIrNodeQueryFrame base = {0};
             admitted = c_ir_node_query_request(builder,
-                (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, 0), .kind = C_IR_NODE_QUERY_CONSTANT, .view = C_IR_AST_CONSTANT_LVALUE}, &base) &&
+                (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, 0), .kind = C_IR_NODE_QUERY_CONSTANT, .view = frame->view == C_IR_AST_CONSTANT_WHOLE_ADDRESS ? C_IR_AST_CONSTANT_WHOLE_ADDRESS : C_IR_AST_CONSTANT_LVALUE}, &base) &&
                        base.success && !base.constant.is_complex;
             if (admitted)
             {
@@ -58161,7 +58162,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             CIrNodeQueryFrame second = {0};
             admitted = operation != C_CONDITIONAL_OPERATOR_COUNT && (count == 1 || count == 2) &&
                        c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, 0), .kind = C_IR_NODE_QUERY_CONSTANT,
-                            .view = operation == C_CONDITIONAL_ADDRESS_OF ? C_IR_AST_CONSTANT_LVALUE : C_IR_AST_TYPE_STRICT}, &first) && first.success;
+                            .view = operation == C_CONDITIONAL_ADDRESS_OF ? (frame->view == C_IR_AST_CONSTANT_WHOLE_ADDRESS
+                                ? C_IR_AST_CONSTANT_WHOLE_ADDRESS : C_IR_AST_CONSTANT_LVALUE) : C_IR_AST_TYPE_STRICT}, &first) && first.success;
             if (admitted && count == 1)
             {
                 value = first.constant;
@@ -58196,6 +58198,33 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
     return admitted;
 }
 
+// The old whole-initializer literal-address path admitted nested objects;
+// general arithmetic/conditional probes kept the guarded refusal. Retain that
+// context in the private task key, using only the exact source node topology.
+BUSTER_C_INTERNAL CIrAstTypeView c_ir_constant_root_view(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    bool valid = ast && node < ast->node_count;
+    bool address = valid && ast->kinds[node] == C_AST_ADDRESS;
+    u32 cursor = address ? c_ast_child_at(ast, node, 0) : node;
+    while (valid && cursor < ast->node_count && (ast->kinds[cursor] == C_AST_MEMBER || ast->kinds[cursor] == C_AST_INDEX))
+        cursor = c_ast_child_at(ast, cursor, 0);
+    valid = valid && cursor < ast->node_count && ast->kinds[cursor] == C_AST_COMPOUND_LITERAL;
+    bool array = false;
+    if (valid && !address)
+    {
+        u32 name = c_ast_child_at(ast, cursor, 0);
+        CAstFacts const* facts = builder->syntax_facts;
+        u32 flags = facts && name < facts->node_count ? facts->flags[name] : 0;
+        u32 index = (flags & C_AST_FACT_TYPED) ? facts->types[name] : C_AST_FACT_NONE;
+        CType const* type = (flags & C_AST_FACT_RECIPE) ? index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
+                                                           ? &facts->recipes[index].type : 0
+                                                   : index < builder->parse.type_count ? builder->parse.types + index : 0;
+        array = type && type->kind == C_TYPE_ARRAY;
+    }
+    return valid && (address || array) ? C_IR_AST_CONSTANT_WHOLE_ADDRESS : C_IR_AST_TYPE_STRICT;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* result_out)
 {
     CAst const* ast = builder->syntax_tree;
@@ -58206,7 +58235,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u
     if (!valid)
     {
         CIrNodeQueryFrame answer = {0};
-        CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_CONSTANT};
+        CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_CONSTANT, .view = c_ir_constant_root_view(builder, node)};
         bool settled = builder->queries && builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
                                                                        : c_ir_node_query_execute(builder, key, &answer);
         valid = settled && answer.success && !answer.constant.is_complex;

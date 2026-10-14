@@ -6840,6 +6840,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_node_tasks(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_object_context(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("struct Node { int* p; }; static struct Node* q = &(struct Node){ .p = &(int){7} };\n"),
+        S8("struct Node { int* p; }; static struct Node* q = 1 ? &(struct Node){ .p = &(int){7} } : 0;\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("compound-context.c"), preprocess, analysis, target_native);
+        if (!index) BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+        else
+        {
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.diagnostic_count);
+            if (lowered.diagnostic_count)
+                BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("nested compound literal objects")) != BUSTER_STRING_NO_MATCH);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_bound_owners(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8155,6 +8182,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_bound_owners);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_object_context);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
