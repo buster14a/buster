@@ -410,7 +410,7 @@ fi
         caller, positional = self.caller_phase_fixture("partial")
         self.assertEqual(positional[0], "0")
         self.assertEqual(positional[3], caller["generation"])
-        self.assertEqual(positional[-1], "starting")
+        self.assertEqual(positional[-1], "awaiting-completion")
 
     def test_full_matching_caller_records_cannot_admit_actual_collector_exit70(self):
         caller, positional = self.caller_phase_fixture("nonzero")
@@ -824,6 +824,10 @@ printf 'BUSTER_IOS_CAPTURE total_bytes=0 retained_bytes=0 truncated=0\\n' >"$pre
             ("declined-without-proof", declined.replace("supervisor_valid=1", "supervisor_valid=0"), warning, b"", 1),
             ("declined-with-native-admission", declined.replace("native_launch=0", "native_launch=1"), warning, b"", 1),
             ("capture-expired-124", expired.replace("monitor_status=137", "monitor_status=124"), warning, None, 0),
+            ("capture-expired-awaiting-completion", expired.replace("reason=starting", "reason=awaiting-completion"), warning, None, 0),
+            ("capture-expired-awaiting-completion-124", expired.replace("reason=starting", "reason=awaiting-completion")
+             .replace("monitor_status=137", "monitor_status=124"), warning, None, 0),
+            ("capture-expired-unknown-phase", expired.replace("reason=starting", "reason=unknown"), warning, None, 1),
             ("limit", complete, "", b"x" * 65536, 0),
             ("oversized", complete, "", b"x" * 65537, 1),
             ("missing-output", complete, "", None, 1),
@@ -928,6 +932,7 @@ printf 'BUSTER_IOS_CAPTURE total_bytes=0 retained_bytes=0 truncated=0\\n' >"$pre
         status, fields, prefix, private, elapsed, errors = self.finish_cap(self.start_cap(command, environment))
         self.assertIn(status, (124, 137), errors)
         self.assertEqual(fields["admission"], "0")
+        self.assertEqual(fields["reason"], "starting")
         self.assertTrue((state / "startup-entered").exists())
         self.assertFalse((state / "startup-exec-admitted").exists())
         self.assertFalse(native_marker.exists())
@@ -952,6 +957,30 @@ printf 'BUSTER_IOS_CAPTURE total_bytes=0 retained_bytes=0 truncated=0\\n' >"$pre
 
     def test_finite_startup13_is_bounded_by_caller_cap12_blocked_usr1(self):
         self.startup_case("block")
+
+    def test_native_deadline_without_completion_retains_go_phase_without_admission(self):
+        state = self.root / "deadline-delayed-completion"
+        environment = self.python_overlay(state, "delay-publication")
+        self.release_states.append(state)
+        self.required_end_markers.append(state / "owner-wrapper-ended")
+        command = [sys.executable, str(self.fixture), "active", str(state)]
+        status, fields, prefix, private, elapsed, errors = self.finish_cap(
+            self.start_cap(command, environment))
+        self.assertIn(status, (124, 137), errors)
+        self.assertEqual(fields["admission"], "0")
+        self.assertEqual(fields["reason"], "awaiting-completion")
+        self.assertEqual(fields["helper_status"], "unavailable")
+        self.assertEqual(fields["invocation_status"], "unavailable")
+        self.assertTrue((state / "active-native").exists())
+        self.assertTrue((state / "native-term").exists())
+        self.assertTrue((state / "native-ended").exists())
+        self.assertTrue((state / "publication-delay-entered").exists())
+        stages = (private / "bridge-stages.log").read_text()
+        self.assertIn("stage=go-authorized", stages)
+        self.assertNotIn("stage=complete-observed", stages)
+        self.assertFalse(Path(str(prefix) + ".supervisor-status.log").exists())
+        self.assertGreaterEqual(elapsed, 11.8)
+        self.assertLess(elapsed, 13)
 
     def test_early_native_zero_accepts_escaped_real_eof_after_command_bound(self):
         state = self.root / "finite-escaped-writer"

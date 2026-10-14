@@ -115,6 +115,11 @@ exec 3>&- 4>&- 5>&- 7>&- 8>&-
 printf 'GO-AUTHORIZE %s\n' "$generation" >&9 || refuse go-authorize
 observe_stage 9 go-authorized
 exec 9>&-
+# Retain the last caller boundary if its capture clock expires before COMPLETE.
+# This is still admission=0: GO proves neither native launch nor completion,
+# and only the final closed snapshot below may authorize stable receipts.
+reason=awaiting-completion
+record_caller || true
 
 read_frame 14 || refuse completion-frame
 read -r tag received reported extra <<<"$frame"
