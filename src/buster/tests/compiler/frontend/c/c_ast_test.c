@@ -6450,6 +6450,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments
     return result;
 }
 
+// The initializer validator publishes its selections, including paths that
+// brace elision and anonymous-member continuations make implicit in syntax.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8("struct S { int : 0; int x; struct { int y, z; }; char text[4]; };\n"
+                        "struct S object = { .y = 4, 5, .text = {\"abc\"}, .x = 2 };\n"
+                        "int table[] = { [2 ... 4] = 1, [3] = 9, 7 };\n"
+                        "int matrix[2][2] = { 1, 2, 3, 4 };\n"
+                        "int f(void) { struct S local = { .y = 1, 2 }; return ((int[]){ 3, 4 })[0] + local.z; }\n");
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    bool ready = BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete) &&
+                 BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast));
+    if (ready)
+    {
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        syntax.ast = &built.ast;
+        syntax.ast_facts = &facts;
+        syntax.type_interning = true;
+        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+        u32 plans = 0;
+        u32 values = 0;
+        u32 ranged = 0;
+        u32 promoted = 0;
+        u32 nested = 0;
+        for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
+        {
+            BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
+            plans += plan->complete;
+            for (u32 path = 0; path < plan->path_count; path += 1)
+            {
+                CInitializerPath edge = plan->paths[path];
+                BUSTER_TEST(arguments, edge.container.value < analysis.type_count && edge.parent_plus_one <= plan->path_count);
+                ranged += edge.first != edge.last;
+                if (edge.member != UINT32_MAX && edge.container.value < analysis.type_count)
+                {
+                    CType container = analysis.types[edge.container.value];
+                    BUSTER_TEST(arguments, edge.member < container.member_count);
+                    promoted += edge.parent_plus_one != 0;
+                }
+                else nested += edge.parent_plus_one != 0;
+            }
+            for (u32 item = 0; item < plan->item_count; item += 1)
+            {
+                CInitializerItem value = plan->items[item];
+                BUSTER_TEST(arguments, value.node < built.ast.node_count && value.type.value < analysis.type_count &&
+                                       value.path_plus_one <= plan->path_count);
+                values += (value.flags & C_INITIALIZER_ITEM_VALUE) != 0;
+            }
+            if (plan->type.value < analysis.type_count && analysis.types[plan->type.value].kind == C_TYPE_ARRAY &&
+                plan->inferred_count == 5)
+                BUSTER_TEST(arguments, plan->item_count >= 3 && plan->path_count >= 3);
+        }
+        BUSTER_TEST(arguments, plans >= 5 && values >= 14 && ranged > 0 && promoted > 0 && nested > 0);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // The facts semantic analysis retains for lowering (CAstFacts, GitHub #4062).
 // One function body and two file-scope initializers are analyzed with the
 // tree and a facts record, and once with the tree alone; the model must be
@@ -6770,6 +6836,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);

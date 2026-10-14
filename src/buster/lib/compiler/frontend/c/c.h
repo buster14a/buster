@@ -2212,6 +2212,71 @@ struct CSizeofOperandType
 };
 #endif
 
+// Semantic initializer selections retained through lowering (#4061). Paths
+// project a root object through member or array edges; member indices are
+// relative to the container's member list, UINT32_MAX names an array edge.
+// A ranged edge selects [first,last], evaluating its value only once.
+typedef struct CInitializerPath CInitializerPath;
+struct CInitializerPath
+{
+    CTypeId container;
+    u64 first;
+    u64 last;
+    u32 parent_plus_one;
+    u32 member;
+    // UINT32_MAX uses the current value anchor; other rows retain the
+    // member/bracket source needed by the original FIELD/INDEX emission.
+    u32 source_token;
+};
+
+typedef enum CInitializerItemFlag
+{
+    C_INITIALIZER_ITEM_VALUE = 1,
+    C_INITIALIZER_ITEM_LIST_BEGIN = 2,
+    C_INITIALIZER_ITEM_LIST_END = 4,
+    C_INITIALIZER_ITEM_DESIGNATED = 8,
+} CInitializerItemFlag;
+
+typedef struct CInitializerItem CInitializerItem;
+struct CInitializerItem
+{
+    CTypeId type;
+    u32 node;
+    u32 path_plus_one;
+    // Value and range-copy anchors preserve the original debug emission.
+    u32 source_token;
+    u32 range_source_token;
+    // Exact value provenance; parentheses are absent from syntax topology.
+    u32 value_start;
+    u32 value_end;
+    u8 flags;
+};
+
+typedef enum CInitializerPlanFlag
+{
+    // `{0}` retains the original zero-constructor emission. `{0,}` does not.
+    C_INITIALIZER_PLAN_SINGLE_ZERO = 1,
+} CInitializerPlanFlag;
+
+typedef struct CInitializerPlan CInitializerPlan;
+struct CInitializerPlan
+{
+    CInitializerPlan* next;
+    CInitializerPlan* hash_next;
+    CInitializerPath* paths;
+    CInitializerItem* items;
+    CTypeId type;
+    u64 inferred_count;
+    u32 node;
+    u32 path_count;
+    u32 item_count;
+    u32 path_capacity;
+    u32 item_capacity;
+    u8 flags;
+    bool complete;
+    bool failed;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -2222,6 +2287,11 @@ struct CParseResult
     // the parse intern names on demand so entity lookups key on symbol ids.
     CSymbolTable* symbols;
     CDeclaration* declarations;
+    // Published by the initializer validator; never rewound with body scratch.
+    CInitializerPlan* initializer_plans;
+    CInitializerPlan** initializer_plan_buckets;
+    u32 initializer_plan_bucket_count;
+    u32 initializer_plan_count;
     CType* types;
     // Borrowed only while semantic constraints are checked. Scalar query
     // results share immutable types; declarator types remain independent.

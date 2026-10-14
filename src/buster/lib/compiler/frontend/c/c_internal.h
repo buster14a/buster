@@ -1683,6 +1683,7 @@ struct CTypeParseMachine
     // While c_parse_infer_file_array_bounds walks one list: where that walk
     // records its element checks. Null at every other time.
     CParseInitializerLog* initializer_log;
+    CInitializerPlan* initializer_plan;
     // The logs kept from those walks, for static-initializer validation to
     // replay instead of walking the list again. Null until the first one; in
     // the phase arena. See c_parse_initializer_replay_find.
@@ -1842,6 +1843,7 @@ BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult c
 BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
 BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
 BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);
+BUSTER_C_EXTERN CInitializerPlan const* c_initializer_plan_find(CParseResult const* result, u32 node);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);
 // The machine state a tree answer leaves, as a valid machine answer with no

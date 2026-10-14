@@ -2382,6 +2382,30 @@ walk. If step 1 publishes F3 only for integer constant expressions, a static
 initializer's arithmetic constant becomes a postorder fold over its
 expression nodes, with no recursion.
 
+### Initializer plan publication
+
+Semantic validation retains F5 as `CInitializerPlan` records indexed by the
+initializer value node. `CInitializerPath` rows name root-relative member
+and array edges, including anonymous promoted members and GNU range
+endpoints. Ordered `CInitializerItem` rows retain values and explicit list
+entry/exit events. An array's already inferred count is copied from its
+semantic bound. Plans and their checked sparse node index belong to the
+result arena and survive body-scratch rewinds.
+
+`c_parse_infer_initializer_array_count_core` records the selections it
+already makes. File-array inference publishes its plan before the replayed
+validation. Compound-literal publication uses the same semantic walker,
+sets aside the tree typer and rolls back any query-only rows, preserving
+the semantic model and debug type inventory. The plan's `source_token`,
+`range_source_token`, `value_start` and `value_end`, and an edge's
+`source_token`, are emission provenance; consumers may not use them to
+rediscover grammar. `{0}` retains a producer flag because a trailing comma
+changes the existing zero-constructor emission.
+
+This is the additive producer stage. Runtime and static lowering still
+require migration to these plans before the initializer token walkers can
+be deleted.
+
 ### Initializers
 
 One explicit-stack walk over an `INITIALIZER_LIST` subtree serves all three
