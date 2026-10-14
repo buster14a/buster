@@ -237,13 +237,19 @@ each `node_count` long, about 9 bytes per node:
 | Column | Bytes | Meaning |
 |---|---|---|
 | `types` | 4 | the node's C type row (`CTypeId` value), or `C_AST_FACT_NONE` |
-| `payloads` | 4 | per flag: the entity an `IDENTIFIER` names, a bit-field member's width, or a string literal's length |
+| `payloads` | 4 | per flag: the entity an `IDENTIFIER` or `DECLARATOR_NAME` names, a bit-field member's width, or a string literal's length |
 | `flags` | 1 | `CAstFactFlag`: candidate, typed, from the machine, nonplace, bound, bit-field, string |
 
 The columns are dense because the tree is complete before analysis starts,
-so the node count is known and the record never grows. The tree typer's
-spans and start chains are not retained: lowering will walk nodes, not map
-token ranges to them.
+so the node count is known and the record never grows. Analysis prepares the
+unit's shared `CAstSpans` range-to-node index before its first query
+(`c_ast_facts_prepare`), using the parse result's retained delimiter rows.
+Every semantic producer keys its finished answer through
+`c_ast_facts_locate`; declaration-name leaves are spanned as well as
+expressions. The index lives in `CAstFacts.index_arena`, follows the facts'
+lifetime, and its bytes are included in `retained_bytes`. A required index
+reservation failure produces a structured semantic diagnostic. The tree
+typer's smaller per-region scratch index is still released at its region's end.
 
 **Candidates.** A fact candidate is an expression node (`IDENTIFIER` through
 `COMMA`, without braced lists and `_Generic` associations) of a *typed
@@ -2158,11 +2164,13 @@ base and callee. The existing skew fixture keeps the navigation bound.
 
 ## Initializers, declarations and type queries from the tree
 
-**Status: design only.** This is step 4 of the
+**Status: local declaration nodes implemented; the other slices remain open.**
+This is step 4 of the
 [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
 of 2026-10-13, tracked in [#4061](https://github.com/buster14a/buster/issues/4061).
-Nothing here is implemented. Under that direction, `c_gen.c` lowers from
-nodes and retained facts, uses tokens only for provenance (source ranges and
+Local declarations and their bindings now use nodes and retained facts.
+Initializer layout, constants and type queries still have their own migration
+slices. Under the direction, `c_gen.c` lowers from nodes and retained facts, uses tokens only for provenance (source ranges and
 spellings), keeps no token fallback, and deletes each walker it migrates.
 The plan:
 
@@ -2309,17 +2317,30 @@ kind. Any kind where it differs is listed here when it is implemented.
 
 ### Declarations
 
-`c_ir_prepare_automatic_declaration`,
-`c_ir_lower_declaration_or_assignment_list_step` and
-`c_ir_lower_automatic_declaration_step` take a `DECLARATION` node. They read
-each `INIT_DECLARATOR`'s entity from F4, its type from the entity, its
-`asm` label and attributes from their nodes, and its initializer subtree
-from the declarator's last child.
+Local statement dispatch takes its `DECLARATION` node. A list visits its
+`INIT_DECLARATOR` children in source order, and each preparation frame keeps
+its declarator node. `c_ir_declarator_name` follows the declarator's inner
+child to its `DECLARATOR_NAME`, never its function parameter siblings.
+Semantic analysis publishes that node's entity in `CAstFacts.payloads` with
+`C_AST_FACT_BOUND` (`c_parse_publish_declaration_facts`); its type and storage
+flags come from the retained `CEntity`. The binder also retains the
+initializer's assignment anchor in `CEntity.initializer_token_plus_one`, so
+stores keep their original `-g` source locations without rediscovering `=`.
+No type row is added by this publication.
+
+`c_ir_prepare_automatic_declaration` and the single-declarator body path
+read initializer presence and shape from the `INIT_DECLARATOR`'s last child.
+They keep their existing emission order. Initializer and VLA owners still
+accept marked range adapters until their slices migrate; `asm` labels and
+attribute payloads still have their own lowering readers. Model-only callers
+and the explicit pilot opt-out build their tree after analysis; their
+binding adapter reads the finalized semantic declaration-anchor index,
+without parsing tokens or looking up source names again.
 
 `c_ir_predeclare_labeled_automatic_locals` reserves fixed-size locals in the
-entry block of a body with labels. It becomes a walk over the body's
-`DECLARATION` nodes, skipping nested function definitions and statement
-expressions as the token scan does. File-scope objects
+entry block of a body with labels. It now visits the body's declaration-name
+nodes in source order and reads their retained entity bindings. Initializers,
+cleanup activation and VLA allocation remain at their declarations. File-scope objects
 (`c_ir_global_initializer`) take their declaration from the split's record
 and their initializer from its node.
 

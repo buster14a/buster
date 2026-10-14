@@ -9796,6 +9796,33 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
 // Ordinary and pending enumerator bindings win over an outer typedef before
 // probing a parenthesized range as a cast. Pending enum names have not yet
 // reached the ordinary entity table while their definition is being parsed.
+// Bind declaration-name nodes from the semantic entities already published.
+// Compatible declarations can share an entity; later local entities at the
+// same anchor intentionally replace an earlier function-linkage row, as the
+// lowering entity index does. This publishes no type, scope or diagnostic.
+BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* machine, CParseResult const* result, CPreprocessResult preprocess)
+{
+    CAstFacts* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    if (facts && ast && facts->node_count == ast->node_count)
+    {
+        for (u32 entity = 0; entity < result->entity_count; entity += 1)
+        {
+            u32 anchor = result->entities[entity].declaration_token_plus_one;
+            if (anchor && anchor <= preprocess.token_count)
+            {
+                u32 node = c_ast_facts_locate(facts, &preprocess, anchor - 1, anchor);
+                if (node != C_AST_NODE_INVALID && ast->kinds[node] == C_AST_DECLARATOR_NAME)
+                {
+                    facts->statistics.bound += (facts->flags[node] & C_AST_FACT_BOUND) == 0;
+                    facts->payloads[node] = entity;
+                    facts->flags[node] |= C_AST_FACT_BOUND;
+                }
+            }
+        }
+    }
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_constant_type_name(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                        CScopeId scope, u32 start, u32 end, u32* cursor)
 {
@@ -28179,6 +28206,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
             .declaration_statement_start = start,
             .declaration_token_start = segment_start,
             .declaration_token_count = segment_end - segment_start,
+            .initializer_token_plus_one = suffix_end < segment_end ? suffix_end + 1 : 0,
             .alignment_start = declarator_alignment_start,
             .alignment_count = declarator_alignment_count,
             .kind = is_typedef ? C_ENTITY_TYPEDEF : C_ENTITY_LOCAL,
@@ -45513,6 +45541,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
     C_DIAGNOSTIC_RESERVATION_CENSUS(SEMANTIC, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
+    if (machine.ast_facts && !c_ast_facts_prepare(machine.ast_facts, syntax.ast, &preprocess, &result))
+    {
+        c_analysis_failure(&result, S8("could not reserve the retained C semantic node index"));
+        machine.failed = true;
+    }
     BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
         .parent = C_SCOPE_ID_INVALID,
@@ -46278,6 +46311,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // gates the ordinary member-constraint pass. This publishes only retained
     // width rows and never opens that gate or evaluates incomplete members.
     c_parse_publish_deferred_bit_field_width_diagnostics(arena, &result, preprocess);
+    c_parse_publish_declaration_facts(&machine, &result, preprocess);
     // The retained facts are final with the type tables (GitHub #4062).
     c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result);
     result.analysis_complete = true;

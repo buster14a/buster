@@ -1276,6 +1276,8 @@ struct CEntity
     u32 declaration_statement_start;
     u32 declaration_token_start;
     u32 declaration_token_count;
+    // The initializer assignment anchor, published by the declarator binder.
+    u32 initializer_token_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
@@ -1715,7 +1717,7 @@ typedef enum CAstFactFlag
     // The machine's nonplace-projection fact (`__real__`/`__imag__` of a real
     // operand).
     C_AST_FACT_NONPLACE = 1u << 3,
-    // An IDENTIFIER: `payloads` holds the entity it names.
+    // An IDENTIFIER or DECLARATOR_NAME: `payloads` holds its entity.
     C_AST_FACT_BOUND = 1u << 4,
     // A MEMBER or MEMBER_ARROW of a bit-field: `payloads` holds its width.
     C_AST_FACT_BIT_FIELD = 1u << 5,
@@ -1778,10 +1780,16 @@ struct CAstFactStatistics
 // C_AST_FACT_NONE) and `flags` (CAstFactFlag), each `node_count` long. They
 // are the only allocations in `arena`, which the facts own: c_ast_facts_create
 // reserves it, c_ast_facts_release retires it once lowering is done.
+typedef struct CAstSpans CAstSpans;
 typedef struct CAstFacts CAstFacts;
 struct CAstFacts
 {
     Arena* arena;
+    // The producer range-to-node index, computed before semantic queries and
+    // retained with the facts. Its delimiter rows belong to CParseResult.
+    Arena* index_arena;
+    CAstSpans* spans;
+    u32 const* matches;
     u32* types;
     u32* payloads;
     u8* flags;
@@ -2579,6 +2587,12 @@ BUSTER_F_DECL bool c_ast_facts_create(CAstFacts* facts, CAst const* ast);
 // Retires the facts' arena and clears the columns; the statistics stay.
 // Idempotent.
 BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
+// Prepare the unit's exact range-to-node index once, before semantic fact
+// producers run. The parse result's delimiter rows outlive the facts. False
+// means the required index could not be reserved or the input is incomplete.
+BUSTER_F_DECL bool c_ast_facts_prepare(CAstFacts* facts, CAst const* ast, CPreprocessResult const* preprocess, CParseResult* result);
+// The same span lookup every producer uses; C_AST_NODE_INVALID on a miss.
+BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preprocess, u32 start, u32 end);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);
