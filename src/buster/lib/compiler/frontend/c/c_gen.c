@@ -34144,7 +34144,11 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
         {
             if (!state->stage)
             {
-                bool settled = kind == C_AST_INDEX
+                // An arrow base is a value context just like a subscript
+                // base. An incomplete source array can decay to its mapped
+                // element pointer without a complete array row; the selected
+                // member still keeps its strict type, including array extent.
+                bool settled = kind == C_AST_INDEX || kind == C_AST_MEMBER_ARROW
                                    ? c_ir_expression_projection_value_child(builder, state, first_node, C_IR_AST_TYPE_STRICT, &state->first)
                                    : c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_STRICT, &state->first);
                 if (settled) state->stage = 1;
