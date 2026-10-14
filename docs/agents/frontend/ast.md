@@ -2632,7 +2632,12 @@ A source compound constructor is requested through the common node scheduler
 before its plan runs. `c_ir_static_compound_literal_node_attempt` keeps the
 private context arena in its owning constant frame across child requests;
 publication of the writable compound object occurs only after every store
-finishes. The state-release hook also releases that arena on query abort.
+finishes. Publication uses the compacted persistent relocation table rather
+than private override tombstones. The state-release hook also releases that
+arena on query abort. Only the actual root empty list selects a whole-object
+zero initializer. Scalar member/object wrappers retain the existing empty,
+nested-brace and bit-field refusals, and a scalar ranged value retains the
+existing nonempty-brace refusal; complex root braces remain aggregate events.
 Source scalar and lvalue views have distinct keys, preserving the occurrence
 identity of addressed scalar literals.
 

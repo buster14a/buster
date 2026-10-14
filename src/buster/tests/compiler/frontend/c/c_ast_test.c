@@ -6816,6 +6816,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_lower_reuse(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_static_plan_object_contract(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("int target_a, target_b; struct R { int *x, *y; };"
+           "static struct R *q = &(struct R){ .x = &target_a, .y = &target_b, .x = 0 };"
+           "static struct R *range[3] = { [0 ... 2] = &(struct R){ .x = &target_a, .y = &target_b, .x = 0 } };"
+           "static _Complex double double_braced = {{3}};"),
+        C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("compound-relocation-contract.c"), preprocess, analysis, target_native);
+    if (BUSTER_REQUIRE(arguments, lowered.program && !analysis.diagnostic_count && !lowered.diagnostic_count && lowered.canonical_ir_certified))
+    {
+        IrModule* module = lowered.program->modules;
+        u32 objects = 0;
+        u32 ranged = 0;
+        u32 complex = 0;
+        u64 pointer_size = lowered.program->data_layout.pointer.size;
+        for (u32 index = 0; index < module->global_count; index += 1)
+        {
+            IrGlobal* global = module->globals + index;
+            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            if (symbol && string_starts_with_sequence(symbol->name, S8(".L.compoundliteral.")))
+            {
+                objects += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.length == pointer_size * 2 &&
+                    global->relocation_count == 1);
+                if (global->relocation_count == 1)
+                {
+                    IrSymbol* target = ir_symbol_from_id(&lowered.program->symbols, global->relocations[0].symbol);
+                    BUSTER_TEST(arguments, target && string_equal(target->name, S8("target_b")) && global->relocations[0].offset == pointer_size);
+                }
+            }
+            if (symbol && string_equal(symbol->name, S8("range")))
+            {
+                ranged += 1;
+                BUSTER_TEST(arguments, global->relocation_count == 3);
+                for (u32 row = 0; row < global->relocation_count; row += 1)
+                    BUSTER_TEST(arguments, global->relocations[row].offset == (u64)row * pointer_size &&
+                        global->relocations[row].symbol.value == global->relocations[0].symbol.value);
+            }
+            if (symbol && string_equal(symbol->name, S8("double_braced")))
+            {
+                complex += 1;
+                f64 real = 3.0;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.length == sizeof(real) * 2);
+                if (global->bytes.length == sizeof(real) * 2)
+                {
+                    BUSTER_TEST(arguments, memcmp(global->bytes.pointer, &real, sizeof(real)) == 0);
+                    for (u32 byte = sizeof(real); byte < sizeof(real) * 2; byte += 1)
+                        BUSTER_TEST(arguments, !global->bytes.pointer[byte]);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, objects == 2 && ranged == 1 && complex == 1);
+    }
+    c_test_scratch_end(temporary);
+    struct { String8 source, message; u32 column; } const refusals[] = {
+        {S8("struct S { unsigned a:4, b:4; }; static struct S s = { .a=7, .b={} };"), S8("unsupported C global initializer for 's'")},
+        {S8("struct S { unsigned a:4, b:4; }; static struct S s = { .a=7, .b={3} };"), S8("unsupported C global initializer for 's'")},
+        {S8("struct S { int a, b; }; static struct S s = { .a=7, .b={} };"), S8("C IR lowering: cannot fold '{' in a static initializer")},
+        {S8("static int a[2] = { [0 ... 1] = {3} };"), S8("C IR lowering: initializer has more elements than the aggregate can hold")},
+        {S8("static int *p = &(int){};"), S8("C IR lowering: cannot fold '{' in a static initializer")},
+        {S8("static int a = {{3}};"), S8("C IR lowering: too many braces around scalar initializer"), 17},
+        {S8("static int a = {{{}}};"), S8("C IR lowering: too many braces around scalar initializer"), 17},
+        {S8("static int a = (int){{3}};"), S8("C IR lowering: too many braces around scalar initializer"), 22},
+        {S8("struct S { int a; }; static struct S s = { .a={{3}} };"), S8("C IR lowering: cannot fold '{' in a static initializer"), 47},
+        {S8("struct S { int a; }; static struct S s = { .a={} };"), S8("C IR lowering: cannot fold '{' in a static initializer"), 47},
+        {S8("static int *p = &(int){{3}};"), S8("C IR lowering: cannot fold '{' in a static initializer"), 23},
+        {S8("static int *p = &(int){{}};"), S8("C IR lowering: cannot fold '{' in a static initializer"), 23},
+        {S8("int f(void) { static int x = {{3}}; return x; }"), S8("in function 'f': could not lower static initializer for local 'x'"), 5},
+        {S8("int f(void) { static int x = (int){{}}; return x; }"), S8("in function 'f': could not lower static initializer for local 'x'"), 5},
+        {S8("static _Complex double z = {{}};"), S8("C IR lowering: cannot fold '{' in a static initializer"), 29},
+        {S8("static _Complex double z = {{{3}}};"), S8("C IR lowering: cannot fold '{' in a static initializer"), 29},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refusals); index += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        preprocess = c_ast_test_preprocess(temporary.arena, refusals[index].source, C_PREPROCESS_DIALECT_GNU17);
+        analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        lowered = c_lower_to_ir(temporary.arena, S8("static-brace-contract.c"), preprocess, analysis, target_native);
+        BUSTER_TEST(arguments, !analysis.diagnostic_count && !lowered.canonical_ir_certified && lowered.diagnostic_count == 1);
+        if (lowered.diagnostic_count == 1) BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, refusals[index].message);
+        if (lowered.diagnostic_count == 1 && refusals[index].column)
+            BUSTER_TEST(arguments, lowered.diagnostics[0].location.line == 1 && lowered.diagnostics[0].location.column == refusals[index].column);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // The facts semantic analysis retains for lowering (CAstFacts, GitHub #4062).
 // One function body and two file-scope initializers are analyzed with the
 // tree and a facts record, and once with the tree alone; the model must be
@@ -8409,6 +8500,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_plan_object_contract);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_call_builtin_facts);

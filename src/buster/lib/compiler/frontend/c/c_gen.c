@@ -52683,6 +52683,7 @@ struct CIrInitializerPlanTask
     bool failed;
     bool object;
     bool previous_literal_active;
+    bool silent_failure;
 };
 
 BUSTER_C_INTERNAL Arena* c_ir_initializer_plan_context_arena_create(CIntegerIrBuilder* builder, u32 capacity, u32 token);
@@ -52773,6 +52774,45 @@ BUSTER_C_INTERNAL CIrInitializerPlanStep c_ir_initializer_plan_task_step(CIntege
                 valid = c_ir_initializer_plan_selection(builder, arena, context, item, edges, capacity, &selection);
                 IrType* child = valid ? ir_type_from_id(&builder->program->types, selection.value_type) : 0;
                 valid = child && child->layout.resolved;
+                bool scalar_list = valid && !c_ir_initializer_type_is_aggregate(child) &&
+                    builder->syntax_tree->kinds[item.node] == C_AST_INITIALIZER_LIST;
+                u32 scalar_count = scalar_list ? c_ast_child_count(builder->syntax_tree, item.node) : 0;
+                if (scalar_list && scalar_count && selection.range_count)
+                {
+                    valid = c_ir_constant_initializer_fail(builder, S8("initializer has more elements than the aggregate can hold"),
+                        builder->syntax_tree->tokens[item.node] + 1);
+                }
+                else if (scalar_list && selection.value_field && selection.value_field->is_bit_field && !selection.range_count)
+                {
+                    // The old direct bit-field writer declined braces without
+                    // setting a message; its caller names the unsupported object.
+                    task->silent_failure = true;
+                    valid = false;
+                }
+                else if (scalar_list && scalar_count == 1 && builder->syntax_tree->kinds[item.node - 1] == C_AST_INITIALIZER_LIST)
+                {
+                    // A scalar leaf accepts one brace wrapper. An object or
+                    // aggregate leaf reports its original outer wrapper when
+                    // another list remains inside it.
+                    valid = c_ir_constant_initializer_fail(builder, S8("cannot fold '{' in a static initializer"),
+                        builder->syntax_tree->tokens[item.node]);
+                }
+                else if (scalar_list && !scalar_count && !selection.range_count)
+                {
+                    IrType* root = ir_type_from_id(&builder->program->types, context->root_type);
+                    bool top_scalar = context_count == 1 && !task->object && !item.path_plus_one &&
+                                      root && !c_ir_initializer_type_is_aggregate(root);
+                    bool ranged_scalar = context_count > 1 && root && !c_ir_initializer_type_is_aggregate(root) &&
+                        item.path_plus_one == context->base_path_plus_one &&
+                        contexts[context_count - 2].storage.pending_range.designator.range_count != 0;
+                    if (!top_scalar && !ranged_scalar)
+                    {
+                        u32 token = builder->syntax_tree->tokens[item.node];
+                        valid = c_ir_constant_initializer_fail(builder, string_format(builder->arena,
+                            S8("cannot fold '{S8}' in a static initializer"),
+                            c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token])), token);
+                    }
+                }
                 u32 value_node = c_ir_initializer_plan_value_node(builder->syntax_tree, item.node);
                 bool compound = valid && (item.flags & C_INITIALIZER_ITEM_VALUE) && c_ir_initializer_type_is_aggregate(child) &&
                                 value_node < builder->syntax_tree->node_count && builder->syntax_tree->kinds[value_node] == C_AST_COMPOUND_LITERAL;
@@ -52862,7 +52902,7 @@ BUSTER_C_INTERNAL CIrInitializerPlanStep c_ir_initializer_plan_task_step(CIntege
         task->context_count = context_count;
         task->failed = !valid && !waiting;
     }
-    if (!valid && !waiting && !builder->failure_message.length)
+    if (!valid && !waiting && !builder->failure_message.length && !(task && task->silent_failure))
         c_ir_constant_initializer_fail(builder, S8("could not emit retained initializer plan"), plan && plan->item_count ? plan->items[0].value_start : 0);
     return waiting ? C_IR_INITIALIZER_PLAN_WAIT : valid ? C_IR_INITIALIZER_PLAN_DONE : C_IR_INITIALIZER_PLAN_FAILED;
 }
@@ -52939,7 +52979,7 @@ BUSTER_C_INTERNAL bool c_ir_static_compound_literal_node_attempt(CIntegerIrBuild
                 .kind = IR_SYMBOL_DATA, .linkage = IR_LINKAGE_INTERNAL, .is_definition = true,
             });
             if (symbol.value != IR_ID_UNDERLYING_INVALID && ir_module_add_global(builder->arena, builder->module, (IrGlobal){
-                    .bytes = {.pointer = storage->bytes, .length = storage->byte_count}, .relocations = storage->relocations,
+                    .bytes = {.pointer = storage->bytes, .length = storage->byte_count}, .relocations = storage->relocation_index.published,
                     .symbol = symbol, .initializer_symbol = IR_SYMBOL_ID_INVALID, .type = task->object_type, .source = source,
                     .relocation_count = task->object_relocation_count, .alignment = literal->layout.alignment,
                     .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
@@ -58719,6 +58759,14 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
         u32 start = plan->item_count ? plan->items[0].value_start : builder->syntax_tree->tokens[node];
         builder->static_initializer_token_plus_one = start + 1;
         bool aggregate = c_ir_initializer_type_is_aggregate(type);
+        u32 scalar_node = builder->syntax_tree->kinds[node] == C_AST_COMPOUND_LITERAL ? node - 1 : node;
+        bool excessive_scalar_braces = !aggregate &&
+            builder->syntax_tree->kinds[scalar_node] == C_AST_INITIALIZER_LIST &&
+            c_ast_child_count(builder->syntax_tree, scalar_node) == 1 &&
+            builder->syntax_tree->kinds[scalar_node - 1] == C_AST_INITIALIZER_LIST;
+        if (excessive_scalar_braces && !builder->function)
+            c_ir_constant_initializer_fail(builder, S8("too many braces around scalar initializer"),
+                builder->syntax_tree->tokens[scalar_node - 1]);
         u32 value_node = c_ir_initializer_plan_value_node(builder->syntax_tree, plan->item_count == 1 ? plan->items[0].node : node);
         bool special = false;
         u32 begin = c_ast_subtree_begin(builder->syntax_tree, value_node);
@@ -58726,17 +58774,17 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             special = builder->syntax_tree->kinds[child] == C_AST_LABEL_ADDRESS;
         if (special && !builder->function)
             c_ir_constant_initializer_fail(builder, S8("a label address in static storage must belong to the defining function"), start);
-        bool empty = builder->syntax_tree->kinds[value_node] == C_AST_INITIALIZER_LIST && !c_ast_child_count(builder->syntax_tree, value_node);
+        bool empty = builder->syntax_tree->kinds[node] == C_AST_INITIALIZER_LIST && !c_ast_child_count(builder->syntax_tree, node);
         if (empty)
         {
             global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
             result = true;
         }
-        else if (!aggregate && !special && !c_ir_ext80_static_scalar_target(builder->target, type))
+        else if (!excessive_scalar_braces && !aggregate && !special && !c_ir_ext80_static_scalar_target(builder->target, type))
         {
             result = c_ir_global_constant_value_node(builder, declaration, type, value_node, global);
         }
-        if (!result && (aggregate || special || c_ir_ext80_static_scalar_target(builder->target, type)))
+        if (!result && !excessive_scalar_braces && (aggregate || special || c_ir_ext80_static_scalar_target(builder->target, type)))
         {
             IrTypeId flexible = c_ir_flexible_initializer_type(builder, node, global->type);
             if (flexible.value != global->type.value)
