@@ -28193,10 +28193,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     decoded.element_width == 1;
                 length = decoded.element_count;
             }
-            else if (builder->syntax_tree->kinds[argument_node] == C_AST_IDENTIFIER &&
-                     (string_equal(c_ir_source_spelling(&builder->preprocess, argument_start), S8("__func__")) ||
-                      string_equal(c_ir_source_spelling(&builder->preprocess, argument_start), S8("__FUNCTION__")) ||
-                      string_equal(c_ir_source_spelling(&builder->preprocess, argument_start), S8("__PRETTY_FUNCTION__"))))
+            else if (c_ir_identity_node_recipe(builder, argument_node) &&
+                     c_ir_identity_node_recipe(builder, argument_node)->form == C_AST_TYPE_RECIPE_FUNCTION_NAME)
             {
                 length = builder->function->name.length;
                 valid = true;
@@ -28560,9 +28558,12 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         if (selected->builtin_va_arg)
         {
             u32 argument_start = selected->open_index + 1;
-            u32 separator = c_ir_va_arg_type_separator(builder, argument_start, selected->close_index);
+            u32 separator = c_ir_call_argument_end(builder, selected, 0);
+            u32 type_name = c_ir_call_argument_node(builder, selected, 1);
+            bool typed = c_ir_call_argument_count(builder, selected) == 2 && type_name < builder->syntax_tree->node_count &&
+                         builder->syntax_tree->kinds[type_name] == C_AST_TYPE_NAME;
             IrValueId list = IR_VALUE_ID_INVALID;
-            IrTypeId result_type = separator < selected->close_index ? c_ir_type_name(builder, separator + 1, selected->close_index) : IR_TYPE_ID_INVALID;
+            IrTypeId result_type = typed ? c_ir_type_name_node(builder, type_name) : IR_TYPE_ID_INVALID;
             if (separator == argument_start || separator >= selected->close_index || result_type.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;

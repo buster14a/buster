@@ -2192,6 +2192,10 @@ byte.
   node kinds, and function-name objects use their semantic recipe. Explicit
   postfix-update nodes own their effects, without looking beyond a consumed
   place's source span for an update token.
+  Runtime `va_arg` takes its list boundary from the argument cache and its
+  result from the exact second-child `TYPE_NAME` query. The separator scanner
+  remains only in the temporary F2 query adapter. String-length function-name
+  shortcuts use the argument's semantic function-name recipe.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment
