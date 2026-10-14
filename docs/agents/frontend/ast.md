@@ -1856,8 +1856,8 @@ frame, or the postorder phase. The walk marks the nodes it hoisted in a bit
 array, private to lowering and offset from the core's first node. A nested
 core consumes a node hoisted by an enclosing core, and does not lower it
 again. Today `c_ir_prepared_control_expression_find` and
-`c_ir_prepared_call_find` record the same fact; calls now key it by their
-exact node, while the control-record migration owns its grouping identity.
+`c_ir_prepared_call_find` record the same fact: calls key it by their exact
+node, and control records by their node and wrapping level.
 
 **No recursion and no callbacks.** A nested core, a call argument or a lazy
 operand becomes a frame on the existing `CIrLowerMachine` with today's frame
@@ -2031,8 +2031,7 @@ reductions and the postfix probe are deleted.
   member name. A failed operator reports the token the walk visited last, as
   the token path reported the token whose arrival reduced it.
 - **Still token ranges** (the temporary adapter of part (c) and step 4):
-  - the place machine and compound-literal
-    frames, and the `EXPRESSION` frames the walk pushes;
+  - the place machine and compound-literal frames;
   - the `sizeof` operand's type and value queries;
   - the cast type (`c_ir_group_type_name`);
   - `__builtin_offsetof`'s designator.
@@ -2102,10 +2101,11 @@ byte.
   agreed, so `sizeof(sizeof(int) + 1.0f)` folded `size_t`'s 8. The
   classifier now splits at the tier of the binary operator the tree has at
   the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
-- **Still token ranges.** The place machine, the `sizeof`, compound-literal
-  frames take their subtree's token range, and the
-  prepared control records use structural group identities; the remaining
-  prepared call lookup still uses tokens.
+- **Still token ranges.** The place machine and the `sizeof` and
+  compound-literal frames take their subtree's token range. Prepared calls
+  use CALL node identity; prepared control records use node and wrapping
+  level. Statement-expression frames enter their compound child directly,
+  and `EXPRESSION` continuations retain their subtree identity.
 - **A unit the builder rejects.** The tree is mandatory: such a unit fails
   with the builder's diagnostics (`tree_rejections`), and lowering does not
   run. These are inputs the parser accepts: invalid `__builtin_offsetof`
