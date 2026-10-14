@@ -1,0 +1,49 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles:u'
+# Event count (approx.): 9338261963
+#
+# Overhead  Shared Object         Symbol                                                         IPC   [IPC Coverage]
+# ........  ....................  .............................................................  ....................
+#
+     3.23%  ide-base              [.] machine_select_canonical_function_x86_64                   -      -            
+     2.77%  ide-base              [.] c_type_parse_machine_run                                   -      -            
+     2.65%  ide-base              [.] machine_fast_placement_build_prepassed                     -      -            
+     2.52%  ide-base              [.] c_lower_to_ir_reserved_run                                 -      -            
+     2.37%  ide-base              [.] c_ir_ssa_finish_publish                                    -      -            
+     2.11%  ide-base              [.] codegen_machine_debug_index_build                          -      -            
+     1.98%  ide-base              [.] machine_fast_prepass_build                                 -      -            
+     1.82%  ide-base              [.] ir_validate_function_walk                                  -      -            
+     1.76%  ide-base              [.] c_parse_validate_lowering_constraints                      -      -            
+     1.73%  ide-base              [.] c_preprocess_run                                           -      -            
+     1.70%  ide-base              [.] ir_cfg_publish_instruction_rows                            -      -            
+     1.58%  ide-base              [.] c_ir_lower_body_advance                                    -      -            
+     1.33%  ide-base              [.] machine_encode_x86_64_into                                 -      -            
+     1.29%  ide-base              [.] c_ir_lower_expression_core_step                            -      -            
+     1.27%  ide-base              [.] ir_rewrite_compact                                         -      -            
+     1.21%  ide-base              [.] ir_source_region_position                                  -      -            
+     1.16%  ide-base              [.] c_preprocess_expand                                        -      -            
+     1.15%  ide-base              [.] c_parse_ast_run                                            -      -            
+     1.13%  ide-base              [.] ir_prepare_canonical_module                                -      -            
+     1.11%  ide-base              [.] ir_promote_function                                        -      -            
+     1.09%  ide-base              [.] c_lex_dispatch                                             -      -            
+     1.05%  ide-base              [.] machine_function_compact_virtual_registers                 -      -            
+     1.01%  ide-base              [.] c_parse_validate_const_assignments                         -      -            
+     0.98%  ide-base              [.] machine_x64_emit_exact_recipe                              -      -            
+     0.95%  ide-base              [.] codegen_record_machine_locations                           -      -            
+     0.90%  ide-base              [.] c_parse_type_layout_passes_run                             -      -            
+     0.87%  ide-base              [.] c_semantic_integer_literal_kind                            -      -            
+     0.82%  ide-base              [.] target_data_layout                                         -      -            
+     0.79%  ide-base              [.] c_symbol_intern                                            -      -            
+     0.77%  ide-base              [.] c_ir_ssa_finish                                            -      -            
+     0.75%  ide-base              [.] c_ir_lower_expression_step                                 -      -            
+     0.74%  ide-base              [.] c_parse_expression_leaf_without_cast                       -      -            
+     0.71%  ide-base              [.] c_ir_constant_initializer_bytes                            -      -            
+
+
+#
+# (Tip: For latency profiling, try: perf record/report --latency)
+#

@@ -2348,5 +2348,41 @@ class ConstantReusePairTest(unittest.TestCase):
             lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
                       "--output", os.path.join(temporary, "out"), "--constant-reuse-pair", "table"])
 
+
+class ProcessFloorPairTest(unittest.TestCase):
+    def test_fixed_cell_gives_a_the_x86_64_object_compile_and_b_the_cell_command(self):
+        for cell, command in lab.PROCESS_FLOOR_CELLS.items():
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(cell=cell):
+                root = os.path.abspath(temporary)
+                ide = os.path.join(root, "ide")
+                open(ide, "wb").close()
+                arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                             "sudo": False, "fresh_copy": True, "process_floor_pair": cell})()
+                labs = lab.compare_labs(arguments, root, 2, [])
+                self.assertEqual((labs["a"].extra, labs["b"].extra), ([], []))
+                self.assertEqual((labs["a"].compile, labs["b"].compile), (lab.PROCESS_FLOOR_OBJECT, command))
+                self.assertEqual(labs["a"].workload("OUT"), [ide, "cc", "-g0", "-c", "tiny.c", "-o", "OUT"])
+                self.assertEqual(labs["b"].writes_output, cell != "syntax-only")
+                self.assertEqual("-o" in labs["b"].workload("OUT"), cell != "syntax-only")
+                for key in ("a", "b"):
+                    self.assertTrue(labs[key].transcripts)
+                    self.assertEqual(labs[key].repo_root, root)
+                    self.assertEqual(labs[key].meta["config"]["process_floor_cell"], cell)
+                    self.assertNotIn("constant_reuse_cell", labs[key].meta["config"])
+        self.assertIn("-target", lab.PROCESS_FLOOR_CELLS["aarch64"])
+        self.assertEqual(lab.PROCESS_FLOOR_CELLS["aa"], lab.PROCESS_FLOOR_OBJECT)
+
+    def test_fixed_cell_rejects_request_flags_other_pairs_and_profile_steps(self):
+        for extra in (["--", "-O3"], ["--canonical-inline-pair"], ["--ast-pilot-pair", "object"],
+                      ["--constant-reuse-pair", "intern"], ["--profile-steps", "topdown"]):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as raised:
+                    lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                              "--output", os.path.join(temporary, "out"), "--process-floor-pair", "aa", *extra])
+                self.assertIn("accepts no", str(raised.exception.code))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
+            lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                      "--output", os.path.join(temporary, "out"), "--process-floor-pair", "x86"])
+
 if __name__ == "__main__":
     unittest.main()

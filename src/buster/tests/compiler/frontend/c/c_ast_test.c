@@ -28,7 +28,9 @@
 // machine on shadowing shapes; c_ast_test_split runs the tree split on one
 // shape per fallback reason in every layout; c_ast_test_declaration_hints holds
 // the statement plan's declaration hints (storage classes, the auto precheck)
-// to the walker.
+// to the walker. c_ast_test_spans checks the retained token spans and their
+// range lookup, which the corpus also holds to every node
+// (c_ast_test_spans_consistent).
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -1307,13 +1309,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_uninterned(UnitTestArguments* argu
             CPreprocessResult changed = preprocess;
             changed.tokens = stripped;
             CAstResult other = c_ast_build(temporary.arena, changed, (CAstOptions){0});
-            BUSTER_TEST(arguments, reference.complete && other.complete);
-            if (reference.complete && other.complete)
+            // A hand-built stream with no symbol table at all: the builder
+            // interns into a table of its own (c_symbol_table_standalone).
+            CPreprocessResult tableless = changed;
+            tableless.symbols = 0;
+            CAstResult standalone = c_ast_build(temporary.arena, tableless, (CAstOptions){0});
+            BUSTER_TEST(arguments, reference.complete && other.complete && standalone.complete);
+            if (reference.complete && other.complete && standalone.complete)
             {
                 BUSTER_TEST(arguments, c_ast_validate(&other.ast) == C_AST_NODE_INVALID);
-                BUSTER_STRING_TEST(arguments, c_ast_dump(temporary.arena, &reference.ast, preprocess, reference.ast.root),
-                                   c_ast_dump(temporary.arena, &other.ast, changed, other.ast.root));
+                BUSTER_TEST(arguments, c_ast_validate(&standalone.ast) == C_AST_NODE_INVALID);
+                String8 expected = c_ast_dump(temporary.arena, &reference.ast, preprocess, reference.ast.root);
+                BUSTER_STRING_TEST(arguments, expected, c_ast_dump(temporary.arena, &other.ast, changed, other.ast.root));
+                BUSTER_STRING_TEST(arguments, expected, c_ast_dump(temporary.arena, &standalone.ast, tableless, standalone.ast.root));
             }
+            c_ast_release(&standalone.ast);
             c_ast_release(&other.ast);
             c_ast_release(&reference.ast);
         }
@@ -1831,6 +1841,74 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisRes
         }
     }
     return difference;
+}
+
+// The matching-delimiter index c_ast_spans_build reads (closer + 1 at each
+// opener, 0 elsewhere), built with a stack as CPositionIndex builds it. A
+// stream whose delimiters do not match has none.
+BUSTER_GLOBAL_LOCAL u32* c_ast_test_matches(Arena* arena, CPreprocessResult preprocess)
+{
+    u32 count = (u32)preprocess.token_count;
+    u32* matches = arena_allocate_zeroed(arena, u32, (u64)count + 1);
+    u32* stack = arena_allocate(arena, u32, (u64)count + 1);
+    u32 depth = 0;
+    bool matched = true;
+    for (u32 index = 0; index < count && matched; index += 1)
+    {
+        CToken const* token = &preprocess.tokens[index];
+        bool open = token->punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+                    token->punctuator == C_PUNCTUATOR_LEFT_BRACE;
+        bool close = token->punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || token->punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                     token->punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+        if (open)
+        {
+            stack[depth] = index;
+            depth += 1;
+        }
+        else if (close)
+        {
+            matched = depth > 0;
+            if (matched)
+            {
+                depth -= 1;
+                matches[stack[depth]] = index + 1;
+            }
+        }
+    }
+    return matched && !depth ? matches : 0;
+}
+
+// The spellings of [first, end), one space apart.
+BUSTER_GLOBAL_LOCAL String8 c_ast_test_span_text(Arena* arena, CPreprocessResult preprocess, u32 first, u32 end)
+{
+    String8 text = {0};
+    for (u32 token = first; token < end; token += 1)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]);
+        text = text.length ? string_format(arena, S8("{S8} {S8}"), text, spelling) : spelling;
+    }
+    return text;
+}
+
+// Every spanned node of a built tree holds its anchor token, and the span
+// maps back to a node with the same span.
+BUSTER_GLOBAL_LOCAL bool c_ast_test_spans_consistent(CAst const* ast, CAstSpans const* spans, CPreprocessResult preprocess, u32 const* matches)
+{
+    bool consistent = spans->node_count == ast->node_count;
+    for (u32 node = 0; node < ast->node_count && consistent; node += 1)
+    {
+        u32 first = spans->first[node];
+        u32 end = spans->end[node];
+        if (first != C_AST_SPAN_NONE)
+        {
+            u32 token = ast->tokens[node];
+            // A label address is anchored at its label, after the `&&`.
+            consistent = token >= first && token < end;
+            u32 found = c_ast_spans_locate(spans, preprocess.tokens, matches, first, end);
+            consistent = consistent && found != C_AST_NODE_INVALID && spans->first[found] == first && spans->end[found] == end;
+        }
+    }
+    return consistent;
 }
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -2636,6 +2714,13 @@ struct CAstCorpusTally
     // tree, and those of them compared with the machine in verify mode.
     u64 member_answers;
     u64 member_compared;
+    // The retained facts (CAstFacts, GitHub #4062) of the analysis with the
+    // tree: fact candidates, those left without a type, and published rows
+    // found past the type table.
+    u64 fact_candidates;
+    u64 fact_missing;
+    u64 fact_stale;
+    u64 fact_unaccounted;
 };
 
 // c_parse_ast_from_tree on one input whose tree is complete, held to
@@ -2728,7 +2813,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         typed_syntax.ast_statement_statistics = &statements;
         typed_syntax.ast_specifier_statistics = &specifiers;
         typed_syntax.type_interning = true;
+        // The analysis with the tree also publishes the retained facts, which
+        // must leave the model as the machine alone builds it (below).
+        CAstFacts facts = {0};
+        typed_syntax.ast_facts = c_ast_facts_create(&facts, ast) ? &facts : 0;
         CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
+        CAstFactStatistics fact_counts = facts.statistics;
+        c_ast_facts_release(&facts);
+        u64 fact_gaps = 0;
+        for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+        {
+            fact_gaps += fact_counts.gaps[gap];
+        }
+        tally->fact_candidates += fact_counts.candidates;
+        tally->fact_missing += fact_gaps;
+        tally->fact_stale += fact_counts.stale;
+        tally->fact_unaccounted += fact_counts.tree + fact_counts.machine + fact_counts.completed + fact_gaps != fact_counts.candidates;
         String8 difference = c_ast_corpus_analyses_differ(arguments->arena, &plain, &typed);
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
         // The body binder followed the tree's statement plans in the second
@@ -2863,6 +2963,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
         if (built.complete)
         {
             BUSTER_TEST_RAW(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID, label);
+            u32* matches = c_ast_test_matches(temporary.arena, preprocess);
+            CAstSpans spans = {0};
+            if (matches && c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, matches, &spans))
+            {
+                BUSTER_TEST_RAW(arguments, c_ast_test_spans_consistent(&built.ast, &spans, preprocess, matches),
+                                string_format(temporary.arena, S8("{S8}: token spans"), label));
+            }
             c_ast_test_merge(&result, c_ast_corpus_split(arguments, temporary.arena, label, preprocess, &built.ast, &syntax, tally));
             if (!syntax.diagnostic_count)
             {
@@ -3283,6 +3390,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
 #endif
     // Every body of the corpus follows its plan; none is left to the token walk.
     BUSTER_TEST(arguments, tally.statement_fallbacks == 0 && tally.statement_bodies);
+    // Every fact candidate is published or counted as a gap once, and no
+    // published row outlives the type table (GitHub #4062).
+    BUSTER_TEST(arguments, tally.fact_candidates && tally.fact_stale == 0 && tally.fact_unaccounted == 0 && tally.fact_missing < tally.fact_candidates);
     // No corpus body's extent table is refused.
     BUSTER_TEST(arguments, tally.extent_refused == 0 && tally.extent_walked[C_AST_EXTENT_FALLBACK_INPUT] == 0 &&
                                tally.extent_walked[C_AST_EXTENT_FALLBACK_ANCHOR] == 0);
@@ -3693,6 +3803,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
         c_ast_test_expect(arguments, S8("__builtin_va_list ap;"), S8("(translation_unit (declaration (decl_specifiers (specifier_word __builtin_va_list)) (init_declarator (declarator_name ap))))"));
         c_ast_test_expect(arguments, S8("_Float16 h;"), S8("(translation_unit (declaration (decl_specifiers (specifier_word _Float16)) (init_declarator (declarator_name h))))"));
         c_ast_test_expect(arguments, S8("__bf16 b;"), S8("(translation_unit (declaration (decl_specifiers (specifier_word __bf16)) (init_declarator (declarator_name b))))"));
+        // __fp16 is a type word (Clang's stock f16cintrin.h typedefs vectors of it).
+        c_ast_test_expect(arguments, S8("__fp16 h;"), S8("(translation_unit (declaration (decl_specifiers (specifier_word __fp16)) (init_declarator (declarator_name h))))"));
         c_ast_test_expect(arguments, S8("inline int f(void);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word inline) (specifier_word int)) (init_declarator (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))))))"));
         c_ast_test_expect(arguments, S8("__inline__ int f(void);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word inline) (specifier_word int)) (init_declarator (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))))))"));
         c_ast_test_expect(arguments, S8("_Noreturn void f(void);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word _Noreturn) (specifier_word void)) (init_declarator (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))))))"));
@@ -5491,15 +5603,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* argumen
         c_ast_release(&built.ast);
         c_test_scratch_end(temporary);
     }
-    // Without a tree lowering keeps no table and counts nothing.
+    // Without a caller's tree lowering builds the unit's own (GitHub #3102
+    // step 1), so the table answers just the same.
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(int a) { if (a) return 1; return 0; }"), C_PREPROCESS_DIALECT_GNU17);
         CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
         CAstExtentStatistics statistics = {0};
+        CAstLowerStatistics lower = {0};
         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("extent, no tree"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){.syntax_tree_extent_statistics = &statistics});
-        BUSTER_TEST(arguments, lowered.program && statistics.bodies == 0 && statistics.answers == 0);
+                                                            (CIRLowerOptions){.syntax_tree_extent_statistics = &statistics,
+                                                                              .ast_lower_statistics = &lower});
+        BUSTER_TEST_RAW(arguments,
+                        lowered.program && statistics.bodies == 1 && lower.trees_built == 1 && lower.tree_rejections == 0 && lower.tree_nodes != 0 &&
+                            lower.tree_bytes != 0 && lower.span_nodes != 0 && lower.span_bytes != 0,
+                        string_format(temporary.arena, S8("extent, no tree: program={u32} bodies={u64} trees={u64} rejections={u64} nodes={u64} spans={u64}"),
+                                      (u32)(lowered.program != 0), statistics.bodies, lower.trees_built, lower.tree_rejections, lower.tree_nodes,
+                                      lower.span_nodes));
         BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_NONE), S8("none")));
         BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_INPUT), S8("input")));
         BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_ANCHOR), S8("anchor")));
@@ -6133,6 +6253,176 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_members(UnitTestArguments* argumen
     return result;
 }
 
+// Token spans (c_ast_spans_build, GitHub #3102 step 1): an operator's span
+// reaches over the parentheses that wrap its operands, a call and a subscript
+// end at their closer, and c_ast_spans_locate finds a node from its span with
+// or without the parentheses that wrap it, but not from a range that is no
+// node's span.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+                                                          S8("int f(int, int); int g[4];\n"
+                                                             "void h(int c, int d) { (void)((c + d) * f(c, d) + g[2]--); }\n"),
+                                                          C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    u32* matches = c_ast_test_matches(temporary.arena, preprocess);
+    CAstSpans spans = {0};
+    if (BUSTER_REQUIRE(arguments, built.complete && matches) &&
+        BUSTER_REQUIRE(arguments, c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, matches, &spans)))
+    {
+        CAst const* ast = &built.ast;
+        BUSTER_TEST(arguments, c_ast_test_spans_consistent(ast, &spans, preprocess, matches));
+        BUSTER_TEST(arguments, spans.retained_bytes == (u64)ast->node_count * 12 + (preprocess.token_count + 1) * 4);
+        u32 multiply = c_ast_test_find_kind(ast, C_AST_MULTIPLY);
+        u32 decrement = c_ast_test_find_kind(ast, C_AST_POST_DECREMENT);
+        u32 cast = c_ast_test_find_kind(ast, C_AST_CAST);
+        u32 add = c_ast_test_find_kind(ast, C_AST_ADD);
+        if (BUSTER_REQUIRE(arguments, multiply != C_AST_NODE_INVALID && decrement != C_AST_NODE_INVALID && cast != C_AST_NODE_INVALID &&
+                                          add != C_AST_NODE_INVALID))
+        {
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[multiply], spans.end[multiply]),
+                               S8("( c + d ) * f ( c , d )"));
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[decrement], spans.end[decrement]),
+                               S8("g [ 2 ] --"));
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[cast], spans.end[cast]),
+                               S8("( void ) ( ( c + d ) * f ( c , d ) + g [ 2 ] -- )"));
+            // The inner `c + d`, found from its own tokens and from its
+            // parenthesized form.
+            BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, preprocess, spans.first[add], spans.end[add]), S8("c + d"));
+            BUSTER_TEST(arguments, c_ast_spans_locate(&spans, preprocess.tokens, matches, spans.first[add], spans.end[add]) == add);
+            BUSTER_TEST(arguments, c_ast_spans_locate(&spans, preprocess.tokens, matches, spans.first[add] - 1, spans.end[add] + 1) == add);
+            // `d ) * f` is no node's span.
+            BUSTER_TEST(arguments, c_ast_spans_locate(&spans, preprocess.tokens, matches, spans.end[add] - 1, spans.end[add] + 3) ==
+                                       C_AST_NODE_INVALID);
+            BUSTER_TEST(arguments, spans.first[ast->root] == C_AST_SPAN_NONE);
+        }
+    }
+    // Without a delimiter index there are no spans.
+    CAstSpans none = {.spanned = 1};
+    BUSTER_TEST(arguments, !c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, 0, &none) &&
+                               none.spanned == 0 && !none.first);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// The facts semantic analysis retains for lowering (CAstFacts, GitHub #4062).
+// One function body and two file-scope initializers are analyzed with the
+// tree and a facts record, and once with the tree alone; the model must be
+// the same, since publication keeps nothing the machine appended. The
+// columns then hold, among others: a bit-field member's width, an
+// identifier's entity, a string literal in structural form (its element row
+// and its length with the terminator), the type of a `[]` over a string
+// literal whose own run appended the literal's row, and the literals of an
+// initializer no query typed. `__func__` and a builtin's callee name are
+// gaps: the machine types them to nothing. Every candidate is accounted for
+// once, and no published row is past the type table.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8("struct S { int a : 3; int b; };\n"
+                        "char const* names[] = { \"one\", \"three\" };\n"
+                        "int table[] = { 1, 2, 3 };\n"
+                        "int f(struct S* s, int i)\n"
+                        "{\n"
+                        "    int x = s->a + s->b;\n"
+                        "    x += (int)sizeof(\"text\");\n"
+                        "    x += \"abc\"[i];\n"
+                        "    x += __builtin_expect(i, 0);\n"
+                        "    char const* name = __func__;\n"
+                        "    return x + table[i] + (name != 0);\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    bool ready = BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete) &&
+                 BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast));
+    if (ready)
+    {
+        CAst const* ast = &built.ast;
+        BUSTER_TEST(arguments, facts.node_count == ast->node_count && facts.statistics.retained_bytes >= (u64)ast->node_count * 9);
+        CParserResult plain_syntax = c_parse_ast(arena, preprocess);
+        plain_syntax.ast = ast;
+        plain_syntax.type_interning = true;
+        CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, plain_syntax);
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        syntax.ast = ast;
+        syntax.type_interning = true;
+        syntax.ast_facts = &facts;
+        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+        String8 difference = c_ast_corpus_analyses_differ(arena, &plain, &analysis);
+        difference = difference.length ? difference : c_ast_corpus_model_differ(arena, &plain, &analysis);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+        CAstFactStatistics statistics = facts.statistics;
+        u64 gaps = 0;
+        for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+        {
+            gaps += statistics.gaps[gap];
+        }
+        BUSTER_TEST(arguments, statistics.regions == 3 && statistics.candidates);
+        BUSTER_TEST(arguments, statistics.tree + statistics.machine + statistics.completed + gaps == statistics.candidates);
+        BUSTER_TEST(arguments, statistics.stale == 0 && statistics.bit_fields == 1 && statistics.strings == 4 && statistics.bound);
+        BUSTER_TEST(arguments, statistics.gaps[C_AST_FACT_GAP_INVALID] >= 2 && statistics.gaps[C_AST_FACT_GAP_APPENDS] == 0);
+        u32 checked = 0;
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            u32 flags = facts.flags[node];
+            u32 type = facts.types[node];
+            u32 kind = ast->kinds[node];
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[node]]);
+            BUSTER_TEST(arguments, !(flags & C_AST_FACT_TYPED) || type < analysis.type_count);
+            CTypeKind type_kind = (flags & C_AST_FACT_TYPED) && type < analysis.type_count ? analysis.types[type].kind : C_TYPE_COUNT;
+            if (kind == C_AST_STRING && string_equal(spelling, S8("\"abc\"")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_STRING) && type_kind == C_TYPE_CHAR && facts.payloads[node] == 4);
+                checked += 1;
+            }
+            if (kind == C_AST_INDEX && (flags & C_AST_FACT_EXPRESSION) && c_ast_subtree_begin(ast, node) + 1 < node &&
+                ast->kinds[c_ast_subtree_begin(ast, node)] == C_AST_STRING)
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_TYPED) && type_kind == C_TYPE_CHAR);
+                checked += 1;
+            }
+            if (kind == C_AST_MEMBER_ARROW && (flags & C_AST_FACT_BIT_FIELD))
+            {
+                BUSTER_TEST(arguments, facts.payloads[node] == 3 && type_kind == C_TYPE_INT);
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("s")) && (flags & C_AST_FACT_EXPRESSION))
+            {
+                u32 entity = facts.payloads[node];
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_BOUND) && entity < analysis.entity_count &&
+                                           analysis.entities[entity].kind == C_ENTITY_PARAMETER && type_kind == C_TYPE_POINTER);
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("__func__")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && !(flags & C_AST_FACT_TYPED));
+                checked += 1;
+            }
+            if (kind == C_AST_NUMBER && string_equal(spelling, S8("2")))
+            {
+                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && type_kind == C_TYPE_INT && !(flags & C_AST_FACT_MACHINE));
+                checked += 1;
+            }
+        }
+        // "abc", its `[]`, s->a, the two uses of `s`, __func__ and the 2 of `table`.
+        BUSTER_TEST(arguments, checked == 7);
+        c_ast_facts_release(&facts);
+        c_ast_facts_release(&facts);
+        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.statistics.stale == 0);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6149,6 +6439,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_failures);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_tables);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_navigation);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_spans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_validator);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_attribute_slots);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_options_and_statistics);
@@ -6164,6 +6455,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);

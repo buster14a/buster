@@ -69,6 +69,8 @@
 //   c_ast_build, c_ast_release                   setup, the entry point, ownership
 //   c_ast_finalize_layout                        HYBRID and EXPLICIT slices
 //   c_ast_child_count .. c_ast_walk_next         accessors and traversal
+//   c_ast_span_rule, c_ast_spans_build,
+//   c_ast_spans_locate                           token spans and range lookup
 //   c_ast_validate, c_ast_dump                   checker and S-expression dump
 
 #include "c_internal.h"
@@ -159,7 +161,7 @@ struct CAstWordSpelling
 
 // Every spelling the existing frontend's keyword predicates accept
 // (c_declaration_keyword_for_dialect, c_parse_type_word_for_dialect,
-// c_parse_type_qualifier_word, c_parse_alignof_word) with the same dialect
+// c_parse_type_qualifier_word, C_ALIGNOF_WORDS) with the same dialect
 // gates, plus the statement and expression words the syntax steers on. The
 // table is searched by spelling only for the symbols the unit's table already
 // holds (the build) and for tokens the intern pass never saw (the slow path).
@@ -184,6 +186,9 @@ BUSTER_GLOBAL_LOCAL CAstWordSpelling const c_ast_word_spellings[] = {
     C_AST_W("__int128", INT128, ALWAYS),
     C_AST_W("_Float16", FLOAT16, ALWAYS),
     C_AST_W("__bf16", BF16, ALWAYS),
+    // ARM's storage-only half, distinct from _Float16 (no arithmetic, its
+    // own type identity); the parser's type-word table names it too.
+    C_AST_W("__fp16", FP16, ALWAYS),
     // GNU and Clang's builtin binary128 word. `_Float128`, `_Float64x` and
     // `_Float128x` stay identifiers: glibc's <bits/floatn.h> typedefs them
     // for the compiler identity this preprocessor reports.
@@ -299,6 +304,7 @@ BUSTER_GLOBAL_LOCAL u8 const c_ast_info_flags[256] = {
     [C_AST_WORD_INT128] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_FLOAT16] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_BF16] = C_AST_CLASS_TYPE_WORD,
+    [C_AST_WORD_FP16] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_FLOAT128] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_BUILTIN_VA_LIST] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_AUTO_TYPE] = C_AST_CLASS_TYPE_WORD,
@@ -350,6 +356,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_ast_word_names[C_AST_WORD_COUNT] = {
     [C_AST_WORD_INT128] = S8_INITIALIZER("__int128"),
     [C_AST_WORD_FLOAT16] = S8_INITIALIZER("_Float16"),
     [C_AST_WORD_BF16] = S8_INITIALIZER("__bf16"),
+    [C_AST_WORD_FP16] = S8_INITIALIZER("__fp16"),
     [C_AST_WORD_FLOAT128] = S8_INITIALIZER("__float128"),
     [C_AST_WORD_BUILTIN_VA_LIST] = S8_INITIALIZER("__builtin_va_list"),
     [C_AST_WORD_AUTO_TYPE] = S8_INITIALIZER("__auto_type"),
@@ -6016,16 +6023,17 @@ BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessRes
     builder->dialect = preprocess.dialect;
     builder->gnu = c_preprocess_dialect_is_gnu(preprocess.dialect);
     builder->c23 = c_preprocess_dialect_is_c23(preprocess.dialect);
-    builder->symbols = preprocess.symbols;
+    // A hand-built stream carries no symbol table and no interned tokens.
+    // The builder then interns every name into a table of its own in the
+    // phase arena: the tree's symbols are that table's ids, which no
+    // consumer of such a stream compares with another table's.
+    builder->symbols = preprocess.symbols ? preprocess.symbols : c_symbol_table_standalone(builder->phase);
+    preprocess.symbols = builder->symbols;
     builder->eof_token = (CToken){.kind = C_TOKEN_END_OF_FILE};
     builder->ret_name_token = C_AST_NODE_INVALID;
     if (preprocess.token_count >= C_AST_NODE_LIMIT)
     {
         c_ast_fail(builder, 0, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("the token stream is too long for a syntax tree"));
-    }
-    else if (!preprocess.symbols)
-    {
-        c_ast_fail(builder, 0, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("the syntax tree builder needs the preprocessing symbol table"));
     }
     else
     {
@@ -6432,6 +6440,223 @@ CAstWalkEvent c_ast_walk_next(CAstWalk* walk, u32* node_out)
         }
     }
     return result;
+}
+
+// ---- token spans ----------------------------------------------------------
+
+// The closer of the delimiter opening at `open`, or C_AST_SPAN_NONE.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_span_match(CAstSpanInput const* input, u32 open)
+{
+    u32 close = open < input->token_total ? input->matches_plus_one[open] - 1 : C_AST_SPAN_NONE;
+    return close > open && close != C_AST_SPAN_NONE ? close : C_AST_SPAN_NONE;
+}
+
+// The first child of an interior node: the oldest subtree tiling its interval.
+BUSTER_GLOBAL_LOCAL u32 c_ast_span_first_child(CAst const* ast, u32 node)
+{
+    u32 begin = c_ast_subtree_begin(ast, node);
+    u32 child = node - 1;
+    while (c_ast_subtree_begin(ast, child) > begin)
+    {
+        child = c_ast_subtree_begin(ast, child) - 1;
+    }
+    return child;
+}
+
+void c_ast_span_expand(CAstSpanInput const* input, u32 relative, u32* first_out, u32* end_out)
+{
+    u32 first = input->first[relative];
+    u32 end = input->end[relative];
+    if (first != C_AST_SPAN_NONE)
+    {
+        while (first > 0 && c_token_is_punctuator(&input->tokens[first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_ast_span_match(input, first - 1) == end)
+        {
+            first -= 1;
+            end += 1;
+        }
+    }
+    *first_out = first;
+    *end_out = end;
+}
+
+bool c_ast_span_rule(CAstSpanInput const* input, u32 node, u32* first_out, u32* end_out)
+{
+    CAst const* ast = input->ast;
+    u32 kind = ast->kinds[node];
+    u32 token = ast->tokens[node];
+    u32 relative = node - input->base;
+    u32 first = C_AST_SPAN_NONE;
+    u32 end = C_AST_SPAN_NONE;
+    switch (kind)
+    {
+    case C_AST_IDENTIFIER:
+    case C_AST_NUMBER:
+    case C_AST_CHARACTER:
+    case C_AST_BOOLEAN_CONSTANT:
+    case C_AST_NULLPTR:
+    {
+        first = token;
+        end = token + 1;
+    }
+    break;
+    case C_AST_STRING:
+    {
+        first = token;
+        end = token + ast->data[node];
+    }
+    break;
+    case C_AST_LABEL_ADDRESS:
+    {
+        first = token ? token - 1 : C_AST_SPAN_NONE;
+        end = token + 1;
+    }
+    break;
+    case C_AST_STATEMENT_EXPRESSION:
+    case C_AST_INITIALIZER_LIST:
+    {
+        u32 close = c_ast_span_match(input, token);
+        first = close != C_AST_SPAN_NONE ? token : C_AST_SPAN_NONE;
+        end = close != C_AST_SPAN_NONE ? close + 1 : C_AST_SPAN_NONE;
+    }
+    break;
+    case C_AST_GENERIC_SELECTION:
+    case C_AST_SIZEOF_TYPE:
+    case C_AST_ALIGNOF_TYPE:
+    {
+        u32 close = c_ast_span_match(input, token + 1);
+        first = close != C_AST_SPAN_NONE ? token : C_AST_SPAN_NONE;
+        end = close != C_AST_SPAN_NONE ? close + 1 : C_AST_SPAN_NONE;
+    }
+    break;
+    case C_AST_CALL:
+    case C_AST_INDEX:
+    {
+        u32 callee = c_ast_span_first_child(ast, node);
+        u32 expanded_first = C_AST_SPAN_NONE;
+        u32 expanded_end = C_AST_SPAN_NONE;
+        c_ast_span_expand(input, callee - input->base, &expanded_first, &expanded_end);
+        u32 close = c_ast_span_match(input, token);
+        if (expanded_first != C_AST_SPAN_NONE && close != C_AST_SPAN_NONE)
+        {
+            first = expanded_first;
+            end = close + 1;
+        }
+    }
+    break;
+    case C_AST_MEMBER:
+    case C_AST_MEMBER_ARROW:
+    case C_AST_POST_INCREMENT:
+    case C_AST_POST_DECREMENT:
+    {
+        u32 expanded_first = C_AST_SPAN_NONE;
+        u32 expanded_end = C_AST_SPAN_NONE;
+        c_ast_span_expand(input, relative - 1, &expanded_first, &expanded_end);
+        if (expanded_first != C_AST_SPAN_NONE)
+        {
+            first = expanded_first;
+            end = token + 1;
+        }
+    }
+    break;
+    case C_AST_COMPOUND_LITERAL:
+    {
+        u32 close = c_ast_span_match(input, ast->tokens[node - 1]);
+        first = close != C_AST_SPAN_NONE ? token : C_AST_SPAN_NONE;
+        end = close != C_AST_SPAN_NONE ? close + 1 : C_AST_SPAN_NONE;
+    }
+    break;
+    default:
+    {
+        if (kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST)
+        {
+            u32 expanded_first = C_AST_SPAN_NONE;
+            u32 expanded_end = C_AST_SPAN_NONE;
+            c_ast_span_expand(input, relative - 1, &expanded_first, &expanded_end);
+            if (expanded_first != C_AST_SPAN_NONE)
+            {
+                first = token;
+                end = expanded_end;
+            }
+        }
+        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
+        {
+            u32 leftmost = c_ast_span_first_child(ast, node);
+            u32 left_first = C_AST_SPAN_NONE;
+            u32 left_end = C_AST_SPAN_NONE;
+            u32 right_first = C_AST_SPAN_NONE;
+            u32 right_end = C_AST_SPAN_NONE;
+            c_ast_span_expand(input, leftmost - input->base, &left_first, &left_end);
+            c_ast_span_expand(input, relative - 1, &right_first, &right_end);
+            if (left_first != C_AST_SPAN_NONE && right_end != C_AST_SPAN_NONE)
+            {
+                first = left_first;
+                end = right_end;
+            }
+        }
+    }
+    break;
+    }
+    bool valid = first != C_AST_SPAN_NONE && end != C_AST_SPAN_NONE && first < end && end <= input->token_total;
+    *first_out = valid ? first : C_AST_SPAN_NONE;
+    *end_out = valid ? end : C_AST_SPAN_NONE;
+    return valid;
+}
+
+bool c_ast_spans_build(Arena* arena, CAst const* ast, CToken const* tokens, u32 token_total, u32 const* matches_plus_one, CAstSpans* spans)
+{
+    *spans = (CAstSpans){0};
+    bool built = ast && ast->node_count && tokens && matches_plus_one && arena;
+    if (built)
+    {
+        u32 count = ast->node_count;
+        spans->first = arena_allocate(arena, u32, count);
+        spans->end = arena_allocate(arena, u32, count);
+        spans->link = arena_allocate(arena, u32, count);
+        spans->start_head = arena_allocate_zeroed(arena, u32, (u64)token_total + 1);
+        spans->node_count = count;
+        spans->token_total = token_total;
+        spans->retained_bytes = (u64)count * sizeof(u32) * 3 + ((u64)token_total + 1) * sizeof(u32);
+        CAstSpanInput input = {.ast = ast, .tokens = tokens, .matches_plus_one = matches_plus_one, .first = spans->first, .end = spans->end,
+                               .token_total = token_total};
+        u32 spanned = 0;
+        for (u32 node = 0; node < count; node += 1)
+        {
+            u32 first = C_AST_SPAN_NONE;
+            u32 end = C_AST_SPAN_NONE;
+            bool has = c_ast_span_rule(&input, node, &first, &end);
+            spans->first[node] = first;
+            spans->end[node] = end;
+            if (has)
+            {
+                spans->link[node] = spans->start_head[first];
+                spans->start_head[first] = node + 1;
+                spanned += 1;
+            }
+        }
+        spans->spanned = spanned;
+    }
+    return built;
+}
+
+u32 c_ast_spans_locate(CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u32 start, u32 end)
+{
+    u32 node = C_AST_NODE_INVALID;
+    bool searching = spans->start_head && start < end && end <= spans->token_total;
+    while (searching)
+    {
+        u32 hit = spans->start_head[start];
+        while (hit && node == C_AST_NODE_INVALID)
+        {
+            node = spans->end[hit - 1] == end ? hit - 1 : C_AST_NODE_INVALID;
+            hit = node == C_AST_NODE_INVALID ? spans->link[hit - 1] : 0;
+        }
+        searching = node == C_AST_NODE_INVALID && end > start + 2 && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    matches_plus_one[start] == end;
+        start += searching ? 1 : 0;
+        end -= searching ? 1 : 0;
+    }
+    return node;
 }
 
 // ---- validation -----------------------------------------------------------

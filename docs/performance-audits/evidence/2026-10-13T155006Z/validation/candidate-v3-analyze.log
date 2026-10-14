@@ -1,0 +1,19 @@
+[1/1] Running clang --analyze
+ANALYZE_DISPATCH ordinal=0 shard=2
+ANALYZE_DISPATCH ordinal=1 shard=7
+ANALYZE_SHARD shard=2 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=3
+ANALYZE_SHARD shard=3 units=4 elapsed_us=17101589 peak_child_rss_bytes=196849664 status=pass
+ANALYZE_DISPATCH ordinal=3 shard=0
+ANALYZE_SHARD shard=0 units=4 elapsed_us=16086072 peak_child_rss_bytes=144896000 status=pass
+ANALYZE_DISPATCH ordinal=4 shard=6
+ANALYZE_SHARD shard=6 units=1 elapsed_us=10974781 peak_child_rss_bytes=188796928 status=pass
+ANALYZE_DISPATCH ordinal=5 shard=5
+ANALYZE_SHARD shard=5 units=2 elapsed_us=69345 peak_child_rss_bytes=74076160 status=pass
+ANALYZE_DISPATCH ordinal=6 shard=1
+ANALYZE_SHARD shard=1 units=4 elapsed_us=2329772 peak_child_rss_bytes=204509184 status=pass
+ANALYZE_DISPATCH ordinal=7 shard=4
+ANALYZE_SHARD shard=4 units=2 elapsed_us=1886457 peak_child_rss_bytes=175951872 status=pass
+ANALYZE_SHARD shard=7 units=2 elapsed_us=64444791 peak_child_rss_bytes=1227132928 status=pass
+ANALYZE_AGGREGATE eligible=19 checked=19 excluded_config_or_language=188 failures=0 shards=8 peak_child_rss_bytes=1227132928 status=pass
+ANALYZE_RUN elapsed_us=64737507 peak_pending_workers=2 jobs=2 samples=2538 peak_live_processes=5 sampled_peak_tree_rss_bytes=1448538112 process_tree_status=complete process_tree_reason=none results=/home/david/Documents/Codex/2026-10-13/ana/work/buster/build/analyze-32146967431 status=pass

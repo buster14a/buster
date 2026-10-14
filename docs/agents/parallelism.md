@@ -94,10 +94,24 @@
     compare-exchange per first fill. `BUSTER_SINGLE_THREADED` compiles the
     atomics to plain accesses.
 
-  The prologue, epilogue and zero-idiom shapes pin the form key the selector
-  picks, so their first lookup prepares that key without a selector search;
+  Every shape pins the form key the selector picks, one
+  `machine_x64_metadata_shape_pins` row per distinct shape in registration
+  order, so its first lookup prepares that key without a selector search. A
+  row whose folded signature is not its shape's refuses the shape cache, and
   `machine_x86_64_exact_prewarm_all()` re-checks each pin against the
-  selector and refuses the shape cache on a disagreement (#1125).
+  selector and refuses the cache on a disagreement (#1125).
+
+  What stays serial is still the per-process floor of every x86-64 compile:
+  `codegen_prewarm_for_target` runs `buster_x86_metadata_prewarm` (including
+  the decode) and `machine_x86_64_exact_prewarm` once per process, before the
+  first function is encoded. On the Ryzen 7 9700X it costs 1.74 ms of the
+  compiler's own time and 6.6 M retired instructions above an AArch64 compile
+  of the same one-function unit, more than half of that x86-64 compile, and it
+  lies outside the A/A interval
+  ([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md)). A
+  batched or lane-parallel process pays it once; one process per translation
+  unit pays it for every unit. `-fsyntax-only` and `-E` never reach the
+  prewarm unless `-fmetrics-out` requests the driver's setup (#4135).
 
   The TLS and GOT relocation recipes fill one group at a time under a fill
   claim that returns to idle after each fill, and publish their prepared and

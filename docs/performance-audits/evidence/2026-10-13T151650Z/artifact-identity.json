@@ -1,0 +1,20 @@
+[
+  {
+    "mode": "executable-g",
+    "sha256": "4e98a88dca90915e7f756fb1f9c87c127523248d6d762d9b273fbb2f9fd31a95",
+    "bytes": 42678176,
+    "identical": true
+  },
+  {
+    "mode": "object-g",
+    "sha256": "a01a9da4f85371f1ec7495293dc76b47f345a4ddef015b44d29f7dce3d5d5fd2",
+    "bytes": 49937944,
+    "identical": true
+  },
+  {
+    "mode": "object-g0",
+    "sha256": "97dea1b616641ff3bd7d6c6d1cce252fb1bae8b9947d4b10ecea8c9fa9b0deb1",
+    "bytes": 31349088,
+    "identical": true
+  }
+]

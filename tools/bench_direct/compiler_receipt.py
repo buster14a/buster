@@ -51,6 +51,8 @@ Map (searchable symbols):
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
     CONSTANT_REUSE_ACCEPTANCE_PROFILE,
         validate_constant_reuse_acceptance                 issue #3011 constant-reuse flag pairs
+    PROCESS_FLOOR_PROFILE, process_floor_verdict,
+        validate_process_floor_acceptance                  issue #1125 per-process floor and its controls
     THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
@@ -342,6 +344,41 @@ CONSTANT_REUSE_ACCEPTANCE_PROFILE = {
     "cpu": 2,
     "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
     "correctness": "identical stdout/stderr in every run of both cells; B's object differs from A's by design",
+    "report_only": True,
+}
+# Issue #1125: the per-process floor of `ide cc` on the pull-compare route. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
+# frozen candidate binary in fresh processes on PROCESS_FLOOR_SOURCE, alone in
+# its directory: A is the native x86-64 object compile and B is the cell's
+# control, the same command (A/A calibration), the AArch64 object compile or
+# -fsyntax-only. The source, commands, pair and warm-up counts are frozen here
+# and nothing in the request can change them. It is report-only.
+PROCESS_FLOOR_REQUEST_LINE = "profile: process-floor-v1"
+PROCESS_FLOOR_SCHEMA = "buster-process-floor-v1"
+PROCESS_FLOOR_SOURCE = "int main(void){return 0;}\n"
+PROCESS_FLOOR_SOURCE_NAME = "tiny.c"
+PROCESS_FLOOR_OBJECT = ["cc", "-g0", "-c", PROCESS_FLOOR_SOURCE_NAME]
+# B's compile per cell; A is always PROCESS_FLOOR_OBJECT. An object compile
+# also passes `-o OUT`.
+PROCESS_FLOOR_CELLS = {
+    "aa": list(PROCESS_FLOOR_OBJECT),
+    "aarch64": ["cc", "-g0", "-target", "aarch64-unknown-linux", "-c", PROCESS_FLOOR_SOURCE_NAME],
+    "syntax-only": ["cc", "-g0", "-fsyntax-only", PROCESS_FLOOR_SOURCE_NAME],
+}
+PROCESS_FLOOR_PROFILE = {
+    "name": "process-floor-v1",
+    "source": "int main(void){return 0;} as tiny.c, alone in the working directory",
+    "source_sha256": hashlib.sha256(PROCESS_FLOOR_SOURCE.encode("utf-8")).hexdigest(),
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": " ".join(PROCESS_FLOOR_OBJECT + ["-o", "OUT"]), "b": "the cell's command"},
+    "cells": {cell: " ".join(argv + (["-o", "OUT"] if "-c" in argv else [])) for cell, argv in PROCESS_FLOOR_CELLS.items()},
+    "pairs": 100,
+    "warmups": 2,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "task-clock", "compiler wall_ns", "instructions:u", "peak RSS"],
+    "correctness": "byte-identical A/A objects, and identical stdout/stderr in every run of every cell",
     "report_only": True,
 }
 # Issue #2761: the Zen 5 route for real-source throughput. One fresh exact line
@@ -2326,6 +2363,90 @@ def validate_constant_reuse_acceptance(summary: object, expected_revision: str, 
             problems.append(f"{label} {cell} retired-instruction counts are invalid")
         if row.get("diagnostics_identical") is not True:
             problems.append(f"{label} {cell} diagnostics differ between the default and flagged compiles")
+    return problems
+
+
+def process_floor_verdict(cells: object) -> dict:
+    """Issue #1125's stop rule over the cells' paired wall ratios (B/A).
+
+    A control resolves the floor only when its ratio's 95% CI lies wholly
+    outside the A/A cell's. Each `*_ms` value is A's median minus the
+    control's, so a positive value is what the x86-64 object compile costs
+    above that control; it is None when either median is missing.
+    """
+    def metric(cell: str, key: str) -> dict:
+        row = cells.get(cell) if isinstance(cells, dict) and isinstance(cells.get(cell), dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        return values.get(key) if isinstance(values.get(key), dict) else {}
+
+    def above(values: dict) -> float | None:
+        a, b = values.get("a_median"), values.get("b_median")
+        return round((a - b) * 1000.0, 6) if _finite_positive(a) and _finite_positive(b) else None
+
+    aa = metric("aa", "wall")
+    aa_low, aa_high = aa.get("ci_low"), aa.get("ci_high")
+    result: dict = {"aa_interval": [aa_low, aa_high]}
+    for cell in ("aarch64", "syntax-only"):
+        wall = metric(cell, "wall")
+        low, high = wall.get("ci_low"), wall.get("ci_high")
+        bounded = all(_finite_positive(value) for value in (low, high, aa_low, aa_high))
+        result[cell] = {"ci": [low, high], "outside_aa": bool(bounded and (high < aa_low or low > aa_high)),
+                        "wall_ms": above(wall), "task_clock_ms": above(metric(cell, "task_clock"))}
+    return result
+
+
+def validate_process_floor_acceptance(summary: object, expected_revision: str,
+                                      expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate #1125 floor evidence: every cell complete and measured, A/A objects identical, verdict re-derived."""
+    label = "issue #1125 process-floor receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != PROCESS_FLOOR_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    if summary.get("profile") != PROCESS_FLOOR_PROFILE:
+        problems.append(f"{label} profile does not match the fixed profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(PROCESS_FLOOR_CELLS):
+        return [*problems, f"{label} does not hold exactly the aa, aarch64 and syntax-only cells"]
+    for cell in PROCESS_FLOOR_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        task = values.get("task_clock") if isinstance(values.get("task_clock"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_finite_positive(task.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} task-clock measurements are missing")
+        # Peak RSS is NA when the compiler stays near the perf wrapper's own footprint; the compiler's own wall_ns
+        # is NA when -fmetrics-out is unavailable for either command. A value that is present must be valid.
+        for key in ("peak_rss", "compiler_wall"):
+            optional = values.get(key)
+            if not isinstance(optional, dict) or \
+                    any(optional.get(field) is not None and not _finite_positive(optional.get(field))
+                        for field in ("a_median", "b_median")):
+                problems.append(f"{label} {cell} {key} record is missing or invalid")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        if row.get("diagnostics_identical") is not True:
+            problems.append(f"{label} {cell} diagnostics differ between the two commands")
+        if cell == "aa" and row.get("outputs_identical") is not True:
+            problems.append(f"{label} aa objects differ between two runs of the same command")
+    if summary.get("verdict") != process_floor_verdict(cells):
+        problems.append(f"{label} verdict does not follow from its cells")
     return problems
 
 
@@ -4785,6 +4906,7 @@ INVENTORY_LEGS = {
         "inline": ("uarch_lab:compare@canonical-inline-self-host",),
         "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
         "constant-reuse": ("uarch_lab:compare@constant-reuse-acceptance",),
+        "process-floor": ("uarch_lab:compare@process-floor",),
         "real-source": ("build:bench_throughput@throughput-real-source",),
         "production-profile": ("build:production_profile",),
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
@@ -4798,7 +4920,7 @@ INVENTORY_LEGS = {
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
 INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
-                            "constant-reuse": "constant_reuse_acceptance",
+                            "constant-reuse": "constant_reuse_acceptance", "process-floor": "process_floor",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
                             "frontend-nesting": "frontend_nesting",
@@ -5089,6 +5211,39 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 row.get("diagnostics_identical", "NA")))
         if reuse.get("exit") not in (None, 0):
             lines.append(f"Issue #3011 profile exit: {reuse.get('exit')}.")
+    floor = receipt.get("process_floor") if isinstance(receipt, dict) else None
+    if isinstance(floor, dict) and floor.get("requested"):
+        floor_summary = floor.get("summary") if isinstance(floor.get("summary"), dict) else {}
+        lines += ["", f"Issue #1125 per-process floor: {floor.get('status', 'NA')} "
+                  f"({PROCESS_FLOOR_PROFILE['pairs']} ABBA pairs per cell; report-only).",
+                  f"One candidate binary in fresh processes on `{PROCESS_FLOOR_SOURCE.strip()}`: A = "
+                  f"`{PROCESS_FLOOR_PROFILE['compiler_modes']['a']}`, B = the cell's command. Wall is the harness span "
+                  "around the pinned perf wrapper; task-clock is the compiler process alone. A - B is what the "
+                  "x86-64 object compile costs above B. Counters may be NA when the host cannot schedule them.", "",
+                  "| Cell (B) | Wall A / B ms | Wall A - B ms | Wall B/A [95% CI] | Task-clock A / B ms "
+                  "| Instructions A / B | Outside A/A |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        cells = floor_summary.get("cells") if isinstance(floor_summary.get("cells"), dict) else {}
+        verdict = floor_summary.get("verdict") if isinstance(floor_summary.get("verdict"), dict) else {}
+        for cell, command in PROCESS_FLOOR_PROFILE["cells"].items():
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            task = values.get("task_clock") if isinstance(values.get("task_clock"), dict) else {}
+            instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
+            control = verdict.get(cell) if isinstance(verdict.get(cell), dict) else {}
+            milliseconds = [value * 1000.0 if _number(value) else None
+                            for value in (wall.get("a_median"), wall.get("b_median"), task.get("a_median"),
+                                          task.get("b_median"))]
+            lines.append("| %s (`%s`) | %s / %s | %s | %s [%s, %s] | %s / %s | %s / %s | %s |" % (
+                cell, command, number(milliseconds[0], "%.3f"), number(milliseconds[1], "%.3f"),
+                number(control.get("wall_ms") if cell != "aa" else None, "%.3f"),
+                number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number(milliseconds[2], "%.3f"), number(milliseconds[3], "%.3f"),
+                number(instructions.get("a_median"), "%.0f"), number(instructions.get("b_median"), "%.0f"),
+                "A/A" if cell == "aa" else control.get("outside_aa", "NA")))
+        if floor.get("exit") not in (None, 0):
+            lines.append(f"Issue #1125 profile exit: {floor.get('exit')}.")
     real = receipt.get("throughput_real_source") if isinstance(receipt, dict) else None
     if isinstance(real, dict) and real.get("requested"):
         profile = THROUGHPUT_REAL_SOURCE_PROFILE

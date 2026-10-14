@@ -1782,6 +1782,8 @@ struct MachineEncodeResult
     // instruction, one per return row; the AArch64 encoder fills these for
     // the Windows unwind data, the x86-64 encoder leaves them empty.
     u32* epilog_offsets;
+    // Exclusive function-relative offset after each emitted epilogue.
+    u32* epilog_end_offsets;
     u32 call_site_count;
     u32 inline_assembly_relocation_count;
     u32 epilog_count;
@@ -2267,4 +2269,19 @@ struct MachineX64MetadataShapeCacheAudit
     u8 reserved[3];
 };
 BUSTER_F_DECL MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void);
+// The pin row of one distinct shape-cache shape, from the selector's choice
+// for the shape's first query; false past the last shape or when the selector
+// refuses it.  `current` is set when machine_x64_metadata_shape_pins holds
+// exactly this row.
+typedef struct MachineX64MetadataShapePinRow MachineX64MetadataShapePinRow;
+struct MachineX64MetadataShapePinRow
+{
+    String8 mnemonic;
+    u64 stable_hash;
+    u32 signature;
+    u32 form_id;
+    bool current;
+    u8 reserved[7];
+};
+BUSTER_F_DECL bool machine_x86_64_metadata_shape_pin_row(u32 row, MachineX64MetadataShapePinRow* pin);
 #endif

@@ -84,10 +84,11 @@
 // region. The `#pragma clang attribute` form it replaces marked every
 // function a test source merely *declared* there too, so the production
 // functions that test headers redeclare ran at -O0 in the trusted Release
-// `ide` (#1376). A production header that defines functions must still be
-// included before the region, as simd.h's fallbacks are here;
+// `ide` (#1376). A production header or source that defines functions must
+// still be included before the region, as simd.h's fallbacks are here;
 // `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
+#include <buster/apps/disk_builder_verification.c>
 #if BUSTER_COMPILER_CLANG
 #pragma clang optimize off
 #endif
@@ -2163,6 +2164,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
                      layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
                      layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
+        // Units the tree builder refused, which compiled without a tree.
+        if (compile.c_ast.rejections)
+        {
+            string_print(S8("C_AST_REJECTED units={u64}\n"), compile.c_ast.rejections);
+        }
+        // Counts and sizes: the facts lowering retained for the unit (GitHub #3102 step 1), with or without the pilot.
+        {
+            CAstLowerStatistics retained = compile.c_ast.lower;
+            string_print(S8("C_AST_RETAINED trees_built={u64} tree_rejections={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64}\n"),
+                         retained.trees_built, retained.tree_rejections, retained.tree_nodes, retained.tree_bytes, retained.span_nodes,
+                         retained.span_bytes);
+        }
         if (compile.c_ast.units)
         {
             CompilerDriverCAstPilotResult tree = compile.c_ast;
@@ -2227,6 +2240,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
+            // Counts and bytes: the facts analysis retained for lowering, and the fact candidates left without a type, by reason.
+            CAstFactStatistics facts = tree.facts;
+            u64 missing = 0;
+            for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+            {
+                missing += facts.gaps[gap];
+            }
+            string_print(S8("C_AST_FACTS nodes={u64} retained_bytes={u64} regions={u64} candidates={u64} tree={u64} machine={u64} completed={u64} "
+                            "missing={u64} {S8}={u64} {S8}={u64} {S8}={u64} {S8}={u64} bound={u64} bit_fields={u64} strings={u64} uncovered={u64} outside={u64} "
+                            "stale={u64} completion_queries={u64}\n"),
+                         facts.nodes, facts.retained_bytes, facts.regions, facts.candidates, facts.tree, facts.machine, facts.completed, missing,
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_UNSPANNED), facts.gaps[C_AST_FACT_GAP_UNSPANNED],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_INVALID), facts.gaps[C_AST_FACT_GAP_INVALID],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_APPENDS), facts.gaps[C_AST_FACT_GAP_APPENDS],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_BUSY), facts.gaps[C_AST_FACT_GAP_BUSY], facts.bound, facts.bit_fields, facts.strings, facts.uncovered,
+                         facts.outside, facts.stale, facts.completion_queries);
         }
         // Also report disabled passes: -O0 must expose its selected policy.
         {

@@ -47,8 +47,12 @@
 // c_ast_types_body_begin after the binder has recorded every identifier use and
 // c_ast_types_body_end when the body is done. The per-body arrays are allocated
 // in the machine's scratch arena above the body's validation mark and are
-// released with it: nothing here outlives a body, because a speculative
-// rollback may truncate the type rows an entry refers to. A body is typed only
+// released with it: no array here outlives a body, because a speculative
+// rollback may truncate the type rows an entry refers to. What outlives it is
+// copied out at the region's end into the unit's facts record
+// (CParserResult.ast_facts, GitHub #4062; c_ast_types_facts_begin): an
+// accepted node's row existed when the body was typed, before any of the
+// body's checkpoints, so no rollback in the body can take it. A body is typed only
 // while the machine is idle (frame_count 0), and a query is answered only
 // under the same condition.
 //
@@ -225,7 +229,7 @@
 //   c_ast_types_initializer_begin, _end,         the per-initializer entry points
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
-//   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_types_span                             span rules (c_ast_span_rule)
 //   c_ast_types_probe_fails,                      bit-field widths of operands
 //   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
@@ -250,6 +254,10 @@
 //   c_ast_types_lookups_settle,
 //   c_ast_types_lookups_settled
 //   c_ast_types_publish                          machine state after an answer
+//   c_ast_facts_create, c_ast_facts_release,     the retained facts (#4062):
+//   c_ast_types_facts_begin, _next, _record,     publication at a region's end,
+//   c_ast_types_facts_answer,                    a top-level query's answer,
+//   c_ast_types_facts_finish                     and the unit's counts
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
 //                                                c_ast_types_verify_hold_replay
 //                                                and the skipped designator probes
@@ -331,7 +339,7 @@ struct CAstTypeArithmeticMemo
 #define C_AST_TYPE_ARITHMETIC_MEMO_COUNT 64
 BUSTER_CT_CHECK(C_AST_TYPE_ARITHMETIC_MEMO_COUNT == 64);
 // c_ast_types_type_body fills the entity array with all-ones bytes.
-BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX);
+BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX && C_AST_SPAN_NONE == C_AST_TYPE_NONE);
 
 // The `{` token of every top-level function definition, ascending, and the
 // FUNCTION_DEFINITION node it opens; and the first token of every top-level
@@ -675,23 +683,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_punctuator_at(CAstTypeBody co
     return token < body->token_total && c_token_is_punctuator(&body->tokens[token], punctuator);
 }
 
-// The span of the node at `relative`, widened over every balanced pair of
-// parentheses that wraps it exactly. The tree has no node for a parenthesis, so
-// an operator's own span begins or ends outside its operand's.
-BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relative, u32* first_out, u32* end_out)
+// The rules are c_ast_span_rule's (c_ast.c), applied to this region's arrays,
+// which hold spans at relative indices.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE CAstSpanInput c_ast_types_span_input(CAstTypeBody const* body)
 {
-    u32 first = body->first[relative];
-    u32 end = body->end[relative];
-    if (first != C_AST_TYPE_NONE)
-    {
-        while (first > 0 && c_ast_types_punctuator_at(body, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_types_match(body, first - 1) == end)
-        {
-            first -= 1;
-            end += 1;
-        }
-    }
-    *first_out = first;
-    *end_out = end;
+    return (CAstSpanInput){.ast = body->ast, .tokens = body->tokens, .matches_plus_one = body->matches, .first = body->first,
+                           .end = body->end, .token_total = body->token_total, .base = body->begin};
 }
 
 // Computes [first, end) for one expression node. Returns false when the span
@@ -700,130 +697,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relati
 // accepted.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
-    CAst const* ast = body->ast;
-    u32 kind = ast->kinds[node];
-    u32 token = ast->tokens[node];
-    u32 first = C_AST_TYPE_NONE;
-    u32 end = C_AST_TYPE_NONE;
-    switch (kind)
-    {
-    case C_AST_IDENTIFIER:
-    case C_AST_NUMBER:
-    case C_AST_CHARACTER:
-    case C_AST_BOOLEAN_CONSTANT:
-    case C_AST_NULLPTR:
-    {
-        first = token;
-        end = token + 1;
-    }
-    break;
-    case C_AST_STRING:
-    {
-        first = token;
-        end = token + ast->data[node];
-    }
-    break;
-    case C_AST_LABEL_ADDRESS:
-    {
-        first = token ? token - 1 : C_AST_TYPE_NONE;
-        end = token + 1;
-    }
-    break;
-    case C_AST_STATEMENT_EXPRESSION:
-    {
-        u32 close = c_ast_types_match(body, token);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_GENERIC_SELECTION:
-    case C_AST_SIZEOF_TYPE:
-    case C_AST_ALIGNOF_TYPE:
-    {
-        u32 close = c_ast_types_match(body, token + 1);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_CALL:
-    case C_AST_INDEX:
-    {
-        u32 callee = c_ast_types_first_child(ast, node);
-        u32 expanded_first = C_AST_TYPE_NONE;
-        u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, callee - body->begin, &expanded_first, &expanded_end);
-        u32 close = c_ast_types_match(body, token);
-        if (expanded_first != C_AST_TYPE_NONE && close != C_AST_TYPE_NONE)
-        {
-            first = expanded_first;
-            end = close + 1;
-        }
-    }
-    break;
-    case C_AST_MEMBER:
-    case C_AST_MEMBER_ARROW:
-    case C_AST_POST_INCREMENT:
-    case C_AST_POST_DECREMENT:
-    {
-        u32 expanded_first = C_AST_TYPE_NONE;
-        u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
-        if (expanded_first != C_AST_TYPE_NONE)
-        {
-            first = expanded_first;
-            end = token + 1;
-        }
-    }
-    break;
-    case C_AST_COMPOUND_LITERAL:
-    {
-        u32 close = c_ast_types_match(body, ast->tokens[node - 1]);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_INITIALIZER_LIST:
-    {
-        u32 close = c_ast_types_match(body, token);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    default:
-    {
-        if (kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST)
-        {
-            u32 expanded_first = C_AST_TYPE_NONE;
-            u32 expanded_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
-            if (expanded_first != C_AST_TYPE_NONE)
-            {
-                first = token;
-                end = expanded_end;
-            }
-        }
-        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
-        {
-            u32 leftmost = c_ast_types_first_child(ast, node);
-            u32 left_first = C_AST_TYPE_NONE;
-            u32 left_end = C_AST_TYPE_NONE;
-            u32 right_first = C_AST_TYPE_NONE;
-            u32 right_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, leftmost - body->begin, &left_first, &left_end);
-            c_ast_types_expand(body, relative - 1, &right_first, &right_end);
-            if (left_first != C_AST_TYPE_NONE && right_end != C_AST_TYPE_NONE)
-            {
-                first = left_first;
-                end = right_end;
-            }
-        }
-    }
-    break;
-    }
-    bool valid = first != C_AST_TYPE_NONE && end != C_AST_TYPE_NONE && first < end && end <= body->token_total;
-    *first_out = valid ? first : C_AST_TYPE_NONE;
-    *end_out = valid ? end : C_AST_TYPE_NONE;
-    return valid;
+    BUSTER_CHECK(node - body->begin == relative);
+    CAstSpanInput input = c_ast_types_span_input(body);
+    return c_ast_span_rule(&input, node, first_out, end_out);
 }
 
 // ---- the typing rules ----------------------------------------------------------
@@ -1177,7 +1053,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_member(CAstTypeBody* body, CTypeParseMachin
         {
             aggregate = base;
         }
-        else if (value->kind == C_TYPE_POINTER && value->element_type.value < result->type_count)
+        else if ((value->kind == C_TYPE_POINTER || value->kind == C_TYPE_ARRAY) && value->element_type.value < result->type_count)
         {
             aggregate = value->element_type;
         }
@@ -2572,7 +2448,7 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CAstTypeAnswer c_ast_types_decline(CAst
     {
         CTypeId base = body->types[relative - 1];
         CType const* value = result->types + base.value;
-        aggregate = !arrow ? base : value->kind == C_TYPE_POINTER && value->element_type.value < result->type_count ? value->element_type : C_TYPE_ID_INVALID;
+        aggregate = !arrow ? base : (value->kind == C_TYPE_POINTER || value->kind == C_TYPE_ARRAY) && value->element_type.value < result->type_count ? value->element_type : C_TYPE_ID_INVALID;
         value = aggregate.value < result->type_count ? result->types + aggregate.value : 0;
         bool qualified = value && (value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION) && (value->is_const || value->is_volatile) &&
                          !value->is_restrict && !value->is_atomic;
@@ -2684,6 +2560,257 @@ BUSTER_C_SHARED void c_ast_types_publish(CTypeParseMachine* machine, CParseResul
     machine->result_index = end;
     machine->result_valid = true;
     machine->result_nonplace_projection = answer.nonplace_projection;
+}
+
+// ---- retained facts (GitHub #4062) -----------------------------------------------
+
+// Bytes a fact arena reserves beyond its columns: the arena header and the
+// rest of its first commit granule, as the tree's column arenas do.
+#define C_AST_FACT_HEADROOM BUSTER_KB(64)
+// One node's columns: types, payloads and flags.
+#define C_AST_FACT_NODE_BYTES (sizeof(u32) + sizeof(u32) + sizeof(u8))
+
+BUSTER_GLOBAL_LOCAL String8 const c_ast_fact_gap_names[C_AST_FACT_GAP_COUNT] = {
+    [C_AST_FACT_GAP_UNSPANNED] = S8_INITIALIZER("unspanned"),
+    [C_AST_FACT_GAP_INVALID] = S8_INITIALIZER("invalid"),
+    [C_AST_FACT_GAP_APPENDS] = S8_INITIALIZER("appends"),
+    [C_AST_FACT_GAP_BUSY] = S8_INITIALIZER("busy"),
+};
+
+String8 c_ast_fact_gap_name(CAstFactGap gap)
+{
+    return (u32)gap < C_AST_FACT_GAP_COUNT ? c_ast_fact_gap_names[gap] : S8("invalid");
+}
+
+// Returns a fact arena to the calling thread's pool (or the OS), keeping at
+// most C_PHASE_ARENA_RETAINED_SIZE committed, as the tree's column arenas do;
+// a small tree's reservation is smaller than that.
+BUSTER_GLOBAL_LOCAL void c_ast_facts_retire(Arena* arena)
+{
+    arena_retire(arena, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, arena->reserved_size - arena_minimum_position));
+}
+
+bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
+{
+    *facts = (CAstFacts){0};
+    u32 count = ast && ast->storage ? ast->node_count : 0;
+    Arena* arena = count ? c_frontend_arena_create((ArenaCreation){
+                                                       .reserved_size = (u64)count * C_AST_FACT_NODE_BYTES + C_AST_FACT_HEADROOM,
+                                                       .initial_size = C_AST_FACT_HEADROOM,
+                                                       .flags = {.pool_reuse = 1},
+                                                   }, C_FRONTEND_RESERVATION_ANALYSIS)
+                         : 0;
+    u32* types = arena ? arena_allocate(arena, u32, count) : 0;
+    u32* payloads = types ? arena_allocate(arena, u32, count) : 0;
+    u8* flags = payloads ? arena_allocate(arena, u8, count) : 0;
+    bool created = flags != 0;
+    if (created)
+    {
+        memset(types, 0xff, sizeof(*types) * count);
+        memset(payloads, 0xff, sizeof(*payloads) * count);
+        memset(flags, 0, sizeof(*flags) * count);
+        *facts = (CAstFacts){
+            .arena = arena,
+            .types = types,
+            .payloads = payloads,
+            .flags = flags,
+            .node_count = count,
+            .statistics = {.nodes = count, .retained_bytes = arena->position - arena_minimum_position},
+        };
+    }
+    else if (arena)
+    {
+        c_ast_facts_retire(arena);
+    }
+    return created;
+}
+
+void c_ast_facts_release(CAstFacts* facts)
+{
+    if (facts->arena)
+    {
+        c_ast_facts_retire(facts->arena);
+    }
+    facts->arena = 0;
+    facts->types = 0;
+    facts->payloads = 0;
+    facts->flags = 0;
+    facts->node_count = 0;
+}
+
+// A fact candidate's kind: an expression kind the eager pass spans, but not a
+// braced list, which has no type of its own.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_fact_kind(u32 kind)
+{
+    return c_ast_types_kind_classes[kind] != C_AST_TYPE_CLASS_UNTYPED && kind != C_AST_INITIALIZER_LIST;
+}
+
+BUSTER_C_SHARED CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess)
+{
+    CAstTypeBody* body = machine->ast_facts && machine->ast_facts->flags ? machine->ast_types : 0;
+    CAstFacts* facts = machine->ast_facts;
+    if (body)
+    {
+        // An initializer no query typed is typed now: its lone literals took
+        // the literal path, which leaves no node behind.
+        if (body->waiting)
+        {
+            c_ast_types_region_fill(body, machine, preprocess);
+        }
+        CAst const* ast = body->ast;
+        CAstFactStatistics* statistics = &facts->statistics;
+        statistics->regions += 1;
+        for (u32 node = body->begin; node <= body->node; node += 1)
+        {
+            u32 kind = ast->kinds[node];
+            if (c_ast_types_fact_kind(kind))
+            {
+                u32 relative = node - body->begin;
+                u32 typed = body->flags[relative];
+                u32 flags = facts->flags[node] | C_AST_FACT_EXPRESSION;
+                statistics->candidates += 1;
+                if (typed & C_AST_TYPE_FLAG_ACCEPTED)
+                {
+                    // The typer's rule is the fact; a query's answer for the
+                    // same node, which it made exact, is the same row.
+                    facts->types[node] = body->types[relative].value;
+                    flags = (flags | C_AST_FACT_TYPED) & ~(u32)(C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING);
+                    statistics->tree += 1;
+                    if ((kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW) && body->widths[relative])
+                    {
+                        facts->payloads[node] = body->widths[relative];
+                        flags |= C_AST_FACT_BIT_FIELD;
+                        statistics->bit_fields += 1;
+                    }
+                }
+                else if (flags & C_AST_FACT_TYPED)
+                {
+                    statistics->machine += 1;
+                    statistics->strings += (flags & C_AST_FACT_STRING) != 0;
+                }
+                if (kind == C_AST_IDENTIFIER)
+                {
+                    u32 token = ast->tokens[node];
+                    CEntity const* bound = token < body->token_total ? c_ast_types_bound_entity(body->result, token) : 0;
+                    u32 entity = body->entities && body->entities[relative] != C_AST_TYPE_NONE ? body->entities[relative]
+                                 : bound                                                     ? (u32)(bound - body->result->entities)
+                                                                                             : C_AST_FACT_NONE;
+                    if (entity < body->result->entity_count)
+                    {
+                        facts->payloads[node] = entity;
+                        flags |= C_AST_FACT_BOUND;
+                        statistics->bound += 1;
+                    }
+                }
+                facts->flags[node] = (u8)flags;
+            }
+        }
+    }
+    return body;
+}
+
+BUSTER_C_SHARED bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out)
+{
+    bool found = false;
+    u32 node = *cursor > region->begin ? *cursor : region->begin;
+    while (!found && node <= region->node)
+    {
+        if ((facts->flags[node] & (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED)) == C_AST_FACT_EXPRESSION)
+        {
+            found = region->first[node - region->begin] != C_AST_TYPE_NONE;
+            facts->statistics.gaps[C_AST_FACT_GAP_UNSPANNED] += !found;
+        }
+        node += found ? 0 : 1;
+    }
+    *first_out = found ? region->first[node - region->begin] : C_AST_TYPE_NONE;
+    *end_out = found ? region->end[node - region->begin] : C_AST_TYPE_NONE;
+    *cursor = node;
+    return found;
+}
+
+BUSTER_C_SHARED void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeId type, bool nonplace)
+{
+    facts->types[node] = type.value;
+    facts->flags[node] |= (u8)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | (nonplace ? C_AST_FACT_NONPLACE : 0u));
+    facts->statistics.completed += 1;
+}
+
+// The array row c_parse_string_literal_expression_type mints: an unqualified,
+// complete array of a published scalar row with an inferred bound of the
+// literal's length plus its terminator.
+BUSTER_C_SHARED bool c_ast_types_facts_string(CAstFacts* facts, CParseResult const* result, CAst const* ast, u32 node, CTypeId array, u32 rows)
+{
+    CType const* row = ast->kinds[node] == C_AST_STRING && array.value < result->type_count ? result->types + array.value : 0;
+    CArrayBound const* bound = row && row->kind == C_TYPE_ARRAY && row->array_bound < result->array_bound_count ? result->array_bounds + row->array_bound : 0;
+    bool kept = bound && bound->has_inferred_count && bound->inferred_count < C_AST_FACT_NONE && row->element_type.value < rows && !row->is_const &&
+                !row->is_volatile && !row->is_restrict && !row->is_atomic;
+    if (kept)
+    {
+        facts->types[node] = row->element_type.value;
+        facts->payloads[node] = (u32)bound->inferred_count;
+        facts->flags[node] = (u8)((facts->flags[node] & ~(u32)C_AST_FACT_NONPLACE) | C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_STRING);
+    }
+    return kept;
+}
+
+// A top-level query's valid answer, kept for the fact candidate whose span
+// [start, end) is, when nothing has typed it yet. The region's own pass may
+// still overwrite it with the typer's rule (c_ast_types_facts_begin). A
+// waiting initializer has no chains to locate through; its pass at the
+// region's end types every node the literal path answered.
+BUSTER_C_SHARED void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace)
+{
+    CAstTypeBody const* body = machine->ast_types;
+    CAstFacts* facts = machine->ast_facts;
+    if (body && facts && facts->flags && !body->waiting)
+    {
+        u32 relative = c_ast_types_locate(body, start, end);
+        u32 node = relative != C_AST_TYPE_NONE ? body->begin + relative : C_AST_TYPE_NONE;
+        bool open = node != C_AST_TYPE_NONE && c_ast_types_fact_kind(body->ast->kinds[node]) && !(facts->flags[node] & C_AST_FACT_TYPED);
+        // A string literal is kept in structural form, as the completion run
+        // keeps it, whether or not this query minted its row.
+        if (open && !c_ast_types_facts_string(facts, body->result, body->ast, node, type, body->result->type_count) &&
+            body->ast->kinds[node] != C_AST_STRING)
+        {
+            facts->types[node] = type.value;
+            facts->flags[node] |= (u8)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | (nonplace ? C_AST_FACT_NONPLACE : 0u));
+        }
+    }
+}
+
+// Once analysis is done: drops a published row that a rollback left past the
+// type table (none is expected; c_parse_region_facts keeps only answers that
+// appended nothing, and a top-level query's rows are never rolled back), and
+// counts the expression nodes no typed region covered, inside a function
+// definition or not. The backward scan keeps the interval of the outermost
+// definition it is in; a node before that interval's first node has left it.
+BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result)
+{
+    if (facts && facts->flags && ast && ast->node_count == facts->node_count)
+    {
+        CAstFactStatistics* statistics = &facts->statistics;
+        u32 floor = C_AST_TYPE_NONE;
+        for (u32 index = facts->node_count; index; index -= 1)
+        {
+            u32 node = index - 1;
+            u32 flags = facts->flags[node];
+            u32 kind = ast->kinds[node];
+            floor = floor != C_AST_TYPE_NONE && node < floor ? C_AST_TYPE_NONE : floor;
+            floor = floor == C_AST_TYPE_NONE && kind == C_AST_FUNCTION_DEFINITION ? c_ast_subtree_begin(ast, node) : floor;
+            if ((flags & C_AST_FACT_TYPED) && facts->types[node] >= result->type_count)
+            {
+                facts->types[node] = C_AST_FACT_NONE;
+                facts->flags[node] = (u8)(flags & ~(u32)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING));
+                statistics->stale += 1;
+            }
+            if (!(flags & C_AST_FACT_EXPRESSION) && c_ast_types_fact_kind(kind))
+            {
+                statistics->uncovered += floor != C_AST_TYPE_NONE;
+                statistics->outside += floor == C_AST_TYPE_NONE;
+            }
+        }
+        statistics->retained_bytes = facts->arena ? facts->arena->position - arena_minimum_position : 0;
+    }
 }
 
 // ---- verification and test seams ---------------------------------------------------
@@ -2825,15 +2952,30 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_rows_equal(CType const* x, CType const* y)
            x->parameter_start == y->parameter_start && x->parameter_count == y->parameter_count && x->member_start == y->member_start &&
            x->member_count == y->member_count && x->enum_member_start == y->enum_member_start && x->enum_member_count == y->enum_member_count &&
            x->definition_start == y->definition_start && x->definition_token_count == y->definition_token_count &&
-           x->vector_byte_size == y->vector_byte_size && x->kind == y->kind && x->is_const == y->is_const && x->is_volatile == y->is_volatile &&
-           x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic && x->is_complete == y->is_complete &&
-           x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
+           x->vector_byte_size == y->vector_byte_size && x->effective_named_member_count == y->effective_named_member_count &&
+           x->effective_named_member_count_final == y->effective_named_member_count_final && x->kind == y->kind && x->is_const == y->is_const &&
+           x->is_volatile == y->is_volatile && x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic &&
+           x->is_complete == y->is_complete && x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
            x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
 }
 
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_ast_type_replay_effective_member_count(void)
+{
+    CType original = {.effective_named_member_count = 1, .effective_named_member_count_final = true};
+    CType changed_count = original;
+    changed_count.effective_named_member_count = 2;
+    CType changed_finality = original;
+    changed_finality.effective_named_member_count_final = false;
+    return !c_ast_types_rows_equal(&original, &changed_count) && !c_ast_types_rows_equal(&original, &changed_finality);
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool c_ast_types_alignments_equal(CTypeAlignment const* x, CTypeAlignment const* y)
 {
-    return x->type_index == y->type_index && x->alignment_start == y->alignment_start && x->alignment_count == y->alignment_count;
+    return x->type_index == y->type_index && x->source_type_index == y->source_type_index && x->alignment_start == y->alignment_start &&
+           x->alignment_count == y->alignment_count;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ast_types_bounds_equal(CArrayBound const* x, CArrayBound const* y)
