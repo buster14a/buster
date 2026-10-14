@@ -19632,7 +19632,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
             temporary.arena,
             S8("char a[] = \"ab\\n\" \"cd\\x41\"; char b[] = u8\"x\\u00e9\" \"y\"; unsigned short c[] = u\"\\u20ac\" \"z\";"
                " unsigned d[] = U\"\\U0001f600\"; int e[] = L\"wide\" L\"\\n\"; char f[] = (\"paren\" \"wrapped\"); char g[] = \"\";"
-               " int h[] = \"a\" L\"b\"; char i[] = u8\"q\" u\"r\";\n"),
+               " int h[] = \"a\" L\"b\"; char i[] = u8\"q\" u\"r\"; int j = '\\n'; unsigned k = u'\\u20ac'; int number = 17;\n"),
             (CPreprocessOptions){
                 .target = target_native,
                 .data_layout = target_data_layout(target_native),
@@ -19652,6 +19652,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
             }
         }
         BUSTER_TEST(arguments, accepted_ranges >= 20 && rejected_ranges >= 20);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        BUSTER_TEST(arguments, built.complete);
+        u32 literal_nodes = 0;
+        for (u32 node = 0; built.complete && node < built.ast.node_count; node += 1)
+        {
+            u32 kind = built.ast.kinds[node];
+            if (kind == C_AST_STRING || kind == C_AST_CHARACTER || kind == C_AST_NUMBER)
+            {
+                BUSTER_TEST(arguments, c_test_literal_node_paths_agree(temporary.arena, preprocess, &built.ast, node));
+                literal_nodes += kind == C_AST_STRING || kind == C_AST_CHARACTER;
+            }
+        }
+        BUSTER_TEST(arguments, literal_nodes >= 11);
         c_test_scratch_end(temporary);
     }
 

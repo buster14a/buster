@@ -54,7 +54,10 @@
 //   accepted nodes plus a machine run for the rest that keeps nothing it appended
 //   (c_parse_region_facts). Initializer validation publishes its selected
 //   subobject paths and list/value events (c_parse_initializer_plan_item)
-//   for node-owned lowering. The parsing method is unchanged.
+//   for node-owned lowering. Literal range validation stays here:
+//   c_parse_string_literal_range_trim and c_ir_tokens_are_string_literals
+//   guard semantic range callers, while lowering decodes owned STRING runs.
+//   The parsing method is unchanged.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -11923,7 +11926,89 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
 BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                                     u32 expression_start, u32 index);
 
-BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
+// A string initializer may sit in redundant parentheses -- CPython's
+// _PyRuntimeState_INIT writes ("<dictcomp>") into its static identifier
+// table -- and the reference compilers accept the parenthesized spelling
+// everywhere the bare one initializes an array.  Both the predicate and the
+// decoder trim balanced pairs that wrap the whole range, so every caller
+// that asks one and then reads through the other sees the same tokens.
+BUSTER_C_SHARED void c_parse_string_literal_range_trim(CPreprocessResult preprocess, u32* start, u32* end)
+{
+    while (*end > *start + 2 && c_token_is_punctuator(&preprocess.tokens[*start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&preprocess.tokens[*end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        // The opening parenthesis must match the closing one, or
+        // `("a"),("b")` would trim into two unrelated ranges.
+        u32 depth = 0;
+        bool wraps = true;
+        for (u32 index = *start; index < *end && wraps; index += 1)
+        {
+            depth += c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                depth -= 1;
+                wraps = depth != 0 || index == *end - 1;
+            }
+        }
+        if (!wraps)
+        {
+            break;
+        }
+        *start += 1;
+        *end -= 1;
+    }
+}
+
+BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    if (start >= end || end > preprocess.token_count)
+    {
+        return false;
+    }
+    c_parse_string_literal_range_trim(preprocess, &start, &end);
+    for (u32 index = start; index < end; index += 1)
+    {
+        if (preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Semantic character tokens provide spelling; lowering owns CHARACTER nodes.
+BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target, u64* value_out, CTypeKind* kind_out)
+{
+    return c_ir_decode_character_spelling(arena, c_token_spelling(spelling_base, token), target, value_out, kind_out);
+}
+
+// Semantic range APIs admit parentheses and validate the token grammar.
+// Lowering calls the node/run APIs after its syntax owner selected a STRING.
+BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
+                                                                  CStringLiteralMemo const* memo, CIrDecodedString* decoded_out)
+{
+    bool valid = c_ir_tokens_are_string_literals(preprocess, start, end);
+    if (valid)
+    {
+        c_parse_string_literal_range_trim(preprocess, &start, &end);
+        valid = c_ir_decode_string_literal_run_for_target(arena, preprocess, target, start, end, memo, decoded_out);
+    }
+    return valid;
+}
+
+BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
+                                                                 CStringLiteralMemo* memo, CIrDecodedString* decoded_out)
+{
+    bool valid = c_ir_tokens_are_string_literals(preprocess, start, end);
+    if (valid)
+    {
+        c_parse_string_literal_range_trim(preprocess, &start, &end);
+        valid = c_ir_count_string_literal_run_for_target(arena, preprocess, target, start, end, memo, decoded_out);
+    }
+    return valid;
+}
+
+
 
 typedef struct CParseInitializerContinuation CParseInitializerContinuation;
 

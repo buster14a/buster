@@ -182,8 +182,8 @@
 //   c_ir_ext80_*, c_ir_decode_quoted,             IEEE/x87 conversion, string
 //   c_ir_count_quoted                             and character decoding
 //   c_string_literal_memo_create,                 string-literal bytes decoded
-//   c_ir_count_string_literal_range_for_target,   once per token by semantic
-//   c_ir_decode_string_literal_range_for_target   analysis and read by lowering
+//   c_ir_count_string_node_for_target,            once per token by semantic
+//   c_ir_decode_string_node_for_target            analysis and read by lowering
 //   c_ir_build_function_name_index                call-target resolution
 //   CIrLowerFrameKind                             lowering-machine frame kinds
 //   c_ir_place_node_begin, c_ir_place_path,        place topology and ordered
@@ -4159,6 +4159,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_builder_scalar_type(CIntegerIrBuilder* builder, 
         type = c_ir_scalar_type(builder->type_context, kind);
     }
     return type;
+}
+
+// Source spelling is provenance. Syntax consumers pass an already owned anchor.
+BUSTER_C_INTERNAL String8 c_ir_source_spelling(CPreprocessResult const* preprocess, u32 token_index)
+{
+    return preprocess && token_index < preprocess->token_count
+        ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]) : (String8){0};
 }
 
 BUSTER_C_INTERNAL IrSourceRange c_ir_site_source_range(CSourceSite site, u64 length);
@@ -14828,7 +14835,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_unary(bool negative, CIrExt80Value* value
 // Overflow and underflow of real spellings retain their existing values.
 BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 token_index, CIrExt80Value* value_out)
 {
-    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
+    String8 spelling = c_ir_source_spelling(&preprocess, token_index);
     u64 significand = 0;
     bool negative = false;
     u8 unsigned_width = 0;
@@ -16242,29 +16249,43 @@ BUSTER_C_INTERNAL IrTypeId c_ir_float_literal_type(CIntegerIrBuilder* builder, S
 // define `I`: both musl (`0.0f+1.0fi`) and glibc (`1.0iF`) spell
 // `_Complex_I` with one, in opposite suffix orders. The value is composed
 // rather than parsed as complex -- `1.0fi` is the `float _Complex` (0, 1).
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_literal(CIntegerIrBuilder* builder, String8 spelling, IrSourceRange source)
+{
+    String8 real_spelling = spelling;
+    bool imaginary_suffix = c_ir_number_imaginary_spelling(builder->arena, spelling, &real_spelling);
+    IrValueId value = c_ir_emit_float_spelling(builder, imaginary_suffix ? real_spelling : spelling, source);
+    if (imaginary_suffix && value.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrTypeId element = builder->function->values[value.value].canonical_type;
+        IrTypeId complex_type = c_ir_complex_type_for_element(builder, element);
+        IrValueId real = c_ir_complex_zero(builder, element, source);
+        if (complex_type.value == IR_ID_UNDERLYING_INVALID || real.value == IR_ID_UNDERLYING_INVALID)
+        {
+            builder->failure_message = S8("unsupported imaginary constant type");
+            value = IR_VALUE_ID_INVALID;
+        }
+        else
+        {
+            value = c_ir_complex_compose(builder, complex_type, real, value, source);
+        }
+    }
+    return value;
+}
+
+// Synthetic zero spellings have no syntax node. This adapter only supplies
+// their literal contents and source provenance to the same value emitter.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float(CIntegerIrBuilder* builder, CToken token)
 {
-    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-    IrSourceRange source = c_ir_token_source_range(builder, token);
-    String8 real_spelling = spelling;
-    if (!c_ir_number_imaginary_spelling(builder->arena, spelling, &real_spelling))
-    {
-        return c_ir_emit_float_spelling(builder, spelling, source);
-    }
-    IrValueId imaginary = c_ir_emit_float_spelling(builder, real_spelling, source);
-    if (imaginary.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrTypeId element = builder->function->values[imaginary.value].canonical_type;
-    IrTypeId complex_type = c_ir_complex_type_for_element(builder, element);
-    IrValueId real = c_ir_complex_zero(builder, element, source);
-    if (complex_type.value == IR_ID_UNDERLYING_INVALID || real.value == IR_ID_UNDERLYING_INVALID)
-    {
-        builder->failure_message = S8("unsupported imaginary constant type");
-        return IR_VALUE_ID_INVALID;
-    }
-    return c_ir_complex_compose(builder, complex_type, real, imaginary, source);
+    return c_ir_emit_float_literal(builder, c_token_spelling(builder->preprocess.spelling_base, token), c_ir_token_source_range(builder, token));
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_node(CIntegerIrBuilder* builder, u32 node)
+{
+    bool valid = node < builder->syntax_tree->node_count && builder->syntax_tree->kinds[node] == C_AST_NUMBER;
+    u32 anchor = valid ? builder->syntax_tree->tokens[node] : UINT32_MAX;
+    valid = valid && anchor < builder->preprocess.token_count;
+    return valid ? c_ir_emit_float_literal(builder, c_ir_source_spelling(&builder->preprocess, anchor),
+                                          c_ir_token_source_range(builder, builder->preprocess.tokens[anchor])) : IR_VALUE_ID_INVALID;
 }
 
 BUSTER_C_INTERNAL u32 c_ir_hex_digit(u8 byte)
@@ -16779,56 +16800,6 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted_reference(Arena* arena, String8 spelli
 }
 #endif
 
-// A string initializer may sit in redundant parentheses -- CPython's
-// _PyRuntimeState_INIT writes ("<dictcomp>") into its static identifier
-// table -- and the reference compilers accept the parenthesized spelling
-// everywhere the bare one initializes an array.  Both the predicate and the
-// decoder trim balanced pairs that wrap the whole range, so every caller
-// that asks one and then reads through the other sees the same tokens.
-BUSTER_C_INTERNAL void c_ir_string_literal_range_trim(CPreprocessResult preprocess, u32* start, u32* end)
-{
-    while (*end > *start + 2 && c_token_is_punctuator(&preprocess.tokens[*start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           c_token_is_punctuator(&preprocess.tokens[*end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-    {
-        // The opening parenthesis must match the closing one, or
-        // `("a"),("b")` would trim into two unrelated ranges.
-        u32 depth = 0;
-        bool wraps = true;
-        for (u32 index = *start; index < *end && wraps; index += 1)
-        {
-            depth += c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                depth -= 1;
-                wraps = depth != 0 || index == *end - 1;
-            }
-        }
-        if (!wraps)
-        {
-            break;
-        }
-        *start += 1;
-        *end -= 1;
-    }
-}
-
-BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end)
-{
-    if (start >= end || end > preprocess.token_count)
-    {
-        return false;
-    }
-    c_ir_string_literal_range_trim(preprocess, &start, &end);
-    for (u32 index = start; index < end; index += 1)
-    {
-        if (preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 BUSTER_C_INTERNAL bool c_ir_decode_utf8_codepoint(u8 const* bytes, u64 end, u64* index, u32* codepoint_out)
 {
     if (*index >= end)
@@ -17120,27 +17091,18 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
     return result;
 }
 
-// What a string-literal token range shares across its fragments: the
-// encoding its prefixes agree on and the element width and kind that
-// encoding means for `target`. `start` and `end` come back trimmed of the
-// redundant parentheses the decoders accept (c_ir_string_literal_range_trim),
-// and `shape_out` carries only those three fields. Both range entry points
-// below open with this and differ only in what they do with the fragments.
-// Inlined by force: left to the host compiler's judgement it stayed out of
-// line with two callers, and the call layer -- a 128-byte CPreprocessResult
-// and the trimmed bounds travelling through it -- cost about 60 instructions
-// per literal on the stage-1 corpus, where most literals are a few bytes.
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocessResult const* preprocess, Target target, u32* start, u32* end,
+// The semantic owner supplies one STRING run. Encoding is literal contents;
+// bounds and spellings are checked here without classifying source tokens.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_run_shape(CPreprocessResult const* preprocess, Target target, u32 start, u32 end,
                                                         CIrDecodedString* shape_out)
 {
-    c_ir_string_literal_range_trim(*preprocess, start, end);
-    bool result = c_ir_tokens_are_string_literals(*preprocess, *start, *end);
+    bool result = start < end && end <= preprocess->token_count;
     CIrStringEncoding encoding = C_IR_STRING_ENCODING_ORDINARY;
     bool has_encoding = false;
-    for (u32 index = *start; result && index < *end; index += 1)
+    for (u32 index = start; result && index < end; index += 1)
     {
         CIrStringEncoding fragment_encoding = C_IR_STRING_ENCODING_ORDINARY;
-        result = c_ir_string_encoding(c_token_spelling(preprocess->spelling_base, preprocess->tokens[index]), &fragment_encoding);
+        result = c_ir_string_encoding(c_ir_source_spelling(preprocess, index), &fragment_encoding);
         if (result && fragment_encoding != C_IR_STRING_ENCODING_ORDINARY)
         {
             result = !has_encoding || fragment_encoding == encoding;
@@ -17258,12 +17220,12 @@ BUSTER_C_INTERNAL void c_string_literal_memo_insert(CStringLiteralMemo* memo, u3
 // fragments concatenated when there is more than one -- a one-fragment
 // literal, the common case by far, is returned as the fragment decoder left
 // it. `decoded_out` is written on success only.
-BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
+BUSTER_C_SHARED bool c_ir_decode_string_literal_run_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                      CStringLiteralMemo const* memo, CIrDecodedString* decoded_out)
 {
     C_CENSUS_PHASE_RECORD(STRING_RANGE_DECODES, 1);
     CIrDecodedString decoded = {0};
-    bool result = c_ir_string_literal_range_shape(&preprocess, target, &start, &end, &decoded);
+    bool result = c_ir_string_literal_run_shape(&preprocess, target, start, end, &decoded);
     if (result)
     {
         u32 width = decoded.element_width;
@@ -17299,7 +17261,7 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
             }
             else
             {
-                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start + fragment_index]);
+                String8 spelling = c_ir_source_spelling(&preprocess, start + fragment_index);
                 result = width == 1 ? c_ir_decode_quoted(arena, spelling, '"', fragments + fragment_index)
                                     : c_ir_decode_wide_quoted(arena, spelling, '"', width, fragments + fragment_index, fragment_elements + fragment_index);
             }
@@ -17372,12 +17334,12 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 // nothing will lower the unit (CStringLiteralMemo.lengths_only) the bytes have
 // no reader, so that one walk is c_ir_count_quoted's and records the length
 // alone.
-BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
+BUSTER_C_SHARED bool c_ir_count_string_literal_run_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                     CStringLiteralMemo* memo, CIrDecodedString* decoded_out)
 {
     C_CENSUS_PHASE_RECORD(STRING_RANGE_COUNTS, 1);
     CIrDecodedString decoded = {0};
-    bool result = c_ir_string_literal_range_shape(&preprocess, target, &start, &end, &decoded);
+    bool result = c_ir_string_literal_run_shape(&preprocess, target, start, end, &decoded);
     u64 element_count = 0;
     bool memoized = memo && memo->tokens == preprocess.tokens && decoded.element_width == 1;
     for (u32 fragment_index = 0; result && fragment_index < end - start; fragment_index += 1)
@@ -17392,7 +17354,7 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
         }
         else
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
+            String8 spelling = c_ir_source_spelling(&preprocess, token_index);
             ByteSlice fragment = {0};
             if (memoized)
             {
@@ -17428,9 +17390,32 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
     return result;
 }
 
-BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target, u64* value_out, CTypeKind* kind_out)
+// AST STRING data is the adjacent fragment count, with its first fragment
+// as provenance. The codec keeps the same per-token memo key and byte order.
+BUSTER_C_SHARED bool c_ir_decode_string_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                         CStringLiteralMemo const* memo, CIrDecodedString* decoded_out)
 {
-    String8 token_spelling = c_token_spelling(spelling_base, token);
+    bool valid = ast && node < ast->node_count && ast->kinds[node] == C_AST_STRING;
+    u32 first = valid ? ast->tokens[node] : 0;
+    u32 count = valid ? ast->data[node] : 0;
+    valid = valid && count && first < preprocess.token_count && count <= preprocess.token_count - first;
+    if (valid) valid = c_ir_decode_string_literal_run_for_target(arena, preprocess, target, first, first + count, memo, decoded_out);
+    return valid;
+}
+
+BUSTER_C_SHARED bool c_ir_count_string_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                        CStringLiteralMemo* memo, CIrDecodedString* decoded_out)
+{
+    bool valid = ast && node < ast->node_count && ast->kinds[node] == C_AST_STRING;
+    u32 first = valid ? ast->tokens[node] : 0;
+    u32 count = valid ? ast->data[node] : 0;
+    valid = valid && count && first < preprocess.token_count && count <= preprocess.token_count - first;
+    if (valid) valid = c_ir_count_string_literal_run_for_target(arena, preprocess, target, first, first + count, memo, decoded_out);
+    return valid;
+}
+
+BUSTER_C_SHARED bool c_ir_decode_character_spelling(Arena* arena, String8 token_spelling, Target target, u64* value_out, CTypeKind* kind_out)
+{
     C_CENSUS_FACT(CHARACTER, token_spelling.pointer, token_spelling.length);
     u64 opening = 0;
     while (opening < token_spelling.length && token_spelling.pointer[opening] != '\'')
@@ -17517,21 +17502,21 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
     return result;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_character(CIntegerIrBuilder* builder, CToken token)
+BUSTER_C_SHARED bool c_ir_decode_character_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                            u64* value_out, CTypeKind* kind_out)
+{
+    bool valid = ast && node < ast->node_count && ast->kinds[node] == C_AST_CHARACTER && ast->tokens[node] < preprocess.token_count;
+    if (valid) valid = c_ir_decode_character_spelling(arena, c_ir_source_spelling(&preprocess, ast->tokens[node]), target, value_out, kind_out);
+    return valid;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_character_node(CIntegerIrBuilder* builder, u32 node)
 {
     u64 value = 0;
     CTypeKind kind = C_TYPE_INVALID;
-    IrValueId result;
-    if (!c_ir_decode_character_value(builder->arena, builder->preprocess.spelling_base, token, builder->target, &value, &kind))
-    {
-        result = IR_VALUE_ID_INVALID;
-    }
-    else
-    {
-        result = c_ir_emit_integer_value_typed(builder, value, false, token, builder->scalar_types[kind]);
-    }
-
-    return result;
+    bool valid = c_ir_decode_character_node_for_target(builder->arena, builder->preprocess, builder->target, builder->syntax_tree, node, &value, &kind);
+    return valid ? c_ir_emit_integer_value_typed(builder, value, false, builder->preprocess.tokens[builder->syntax_tree->tokens[node]],
+                                                builder->scalar_types[kind]) : IR_VALUE_ID_INVALID;
 }
 
 // A literal's static object is independent of whether its address is needed
@@ -17631,6 +17616,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* b
     return result;
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_string_node_typed(CIntegerIrBuilder* builder, u32 node, u32 source_token, IrTypeId requested_type)
+{
+    CIrDecodedString decoded = {0};
+    bool valid = c_ir_decode_string_node_for_target(builder->arena, builder->preprocess, builder->target, builder->syntax_tree, node,
+                                                   builder->parse.string_literals, &decoded) && source_token < builder->preprocess.token_count;
+    return valid ? c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[source_token], decoded, requested_type) : IR_VALUE_ID_INVALID;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_string_range_typed(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId requested_type)
 {
     CIrDecodedString decoded = {0};
@@ -17694,7 +17687,7 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_function_name_object(CIntegerIrBuilder* 
                 .token_count = 1,
                 .dialect = builder->preprocess.dialect,
             };
-            described = c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, builder->parse.string_literals, &decoded);
+            described = c_ir_decode_string_literal_run_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, builder->parse.string_literals, &decoded);
         }
         if (described)
         {
@@ -33134,10 +33127,9 @@ BUSTER_C_INTERNAL bool c_ir_initializer_item_string(CIntegerIrBuilder* builder, 
                   destination && destination->kind == IR_TYPE_ARRAY;
     if (string)
     {
-        u32 first = builder->syntax_tree->tokens[node];
         CIrDecodedString decoded = {0};
-        string = c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, first,
-                                                             first + builder->syntax_tree->data[node], builder->parse.string_literals, &decoded) &&
+        string = c_ir_decode_string_node_for_target(builder->arena, builder->preprocess, builder->target, builder->syntax_tree, node,
+                                                   builder->parse.string_literals, &decoded) &&
                  c_ir_string_array_element_compatible(builder, destination->element_type, decoded);
     }
     return string;
@@ -33147,7 +33139,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_initializer_item_string_value(CIntegerIrBuilder
 {
     u32 node = c_ir_initializer_value_node(builder, item->node);
     u32 first = builder->syntax_tree->tokens[node];
-    return c_ir_emit_string_range_typed(builder, first, first + builder->syntax_tree->data[node], type);
+    return c_ir_emit_string_node_typed(builder, node, first, type);
 }
 
 // A GNU range's value is evaluated once, then the initialized first element
@@ -37518,8 +37510,8 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
             case C_AST_NUMBER:
             {
                 state->walk_count -= 1;
-                CToken token = builder->preprocess.tokens[first];
-                IrValueId value = c_ir_number_is_float_at(builder, first) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, first);
+                u32 anchor = ast->tokens[node];
+                IrValueId value = c_ir_number_is_float_at(builder, anchor) ? c_ir_emit_float_node(builder, node) : c_ir_emit_integer(builder, anchor);
                 status = value.value != IR_ID_UNDERLYING_INVALID && c_ir_core_value_push(builder, state, value) ? C_IR_CORE_NEXT : C_IR_CORE_FAILED;
             }
             break;
@@ -37527,9 +37519,8 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
             case C_AST_STRING:
             {
                 state->walk_count -= 1;
-                CToken token = builder->preprocess.tokens[first];
-                IrValueId value = kind == C_AST_CHARACTER ? c_ir_emit_character(builder, token)
-                                                          : c_ir_emit_string_range_typed(builder, first, end, IR_TYPE_ID_INVALID);
+                IrValueId value = kind == C_AST_CHARACTER ? c_ir_emit_character_node(builder, node)
+                                                          : c_ir_emit_string_node_typed(builder, node, first, IR_TYPE_ID_INVALID);
                 status = value.value != IR_ID_UNDERLYING_INVALID && c_ir_core_value_push(builder, state, value) ? C_IR_CORE_NEXT : C_IR_CORE_FAILED;
             }
             break;
@@ -50806,6 +50797,63 @@ bool c_test_decode_quoted_paths_agree(Arena* arena, String8 spelling, u8 delimit
     return result;
 }
 
+// Node ownership supplies the literal kind and run even when token-kind
+// bytes are poisoned. Only source offsets, lengths and spellings survive.
+bool c_test_literal_node_paths_agree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, u32 node)
+{
+    bool result = ast && node < ast->node_count;
+    u32 kind = result ? ast->kinds[node] : C_AST_KIND_COUNT;
+    CPreprocessResult provenance = preprocess;
+    provenance.tokens = arena_allocate(arena, CToken, preprocess.token_count);
+    memcpy(provenance.tokens, preprocess.tokens, sizeof(CToken) * preprocess.token_count);
+    for (u32 token = 0; token < preprocess.token_count; token += 1) provenance.tokens[token].kind = C_TOKEN_IDENTIFIER;
+    if (kind == C_AST_STRING)
+    {
+        u32 first = ast->tokens[node];
+        CIrDecodedString reference = {0};
+        CIrDecodedString decoded = {0};
+        CIrDecodedString counted = {0};
+        bool reference_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, first, first + ast->data[node], 0, &reference);
+        bool node_accepts = c_ir_decode_string_node_for_target(arena, provenance, preprocess.target, ast, node, 0, &decoded);
+        CStringLiteralMemo* memo = c_string_literal_memo_create(arena, provenance.tokens, false);
+        bool count_accepts = c_ir_count_string_node_for_target(arena, provenance, preprocess.target, ast, node, memo, &counted);
+        result = reference_accepts == node_accepts && reference_accepts == count_accepts;
+        if (result && reference_accepts)
+        {
+            result = reference.bytes.length == decoded.bytes.length && reference.element_count == decoded.element_count &&
+                     reference.element_width == decoded.element_width && reference.element_kind == decoded.element_kind && reference.encoding == decoded.encoding &&
+                     (!reference.bytes.length || !memcmp(reference.bytes.pointer, decoded.bytes.pointer, reference.bytes.length)) &&
+                     counted.bytes.pointer == 0 && counted.bytes.length == 0 && counted.element_count == decoded.element_count &&
+                     counted.element_width == decoded.element_width && counted.element_kind == decoded.element_kind && counted.encoding == decoded.encoding;
+            CIrDecodedString memoized = {0};
+            result = result && c_ir_decode_string_node_for_target(arena, provenance, preprocess.target, ast, node, memo, &memoized) &&
+                     memoized.bytes.length == decoded.bytes.length &&
+                     (!decoded.bytes.length || !memcmp(memoized.bytes.pointer, decoded.bytes.pointer, decoded.bytes.length));
+        }
+    }
+    else if (kind == C_AST_CHARACTER)
+    {
+        u64 reference = 0;
+        u64 decoded = 0;
+        CTypeKind reference_kind = C_TYPE_INVALID;
+        CTypeKind decoded_kind = C_TYPE_INVALID;
+        bool reference_accepts = c_ir_decode_character_value(arena, preprocess.spelling_base, preprocess.tokens[ast->tokens[node]], preprocess.target,
+                                                               &reference, &reference_kind);
+        bool node_accepts = c_ir_decode_character_node_for_target(arena, provenance, preprocess.target, ast, node, &decoded, &decoded_kind);
+        result = reference_accepts == node_accepts && (!reference_accepts || (reference == decoded && reference_kind == decoded_kind));
+    }
+    else
+    {
+        CIrDecodedString untouched = {.element_count = 17};
+        u64 value = 17;
+        CTypeKind value_kind = C_TYPE_INT;
+        result = result && !c_ir_decode_string_node_for_target(arena, provenance, preprocess.target, ast, node, 0, &untouched) &&
+                 !c_ir_decode_character_node_for_target(arena, provenance, preprocess.target, ast, node, &value, &value_kind) &&
+                 untouched.element_count == 17 && value == 17 && value_kind == C_TYPE_INT;
+    }
+    return result;
+}
+
 // The range-level half of the gate: over a token range, the count-only entry
 // point must accept exactly what the full decode accepts and report the same
 // count, width, kind and encoding, with `bytes` left empty.
@@ -50936,7 +50984,7 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
         result = counted.bytes.pointer == 0 && counted.bytes.length == 0 && counted.element_count == decoded.element_count &&
                  counted.element_width == decoded.element_width && counted.element_kind == decoded.element_kind && counted.encoding == decoded.encoding &&
                  decoded.bytes.length == decoded.element_count * decoded.element_width;
-        c_ir_string_literal_range_trim(preprocess, &start, &end);
+        c_parse_string_literal_range_trim(preprocess, &start, &end);
         if (end - start == 1)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]);

@@ -2451,6 +2451,24 @@ token of each store is the anchor of the item's value node. The
 byte-for-byte comparison of `-g` objects must confirm this for every item
 kind. Any kind where it differs is listed here when it is implemented.
 
+### Literal contents from owned nodes
+
+`c_ir_decode_string_node_for_target` and `c_ir_count_string_node_for_target`
+read a `STRING` node's first token and `data` fragment count. The byte codec
+checks that owned run's bounds and encoding spellings; it does no token-kind
+classification, parenthesis trimming or adjacent-fragment discovery. The
+fragment memo keeps its original token keys and byte ownership. Runtime
+initializer string values and the expression core pass their known nodes.
+Detached synthesized function-name spellings use the same checked run codec.
+
+`CHARACTER` decoding similarly receives a node and retrieves only its source
+spelling. The core selects numeric literals from `NUMBER` nodes and their
+retained number facts. Shared raw-range validation belongs to semantic
+analysis in `c_parse.c`, including the legacy semantic parenthesis rules;
+remaining legacy lowering callers must migrate with their owner walkers.
+The literal test gate poisons every token-kind byte after building real syntax
+nodes, and verifies the byte, count, encoding and memo results remain exact.
+
 ### Runtime initializer values from retained selections
 
 The runtime compound-literal frames consume `CInitializerPlan` by initializer

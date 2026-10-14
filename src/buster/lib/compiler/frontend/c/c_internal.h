@@ -194,6 +194,9 @@ BUSTER_C_EXTERN bool c_parse_vector_size_word(String8 spelling);
 // of the token stream instead of stored in the record.
 BUSTER_C_EXTERN bool c_alignment_specifier_is_standard(CPreprocessResult preprocess, CAlignmentSpecifier specifier);
 BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
+BUSTER_C_EXTERN bool c_ir_decode_character_spelling(Arena* arena, String8 spelling, Target target, u64* value_out, CTypeKind* kind_out);
+BUSTER_C_EXTERN bool c_ir_decode_character_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                           u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
@@ -223,6 +226,15 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_named_label_at
            preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess->tokens[index + 1].punctuator == C_PUNCTUATOR_COLON &&
            c_parse_named_label_proven_at(preprocess, body_start, index, body_end);
 }
+BUSTER_C_EXTERN void c_parse_string_literal_range_trim(CPreprocessResult preprocess, u32* start, u32* end);
+BUSTER_C_EXTERN bool c_ir_decode_string_literal_run_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
+                                                               u32 first, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
+BUSTER_C_EXTERN bool c_ir_count_string_literal_run_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
+                                                              u32 first, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
+BUSTER_C_EXTERN bool c_ir_decode_string_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                        CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
+BUSTER_C_EXTERN bool c_ir_count_string_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                       CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
 // The same answer without the bytes, for the callers that only size or type
