@@ -65,6 +65,11 @@
 // initializer presence and labeled-local predeclaration use node topology
 // (c_ast_declarator_name, c_parse_publish_declaration_facts; GitHub #4061 F4).
 // Initializer-layout, attributes and VLA queries retain marked owner adapters.
+// Expression type node tasks (c_ir_expression_type_node) retain their view:
+// STRICT keeps the operand type, PROMOTED applies the legacy bit-field view,
+// and PREDICTED applies value-context decay and conditional prediction. Their
+// child continuations and retained type materializer share the checked query
+// stack; the projection state stays private until that root completes.
 // No node id reaches the IR. Prepared control
 // expressions of a function are answered by node-indexed tables:
 // c_ir_prepared_control_expression_find uses a node and wrapping level,
@@ -4094,6 +4099,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_retained_qualify(CIntegerIrBuilder* builder, CTy
                ? c_ir_add_qualified_type(builder->program, plain, type->is_atomic, type->is_volatile) : plain;
 }
 
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_type_node(CIntegerIrBuilder* builder, u32 node, CIrAstTypeView view);
+
 BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame, CIrRetainedTypeReference reference,
                                                        CIrRetainedTypeReference base)
 {
@@ -4397,11 +4404,20 @@ BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type_node(CIntegerIrBuilder* bu
     return settled && answer.success ? answer.result_type : IR_TYPE_ID_INVALID;
 }
 
+BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
+
 BUSTER_C_INTERNAL bool c_ir_expression_type_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
 {
-    BUSTER_UNUSED(builder);
-    frame->result_type = IR_TYPE_ID_INVALID;
-    return false;
+    return c_ir_expression_type_node_project(builder, frame);
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_type_node(CIntegerIrBuilder* builder, u32 node, CIrAstTypeView view)
+{
+    CIrNodeQueryFrame answer = {0};
+    CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_EXPRESSION_TYPE, .view = view};
+    bool settled = builder->queries && builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+                                                                     : c_ir_node_query_execute(builder, key, &answer);
+    return settled && answer.success ? answer.result_type : IR_TYPE_ID_INVALID;
 }
 
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
@@ -40299,7 +40315,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_type_is_integer_domain(IrType* type)
+BUSTER_C_INTERNAL bool c_ir_type_is_integer_domain(IrType const* type)
 {
     return type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_ENUM);
 }
@@ -40529,6 +40545,355 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type(CIntegerIrBuilder* build
     return result.result_type;
 }
 
+// A projection is a node/view task. Child answers and a row-free type graph
+// keep their private state across query-machine yields; none enters the IR.
+typedef struct CIrExpressionProjection CIrExpressionProjection;
+struct CIrExpressionProjection
+{
+    CIrNodeQueryFrame materialization;
+    IrTypeId first;
+    IrTypeId second;
+    u32 stage;
+    bool first_null;
+    bool failed;
+};
+
+BUSTER_C_INTERNAL bool c_ir_expression_projection_child(CIntegerIrBuilder* builder, CIrExpressionProjection* state,
+                                                         u32 node, CIrAstTypeView view, IrTypeId* type)
+{
+    CIrNodeQueryFrame answer = {0};
+    bool settled = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_EXPRESSION_TYPE, .view = view}, &answer);
+    if (settled)
+    {
+        *type = answer.success ? answer.result_type : IR_TYPE_ID_INVALID;
+        state->failed |= !answer.success;
+    }
+    return settled && answer.success;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_projection_decay(CIntegerIrBuilder* builder, IrTypeId type)
+{
+    IrType const* row = ir_type_from_id(&builder->program->types, type);
+    return row && row->kind == IR_TYPE_FUNCTION ? c_ir_add_pointer_type(builder->program, builder->pointer_types, type)
+                                                : c_ir_sizeof_operand_decay(builder, type);
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_projection_promote(CIntegerIrBuilder* builder, u32 node, IrTypeId type)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    IrType const* row = ir_type_from_id(&builder->program->types, type);
+    u32 width = facts && node < facts->node_count && (facts->flags[node] & C_AST_FACT_BIT_FIELD) ? facts->payloads[node] : 0;
+    if (width && width <= 32 && row && row->kind == IR_TYPE_INTEGER && row->bit_width >= 32)
+    {
+        bool signed_promotion = width < 32 || row->is_signed;
+        if (row->bit_width > 32 || signed_promotion != row->is_signed)
+        {
+            type = signed_promotion ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
+        }
+    }
+    return type;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_projection_binary(CIntegerIrBuilder* builder, u32 kind, IrTypeId left, IrTypeId right)
+{
+    bool additive = kind == C_AST_ADD || kind == C_AST_SUBTRACT;
+    if (additive)
+    {
+        left = c_ir_sizeof_operand_decay(builder, left);
+        right = c_ir_sizeof_operand_decay(builder, right);
+    }
+    IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+    IrType const* first = ir_type_from_id(&builder->program->types, left);
+    IrType const* second = ir_type_from_id(&builder->program->types, right);
+    bool first_vector = first && first->kind == IR_TYPE_VECTOR;
+    bool second_vector = second && second->kind == IR_TYPE_VECTOR;
+    if (first_vector || second_vector)
+    {
+        IrType const* scalar = first_vector ? second : first;
+        bool splat = scalar && (scalar->kind == IR_TYPE_INTEGER || scalar->kind == IR_TYPE_FLOAT || scalar->kind == IR_TYPE_BOOLEAN ||
+                                scalar->kind == IR_TYPE_ENUM);
+        result = (first_vector && second_vector && left.value == right.value) || (first_vector != second_vector && splat)
+                     ? (first_vector ? left : right) : IR_TYPE_ID_INVALID;
+    }
+    if (additive && result.value == IR_ID_UNDERLYING_INVALID && first && second)
+    {
+        bool minus = kind == C_AST_SUBTRACT;
+        if (first->kind == IR_TYPE_POINTER && second->kind == IR_TYPE_POINTER && minus)
+            result = builder->ptrdiff_type;
+        else if (first->kind == IR_TYPE_POINTER && c_ir_type_is_integer_domain(second))
+            result = left;
+        else if (!minus && c_ir_type_is_integer_domain(first) && second->kind == IR_TYPE_POINTER)
+            result = right;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_expression_projection_null(CIntegerIrBuilder* builder, u32 node, IrTypeId type, bool* null)
+{
+    IrType const* row = ir_type_from_id(&builder->program->types, type);
+    IrType const* element = row && row->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, row->element_type) : 0;
+    bool pointer = element && element->kind == IR_TYPE_VOID && !row->is_nullptr;
+    bool settled = true;
+    *null = false;
+    if (pointer || c_ir_type_is_integer_domain(row))
+    {
+        CIrNodeQueryFrame answer = {0};
+        settled = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_CONSTANT}, &answer);
+        if (settled && answer.success && !answer.constant.is_complex)
+        {
+            CIrConstantValue value = answer.constant.real;
+            *null = pointer ? value.kind == C_IR_CONSTANT_POINTER && value.symbol.value == IR_ID_UNDERLYING_INVALID && !value.addend && !value.integer
+                            : value.kind == C_IR_CONSTANT_INTEGER && ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
+        }
+    }
+    return settled;
+}
+
+BUSTER_C_INTERNAL bool c_ir_expression_projection_conditional(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame,
+                                                               CIrExpressionProjection* state)
+{
+    CAst const* ast = builder->syntax_tree;
+    bool predicted = frame->view == C_IR_AST_TYPE_PREDICTED;
+    bool omitted = ast->kinds[frame->node] == C_AST_CONDITIONAL_OMITTED;
+    u32 first_node = c_ast_child_at(ast, frame->node, omitted ? 0u : 1u);
+    u32 second_node = c_ast_child_at(ast, frame->node, omitted ? 1u : 2u);
+    CIrAstTypeView view = predicted ? C_IR_AST_TYPE_PREDICTED : C_IR_AST_TYPE_PROMOTED;
+    if (!state->stage && c_ir_expression_projection_child(builder, state, first_node, view, &state->first)) state->stage = 1;
+    if (state->stage == 1 && c_ir_expression_projection_child(builder, state, second_node, view, &state->second)) state->stage = 2;
+    if (state->stage == 2)
+    {
+        IrType const* first = ir_type_from_id(&builder->program->types, state->first);
+        bool promote = predicted && first && first->kind == IR_TYPE_INTEGER && first->bit_width == 32 && !first->is_signed;
+        if (!promote || c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_PROMOTED, &state->first)) state->stage = 3;
+    }
+    if (state->stage == 3)
+    {
+        IrType const* second = ir_type_from_id(&builder->program->types, state->second);
+        bool promote = predicted && second && second->kind == IR_TYPE_INTEGER && second->bit_width == 32 && !second->is_signed;
+        if (!promote || c_ir_expression_projection_child(builder, state, second_node, C_IR_AST_TYPE_PROMOTED, &state->second)) state->stage = 4;
+    }
+    if (state->stage == 4)
+    {
+        IrType const* first = ir_type_from_id(&builder->program->types, state->first);
+        IrType const* second = ir_type_from_id(&builder->program->types, state->second);
+        if (!predicted)
+        {
+            state->first = c_ir_sizeof_operand_decay(builder, state->first);
+            state->second = c_ir_sizeof_operand_decay(builder, state->second);
+            frame->result_type = c_ir_usual_arithmetic_type(builder, state->first, state->second);
+        }
+        if (frame->result_type.value == IR_ID_UNDERLYING_INVALID && state->first.value == state->second.value)
+            frame->result_type = state->first;
+        if (frame->result_type.value == IR_ID_UNDERLYING_INVALID && first && second && (first->kind == IR_TYPE_VOID || second->kind == IR_TYPE_VOID))
+            frame->result_type = first->kind == IR_TYPE_VOID ? state->first : state->second;
+        if (frame->result_type.value == IR_ID_UNDERLYING_INVALID && first && second)
+        {
+            if (first->kind == IR_TYPE_ARRAY && second->kind != IR_TYPE_ARRAY) state->first = c_ir_sizeof_operand_decay(builder, state->first);
+            if (second->kind == IR_TYPE_ARRAY && first->kind != IR_TYPE_ARRAY) state->second = c_ir_sizeof_operand_decay(builder, state->second);
+            frame->result_type = state->first.value == state->second.value ? state->first : c_ir_usual_arithmetic_type(builder, state->first, state->second);
+        }
+        state->stage = frame->result_type.value != IR_ID_UNDERLYING_INVALID ? 7u : 5u;
+    }
+    if (state->stage == 5 && c_ir_expression_projection_null(builder, first_node, state->first, &state->first_null)) state->stage = 6;
+    if (state->stage == 6)
+    {
+        bool second_null = false;
+        if (c_ir_expression_projection_null(builder, second_node, state->second, &second_null))
+        {
+            frame->result_type = c_ir_conditional_pointer_type(builder, state->first, state->second, state->first_null, second_null);
+            state->stage = 7;
+        }
+    }
+    return state->stage == 7 && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_expression_projection_leading_compound(CAst const* ast, u32 node)
+{
+    u32 current = node;
+    u32 compound = C_AST_NODE_INVALID;
+    bool walking = true;
+    while (walking && current < ast->node_count)
+    {
+        u32 kind = ast->kinds[current];
+        walking = current == node || c_ast_parentheses(ast, current).count == 0;
+        if (walking && kind == C_AST_COMPOUND_LITERAL)
+        {
+            compound = current;
+            walking = false;
+        }
+        else if (walking)
+        {
+            walking = kind == C_AST_CALL || kind == C_AST_INDEX || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW ||
+                      kind == C_AST_POST_INCREMENT || kind == C_AST_POST_DECREMENT || kind == C_AST_EXTENSION ||
+                      (kind >= C_AST_MULTIPLY && kind <= C_AST_LOGICAL_OR) || (kind >= C_AST_ASSIGN && kind <= C_AST_COMMA);
+            current = walking ? c_ast_child_at(ast, current, 0) : C_AST_NODE_INVALID;
+        }
+    }
+    return compound;
+}
+
+BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    bool admitted = ast && facts && frame->node < ast->node_count && frame->node < facts->node_count && frame->view <= C_IR_AST_TYPE_PREDICTED;
+    frame->result_type = IR_TYPE_ID_INVALID;
+    CIrExpressionProjection* state = (CIrExpressionProjection*)frame->state;
+    if (admitted && !state)
+    {
+        Arena* arena = builder->temporary_arena;
+        u64 bytes = sizeof(CIrExpressionProjection) + BUSTER_ALIGN_OF(CIrExpressionProjection);
+        admitted = arena && arena->position <= arena->reserved_size && bytes <= arena->reserved_size - arena->position;
+        state = admitted ? arena_allocate(arena, CIrExpressionProjection, 1) : 0;
+        if (state)
+        {
+            *state = (CIrExpressionProjection){.first = IR_TYPE_ID_INVALID, .second = IR_TYPE_ID_INVALID};
+            frame->state = state;
+        }
+        else
+        {
+            builder->failure_message = S8("could not reserve retained expression type projection state");
+            builder->failure_token_index = ast->tokens[frame->node];
+            builder->failure_kind_plus_one = C_DIAGNOSTIC_SOURCE_TOO_LARGE + 1;
+        }
+    }
+    if (admitted && !state->failed)
+    {
+        u32 kind = ast->kinds[frame->node];
+        u32 first_node = c_ast_child_count(ast, frame->node) ? c_ast_child_at(ast, frame->node, 0) : C_AST_NODE_INVALID;
+        CIrAstTypeView view = frame->view == C_IR_AST_TYPE_PROMOTED ? C_IR_AST_TYPE_PROMOTED : C_IR_AST_TYPE_STRICT;
+        bool binary = (kind >= C_AST_MULTIPLY && kind <= C_AST_SUBTRACT) || kind == C_AST_BIT_AND || kind == C_AST_BIT_XOR || kind == C_AST_BIT_OR;
+        bool unary = kind == C_AST_PLUS || kind == C_AST_NEGATE || kind == C_AST_BIT_NOT || kind == C_AST_ADDRESS || kind == C_AST_DEREFERENCE ||
+                     kind == C_AST_REAL || kind == C_AST_IMAG || kind == C_AST_EXTENSION || kind == C_AST_PRE_INCREMENT || kind == C_AST_PRE_DECREMENT ||
+                     kind == C_AST_POST_INCREMENT || kind == C_AST_POST_DECREMENT || kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT ||
+                     (kind >= C_AST_ASSIGN && kind <= C_AST_BIT_OR_ASSIGN) || kind == C_AST_COMMA || kind == C_AST_EXPRESSION_STATEMENT ||
+                     kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_COMPOUND_STATEMENT;
+        u32 leading = frame->view == C_IR_AST_TYPE_PREDICTED ? c_ir_expression_projection_leading_compound(ast, frame->node) : C_AST_NODE_INVALID;
+        u32 selected = c_ast_facts_selection(facts, frame->node);
+        if (leading != C_AST_NODE_INVALID)
+        {
+            // Preserve the prediction method's leading-compound decision
+            // before its postfix chain; strict projection still reads the
+            // complete expression. The category is a retained tree shape.
+            CIrNodeQueryFrame answer = {0};
+            admitted = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = leading, .kind = C_IR_NODE_QUERY_COMPOUND_TYPE}, &answer) && answer.success;
+            if (admitted) frame->result_type = answer.result_type;
+        }
+        else if (selected != C_AST_NODE_INVALID)
+        {
+            admitted = c_ir_expression_projection_child(builder, state, selected, frame->view, &frame->result_type);
+        }
+        else if (kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED)
+        {
+            admitted = c_ir_expression_projection_conditional(builder, frame, state);
+        }
+        else if (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX)
+        {
+            if (!state->stage && c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_STRICT, &state->first)) state->stage = 1;
+            IrType const* first = ir_type_from_id(&builder->program->types, state->first);
+            if (state->stage == 1 && kind == C_AST_INDEX && c_ir_type_is_integer_domain(first))
+            {
+                if (c_ir_expression_projection_child(builder, state, c_ast_child_at(ast, frame->node, 1), C_IR_AST_TYPE_STRICT, &state->first)) state->stage = 2;
+            }
+            else if (state->stage == 1) state->stage = 2;
+            if (state->stage == 2)
+            {
+                first = ir_type_from_id(&builder->program->types, state->first);
+                if (kind == C_AST_INDEX)
+                    frame->result_type = first && (first->kind == IR_TYPE_ARRAY || first->kind == IR_TYPE_POINTER || first->kind == IR_TYPE_VECTOR)
+                                             ? first->element_type : IR_TYPE_ID_INVALID;
+                else
+                {
+                    IrTypeId aggregate = state->first;
+                    if (kind == C_AST_MEMBER_ARROW) aggregate = first && (first->kind == IR_TYPE_ARRAY || first->kind == IR_TYPE_POINTER)
+                                                                 ? first->element_type : IR_TYPE_ID_INVALID;
+                    CIrPromotedMemberPath path = {0};
+                    u32 token = ast->tokens[frame->node];
+                    if (token < builder->preprocess.token_count && c_ir_promoted_member_path(builder, aggregate,
+                        c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token]), &path)) frame->result_type = path.type;
+                }
+            }
+            admitted = state->stage == 2 && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+        }
+        else if (binary)
+        {
+            if (!state->stage && c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_PROMOTED, &state->first)) state->stage = 1;
+            if (state->stage == 1 && c_ir_expression_projection_child(builder, state, c_ast_child_at(ast, frame->node, 1), C_IR_AST_TYPE_PROMOTED, &state->second)) state->stage = 2;
+            if (state->stage == 2) frame->result_type = c_ir_expression_projection_binary(builder, kind, state->first, state->second);
+            admitted = state->stage == 2 && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+        }
+        else if (unary)
+        {
+            u32 count = c_ast_child_count(ast, frame->node);
+            if (kind == C_AST_COMMA) first_node = c_ast_child_at(ast, frame->node, 1);
+            if (kind == C_AST_COMPOUND_STATEMENT) first_node = count ? c_ast_child_at(ast, frame->node, count - 1) : C_AST_NODE_INVALID;
+            if (kind == C_AST_EXTENSION || kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_COMPOUND_STATEMENT || kind == C_AST_EXPRESSION_STATEMENT) view = frame->view;
+            if (kind == C_AST_PLUS || kind == C_AST_NEGATE || kind == C_AST_BIT_NOT || kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT) view = C_IR_AST_TYPE_PROMOTED;
+            bool empty = kind == C_AST_COMPOUND_STATEMENT && (first_node == C_AST_NODE_INVALID || ast->kinds[first_node] != C_AST_EXPRESSION_STATEMENT);
+            if (empty) frame->result_type = builder->void_type;
+            else if (c_ir_expression_projection_child(builder, state, first_node, view, &state->first))
+            {
+                IrType const* first = ir_type_from_id(&builder->program->types, state->first);
+                frame->result_type = state->first;
+                if (kind == C_AST_PLUS || kind == C_AST_NEGATE || kind == C_AST_BIT_NOT || kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT)
+                    frame->result_type = c_ir_usual_arithmetic_type(builder, state->first, state->first);
+                IrType const* promoted = ir_type_from_id(&builder->program->types, frame->result_type);
+                if ((kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT) && (!promoted || promoted->kind != IR_TYPE_INTEGER))
+                    frame->result_type = IR_TYPE_ID_INVALID;
+                if (kind == C_AST_BIT_NOT && (!promoted || (promoted->kind != IR_TYPE_INTEGER && !promoted->is_complex)))
+                    frame->result_type = IR_TYPE_ID_INVALID;
+                if (kind == C_AST_ADDRESS) frame->result_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, state->first);
+                if (kind == C_AST_DEREFERENCE) frame->result_type = first && (first->kind == IR_TYPE_POINTER || first->kind == IR_TYPE_ARRAY || first->kind == IR_TYPE_FUNCTION)
+                                                                                    ? first->kind == IR_TYPE_FUNCTION ? state->first : first->element_type : IR_TYPE_ID_INVALID;
+                if ((kind == C_AST_REAL || kind == C_AST_IMAG) && first && first->is_complex) frame->result_type = first->element_type;
+                if ((kind == C_AST_REAL || kind == C_AST_IMAG) && (!first || (!c_ir_type_is_integer_domain(first) && first->kind != IR_TYPE_FLOAT && !first->is_complex)))
+                    frame->result_type = IR_TYPE_ID_INVALID;
+                if (((kind >= C_AST_ASSIGN && kind <= C_AST_BIT_OR_ASSIGN) || kind == C_AST_PRE_INCREMENT || kind == C_AST_PRE_DECREMENT ||
+                     kind == C_AST_POST_INCREMENT || kind == C_AST_POST_DECREMENT) && first && first->is_atomic) frame->result_type = first->unqualified_type;
+                if (kind == C_AST_COMMA || kind == C_AST_STATEMENT_EXPRESSION) frame->result_type = c_ir_sizeof_operand_decay(builder, frame->result_type);
+            }
+            admitted = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+        }
+        else if ((kind >= C_AST_LESS && kind <= C_AST_NOT_EQUAL) || kind == C_AST_LOGICAL_AND || kind == C_AST_LOGICAL_OR || kind == C_AST_LOGICAL_NOT)
+            frame->result_type = builder->s32_type;
+        else if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE)
+            frame->result_type = builder->size_type;
+        else if (kind == C_AST_COMPOUND_LITERAL || kind == C_AST_CAST)
+        {
+            CIrNodeQueryFrame answer = {0};
+            admitted = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = kind == C_AST_COMPOUND_LITERAL ? frame->node : first_node,
+                .kind = kind == C_AST_COMPOUND_LITERAL ? C_IR_NODE_QUERY_COMPOUND_TYPE : C_IR_NODE_QUERY_TYPE_NAME}, &answer) && answer.success;
+            if (admitted) frame->result_type = answer.result_type;
+        }
+        else if (facts->flags[frame->node] & C_AST_FACT_STRING)
+        {
+            u32 element = facts->types[frame->node];
+            IrTypeId type = element < builder->parse.type_count ? builder->c_type_ir_map[element] : IR_TYPE_ID_INVALID;
+            if (type.value != IR_ID_UNDERLYING_INVALID) frame->result_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+        }
+        else
+        {
+            u32 index = facts->types[frame->node];
+            CAstTypeRecipe const* recipe = (facts->flags[frame->node] & C_AST_FACT_RECIPE) && index < facts->recipe_count ? facts->recipes + index : 0;
+            if (recipe && recipe->form == C_AST_TYPE_RECIPE_FUNCTION_NAME)
+            {
+                CIrConstantValue object = c_ir_function_name_object(builder, builder->preprocess.tokens[ast->tokens[frame->node]]);
+                if (object.kind == C_IR_CONSTANT_LVALUE) frame->result_type = object.type;
+            }
+            else if (!(recipe && recipe->form == C_AST_TYPE_RECIPE_BUILTIN))
+            {
+                admitted = c_ir_retained_type_fact_attempt(builder, &state->materialization, frame->node);
+                if (admitted) frame->result_type = state->materialization.result_type;
+            }
+        }
+        admitted = admitted && !state->failed && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+        if (admitted && frame->view == C_IR_AST_TYPE_PROMOTED) frame->result_type = c_ir_expression_projection_promote(builder, frame->node, frame->result_type);
+        if (admitted && frame->view == C_IR_AST_TYPE_PREDICTED) frame->result_type = c_ir_expression_projection_decay(builder, frame->result_type);
+    }
+    admitted = admitted && state && !state->failed && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+    return admitted;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     if (start >= end)
@@ -40569,13 +40934,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     WORK_LEDGER_RECORD(REDERIVE_LOWER_TYPE_PREDICTIONS, 1);
-    CIrQueryFrame result = {0};
-    IrTypeId type = IR_TYPE_ID_INVALID;
-    if (c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) && result.success)
-    {
-        type = result.result_type;
-    }
-    return type;
+    u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
+    return c_ir_expression_type_node(builder, node, C_IR_AST_TYPE_PREDICTED);
 }
 
 // Type immediate conditional children in postorder before flattening their

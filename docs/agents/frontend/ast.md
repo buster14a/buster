@@ -427,6 +427,18 @@ lowers from nodes and facts.
 Retained bytes are measured and reported, not budgeted per slice. The
 end-to-end measurement waits until lowering is complete (step 5).
 
+Expression type queries have distinct node views in `c_ir_expression_type_node`:
+`STRICT` keeps the operand type, `PROMOTED` uses the existing bit-field promotion
+rules, and `PREDICTED` applies value-context array/function decay and the existing
+conditional prediction method. These views remain part of each checked query
+key. Their child tasks follow AST topology and the finished facts; sparse type
+recipes are materialized without appending a semantic model row. Private graph
+and projection state survives a child yield and is rewound only after its root
+finishes. Canonical IR stores the resulting IR types, never the node or state.
+The prediction entrypoint's remaining range boundary locates its retained node;
+the node task itself reads no expression grammar. The strict and promoted
+range entrypoints remain migration adapters until their callers carry nodes.
+
 ## Layouts
 
 `CAstOptions.layout` selects a variant of the same tree:
