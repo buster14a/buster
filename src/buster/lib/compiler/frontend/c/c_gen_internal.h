@@ -42,6 +42,8 @@ struct CIrExt80Big
 #if BUSTER_INCLUDE_TESTS
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
+// Token-free structural groups, replayed row reuse and restored node heads.
+BUSTER_F_DECL bool c_test_prepared_control_identity_replay(void);
 // Calling-thread reference lookups plus scanned rows, and scanned rows alone.
 BUSTER_F_DECL u64 c_test_logical_call_reference_work(void);
 BUSTER_F_DECL u64 c_test_logical_call_reference_rows(void);

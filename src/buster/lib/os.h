@@ -613,6 +613,8 @@ BUSTER_F_DECL bool process_control_atomic_set_if_zero(ProcessControlAtomic* addr
 // is only atomic where the type is _Atomic; MSVC and single-threaded builds use
 // a plain u64, so cross-thread readers go through this instead.
 BUSTER_F_DECL u64 atomic_u64_load(AtomicU64* address);
+// A sequentially consistent store with the same compiler/serial portability.
+BUSTER_F_DECL void atomic_u64_store(AtomicU64* address, u64 value);
 
 // All three return the value the address held before the addition. In
 // single-threaded builds they compile to plain arithmetic.

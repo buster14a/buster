@@ -28394,13 +28394,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         BUSTER_TEST(arguments, main_built[0] && compiler_driver_test_image_header(arena, main_paths[0], &type, &entry_address) && type == 2);
         BUSTER_TEST(arguments, main_built[1] && compiler_driver_test_image_header(arena, main_paths[1], &type, &entry_address) && type == 3 &&
                                    entry_address != 0);
-        // Two runs of the PIE land at different bases wherever the kernel
-        // randomizes them.
+        // ADDR_NO_RANDOMIZE is inherited across these ordinary child execs.
+        // TSan may set it before re-exec even with the global ASLR sysctl on
+        // (#4179); require address movement only with effective child ASLR.
+        enum { TEST_PIE_ADDR_NO_RANDOMIZE = 0x0040000 };
         String8 randomization_query[] = {S8("/bin/cat"), S8("/proc/sys/kernel/randomize_va_space")};
         String8 randomization = {0};
-        bool randomized = compiler_driver_test_image_run(arguments, arena, randomization_query, BUSTER_ARRAY_LENGTH(randomization_query), directory,
-                                                         &randomization) &&
-                          randomization.length && randomization.pointer[0] != '0';
+        bool kernel_randomized = compiler_driver_test_image_run(arguments, arena, randomization_query, BUSTER_ARRAY_LENGTH(randomization_query), directory,
+                                                                &randomization) &&
+                                 randomization.length && randomization.pointer[0] != '0';
+        String8 personality_query[] = {S8("/bin/cat"), S8("/proc/self/personality")};
+        String8 personality_text = {0};
+        bool personality_read = compiler_driver_test_image_run(arguments, arena, personality_query, BUSTER_ARRAY_LENGTH(personality_query), directory,
+                                                               &personality_text);
+        IntegerParsingU64 personality_flags = string8_parse_u64_hexadecimal(personality_text);
+        bool personality_valid = personality_read && personality_flags.status == INTEGER_PARSING_SUCCESS && personality_flags.length &&
+                                 (personality_flags.length == personality_text.length ||
+                                  (personality_flags.length + 1 == personality_text.length && personality_text.pointer[personality_flags.length] == '\n'));
+        BUSTER_REQUIRE(arguments, personality_valid);
+        bool randomized = kernel_randomized && personality_valid && !(personality_flags.value & TEST_PIE_ADDR_NO_RANDOMIZE);
+        arguments->show(arguments, S8("PIE_ASLR_V1 kernel_enabled={u32} personality={u64} effective={u32}\n"),
+                        (u32)kernel_randomized, personality_flags.value, (u32)randomized);
         if (main_built[1] && randomized)
         {
             String8 first = {0};
