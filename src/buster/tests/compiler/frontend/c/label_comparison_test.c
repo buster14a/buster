@@ -51,7 +51,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 compiler = executable_resolve_in_path(temporary.arena, reference_names[reference]);
         BUSTER_TEST(arguments, compiler.length != 0);
-        TestReferenceIdentity identity = buster_test_reference_identity(temporary.arena, compiler, 0);
+        TestProcessEnvironment environment = buster_test_process_environment_with_override(temporary.arena, S8("LC_ALL"), S8("C"));
+        TestReferenceIdentity identity = buster_test_reference_identity(temporary.arena, compiler, &environment);
+        BUSTER_TEST(arguments, identity.observed);
         arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=c-frontend fixture=label-comparison-logicals tool={S8} version={S8} target={S8}\n"),
             compiler, identity.version, identity.target);
         for (u32 source = 0; compiler.length && source < BUSTER_ARRAY_LENGTH(sources); source += 1)
