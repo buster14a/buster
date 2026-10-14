@@ -1277,7 +1277,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                        load_module.load_module && from_name.from_name && get_module_info.get_module_info;
         if (BUSTER_REQUIRE(arguments, exports))
         {
-            String8 path = buster_test_temporary_path(arguments->arena, S8("buster-mixed-gsi"), S8(".pdb"));
+            String8 path = buster_test_temporary_unique_path(arguments->arena, S8("buster-mixed-gsi"), S8(".pdb"));
             if (BUSTER_REQUIRE(arguments, file_write(path, pdb)))
             {
                 String16 path_wide = string16_from_string8(arguments->arena, path, true);
@@ -1323,7 +1323,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                 symbol->MaxNameLen = 64;
                                 BOOL bare_found = from_name.from_name(session, query.pointer, symbol);
                                 DWORD bare_error = bare_found ? 0 : GetLastError();
-                                String8 qualified = string_format(arguments->arena, S8("mixed!{S8}"), names.pointer[index]);
+                                String8 qualified = string_format(arguments->arena, S8("{S8}!{S8}"), info_name, names.pointer[index]);
                                 String16 qualified_query = string16_from_string8(arguments->arena, qualified, true);
                                 memset(symbol, 0, symbol_bytes);
                                 symbol->SizeOfStruct = (ULONG)sizeof(SYMBOL_INFOW);
@@ -1371,19 +1371,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
 
 // Repeating an eight-byte block keeps every cyclic name in the same format
 // bucket. All six permutations exercise both insertion and merge sorting.
-// The last two names are positive controls outside the colliding bucket.
+// The last two names are positive controls outside the colliding bucket;
+// they also form a separate acyclic PDB before any mixed fixture is loaded.
 BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_mixed_reader(UnitTestArguments* arguments)
 {
     enum { RECORD_SIZE = 32, MAX_NAMES = 22 };
     UnitTestResult result = {0};
     u32 permutations[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
     String8 blocks[] = {S8("a0000000"), S8("B0000000"), S8("C\xc3\xa9" "00000"), S8("A0000000"), S8("c\xc3\xa9" "00000")};
-    for (u32 large = 0; large < 2; large += 1)
+    for (u32 shape = 0; shape < 3; shape += 1)
     {
-        for (u32 permutation = 0; permutation < BUSTER_ARRAY_LENGTH(permutations); permutation += 1)
+        bool controls_only = shape == 0;
+        u32 permutation_count = controls_only ? 1 : BUSTER_ARRAY_LENGTH(permutations);
+        for (u32 permutation = 0; permutation < permutation_count; permutation += 1)
         {
-            u32 triples = large ? 6 : 1;
-            u32 count = triples * 3 + 4;
+            u32 triples = controls_only ? 0 : shape == 2 ? 6 : 1;
+            u32 count = triples * 3 + (controls_only ? 2 : 4);
             String8 names[MAX_NAMES];
             ByteWriter symbols = byte_writer_make(arena_allocate(arguments->arena, u8, 12 + count * RECORD_SIZE), 12 + count * RECORD_SIZE);
             byte_writer_emit_u32_le(&symbols, 4);
@@ -1414,7 +1417,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_mixed_reader(UnitTestArguments* 
                 byte_writer_emit_zero(&symbols, RECORD_SIZE - 14 - names[index].length);
                 u32 bucket = pdb_test_hash_v1(names[index]) % 4096;
                 u32 collision_bucket = pdb_test_hash_v1(names[0]) % 4096;
-                BUSTER_TEST(arguments, index + 2 < count ? bucket == collision_bucket : bucket != collision_bucket);
+                BUSTER_TEST(arguments, index + 2 < count ? bucket == collision_bucket : controls_only || bucket != collision_bucket);
             }
             PdbSection section = {.name = S8(".data"), .virtual_address = 0x1000, .virtual_size = count * 4, .raw_size = count * 4};
             String8 path = S8("mixed.c");
