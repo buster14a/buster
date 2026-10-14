@@ -3841,128 +3841,372 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* con
     return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
 }
 
-// A typed query that neither c_parse_layout_alignment_fold nor the untyped
-// evaluator can fold asks the protected query, which solves the types its
-// expression names on a private copy of the model, and that solve asks again
-// for their own member alignments and array bounds. The fold answers the
-// `sizeof`/`_Alignof`-of-a-type-name shapes without a query, so only the other
-// shapes nest. Three limits keep that nesting from running away on hostile
-// input:
-//  - a type that reaches itself (`_Alignas(sizeof(struct A))` inside
-//    `struct A`) is refused while its own query is in flight;
-//  - the nesting depth is at most C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY;
-//  - one outermost query may run at most C_PARSE_LAYOUT_TYPED_QUERY_BUDGET
-//    nested queries, and answers a range it already folded from a memo.
-// A refused request leaves its type with an invalid alignment or an unresolved
-// bound, which the caller diagnoses like any other unfolded constant.
-#define C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY 256u
-#define C_PARSE_LAYOUT_TYPED_QUERY_BUDGET 512u
-#define C_PARSE_LAYOUT_TYPED_QUERY_MEMO_CAPACITY 256u
+// Layout's protected TYPE queries use an explicit dependency stack. A worker
+// that reaches another alignment query captures its private model and yields;
+// only after that worker has returned does the next worker evaluate the
+// prerequisite. Completed numeric answers last for this one outer call.
+// The caller's layout agenda still owns original type dependencies and cycles.
+#define C_PARSE_LAYOUT_TYPED_TASK_INITIAL_CAPACITY 8u
 
-typedef struct CLayoutTypedMemo CLayoutTypedMemo;
-struct CLayoutTypedMemo
+typedef enum CLayoutTypedTaskState
 {
-    u32 start;
-    u32 end;
+    C_LAYOUT_TYPED_TASK_OPEN,
+    C_LAYOUT_TYPED_TASK_EVALUATING,
+    C_LAYOUT_TYPED_TASK_DONE,
+    C_LAYOUT_TYPED_TASK_FAILED,
+} CLayoutTypedTaskState;
+
+typedef struct CLayoutTypedTask CLayoutTypedTask;
+struct CLayoutTypedTask
+{
+    CParseResult model;
+    CTokenPositionIndex positions;
+    CAggregateLookup aggregates;
+    CAggregateLookupSlot aggregate_slot;
+    CTypeId scalar_types[C_TYPE_COUNT];
     CIntegerConstant constant;
-};
-
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_types[C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY];
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_depth;
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_work;
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_memo_count;
-// Set once the nest or the budget refused a request of the running outermost
-// query: every later request of that query is refused at once instead of
-// repeating the doomed solves above it.
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_layout_typed_query_exhausted;
-
-// Ranges whose outermost query ended refused by the nest or the budget, for
-// the rest of the semantic analysis of this thread's current translation unit
-// (c_analyze_semantics_core clears it). A chain too deep to solve would
-// otherwise repeat its doomed nest for each type above the limit, which is
-// cubic in the chain; a later request for the same range is refused at once.
-#define C_PARSE_LAYOUT_TYPED_REFUSAL_CAPACITY 256u
-
-typedef struct CLayoutTypedRefusal CLayoutTypedRefusal;
-struct CLayoutTypedRefusal
-{
-    CToken const* tokens;
+    CScopeId scope;
+    u32 scope_start;
+    u32 scope_end;
     u32 start;
     u32 end;
+    u32 parent;
+    CLayoutTypedTaskState state;
 };
 
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_refusal_count;
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CLayoutTypedRefusal c_parse_layout_typed_refusals[C_PARSE_LAYOUT_TYPED_REFUSAL_CAPACITY];
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CLayoutTypedMemo c_parse_layout_typed_memo[C_PARSE_LAYOUT_TYPED_QUERY_MEMO_CAPACITY];
-
-// The integer constant of [start, end) through the protected typed query on
-// behalf of the type being laid out. A query nests on the calling thread's
-// stack, so the in-flight state lives in thread-local storage that the query's
-// private copy of the model reaches without a field in the published model.
-// The memo holds only valid answers and lasts one outermost query, whose
-// private models all describe the same source. An empty constant for a cycle,
-// too deep a nest or an exhausted budget.
-BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutContext* context, u32 start, u32 end)
+typedef struct CLayoutTypedArenas CLayoutTypedArenas;
+struct CLayoutTypedArenas
 {
-    CIntegerConstant constant = {0};
-    CParseResult* result = context->result;
-    bool in_flight = false;
-    bool memoized = false;
-    for (u32 index = 0; index < c_parse_layout_typed_query_depth; index += 1)
+    Arena* model;
+    Arena* fixed;
+    CLayoutTypedArenas* next;
+};
+
+typedef struct CLayoutTypedQuery CLayoutTypedQuery;
+struct CLayoutTypedQuery
+{
+    CParseLayoutContext* owner;
+    CParseResult original;
+    Arena* arena;
+    CParseBodyScratchModel storage_guard;
+    CLayoutTypedTask* tasks;
+    CLayoutTypedArenas* retained;
+    u64 lookup_generation;
+    u32 count;
+    u32 capacity;
+    u32 current;
+    u32 missing;
+    u32 blocker;
+    u32 captures;
+    bool generation_available;
+    bool worker;
+    bool failed_dependency;
+    bool refused;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CLayoutTypedQuery* c_parse_layout_typed_query;
+
+// Private TYPE copies belong to the active worker only. Matching the complete
+// preprocessing identity also prevents another unit or target from observing
+// a worker's model or numeric answers.
+BUSTER_C_INTERNAL bool c_parse_layout_typed_source(CLayoutTypedQuery const* query, CPreprocessResult preprocess)
+{
+    CPreprocessResult owner = query->owner->preprocess;
+    return owner.tokens == preprocess.tokens && owner.token_count == preprocess.token_count &&
+           owner.spelling_base == preprocess.spelling_base && owner.detail == preprocess.detail &&
+           owner.dialect == preprocess.dialect && owner.pragma_changes == preprocess.pragma_changes &&
+           owner.pragma_change_count == preprocess.pragma_change_count &&
+           memcmp(&owner.target, &preprocess.target, sizeof(owner.target)) == 0;
+}
+
+// Task storage is independent of a protected worker's rewound scratch and
+// private model. It joins an open body's allocation guard with its own fixed
+// base/limit; temporarily offering it never displaces the worker's guard.
+BUSTER_C_INTERNAL void* c_parse_layout_typed_allocate(CLayoutTypedQuery* query, u64 element_size, u64 count, u64 alignment)
+{
+    void* pointer = 0;
+    u64 aligned = 0;
+    bool fits = !query->refused && element_size && count <= ARENA_MAX_RESERVATION / element_size &&
+                arena_align_position_checked(query->arena, query->arena->position, alignment, &aligned) &&
+                aligned <= query->arena->reserved_size && element_size * count <= query->arena->reserved_size - aligned;
+    if (fits)
     {
-        in_flight = in_flight || c_parse_layout_typed_query_types[index] == context->current_type;
+        CParseBodyScratchModel previous = c_parse_body_scratch_guard.model;
+        if (c_parse_body_scratch_guard.arena) c_parse_body_scratch_guard.model = query->storage_guard;
+        pointer = c_parse_body_scratch_allocate(query->arena, element_size, count, alignment);
+        c_parse_body_scratch_guard.model = previous;
     }
-    for (u32 index = 0; index < c_parse_layout_typed_memo_count && !memoized; index += 1)
+    query->refused |= !pointer;
+    if (!pointer) c_parse_body_scratch_refuse();
+    return pointer;
+}
+
+// Captured result tables are kept alive by the worker's retained arenas.
+// These three headers/arrays are the exceptions: the protected reader places
+// them on its C stack. Give the continuation its own copy before unwinding.
+// It carries no mutable spelling/name index into the next worker.
+BUSTER_C_INTERNAL u32 c_parse_layout_typed_task(CLayoutTypedQuery* query, CParseResult* model, CScopeId scope,
+                                               u32 start, u32 end, u32 parent)
+{
+    u32 entry = C_PARSE_LAYOUT_NONE;
+    if (query->count == query->capacity)
     {
-        if (c_parse_layout_typed_memo[index].start == start && c_parse_layout_typed_memo[index].end == end)
+        u32 capacity = query->capacity ? query->capacity * 2 : C_PARSE_LAYOUT_TYPED_TASK_INITIAL_CAPACITY;
+        CLayoutTypedTask* tasks = capacity > query->capacity
+            ? c_parse_layout_typed_allocate(query, sizeof(*tasks), capacity, BUSTER_ALIGN_OF(CLayoutTypedTask)) : 0;
+        if (tasks)
         {
-            constant = c_parse_layout_typed_memo[index].constant;
-            memoized = true;
+            if (query->count) memcpy(tasks, query->tasks, sizeof(*tasks) * query->count);
+            query->tasks = tasks;
+            query->capacity = capacity;
+        }
+        else query->refused = true;
+    }
+    if (!query->refused)
+    {
+        entry = query->count++;
+        CLayoutTypedTask* task = query->tasks + entry;
+        *task = (CLayoutTypedTask){
+            .model = *model, .scope = scope, .start = start, .end = end, .parent = parent,
+            .state = C_LAYOUT_TYPED_TASK_OPEN,
+        };
+        if (scope.value < model->scope_count)
+        {
+            task->scope_start = model->scopes[scope.value].token_start;
+            task->scope_end = model->scopes[scope.value].token_end;
+        }
+        if (model->position_index)
+        {
+            task->positions = *model->position_index;
+            task->model.position_index = &task->positions;
+        }
+        if (model->expression_scalar_types)
+        {
+            memcpy(task->scalar_types, model->expression_scalar_types, sizeof(task->scalar_types));
+            task->model.expression_scalar_types = task->scalar_types;
+        }
+        task->aggregates = (CAggregateLookup){.slots = &task->aggregate_slot, .slot_count = 1, .incomplete = true};
+        task->model.aggregate_lookup = &task->aggregates;
+        task->model.member_lookup = 0;
+        task->model.definition_index = 0;
+        task->model.token_classes = 0;
+        task->model.symbols = 0;
+        task->model.type_layout_statistics = 0;
+        query->captures += 1;
+    }
+    return entry;
+}
+
+BUSTER_C_INTERNAL bool c_parse_layout_typed_retain(CLayoutTypedQuery* query, Arena* model, Arena* fixed)
+{
+    CLayoutTypedArenas* retained = c_parse_layout_typed_allocate(query, sizeof(*retained), 1, BUSTER_ALIGN_OF(CLayoutTypedArenas));
+    if (retained)
+    {
+        *retained = (CLayoutTypedArenas){.model = model, .fixed = fixed, .next = query->retained};
+        query->retained = retained;
+    }
+    return retained != 0;
+}
+
+// Numeric facts can name only the original ID prefix of this fixed owning
+// model. A private append or completion is excluded unless every layout and
+// binding input in that prefix is still equal. The scope cursor generation
+// is checked as well; a token pointer alone is never an ownership proof.
+BUSTER_C_INTERNAL bool c_parse_layout_typed_original(CLayoutTypedQuery const* query, CParseResult const* model)
+{
+    CParseResult const* original = &query->original;
+    CParseResult const* live = query->owner->result;
+    u64 generation = 0;
+    bool generation_available = c_parse_lookup_generation(live, &generation);
+    bool same = generation_available == query->generation_available && generation == query->lookup_generation &&
+                live->types == original->types && live->type_count == original->type_count &&
+                live->members == original->members && live->member_count == original->member_count &&
+                live->entities == original->entities && live->entity_count == original->entity_count &&
+                live->scopes == original->scopes && live->scope_count == original->scope_count &&
+                live->array_bounds == original->array_bounds && live->array_bound_count == original->array_bound_count &&
+                live->alignments == original->alignments && live->alignment_count == original->alignment_count &&
+                live->type_alignments == original->type_alignments && live->type_alignment_count == original->type_alignment_count &&
+                model->scope_cursor == original->scope_cursor;
+#define C_PARSE_LAYOUT_TYPED_PREFIX(field, count_field) \
+    same = same && model->count_field >= original->count_field && \
+           (!original->count_field || memcmp(model->field, original->field, sizeof(*original->field) * original->count_field) == 0)
+    C_PARSE_LAYOUT_TYPED_PREFIX(types, type_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(members, member_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(enum_members, enum_member_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(parameters, parameter_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(entities, entity_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(scopes, scope_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(declarations, declaration_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(array_bounds, array_bound_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(alignments, alignment_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(type_alignments, type_alignment_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(aggregate_attributes, aggregate_attribute_count);
+#undef C_PARSE_LAYOUT_TYPED_PREFIX
+    return same;
+}
+
+// Completed nonprovisional facts are borrowed read-only. An open original
+// type is delegated to the owning agenda/pass, rather than solved again on
+// an unseeded private model. Offset/member-placement roots are always replayed.
+BUSTER_C_INTERNAL bool c_parse_layout_typed_original_layout(CPreprocessResult preprocess, CParseResult* result, CTypeId type,
+                                                            bool offset, u64* size, u32* alignment, bool* handled)
+{
+    CLayoutTypedQuery* query = c_parse_layout_typed_query;
+    bool answered = false;
+    *handled = false;
+    if (query && query->worker && !offset && type.value < query->original.type_count &&
+        c_parse_layout_typed_source(query, preprocess) && c_parse_layout_typed_original(query, result))
+    {
+        CParseLayoutContext* owner = query->owner;
+        bool resolved = c_parse_layout_resolved(owner, owner->agenda, type.value);
+        if (resolved && !c_parse_layout_provisional(owner, owner->agenda, type.value))
+        {
+            *size = c_parse_layout_size(owner, owner->agenda, type.value);
+            *alignment = c_parse_layout_alignment(owner, owner->agenda, type.value);
+            answered = true;
+            *handled = true;
+        }
+        else if (!resolved)
+        {
+            if (!query->blocker) query->blocker = type.value + 1;
+            *handled = true;
         }
     }
-    bool refused = c_parse_layout_typed_query_depth >= C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY ||
-                   c_parse_layout_typed_query_work >= C_PARSE_LAYOUT_TYPED_QUERY_BUDGET;
-    for (u32 index = 0; index < c_parse_layout_typed_refusal_count && !refused; index += 1)
+    return answered;
+}
+
+// A nested request only inspects completed tasks or captures its first
+// prerequisite. Its parent view and lexical source scope identify the saved
+// binding model; no private type ID is exported with the numeric constant.
+BUSTER_C_INTERNAL CIntegerConstant c_parse_layout_typed_dependency(CLayoutTypedQuery* query, CParseLayoutContext* context,
+                                                                  u32 start, u32 end)
+{
+    CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
+    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, start);
+    u32 scope_start = scope.value < context->result->scope_count ? context->result->scopes[scope.value].token_start : 0;
+    u32 scope_end = scope.value < context->result->scope_count ? context->result->scopes[scope.value].token_end : 0;
+    u32 found = C_PARSE_LAYOUT_NONE;
+    for (u32 index = 0; index < query->count && found == C_PARSE_LAYOUT_NONE; index += 1)
     {
-        CLayoutTypedRefusal entry = c_parse_layout_typed_refusals[index];
-        refused = entry.tokens == context->preprocess.tokens && entry.start == start && entry.end == end;
+        CLayoutTypedTask* task = query->tasks + index;
+        if (task->parent == query->current && task->start == start && task->end == end &&
+            task->scope_start == scope_start && task->scope_end == scope_end)
+        {
+            found = index;
+        }
     }
-    c_parse_layout_typed_query_exhausted |= !memoized && refused;
-    if (!memoized && !in_flight && !c_parse_layout_typed_query_exhausted)
+    if (found != C_PARSE_LAYOUT_NONE)
     {
-        bool outermost = !c_parse_layout_typed_query_depth;
-        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
-        if (outermost)
+        CLayoutTypedTask task = query->tasks[found];
+        if (task.state == C_LAYOUT_TYPED_TASK_DONE) constant = task.constant;
+        else if (task.state == C_LAYOUT_TYPED_TASK_FAILED) query->failed_dependency = true;
+        else if (query->missing == C_PARSE_LAYOUT_NONE) query->missing = found;
+    }
+    else if (query->missing == C_PARSE_LAYOUT_NONE && !query->failed_dependency && !query->blocker)
+    {
+        bool cycle = false;
+        for (u32 ancestor = query->current; ancestor != C_PARSE_LAYOUT_NONE && !cycle; ancestor = query->tasks[ancestor].parent)
         {
-            c_parse_layout_typed_query_work = 0;
-            c_parse_layout_typed_memo_count = 0;
-            c_parse_layout_typed_query_exhausted = false;
+            CLayoutTypedTask* task = query->tasks + ancestor;
+            cycle = task->start == start && task->end == end && task->scope_start == scope_start && task->scope_end == scope_end;
         }
-        c_parse_layout_typed_query_work += 1;
-        c_parse_layout_typed_query_types[c_parse_layout_typed_query_depth] = context->current_type;
-        c_parse_layout_typed_query_depth += 1;
-        constant = c_parse_type_integer_constant(context->arena, context->preprocess, result, scope, start, end);
-        c_parse_layout_typed_query_depth -= 1;
-        if (constant.valid && c_parse_layout_typed_memo_count < C_PARSE_LAYOUT_TYPED_QUERY_MEMO_CAPACITY)
-        {
-            c_parse_layout_typed_memo[c_parse_layout_typed_memo_count] = (CLayoutTypedMemo){.start = start, .end = end, .constant = constant};
-            c_parse_layout_typed_memo_count += 1;
-        }
-        if (outermost)
-        {
-            if (!constant.valid && c_parse_layout_typed_query_exhausted && c_parse_layout_typed_refusal_count < C_PARSE_LAYOUT_TYPED_REFUSAL_CAPACITY)
-            {
-                c_parse_layout_typed_refusals[c_parse_layout_typed_refusal_count] =
-                    (CLayoutTypedRefusal){.tokens = context->preprocess.tokens, .start = start, .end = end};
-                c_parse_layout_typed_refusal_count += 1;
-            }
-            c_parse_layout_typed_memo_count = 0;
-            c_parse_layout_typed_query_work = 0;
-            c_parse_layout_typed_query_exhausted = false;
-        }
+        if (cycle) query->failed_dependency = true;
+        else query->missing = c_parse_layout_typed_task(query, context->result, scope, start, end, query->current);
     }
     return constant;
 }
+
+BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutContext* context, u32 start, u32 end)
+{
+    CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
+    CLayoutTypedQuery* previous = c_parse_layout_typed_query;
+    if (previous && previous->worker)
+    {
+        if (c_parse_layout_typed_source(previous, context->preprocess))
+        {
+            constant = c_parse_layout_typed_dependency(previous, context, start, end);
+        }
+        else previous->failed_dependency = true;
+    }
+    else
+    {
+        CLayoutTypedQuery query = {
+            .owner = context, .original = *context->result, .current = C_PARSE_LAYOUT_NONE, .missing = C_PARSE_LAYOUT_NONE,
+        };
+        query.generation_available = c_parse_lookup_generation(context->result, &query.lookup_generation);
+        query.arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+        if (query.arena)
+        {
+            CParseBodyScratchModel enclosing = c_parse_body_scratch_model_begin(query.arena);
+            query.storage_guard = c_parse_body_scratch_guard.model;
+            c_parse_body_scratch_model_end(enclosing);
+            CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, start);
+            query.current = c_parse_layout_typed_task(&query, context->result, scope, start, end, C_PARSE_LAYOUT_NONE);
+            c_parse_layout_typed_query = &query;
+            while (query.current != C_PARSE_LAYOUT_NONE && !query.refused && !query.blocker)
+            {
+                u32 current = query.current;
+                CLayoutTypedTask input = query.tasks[current];
+                query.tasks[current].state = C_LAYOUT_TYPED_TASK_EVALUATING;
+                query.missing = C_PARSE_LAYOUT_NONE;
+                query.failed_dependency = false;
+                query.worker = true;
+                u64 scratch_mark = context->arena->position;
+                u32 width_count = context->result->deferred_bit_field_width_diagnostic_count;
+                CIntegerConstant answer = c_parse_type_integer_constant(context->arena, context->preprocess,
+                    current ? &input.model : context->result, input.scope, input.start, input.end);
+                query.worker = false;
+                // Preserve newly forwarded width diagnostics if the caller's
+                // model and scratch share an arena. Other worker scratch has
+                // no reader after the protected query returned.
+                if (context->result->arena != context->arena ||
+                    width_count == context->result->deferred_bit_field_width_diagnostic_count)
+                {
+                    arena_set_position(context->arena, scratch_mark);
+                }
+                answer.type = C_TYPE_ID_INVALID;
+                if (query.refused || query.blocker || query.failed_dependency)
+                {
+                    query.tasks[current].state = C_LAYOUT_TYPED_TASK_FAILED;
+                    query.current = query.tasks[current].parent;
+                }
+                else if (query.missing != C_PARSE_LAYOUT_NONE)
+                {
+                    // Pending work never publishes a worker's partial answer.
+                    query.current = query.missing;
+                }
+                else
+                {
+                    query.tasks[current].constant = answer;
+                    query.tasks[current].state = answer.valid ? C_LAYOUT_TYPED_TASK_DONE : C_LAYOUT_TYPED_TASK_FAILED;
+                    query.current = query.tasks[current].parent;
+                }
+            }
+            if (!query.refused && !query.blocker && query.count && query.tasks[0].state == C_LAYOUT_TYPED_TASK_DONE)
+            {
+                constant = query.tasks[0].constant;
+            }
+            c_parse_layout_typed_query = previous;
+            for (CLayoutTypedArenas* retained = query.retained; retained; retained = retained->next)
+            {
+                bool model_destroyed = arena_destroy(retained->model, 1);
+                bool fixed_destroyed = arena_destroy(retained->fixed, 1);
+                BUSTER_VALIDATE(model_destroyed && fixed_destroyed);
+            }
+            bool storage_destroyed = arena_destroy(query.arena, 1);
+            BUSTER_VALIDATE(storage_destroyed);
+        }
+        else c_parse_body_scratch_refuse();
+    }
+    return constant;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_layout_typed_query_idle(void)
+{
+    return c_parse_layout_typed_query == 0;
+}
+#endif
 
 // The value of an alignment request through the protected typed query, which
 // runs its own machine on a private copy of the model and never reenters the
@@ -4632,7 +4876,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* c
     // itself, call nesting that grows with the input. Inside a query the bound
     // stays unresolved, as it did before this route existed.
     CIntegerConstant constant = {0};
-    if (!c_parse_layout_typed_query_depth)
+    if (!c_parse_layout_typed_query || !c_parse_layout_typed_query->worker)
     {
         constant = c_parse_layout_typed_constant(context, bound.token_start, bound.token_start + bound.token_count);
     }
@@ -5769,6 +6013,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
             return true;
         }
     }
+    bool typed_handled = false;
+    bool typed_answer = c_parse_layout_typed_original_layout(preprocess, result, requested, offset_out != 0,
+                                                             size_out, alignment_out, &typed_handled);
+    bool answered = typed_answer;
+    if (typed_handled) goto layout_answer;
     CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens &&
                               (!offset_out || (!machine->frame_count && !machine->mutation_count)) ? &machine->layout_cache : 0;
     bool cached = cache && requested.value < cache->capacity && cache->states[requested.value];
@@ -5831,7 +6080,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
     // whichever order the attempts run in; the agenda then does the work of
     // the requested type's closure instead of the whole table's.
     bool settled = false;
-    bool answered = false;
+    answered = false;
     // The agenda grows its tables as the closure is discovered, so it never
     // runs in a function body's guarded scratch arena (#1256); the ordered
     // passes answer the same query there with checked tables.
@@ -5858,6 +6107,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         machine->phase_released_bytes += arena_release_to_position(query_arena, query_mark);
         machine->phase_releases += 1;
     }
+layout_answer:
     return answered;
 }
 
@@ -36656,7 +36906,14 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             arena,
             c_parse_body_scratch_arena() ? c_parse_body_scratch_arena() : arena,
         };
-        Arena* model_scratch = fixed_buffer_arena ? thread_context_get_scratch(model_conflicts, BUSTER_ARRAY_LENGTH(model_conflicts)) : 0;
+        CLayoutTypedQuery* layout_query = c_parse_layout_typed_query;
+        bool layout_worker = layout_query && layout_query->worker && c_parse_layout_typed_source(layout_query, preprocess);
+        u32 layout_captures = layout_worker ? layout_query->captures : 0;
+        // A yielded layout continuation may keep pointers into this model.
+        // Give workers independently owned arenas; ordinary protected queries
+        // retain their existing scratch choice and release behavior.
+        Arena* model_scratch = fixed_buffer_arena && !layout_worker
+            ? thread_context_get_scratch(model_conflicts, BUSTER_ARRAY_LENGTH(model_conflicts)) : 0;
         Arena* model_private = fixed_buffer_arena && !model_scratch ? arena_create((ArenaCreation){0}) : 0;
         if (fixed_buffer_arena && !model_scratch && !model_private)
         {
@@ -36861,14 +37118,19 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                 if (member_alignment) *member_alignment = 0;
             }
             c_parse_body_scratch_model_end(enclosing_model);
-            scratch_end(model_temporary);
-            if (model_private)
+            bool retained_layout_model = layout_worker && layout_query->captures != layout_captures &&
+                c_parse_layout_typed_retain(layout_query, model_private, fixed_buffer_arena);
+            if (!retained_layout_model)
             {
-                bool model_destroyed = arena_destroy(model_private, 1);
-                BUSTER_VALIDATE(model_destroyed);
+                scratch_end(model_temporary);
+                if (model_private)
+                {
+                    bool model_destroyed = arena_destroy(model_private, 1);
+                    BUSTER_VALIDATE(model_destroyed);
+                }
+                bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
+                BUSTER_VALIDATE(fixed_buffers_destroyed);
             }
-            bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
-            BUSTER_VALIDATE(fixed_buffers_destroyed);
         }
     }
     return constant;
@@ -45273,7 +45535,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .symbols = preprocess.symbols,
         .number_facts = syntax.number_facts,
     };
-    c_parse_layout_typed_refusal_count = 0;
     if (syntax.diagnostic_count)
     {
         result.diagnostics = syntax.diagnostics;

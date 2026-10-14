@@ -1071,6 +1071,178 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_backward_chains(UnitTestAr
     return result;
 }
 
+// These residual operators intentionally bypass the narrow +/* type-name
+// fold. Each positive source exceeds the retired nesting limit and reaches
+// semantic validation, canonical lowering and both layout drivers.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_typed_alignment_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const expressions[] = {
+        S8("sizeof(struct S{u32}) ? 1 : 1"),
+        S8("sizeof(struct S{u32}) == 1"),
+        S8("sizeof(struct S{u32}) - 0"),
+        S8("(unsigned char)sizeof(struct S{u32})"),
+        S8("sizeof(x{u32})"),
+        S8("sizeof(struct S{u32}[1])"),
+    };
+    u32 const depth = 700;
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(expressions); shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CTypeLayoutTestText text = {.arena = temporary.arena};
+        c_type_layout_test_append(&text, S8("struct S0 { char c; }; struct S0 x0;\n"));
+        for (u32 link = 1; link <= depth; link += 1)
+        {
+            String8 expression = string_format(temporary.arena, expressions[shape], link - 1);
+            c_type_layout_test_append(&text, string_format(temporary.arena,
+                S8("struct S{u32} {{ _Alignas({S8}) char c; }; struct S{u32} x{u32};\n"), link, expression, link, link));
+        }
+        c_type_layout_test_append(&text, S8("_Static_assert(sizeof(struct S700) == 1, \"size\");\n"
+                                          "_Static_assert(_Alignof(struct S700) == 1, \"alignment\");\n"));
+        CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+        BUSTER_TEST(arguments, unit.preprocess.diagnostic_count == 0 && unit.parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, c_test_layout_typed_query_idle());
+        CTypeId top = c_type_layout_test_tag(&unit.parse, C_TYPE_STRUCT, S8("S700"));
+        if (BUSTER_REQUIRE(arguments, top.value != C_ID_UNDERLYING_INVALID))
+        {
+            CTypeLayoutTestAnswer agenda = c_type_layout_test_query(temporary.arena, &unit, top, true, UINT32_MAX);
+            CTypeLayoutTestAnswer passes = c_type_layout_test_query(temporary.arena, &unit, top, false, UINT32_MAX);
+            BUSTER_TEST(arguments, c_type_layout_test_same(agenda, passes, false));
+            BUSTER_TEST(arguments, agenda.resolved && agenda.size == 1 && agenda.alignment == 1);
+        }
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("typed-layout-chain.c"), unit.preprocess,
+                                           c_parse_ast(temporary.arena, unit.preprocess), target.target);
+        BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0 && lowered.canonical_ir_certified);
+        BUSTER_TEST(arguments, c_test_layout_typed_query_idle());
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// Member alignment must replay placement even when the owner has a completed
+// size/alignment fact. Its own typed alignment requests use saved continuations,
+// and the public model (including spare rows) remains unchanged.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_typed_member_replay(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CTypeLayoutTestText text = {.arena = temporary.arena};
+    c_type_layout_test_append(&text, S8("struct S0 { _Alignas(8) char c; }; struct S0 x0;\n"));
+    for (u32 link = 1; link <= 24; link += 1)
+    {
+        c_type_layout_test_append(&text, string_format(temporary.arena,
+            S8("struct S{u32} {{ _Alignas(_Alignof(x{u32}.c) == 8 ? 8 : 1) char c; }; struct S{u32} x{u32};\n"),
+            link, link - 1, link, link));
+    }
+    c_type_layout_test_append(&text, S8("_Static_assert(_Alignof(x24.c) == 8, \"placed alignment\");\n"));
+    CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+    BUSTER_TEST(arguments, unit.preprocess.diagnostic_count == 0 && unit.parse.diagnostic_count == 0);
+    bool queried = false;
+    for (u32 token = 0; token + 2 < unit.preprocess.token_count && !queried; token += 1)
+    {
+        if (string_equal(c_token_spelling(unit.preprocess.spelling_base, unit.preprocess.tokens[token]), S8("x24")) &&
+            c_token_is_punctuator(unit.preprocess.tokens + token + 1, C_PUNCTUATOR_DOT))
+        {
+            CTestMemberAlignmentQuery query = c_test_member_alignment_query(temporary.arena, unit.preprocess, &unit.parse,
+                (CScopeId){.value = 0}, token, token + 3);
+            BUSTER_TEST(arguments, query.valid && query.alignment == 8 && query.model_unchanged);
+            queried = true;
+        }
+    }
+    BUSTER_TEST(arguments, queried && c_test_layout_typed_query_idle());
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// Cycles and unsupported constants fail without leaving a saved model in TLS.
+// Private inline aggregate IDs stay inside their owning captured query.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_typed_alignment_controls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("struct A { _Alignas(sizeof(struct A) ? 1 : 1) char c; };\n"),
+        S8("struct A; struct B; struct A { _Alignas(sizeof(struct B) == 1 ? 1 : 1) char c; };\n"
+           "struct B { _Alignas(sizeof(struct A) == 1 ? 1 : 1) char c; };\n"),
+        S8("extern int n; struct A { _Alignas(n ? 1 : 1) char c; };\n"),
+        S8("struct A { _Alignas(sizeof(struct { _Alignas(sizeof(struct A) == 1 ? 1 : 1) char c; })) char c; };\n"),
+        S8("struct A { _Alignas(sizeof(struct { _Alignas(sizeof(int) == 4 ? 8 : 1) char c; })) char c; };\n"
+           "_Static_assert(sizeof(struct A) == 8, \"private layout\");\n"),
+        S8("struct S { char c; }; struct S global;\n"
+           "void f(void) { struct S { long c; }; struct S local;\n"
+           "struct L { _Alignas(sizeof(local) - 0) char c; };\n"
+           "_Static_assert(_Alignof(struct L) == sizeof(long), \"local scope\"); }\n"
+           "struct G { _Alignas(sizeof(global) - 0) char c; };\n"
+           "_Static_assert(_Alignof(struct G) == 1, \"global scope\");\n"),
+        S8("struct A { _Alignas((unsigned char)256) char c; };\n"
+           "_Static_assert(sizeof(struct A) == 1, \"narrow zero\");\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, sources[index]);
+        BUSTER_TEST(arguments, unit.preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, index < 4 ? unit.parse.diagnostic_count != 0 : unit.parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, c_test_layout_typed_query_idle());
+        c_test_scratch_end(temporary);
+    }
+    // A following unit reuses the thread and allocator with a different ABI;
+    // previous success/failure/owned models cannot supply its long layout.
+    String8 const triples[] = {S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(triples); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(triples[index]);
+        u32 expected = target_data_layout(target.target).long_integer.size;
+        String8 source = string_format(temporary.arena,
+            S8("struct Q {{ _Alignas(sizeof(long) - 0) char c; };\n"
+               "_Static_assert(sizeof(struct Q) == {u32}, \"target\");\n"), expected);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, c_test_layout_typed_query_idle());
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// An actual case-label member query opens the function-body model guard.
+// Refusing its typed-layout continuation storage must report exhaustion and
+// restore TLS; the following uncapped compile must recover on the same thread.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_typed_guard_recovery(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct S { _Alignas(sizeof(long) - 0) long m; };\n"
+                        "int f(void) { struct S s = {0}; switch (0) {\n"
+                        "case _Alignof(s.m): return 0; default: return 1; } }\n");
+    u64 const caps[] = {0, 32, 0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(caps); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CTestBodyScratchRequest* trace = arena_allocate(temporary.arena, CTestBodyScratchRequest, 1024);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+        c_test_body_validation_model_limit(caps[sample]);
+        c_test_body_validation_scratch_trace(trace, 1024);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("typed-layout-guard.c"), preprocess,
+                                           c_parse_ast(temporary.arena, preprocess), target.target);
+        u32 trace_count = c_test_body_validation_scratch_trace_count();
+        c_test_body_validation_scratch_trace(0, 0);
+        c_test_body_validation_model_limit(0);
+        bool model_refused = false;
+        for (u32 row = 0; row < trace_count; row += 1)
+            model_refused |= trace[row].model && trace[row].end == UINT64_MAX;
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, sample == 1 ? lowered.diagnostic_count != 0 && model_refused
+                                           : lowered.program && lowered.diagnostic_count == 0 && lowered.canonical_ir_certified);
+        BUSTER_TEST(arguments, c_test_layout_typed_query_idle());
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1097,6 +1269,10 @@ UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_random_programs);
     C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_array_validation_solves);
     C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_validation_scaling);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_alignment_chains);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_member_replay);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_alignment_controls);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_guard_recovery);
     return result;
 }
 

@@ -228,6 +228,10 @@ struct CTestQualifiedShare
 };
 BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base);
 
+// The calling thread must have no live layout-query continuation after a
+// successful, cyclic, unsupported or exhausted query returns.
+BUSTER_F_DECL bool c_test_layout_typed_query_idle(void);
+
 // Cast-proof token visits and logical-position probes on the calling thread.
 BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
 
