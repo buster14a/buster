@@ -58,8 +58,8 @@
 // c_ir_tree_range_is_cast and c_ir_tree_anchored_node (GitHub #4061). Most
 // other structure questions still re-walk token ranges, resolving identifiers
 // through the parse result's scopes and the prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). The caller may also pass the facts semantic
-// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062).
+// (c_ir_build_delimiter_index). Required node facts are inherited from the
+// finished semantic output (CIRLowerOptions.syntax_facts, GitHub #4062).
 // Local declarations read their DECLARATOR_NAME bindings from these facts;
 // their storage and assignment provenance come from CEntity. Declarator lists,
 // initializer presence and labeled-local predeclaration use node topology
@@ -70,6 +70,11 @@
 // and PREDICTED applies value-context decay and conditional prediction. Their
 // child continuations and retained type materializer share the checked query
 // stack; the projection state stays private until that root completes.
+// Operand, prediction, conditional and null-constant token-range frame
+// families and their precedence/postfix walkers have been retired. Range
+// boundaries locate a retained node; the checked task key is node plus view.
+// c_ir_conditional_result_type_node reuses projected branch types and requests
+// only the promoted/null children its conditional merge still needs.
 // No node id reaches the IR. Prepared control
 // expressions of a function are answered by node-indexed tables:
 // c_ir_prepared_control_expression_find uses a node and wrapping level,
@@ -157,7 +162,7 @@
 //   prepares it inside the block that actually runs.
 //
 // c_ir_type_identity_query consumes the retained semantic C answer for
-// generic selections, __builtin_choose_expr choices (c_ir_selection_answer)
+// generic selections and __builtin_choose_expr choices
 // and the GNU compatibility predicate. Canonical types
 // represent the selected value; they never decide source type identity.
 //
@@ -1845,8 +1850,6 @@ struct CIrQueryFrame
     CIrNodeQueryFrame node_task;
     CIrConstantValue constant;
     CArrayBound bound;
-    IrTypeId first_type;
-    IrTypeId second_type;
     IrTypeId result_type;
     u64 integer;
     u32 start;
@@ -4549,13 +4552,6 @@ BUSTER_C_INTERNAL bool c_ir_query_compound_type(CIntegerIrBuilder* builder, u32 
     return type_out->value != IR_ID_UNDERLYING_INVALID;
 }
 
-BUSTER_C_INTERNAL bool c_ir_query_prediction(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
-{
-    u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
-    *type_out = c_ir_expression_type_node(builder, node, C_IR_AST_TYPE_PREDICTED);
-    return type_out->value != IR_ID_UNDERLYING_INVALID;
-}
-
 BUSTER_C_INTERNAL bool c_ir_query_offsetof(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
 {
     CIrQueryFrame result = {0};
@@ -4730,55 +4726,11 @@ BUSTER_C_INTERNAL bool c_ir_node_may_prepare_calls(CIntegerIrBuilder* builder, u
 }
 
 
-typedef enum CIrGroupScan
-{
-    C_IR_GROUP_SCAN_NOT_OPEN,
-    C_IR_GROUP_SCAN_SKIPPED,
-    C_IR_GROUP_SCAN_UNCLOSED,
-} CIrGroupScan;
-
 /* Steps a top-level token scan over a whole `(`/`[`/`{` group in one hop instead of counting
    every nested token, so scans that look for a top-level separator stay linear in the number
    of top-level tokens rather than quadratic in expression nesting depth. `C_IR_GROUP_SCAN_UNCLOSED`
    means the group at `*index_in_out` has no match before `end`; a well-nested body can never
    return to that group's level again, so no later token in the range is top level. */
-BUSTER_C_INTERNAL CIrGroupScan c_ir_scan_delimiter_group(CIntegerIrBuilder* builder, u32* index_in_out, u32 end)
-{
-    // The punctuator id alone answers the question (digraph spellings carry
-    // distinct ids, so `<%` stays excluded exactly like the old
-    // one-character-spelling test), and reading it through the pointer avoids
-    // copying the whole token per scanned position.
-    u32 punctuator = builder->preprocess.tokens[*index_in_out].punctuator;
-    CPunctuator opening;
-    CPunctuator closing;
-    if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
-    {
-        opening = C_PUNCTUATOR_LEFT_PARENTHESIS;
-        closing = C_PUNCTUATOR_RIGHT_PARENTHESIS;
-    }
-    else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
-    {
-        opening = C_PUNCTUATOR_LEFT_BRACKET;
-        closing = C_PUNCTUATOR_RIGHT_BRACKET;
-    }
-    else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
-    {
-        opening = C_PUNCTUATOR_LEFT_BRACE;
-        closing = C_PUNCTUATOR_RIGHT_BRACE;
-    }
-    else
-    {
-        return C_IR_GROUP_SCAN_NOT_OPEN;
-    }
-    u32 close = c_ir_matching_delimiter_cached(builder, *index_in_out, end, opening, closing);
-    if (close >= end)
-    {
-        return C_IR_GROUP_SCAN_UNCLOSED;
-    }
-    *index_in_out = close;
-    return C_IR_GROUP_SCAN_SKIPPED;
-}
-
 BUSTER_C_INTERNAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrTypeId type)
 {
     return (IrInstruction){
@@ -9974,7 +9926,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float_with_sign(CIntegerIrBuilder* builder, IrValueId value, IrValueId sign_source, IrTypeId type_id, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_byte_swap(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, CToken token, IrSourceRange source);
 BUSTER_C_INTERNAL IrTypeId c_ir_complex_type_for_element(CIntegerIrBuilder* builder, IrTypeId element);
-BUSTER_C_INTERNAL IrTypeId c_ir_float_literal_type(CIntegerIrBuilder* builder, String8 spelling);
 BUSTER_C_INTERNAL IrValueId c_ir_complex_compose(CIntegerIrBuilder* builder, IrTypeId complex_type, IrValueId real, IrValueId imaginary,
                                                    IrSourceRange source);
 BUSTER_C_INTERNAL IrBlockId c_ir_block_create(CIntegerIrBuilder* builder);
@@ -9984,7 +9935,6 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
 BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* builder, IrValueId pointer, IrSourceRange source);
 BUSTER_C_INTERNAL IrTypeId c_ir_complex_result_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
-BUSTER_C_INTERNAL bool c_ir_complex_part_operator(CIntegerIrBuilder* builder, CToken token, CConditionalOperator* operation);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* builder, IrValueId value, bool imaginary, IrSourceRange source);
 
 // An integer converted to a pointer (6.3.2.3p5, and the null pointer constant
@@ -15849,24 +15799,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
 // counterpart of c_ir_emit_float, so a conditional whose arms are `1.0i` and
 // a real does not predict the real type and then convert the imaginary arm
 // down to its (zero) real part.
-BUSTER_C_INTERNAL IrTypeId c_ir_float_literal_type(CIntegerIrBuilder* builder, String8 spelling)
-{
-    String8 real_spelling = spelling;
-    bool imaginary = c_ir_number_imaginary_spelling(builder->arena, spelling, &real_spelling);
-    char8 suffix = 0;
-    c_ir_float_suffix(real_spelling, &suffix);
-    IrTypeId element = suffix == 'h'                   ? builder->f16_type
-                       : suffix == 'f' || suffix == 'F' ? builder->f32_type
-                       : suffix == 'l' || suffix == 'L' ? builder->long_double_type
-                                                        : builder->f64_type;
-    if (!imaginary)
-    {
-        return element;
-    }
-    IrTypeId complex_type = c_ir_complex_type_for_element(builder, element);
-    return complex_type.value == IR_ID_UNDERLYING_INVALID ? element : complex_type;
-}
-
 // A floating literal, imaginary suffix included. GNU's `i`/`j` suffix makes
 // the constant purely imaginary, and it is the only way <complex.h> can
 // define `I`: both musl (`0.0f+1.0fi`) and glibc (`1.0iF`) spell
@@ -18848,7 +18780,6 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 node);
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_base(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
 BUSTER_C_INTERNAL u32 c_ir_core_wraps(CIntegerIrBuilder* builder, u32 node, u32 limit);
@@ -22552,30 +22483,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_unary_value(CIntegerIrBuilder* builder, Ir
 // operator each names. The expression walker asks this of every identifier it
 // meets where an operand is expected, so the length test carries the common
 // answer before any comparison runs.
-BUSTER_C_INTERNAL bool c_ir_complex_part_operator(CIntegerIrBuilder* builder, CToken token, CConditionalOperator* operation)
-{
-    if (token.kind != C_TOKEN_IDENTIFIER)
-    {
-        return false;
-    }
-    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-    if (spelling.length != 6 && spelling.length != 8)
-    {
-        return false;
-    }
-    if (string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")))
-    {
-        *operation = C_CONDITIONAL_REAL_PART;
-        return true;
-    }
-    if (string_equal(spelling, S8("__imag__")) || string_equal(spelling, S8("__imag")))
-    {
-        *operation = C_CONDITIONAL_IMAGINARY_PART;
-        return true;
-    }
-    return false;
-}
-
 BUSTER_C_INTERNAL IrType* c_ir_complex_type_of(CIntegerIrBuilder* builder, IrTypeId type_id)
 {
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
@@ -23728,19 +23635,6 @@ BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 
 // The range a _Generic or __builtin_choose_expr selection [token_index, end)
 // selects, from the parser's retained row; false when the parser recorded no
 // selection for exactly that range.
-BUSTER_C_INTERNAL bool c_ir_selection_answer(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out)
-{
-    CTypeIdentityQuery answer;
-    bool valid = c_ir_type_identity_query(builder, token_index, end, &answer) && answer.token_end == end &&
-                 answer.result_start != UINT32_MAX && answer.result_start < answer.result_end;
-    if (valid)
-    {
-        *selected_start_out = answer.result_start;
-        *selected_end_out = answer.result_end;
-    }
-    return valid;
-}
-
 // Whether an active group strictly contains this structural group. Two
 // parentheses on the same node order by wrapping level; a parenthesis also
 // contains that node's bracket/arguments. Other owners lie in the recorded
@@ -24622,48 +24516,6 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
 // until #3102 step 4. Resolve its postfix base through the retained tree;
 // prepared values are looked up only by the resulting CALL node. No token
 // index or prepared-row scan can substitute for a missing structural node.
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_base(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    u32 node = c_ir_tree_range_node(builder, start, end);
-    CIrPreparedCall* found = 0;
-    bool descending = node != C_AST_NODE_INVALID;
-    while (descending)
-    {
-        u32 kind = builder->syntax_tree->kinds[node];
-        switch (kind)
-        {
-        case C_AST_CALL:
-        case C_AST_GENERIC_SELECTION:
-        {
-            found = c_ir_prepared_call_find(builder, node);
-            descending = false;
-        }
-        break;
-        case C_AST_MEMBER:
-        case C_AST_MEMBER_ARROW:
-        case C_AST_INDEX:
-        case C_AST_EXTENSION:
-        case C_AST_DEREFERENCE:
-        case C_AST_ADDRESS:
-        {
-            node = c_ir_tree_first_child(builder->syntax_tree, node);
-        }
-        break;
-        case C_AST_CAST:
-        {
-            node -= 1;
-        }
-        break;
-        default:
-        {
-            descending = false;
-        }
-        break;
-        }
-    }
-    return found;
-}
-
 #if BUSTER_INCLUDE_TESTS
 // Retained test hooks: direct CALL-node consumption needs no chained-call
 // reference scan, in Debug or Release.
@@ -24789,20 +24641,6 @@ BUSTER_C_INTERNAL u32 c_ir_call_argument_node(CIntegerIrBuilder* builder, CIrPre
 // the first `capacity` arguments of the call whose callee is the token at
 // `callee` and whose `)` is `close`. An argument past the last one ends at
 // `close` too.
-BUSTER_C_INTERNAL void c_ir_call_separators(CIntegerIrBuilder* builder, u32 callee, u32 close, u32* ends, u32 capacity)
-{
-    BUSTER_CHECK(capacity <= C_IR_CALL_SEPARATORS_CAPACITY);
-    CIrPreparedCall call = {.token_index = callee, .open_index = callee + 1, .close_index = close,
-                            .node = c_ir_tree_range_node(builder, callee, close + 1)};
-    u32 starts[C_IR_CALL_SEPARATORS_CAPACITY] = {0};
-    u32 count = 0;
-    for (u32 index = 0; index < capacity; index += 1)
-    {
-        ends[index] = close;
-    }
-    c_ir_call_arguments_counted(builder, &call, starts, ends, capacity, &count, true);
-}
-
 BUSTER_C_INTERNAL u32 c_ir_call_argument_count(CIntegerIrBuilder* builder, CIrPreparedCall* call)
 {
     c_ir_call_argument_end(builder, call, 0);
@@ -25174,62 +25012,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_argument_value(CIntegerIrBuilder* builde
         result = c_ir_emit_cast(builder, value, type, source);
     }
     return result;
-}
-
-BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 close, IrTypeId* type_out)
-{
-    String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]);
-    CVendorBuiltin signature = {0};
-    CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
-    IrTypeId type = IR_TYPE_ID_INVALID;
-    bool valid = true;
-    bool operand_signature = generic.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE;
-    if (!operand_signature && c_semantic_vendor_builtin_signature(builder->target, name, &signature))
-        type = c_ir_vendor_signature_type(builder, signature.types[0]);
-    else if (generic.operation)
-    {
-        u32 starts[2] = {0}, ends[2] = {0};
-        u32 count = 0;
-        for (u32 argument = start + 2; argument < close;)
-        {
-            u32 limit = c_parse_constraint_expression_end(&builder->parse, builder->preprocess, argument, close);
-            if (count < BUSTER_ARRAY_LENGTH(starts)) { starts[count] = argument; ends[count] = limit; }
-            count += 1;
-            argument = limit + 1;
-        }
-        valid = count >= generic.minimum_arguments && (generic.maximum_arguments == UINT8_MAX || count <= generic.maximum_arguments);
-        if (valid && generic.type_arguments)
-        {
-            u32 selected = generic.type_arguments == 2 ? 1 : 0;
-            bool storage_half = generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
-                c_semantic_vendor_storage_half_argument(builder->preprocess, starts[0], ends[0]);
-            if (storage_half)
-            {
-                builder->failure_message = S8("__builtin_bit_cast destination __fp16 has no canonical implementation");
-                builder->failure_token_index = starts[0];
-                valid = false;
-            }
-            else
-                valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
-        }
-        else if (valid)
-        {
-            valid = c_ir_query_prediction(builder, starts[0], ends[0], &type);
-            if (valid) type = c_ir_sizeof_operand_decay(builder, type);
-            IrType* value = ir_type_from_id(&builder->program->types, type);
-            if (generic.result == C_VENDOR_GENERIC_RESULT_VOID)
-                type = builder->void_type;
-            else if (generic.result == C_VENDOR_GENERIC_RESULT_POINTEE || generic.result == C_VENDOR_GENERIC_RESULT_VECTOR_ELEMENT)
-                type = value && (generic.result == C_VENDOR_GENERIC_RESULT_POINTEE ? value->kind == IR_TYPE_POINTER : value->kind == IR_TYPE_VECTOR)
-                    ? value->element_type : IR_TYPE_ID_INVALID;
-            else if (generic.result == C_VENDOR_GENERIC_RESULT_SHUFFLE && count > 2)
-                type = value && value->kind == IR_TYPE_VECTOR ? c_ir_vendor_typed_vector(builder, value->element_type, count - 2) : IR_TYPE_ID_INVALID;
-        }
-    }
-    else valid = false;
-    if (valid && type.value != IR_ID_UNDERLYING_INVALID) *type_out = type;
-    else valid = false;
-    return valid;
 }
 
 // Root callers enter a strict operand-type query; the attempt above is used
@@ -32469,7 +32251,6 @@ BUSTER_C_INTERNAL bool c_ir_static_postfix_type(CIntegerIrBuilder* builder, IrTy
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
-BUSTER_C_INTERNAL bool c_ir_sizeof_unmapped_array_value_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
@@ -32508,25 +32289,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_unlowered_array_decay(CIntegerIrBuilder* 
     return result;
 }
 
-/* Resolves the C result type of a sizeof/alignof expression operand strictly: every
-   sub-operand must resolve through a mapped entity, literal, cast, or call before any
-   type is combined, and binary operators apply the usual arithmetic conversions (so
-   narrow operands promote to int and mixed widths take the wider side). Returning
-   false defers to the older per-shape paths and ultimately the caller's fallback; a
-   guessed type must never come out of this function, because the guessed size folds
-   silently into the program (the 2026-08-08 array-bound incident, and the same
-   defect shape in function bodies).
 
-   The precedence walk is iterative. c_ir_sizeof_operand_type_classify scans one
-   operand range, answers it directly when it is a leaf, and otherwise records the
-   operator and its first sub-operand in the frame; c_ir_sizeof_operand_type_combine
-   resumes the frame with each sub-operand's type. The frames live in an explicit
-   stack, so nesting depth costs neither host stack nor a depth bound: every
-   sub-operand range is strictly shorter than its parent, which bounds the stack by
-   the range's token count (the machine's frame capacity covers any declaration).
-   A left-associative chain folds left to right in one frame and a conditional
-   hands its false arm the next `?` and `:`, so each token is scanned a bounded
-   number of times per nesting level (GitHub #2715). */
 
 /* One top-level operator scan of [start, end) for the sizeof operand resolver.
    It records the first and last operator of every tier at ternary depth zero
@@ -32652,18 +32415,6 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBu
 // operand walk refuses it bare so that sizeof can diagnose the unsized array.
 // Used as a value -- a conditional arm or an additive operand -- it is only
 // the pointer to its element; report that type, or fail when it is not one.
-BUSTER_C_INTERNAL bool c_ir_sizeof_unmapped_array_value_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
-{
-    bool result = false;
-    if (!builder->queries->has_request && c_ir_sizeof_operand_is_unmapped_array_object(builder, start, end))
-    {
-        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
-        *type_out = c_ir_sizeof_unlowered_array_decay(builder, builder->parse.entities[entity.value].type);
-        result = type_out->value != IR_ID_UNDERLYING_INVALID;
-    }
-    return result;
-}
-
 // Whether a statement-expression operand's tail names an unlowered array
 // object or local with no IR type whose element has none either -- a
 // variably modified element, say. The resolvers above could not type the tail, and the prediction
@@ -35506,12 +35257,6 @@ BUSTER_C_INTERNAL bool c_ir_node_root_conditional(CIntegerIrBuilder* builder, u3
 
 // Temporary range boundary for the condition and type-query owners. The
 // expression owner already holds its subtree and asks the node reader above.
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
-                                             u32* colon, u32* expression_end)
-{
-    return c_ir_node_root_conditional(builder, c_ir_tree_range_node(builder, start, end), expression_start, question, colon, expression_end, 0);
-}
-
 struct CIrConditionTask
 {
     u32 start;
@@ -37075,11 +36820,6 @@ BUSTER_C_INTERNAL bool c_ir_node_has_root_assignment(CIntegerIrBuilder* builder,
 }
 
 // Temporary type-query boundary; lowering owners retain their exact node.
-BUSTER_C_INTERNAL bool c_ir_range_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    return c_ir_node_has_root_assignment(builder, c_ir_tree_range_node(builder, start, end), start);
-}
-
 BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -37209,20 +36949,6 @@ u64 c_test_assignment_lower_work(void)
 // The operand of [start, end) that a value-taking reader evaluates last: the
 // right operand of each root comma in turn, without its redundant
 // parentheses, from the range's node. A range no node spans is left as it is.
-BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
-{
-    u32 node = c_ir_tree_range_node(builder, *start_in_out, *end_in_out);
-    while (node != C_AST_NODE_INVALID && builder->syntax_tree->kinds[node] == C_AST_COMMA)
-    {
-        node = c_ir_core_last_child(node);
-    }
-    if (node != C_AST_NODE_INVALID)
-    {
-        *start_in_out = builder->syntax_spans->first[node];
-        *end_in_out = builder->syntax_spans->end[node];
-    }
-}
-
 // The first token, in source order, of `node`'s root region -- the tokens a
 // scan of its span sees outside every parenthesis, bracket and brace -- that
 // is the operator `which` names; UINT32_MAX when there is none. The walk
