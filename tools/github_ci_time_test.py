@@ -257,12 +257,18 @@ class ReconciledInventoryTests(unittest.TestCase):
 
     def test_missing_unknown_failed_workloads_and_required_steps_remain_failures(self):
         controls = [self.jobs[1:], self.jobs + [dict(self.jobs[0], name="Unknown workload", id=9999)]]
-        for field, value in (("conclusion", "failure"), ("run_attempt", 2), ("steps", [])):
+        # steps=[] alone is stale metadata that #4102 accepts with a warning; a
+        # present required step that did not succeed is never stale.
+        skipped = [{"name": github_ci_time._required_job_steps(self.jobs[0]["name"])[0],
+                    "status": "completed", "conclusion": "skipped"}]
+        for field, value in (("conclusion", "failure"), ("run_attempt", 2), ("steps", skipped)):
             jobs = copy.deepcopy(self.jobs)
             jobs[0][field] = value
             controls.append(jobs)
         for jobs in controls:
-            self.assertFalse(self.gate(jobs=jobs)["success"])
+            result = self.gate(jobs=jobs)
+            self.assertFalse(result["success"])
+            self.assertEqual(result["step_proof_waived"], [])
 
     def test_partial_moving_or_excessive_check_snapshots_are_refused(self):
         first = {"total_count": 2, "check_runs": self.checks[:1]}
@@ -753,6 +759,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         self.assertFalse(self.gate(jobs=self.jobs[1:])["success"])
         jobs = copy.deepcopy(self.jobs)
         jobs[0]["steps"] = []
+        jobs[0]["conclusion"] = "failure"
         self.assertFalse(self.gate(jobs=jobs)["success"])
         with mock.patch.object(github_ci_time, "_gate_metadata", side_effect=ValueError("unavailable")):
             result = self.gate()

@@ -3755,6 +3755,11 @@ enum
     C_AST_ATTRIBUTE_GROUP_AFTER_ARGUMENT,
     // F_ATTR_GROUP flag: the current item is `namespace::name`.
     C_AST_ATTRIBUTE_GROUP_SCOPED = 1,
+    // F_ATTR_GROUP flag: the current item's namespace is another vendor's
+    // than GNU's or Clang's, whose attributes take expressions: its argument
+    // clause is a balanced token sequence (C23 6.7.13.2), which has no
+    // expression to commit, so no argument nodes are appended.
+    C_AST_ATTRIBUTE_GROUP_VENDOR = 2,
 };
 
 enum
@@ -4403,7 +4408,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
                 frame->e = builder->node_count;
                 frame->d = builder->position;
                 frame->f = 0;
-                frame->flags = (u16)(frame->flags & ~C_AST_ATTRIBUTE_GROUP_SCOPED);
+                frame->flags = (u16)(frame->flags & ~(C_AST_ATTRIBUTE_GROUP_SCOPED | C_AST_ATTRIBUTE_GROUP_VENDOR));
                 c_ast_advance(builder);
                 bool valid = true;
                 bool opaque = false;
@@ -4414,6 +4419,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
                     opaque = !string_equal(scope, S8("gnu")) && !string_equal(scope, S8("__gnu__")) && !string_equal(scope, S8("clang")) &&
                              !string_equal(scope, S8("_Clang"));
                     c_ast_append(builder, C_AST_ATTRIBUTE_NAMESPACE, builder->node_count, frame->d, 0);
+                    String8 space = c_token_spelling(builder->preprocess.spelling_base, token);
+                    if (!string_equal(space, S8("gnu")) && !string_equal(space, S8("__gnu__")) && !string_equal(space, S8("clang")) &&
+                        !string_equal(space, S8("_Clang")))
+                    {
+                        frame->flags |= C_AST_ATTRIBUTE_GROUP_VENDOR;
+                    }
                     c_ast_advance(builder);
                     c_ast_advance(builder);
                     CToken name = c_ast_peek(builder, 0);
@@ -4485,6 +4496,53 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
             {
                 c_ast_advance(builder);
                 item_done = true;
+            }
+            else if (frame->flags & C_AST_ATTRIBUTE_GROUP_VENDOR)
+            {
+                // Step over the balanced sequence to the `)` that closes it.
+                u32 depth = 0;
+                bool scanning = true;
+                while (scanning)
+                {
+                    CToken current = c_ast_peek(builder, 0);
+                    if (current.kind == C_TOKEN_END_OF_FILE)
+                    {
+                        c_ast_fail_expected(builder, C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("')' to close the attribute arguments"));
+                        scanning = false;
+                    }
+                    else if (c_ast_is_punctuator(current, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_ast_is_punctuator(current, C_PUNCTUATOR_LEFT_BRACKET) ||
+                             c_ast_is_punctuator(current, C_PUNCTUATOR_LEFT_BRACE))
+                    {
+                        depth += 1;
+                        c_ast_advance(builder);
+                    }
+                    else if (c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                             c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_BRACKET) || c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_BRACE))
+                    {
+                        if (depth)
+                        {
+                            depth -= 1;
+                            c_ast_advance(builder);
+                        }
+                        else
+                        {
+                            if (c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                            {
+                                c_ast_advance(builder);
+                                item_done = true;
+                            }
+                            else
+                            {
+                                c_ast_fail_expected(builder, C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("')' to close the attribute arguments"));
+                            }
+                            scanning = false;
+                        }
+                    }
+                    else
+                    {
+                        c_ast_advance(builder);
+                    }
+                }
             }
             else
             {

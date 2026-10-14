@@ -36074,9 +36074,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-        // Lowering's: the function arena, the tree's extent table and spans (#3102
+        // Lowering's: the function arena, the tree's spans (#3102
         // step 1), and the arena a 64 KiB first reservation grows into.
-        u32 counts[] = {4, 2, 4};
+        u32 counts[] = {4, 2, 3};
         String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
         String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
@@ -36096,7 +36096,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                         String8 command[] = {S8("-g0"), S8("-fno-c-ast-pilot"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output,
                                              input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        c_test_lowering_initial_reservation(phase == 2 && ordinal == 4 ? BUSTER_KB(64) : 0);
+                        c_test_lowering_initial_reservation(phase == 2 && ordinal == 3 ? BUSTER_KB(64) : 0);
                         c_test_fail_frontend_reservation(phases[phase], ordinal);
                         CompilerDriverResult failed = compiler_driver_execute_invocation(arena, invocation);
                         bool pending = c_test_frontend_reservation_pending();
@@ -45347,7 +45347,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // parsing defects.  The seventh joined them later: `noreturn` spelled on a
     // function pointer type or typedef rather than on a declaration, which the
     // assembly assertion below is what actually gates -- running it only proves
-    // the bodies lower.
+    // the bodies lower. The eighth runs every statement kind the walker reads
+    // from its statement node (#4060), labels and gotos across blocks included.
     String8 c_lz4_regression_paths[] = {
         S8("tests/basic_c_builtin_memory.c"),
         S8("tests/basic_c_case_substatement.c"),
@@ -45356,6 +45357,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_address_of_array.c"),
         S8("tests/basic_c_local_typedef_scope.c"),
         S8("tests/basic_c_goto_into_loop.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/basic_c_statement_nodes.c"),
     };
     String8 c_lz4_regression_names[] = {
         S8("buster-c-builtin-memory"),
@@ -45365,6 +45367,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-address-of-array"),
         S8("buster-c-local-typedef-scope"),
         S8("buster-c-goto-into-loop"),
+        S8("buster-c-statement-nodes"),
     };
     String8 c_lz4_regression_allocators[] = {
         S8("-fregister-allocator=fast"),

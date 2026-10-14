@@ -959,6 +959,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_check_slots(UnitTestArguments* arg
 // The attribute slots of INIT_DECLARATOR (bit 3 leading, bit 1 trailing),
 // MEMBER_DECLARATOR (bit 3 leading, bit 2 trailing) and the FIXED
 // DECLARATOR_ATTRIBUTED, as c_ast.h states them.
+// A vendor attribute's argument clause is a balanced token sequence (C23
+// 6.7.13.2): `vendor::tag({gnu::error("m")})` is stepped over to its closing
+// parenthesis and appends no argument node, while a `gnu::` attribute's
+// arguments are still expressions. An unbalanced clause fails the build.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_attribute_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(
+        temporary.arena, S8("[[gnu::unused, vendor::tag({gnu::error(\"m\")}), gnu::aligned(8)]] void f(void);\nvoid t(void) { f(); }\n"),
+        C_PREPROCESS_DIALECT_GNU23);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    if (BUSTER_REQUIRE(arguments, built.complete))
+    {
+        u32 vendor = C_AST_NODE_INVALID;
+        u32 aligned = C_AST_NODE_INVALID;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_ATTRIBUTE_SCOPED)
+            {
+                String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[node]]);
+                vendor = string_equal(name, S8("tag")) ? node : vendor;
+                aligned = string_equal(name, S8("aligned")) ? node : aligned;
+            }
+        }
+        // The namespace alone; `aligned` keeps its argument expression.
+        BUSTER_TEST(arguments, vendor != C_AST_NODE_INVALID && c_ast_child_count(&built.ast, vendor) == 1);
+        BUSTER_TEST(arguments, aligned != C_AST_NODE_INVALID && c_ast_child_count(&built.ast, aligned) == 2);
+        BUSTER_TEST(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID);
+    }
+    c_ast_release(&built.ast);
+    CPreprocessResult unbalanced = c_ast_test_preprocess(temporary.arena, S8("[[vendor::tag({)]] void f(void);\n"), C_PREPROCESS_DIALECT_GNU23);
+    CAstResult refused = c_ast_build(temporary.arena, unbalanced, (CAstOptions){0});
+    BUSTER_TEST(arguments, !refused.complete && refused.diagnostic_count != 0);
+    c_ast_release(&refused.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_attribute_slots(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2602,12 +2641,6 @@ enum
     // frontend's own sources.
     C_AST_CORPUS_STATEMENT_BRACED_FLOOR = 380,
     C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR = 3500,
-    // Controlled body ranges lowering's extent table answered, each checked
-    // against the token walker (c_ast_corpus_extents): about 3,000 from the
-    // fixtures on Linux x86-64, and about 19,100 in all with the frontend's
-    // own sources.
-    C_AST_CORPUS_EXTENT_ANSWER_FLOOR = 2400,
-    C_AST_CORPUS_HOSTED_EXTENT_ANSWER_FLOOR = 15000,
     // Type-name runs skipped as no type name, each checked against the
     // machine in verify mode, and type-name runs read from the tree, in the
     // same analyses: about 1,250 skipped and 2,270 read from the fixtures on
@@ -2698,13 +2731,6 @@ struct CAstCorpusTally
     u64 specifier_answers;
     u64 specifier_fallbacks;
     u64 specifier_compared;
-    // Lowering's extent table over the same inputs (c_ast_corpus_extents):
-    // queries it answered, each compared with the token walker's answer;
-    // queries the walker answered, by reason; bodies whose table was refused.
-    u64 extent_answers;
-    u64 extent_compared;
-    u64 extent_walked[C_AST_EXTENT_FALLBACK_COUNT];
-    u64 extent_refused;
     // The type-name runs over the same inputs: runs skipped as no type name,
     // and checked against the machine in verify mode; runs read from the tree.
     u64 type_name_skips;
@@ -2742,44 +2768,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_split(UnitTestArguments* argumen
         tally->split_fallback_counts[reason] += statistics.fallback_counts[reason];
     }
     tally->split_compared += derived.declaration_count;
-    return result;
-}
-
-// Lowers `analysis` with the tree in extent verify mode: every controlled body
-// range lowering's extent table answers is answered by the token walker too,
-// and the two must agree field by field.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_extents(UnitTestArguments* arguments, Arena* arena, String8 label, CPreprocessResult preprocess,
-                                                        CAst const* ast, CAnalysisResult analysis, CAstCorpusTally* tally)
-{
-    UnitTestResult result = {0};
-    CAstExtentStatistics statistics = {0};
-    c_test_ir_extent_verify_take();
-    c_test_ir_extent_verify_set(true);
-    c_lower_to_ir_with_options(arena, label, preprocess, analysis, target_native,
-                               (CIRLowerOptions){.syntax_tree = ast, .syntax_tree_extent_statistics = &statistics});
-    c_test_ir_extent_verify_set(false);
-    CTestIrExtentVerify verify = c_test_ir_extent_verify_take();
-    BUSTER_TEST_RAW(arguments, verify.compared == statistics.answers,
-                    string_format(arguments->arena, S8("{S8}: {u64} extent answers, {u64} verified"), label, statistics.answers, verify.compared));
-    for (u32 index = 0; index < verify.first_count; index += 1)
-    {
-        CTestIrExtentMismatch const* mismatch = verify.first + index;
-        String8 first = mismatch->start < preprocess.token_count ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[mismatch->start]) : S8("?");
-        BUSTER_TEST_RAW(arguments, false,
-                        string_format(arguments->arena,
-                                      S8("{S8}: extent of [{u32}, {u32}) at '{S8}': table {u32} {u32} {u32}, walker {u32}: {u32} {u32} {u32}"), label,
-                                      mismatch->start, mismatch->end, first, mismatch->table[0], mismatch->table[1], mismatch->table[2],
-                                      (u32)mismatch->walker_result, mismatch->walker[0], mismatch->walker[1], mismatch->walker[2]));
-    }
-    BUSTER_TEST_RAW(arguments, verify.mismatches == verify.first_count,
-                    string_format(arguments->arena, S8("{S8}: {u64} extent answers disagree with the walker"), label, verify.mismatches));
-    tally->extent_answers += statistics.answers;
-    tally->extent_compared += verify.compared;
-    for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
-    {
-        tally->extent_walked[reason] += statistics.walked[reason];
-        tally->extent_refused += statistics.body_fallbacks[reason];
-    }
     return result;
 }
 
@@ -2860,10 +2848,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         tally->statement_braced += statements.braced;
         tally->statement_fallbacks += statements.fallbacks;
         tally->statement_compared += typed.identifier_use_count;
-        if (plain.analysis_complete && !plain.diagnostic_count)
-        {
-            c_ast_test_merge(&result, c_ast_corpus_extents(arguments, arena, label, preprocess, ast, plain, tally));
-        }
         arena_destroy(arena, 1);
         arena = arena_create(creation);
         if (BUSTER_REQUIRE(arguments, arena != 0))
@@ -3328,7 +3312,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
                                        tally->statement_declarator_declines == 0));
     BUSTER_TEST(arguments, !hosted || tally->specifier_answers >= C_AST_CORPUS_HOSTED_SPECIFIER_ANSWER_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->statement_braced >= C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR);
-    BUSTER_TEST(arguments, !hosted || tally->extent_answers >= C_AST_CORPUS_HOSTED_EXTENT_ANSWER_FLOOR);
     BUSTER_TEST(arguments, !hosted || (tally->type_name_skips >= C_AST_CORPUS_HOSTED_TYPE_NAME_SKIP_FLOOR &&
                                        tally->type_name_checked == tally->type_name_skips &&
                                        tally->type_name_answers >= C_AST_CORPUS_HOSTED_TYPE_NAME_ANSWER_FLOOR));
@@ -3379,7 +3362,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
                                tally.statement_initializers >= C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR && tally.statement_declarator_declines == 0);
     BUSTER_TEST(arguments, tally.specifier_answers >= C_AST_CORPUS_SPECIFIER_ANSWER_FLOOR && tally.specifier_compared);
     BUSTER_TEST(arguments, tally.statement_braced >= C_AST_CORPUS_STATEMENT_BRACED_FLOOR);
-    BUSTER_TEST(arguments, tally.extent_answers >= C_AST_CORPUS_EXTENT_ANSWER_FLOOR && tally.extent_compared == tally.extent_answers);
     BUSTER_TEST(arguments, tally.type_name_skips >= C_AST_CORPUS_TYPE_NAME_SKIP_FLOOR && tally.type_name_checked == tally.type_name_skips &&
                                tally.type_name_answers >= C_AST_CORPUS_TYPE_NAME_ANSWER_FLOOR);
     BUSTER_TEST_RAW(arguments, tally.member_answers >= C_AST_CORPUS_MEMBER_ANSWER_FLOOR && tally.member_compared == tally.member_answers,
@@ -3393,9 +3375,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     // Every fact candidate is published or counted as a gap once, and no
     // published row outlives the type table (GitHub #4062).
     BUSTER_TEST(arguments, tally.fact_candidates && tally.fact_stale == 0 && tally.fact_unaccounted == 0 && tally.fact_missing < tally.fact_candidates);
-    // No corpus body's extent table is refused.
-    BUSTER_TEST(arguments, tally.extent_refused == 0 && tally.extent_walked[C_AST_EXTENT_FALLBACK_INPUT] == 0 &&
-                               tally.extent_walked[C_AST_EXTENT_FALLBACK_ANCHOR] == 0);
     return result;
 }
 
@@ -5433,11 +5412,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
     return result;
 }
 
-// Lowering's extent table (c_ir_statement_extents in c_gen.c): one body with
-// every controlled-substatement shape, answered by the table and checked
-// against the token walker in verify mode, with the program lowered alike
-// with and without the tree; the two table mutations, which the differential
-// must see; and one tampered tree per body fallback reason.
+// Lowering's statement walker (c_ir_lower_body_advance in c_gen.c, #4060)
+// reads a body's structure from its statement nodes: one body with every
+// controlled-substatement shape lowers alike in every layout, and alike with
+// the tree the caller passes and with none; a tree whose body or header
+// anchor is moved refuses the body with a diagnostic, and no token walk
+// answers instead.
 #define C_AST_EXTENT_CASE_EVERY                                                                                                                      \
     "struct P { int x; };\n"                                                                                                                         \
     "int g(int v);\n"                                                                                                                                \
@@ -5475,30 +5455,8 @@ typedef enum CAstExtentTamper
     C_AST_EXTENT_TAMPER_BRACE,
     // An `if` anchor moves off its keyword: the token after it is not `(`.
     C_AST_EXTENT_TAMPER_HEADER,
+    C_AST_EXTENT_TAMPER_COUNT,
 } CAstExtentTamper;
-
-typedef struct CAstExtentCase CAstExtentCase;
-struct CAstExtentCase
-{
-    CAstExtentTamper tamper;
-    CTestIrExtentMutation mutation;
-    CAstExtentFallback reason;
-};
-
-BUSTER_GLOBAL_LOCAL CAstExtentCase const c_ast_extent_cases[] = {
-    {C_AST_EXTENT_TAMPER_NONE, C_TEST_IR_EXTENT_MUTATION_NONE, C_AST_EXTENT_FALLBACK_NONE},
-    {C_AST_EXTENT_TAMPER_NONE, C_TEST_IR_EXTENT_MUTATION_DO_TAIL, C_AST_EXTENT_FALLBACK_NONE},
-    {C_AST_EXTENT_TAMPER_NONE, C_TEST_IR_EXTENT_MUTATION_DROPPED_ELSE, C_AST_EXTENT_FALLBACK_NONE},
-    {C_AST_EXTENT_TAMPER_BRACE, C_TEST_IR_EXTENT_MUTATION_NONE, C_AST_EXTENT_FALLBACK_INPUT},
-    {C_AST_EXTENT_TAMPER_HEADER, C_TEST_IR_EXTENT_MUTATION_NONE, C_AST_EXTENT_FALLBACK_ANCHOR},
-};
-
-enum
-{
-    // Controlled substatements of C_AST_EXTENT_CASE_EVERY the table answers;
-    // the `if` inside the statement expression is walked (shape).
-    C_AST_EXTENT_CASE_ANSWER_FLOOR = 28,
-};
 
 BUSTER_GLOBAL_LOCAL u64 c_ast_test_instruction_total(CIRLowerResult const* lowered)
 {
@@ -5514,16 +5472,15 @@ BUSTER_GLOBAL_LOCAL u64 c_ast_test_instruction_total(CIRLowerResult const* lower
     return total;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_extent_cases); index += 1)
+    for (u32 tamper = 0; tamper < C_AST_EXTENT_TAMPER_COUNT; tamper += 1)
     {
-        CAstExtentCase const* extent_case = &c_ast_extent_cases[index];
         for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            String8 label = string_format(temporary.arena, S8("extent case {u32}, layout {u32}"), index, layout);
+            String8 label = string_format(temporary.arena, S8("statement nodes, tamper {u32}, layout {u32}"), tamper, layout);
             CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8(C_AST_EXTENT_CASE_EVERY), C_PREPROCESS_DIALECT_GNU17);
             CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
             if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
@@ -5531,105 +5488,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* argumen
                 CAst tree = c_ast_test_copy(temporary.arena, &built.ast);
                 u32 definition = c_ast_test_find_kind(&tree, C_AST_FUNCTION_DEFINITION);
                 u32 header = c_ast_test_find_kind(&tree, C_AST_IF);
-                if (extent_case->tamper == C_AST_EXTENT_TAMPER_BRACE && BUSTER_REQUIRE(arguments, definition != C_AST_NODE_INVALID))
+                if (tamper == C_AST_EXTENT_TAMPER_BRACE && BUSTER_REQUIRE(arguments, definition != C_AST_NODE_INVALID))
                 {
                     tree.tokens[definition - 1] += 1;
                 }
-                if (extent_case->tamper == C_AST_EXTENT_TAMPER_HEADER && BUSTER_REQUIRE(arguments, header != C_AST_NODE_INVALID))
+                if (tamper == C_AST_EXTENT_TAMPER_HEADER && BUSTER_REQUIRE(arguments, header != C_AST_NODE_INVALID))
                 {
                     tree.tokens[header] += 1;
                 }
                 CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
                 if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0))
                 {
-                    CIRLowerResult walked = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native, (CIRLowerOptions){0});
-                    CAstExtentStatistics statistics = {0};
-                    c_test_ir_extent_mutation_set(extent_case->mutation);
-                    CIRLowerResult tabled = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native,
-                                                                       (CIRLowerOptions){.syntax_tree = &tree, .syntax_tree_extent_statistics = &statistics});
-                    c_test_ir_extent_verify_take();
-                    c_test_ir_extent_verify_set(true);
-                    CAstExtentStatistics verified_statistics = {0};
-                    c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native,
-                                               (CIRLowerOptions){.syntax_tree = &tree, .syntax_tree_extent_statistics = &verified_statistics});
-                    c_test_ir_extent_verify_set(false);
-                    c_test_ir_extent_mutation_set(C_TEST_IR_EXTENT_MUTATION_NONE);
-                    CTestIrExtentVerify verify = c_test_ir_extent_verify_take();
-                    BUSTER_TEST_RAW(arguments, walked.program && walked.diagnostic_count == 0, label);
-                    BUSTER_TEST_RAW(arguments, verify.compared == verified_statistics.answers, label);
-                    if (extent_case->mutation)
+                    // No tree passed: lowering builds the implicit one itself.
+                    CIRLowerResult own = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native, (CIRLowerOptions){0});
+                    CIRLowerResult passed = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native,
+                                                                       (CIRLowerOptions){.syntax_tree = &tree});
+                    BUSTER_TEST_RAW(arguments, own.program && own.diagnostic_count == 0 && own.canonical_ir_certified, label);
+                    if (tamper == C_AST_EXTENT_TAMPER_NONE)
                     {
-                        // The differential sees the mutated entries.
-                        BUSTER_TEST_RAW(arguments, verify.mismatches != 0, label);
+                        BUSTER_TEST_RAW(arguments, passed.program && passed.diagnostic_count == 0 && passed.canonical_ir_certified, label);
+                        BUSTER_TEST_RAW(arguments, c_ast_test_instruction_total(&passed) == c_ast_test_instruction_total(&own), label);
                     }
                     else
                     {
-                        BUSTER_TEST_RAW(arguments, verify.mismatches == 0, label);
-                        BUSTER_TEST_RAW(arguments, tabled.program && tabled.diagnostic_count == 0, label);
-                        BUSTER_TEST_RAW(arguments, c_ast_test_instruction_total(&tabled) == c_ast_test_instruction_total(&walked), label);
+                        bool refused = passed.diagnostic_count == 1 && !passed.canonical_ir_certified &&
+                                       string_starts_with_sequence(passed.diagnostics[0].message, S8("in function 'f': "));
+                        BUSTER_TEST_RAW(arguments, refused, label);
+                        if (tamper == C_AST_EXTENT_TAMPER_BRACE && refused)
+                        {
+                            BUSTER_TEST_RAW(arguments, string_equal(passed.diagnostics[0].message, S8("in function 'f': function body has no syntax tree node")),
+                                            passed.diagnostics[0].message);
+                        }
                     }
-                    // Counted on the verified run, which lowers by the walker's
-                    // answers: a mutated table stops the tabled run early.
-                    bool followed = extent_case->reason == C_AST_EXTENT_FALLBACK_NONE;
-                    statistics = verified_statistics;
-                    BUSTER_TEST_RAW(arguments, statistics.bodies == 1, label);
-                    BUSTER_TEST_RAW(arguments,
-                                    followed ? statistics.answers >= C_AST_EXTENT_CASE_ANSWER_FLOOR && statistics.walked[C_AST_EXTENT_FALLBACK_SHAPE] != 0 &&
-                                                   statistics.walked[C_AST_EXTENT_FALLBACK_INPUT] == 0 && statistics.walked[C_AST_EXTENT_FALLBACK_ANCHOR] == 0
-                                             : statistics.answers == 0 && statistics.body_fallbacks[extent_case->reason] == 1 &&
-                                                   statistics.reason == extent_case->reason && statistics.walked[extent_case->reason] != 0,
-                                    label);
                 }
             }
             c_ast_release(&built.ast);
             c_test_scratch_end(temporary);
         }
     }
-    // A table that does not fit its arena refuses the body (`input`), and the
-    // walker lowers it alike: the reservation is checked before any carve.
-    for (u32 reserved = 0; reserved < 2; reserved += 1)
-    {
-        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8(C_AST_EXTENT_CASE_EVERY), C_PREPROCESS_DIALECT_GNU17);
-        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
-        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
-        if (BUSTER_REQUIRE(arguments, built.complete && analysis.analysis_complete && analysis.diagnostic_count == 0))
-        {
-            CIRLowerResult walked = c_lower_to_ir_with_options(temporary.arena, S8("extent, walked"), preprocess, analysis, target_native, (CIRLowerOptions){0});
-            CAstExtentStatistics statistics = {0};
-            c_test_lowering_initial_reservation(reserved ? 4096 : 0);
-            CIRLowerResult tabled = c_lower_to_ir_with_options(temporary.arena, S8("extent, small arena"), preprocess, analysis, target_native,
-                                                               (CIRLowerOptions){.syntax_tree = &built.ast, .syntax_tree_extent_statistics = &statistics});
-            c_test_lowering_initial_reservation(0);
-            BUSTER_TEST(arguments, tabled.program && tabled.diagnostic_count == 0);
-            BUSTER_TEST(arguments, c_ast_test_instruction_total(&tabled) == c_ast_test_instruction_total(&walked));
-            BUSTER_TEST(arguments, reserved ? statistics.answers == 0 && (statistics.bodies == 0 || statistics.body_fallbacks[C_AST_EXTENT_FALLBACK_INPUT] == 1)
-                                            : statistics.answers >= C_AST_EXTENT_CASE_ANSWER_FLOOR);
-        }
-        c_ast_release(&built.ast);
-        c_test_scratch_end(temporary);
-    }
     // Without a caller's tree lowering builds the unit's own (GitHub #3102
-    // step 1), so the table answers just the same.
+    // step 1), and the statement walker reads its body from it.
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(int a) { if (a) return 1; return 0; }"), C_PREPROCESS_DIALECT_GNU17);
         CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
-        CAstExtentStatistics statistics = {0};
         CAstLowerStatistics lower = {0};
-        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("extent, no tree"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){.syntax_tree_extent_statistics = &statistics,
-                                                                              .ast_lower_statistics = &lower});
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("statement nodes, no tree"), preprocess, analysis, target_native,
+                                                            (CIRLowerOptions){.ast_lower_statistics = &lower});
         BUSTER_TEST_RAW(arguments,
-                        lowered.program && statistics.bodies == 1 && lower.trees_built == 1 && lower.tree_rejections == 0 && lower.tree_nodes != 0 &&
+                        lowered.program && lower.statement_bodies == 1 && lower.trees_built == 1 && lower.tree_rejections == 0 && lower.tree_nodes != 0 &&
                             lower.tree_bytes != 0 && lower.span_nodes != 0 && lower.span_bytes != 0,
-                        string_format(temporary.arena, S8("extent, no tree: program={u32} bodies={u64} trees={u64} rejections={u64} nodes={u64} spans={u64}"),
-                                      (u32)(lowered.program != 0), statistics.bodies, lower.trees_built, lower.tree_rejections, lower.tree_nodes,
+                        string_format(temporary.arena, S8("statement nodes, no tree: program={u32} bodies={u64} trees={u64} rejections={u64} nodes={u64} spans={u64}"),
+                                      (u32)(lowered.program != 0), lower.statement_bodies, lower.trees_built, lower.tree_rejections, lower.tree_nodes,
                                       lower.span_nodes));
-        BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_NONE), S8("none")));
-        BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_INPUT), S8("input")));
-        BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_ANCHOR), S8("anchor")));
-        BUSTER_TEST(arguments, string_equal(c_ast_extent_fallback_name(C_AST_EXTENT_FALLBACK_SHAPE), S8("shape")));
         c_test_scratch_end(temporary);
     }
     return result;
@@ -6448,6 +6359,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_spans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_validator);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_attribute_slots);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_attribute_arguments);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_options_and_statistics);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_columns);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_oracle);
@@ -6456,7 +6368,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_lookups);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_split);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statements);
-    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_extents);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statement_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_specifiers);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
