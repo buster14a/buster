@@ -18,7 +18,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
            "int yes=((p==&&done && ++n) && (p==&&done && ++n));"
            "int no=((p!=&&done && ++n) || (p==&&done || ++n));"
            "return yes!=1 || no!=1 || n!=2; }"),
-        S8("struct box { void *p; int n; }; int main(void) { const struct box b={&&done,1};"
+        S8("struct box { void *p; const int n; }; int main(void) { struct box b={&&done,1};"
            "done: return (b.p!=&&done) || (b.n && (b.p!=&&done)); }"),
         S8("int saved; int take(int x) { saved=x; return x; }"
            "int main(void) { void *p=&&done; done: return take(p!=&&done || p!=&&done) || saved; }"),
