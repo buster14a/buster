@@ -1937,6 +1937,8 @@ AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c",
                              for name in ("summary.json", "compare.json", "pairs.json", "reference.json", "a/lab.json", "b/lab.json",
                                           "a/env/env.json", "b/env/env.json", "a/reference.diagnostics", "b/reference.diagnostics",
                                           "a/reference.000.bin", "a/reference.001.bin", "b/reference.000.bin", "b/reference.001.bin")),
+                           *(f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in AST_RETIREMENT_CELLS
+                             for pair in range(1, AST_RETIREMENT_PROFILE["pairs"] + 1) for arm in ("a", "b")),
                            *(f"probe/{cell}/{name}" for cell in AST_RETIREMENT_CELLS for name in ("probe.json", "a.log", "b.log")))
 
 

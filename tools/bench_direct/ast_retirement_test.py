@@ -8,6 +8,7 @@ RetirementPublisherTest, RetirementPublicationPolicyTest.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import copy
 from functools import lru_cache
@@ -19,6 +20,7 @@ import subprocess
 import tempfile
 import unittest
 import urllib.parse
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ast_retirement_acceptance as retirement
@@ -392,6 +394,44 @@ class RetirementPublicationPolicyTest(unittest.TestCase):
 
 
 class RetirementProducerRoutingTest(unittest.TestCase):
+    def test_sealed_export_cannot_complete_without_every_raw_counter(self) -> None:
+        _, bundle = evidence()
+        counters = {f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in receipt.AST_RETIREMENT_CELLS
+                    for pair in range(1, 21) for arm in ("a", "b")}
+        self.assertEqual(len(counters), 800)
+        self.assertTrue(counters.issubset(compare.AST_RETIREMENT_REQUIRED))
+        missing = "unity-syntax-only/pairs/0001-a.csv"
+        for case in ("complete", "absent", "budget"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                work, exported = root / "work", root / "evidence"
+                source = work / "ast-retirement-acceptance"
+                exported.mkdir()
+                for name, data in bundle["files"].items():
+                    relative = name.removeprefix("ast_retirement_acceptance/")
+                    if case == "absent" and relative == missing:
+                        continue
+                    target = source / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                record = {"requested": True, "status": "pending"}
+                current = {"timings": {}, "binaries": BINARIES, "ast_retirement_acceptance": record}
+                arguments = argparse.Namespace(lab=root / "trusted-lab.py", base=BASE, head=HEAD)
+                with mock.patch.object(compare, "run", return_value=0), mock.patch.object(compare, "mark"), \
+                        mock.patch.object(compare, "EVIDENCE_DEFER_ALL", True), \
+                        mock.patch.object(compare, "EVIDENCE_DEFERRED_OPTIONAL", []), \
+                        mock.patch.object(compare, "EVIDENCE_OMISSION_LEDGER", []), \
+                        mock.patch.object(compare, "EVIDENCE_FILE_COUNT", 0 if case == "budget" else compare.EVIDENCE_FILE_COUNT):
+                    compare.measure_ast_retirement(arguments, root, root / "bin", work, exported, current, None)
+                if case == "complete":
+                    self.assertEqual(record["status"], "complete")
+                    self.assertEqual(record["errors"], [])
+                    self.assertTrue(all((exported / "ast_retirement_acceptance" / name).is_file() for name in counters))
+                else:
+                    self.assertEqual(record["status"], "failed")
+                    self.assertTrue(any(f"{missing} not exported" in error for error in record["errors"]))
+                    self.assertFalse((exported / "ast_retirement_acceptance" / missing).exists())
+
     def test_real_git_merge_parents_cannot_replay_or_duplicate_a_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
