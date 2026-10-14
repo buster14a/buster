@@ -2181,7 +2181,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
     for (u32 grouped = 0; grouped < 2; grouped += 1)
     {
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
-            (ProcessSpawnOptions){.new_process_group = grouped});
+            (ProcessSpawnOptions){.new_process_group = grouped != 0});
         if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
         {
             ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 1);

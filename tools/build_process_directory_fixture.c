@@ -125,5 +125,8 @@ int main(int argc, char** argv)
         printf("cwd-fixture: rejected=%d failure=%d error=%u\n", rejected, (int)spawn.failure, spawn.error.v);
         result = valid ? 0 : 1;
     }
+#if BUSTER_WINDOWS
+    if (!os_process_shutdown_keep_alive()) result = 1;
+#endif
     return result;
 }

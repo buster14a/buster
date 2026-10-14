@@ -207,7 +207,9 @@ Raw application workers must be joined before returning from `entry_point`.
 After process cleanup, an unjoined tracked worker makes the normal return take
 `os_exit` while global storage is still intact, rather than free it under the
 worker's wait/callback/context tail. The freestanding Windows CRT also routes
-through `os_exit`. A cleanup refusal cannot be hidden by a successful custom
+through `os_exit`. The standalone build-cwd fixture and throughput-test CRT
+mains call the same hook before returning/releasing their thread context;
+normal CRT return still flushes their buffered output. A cleanup refusal cannot be hidden by a successful custom
 application exit-code override. No second launcher or surviving helper is added;
 #2986's broader caller-driven lifecycle remains separate.
 
