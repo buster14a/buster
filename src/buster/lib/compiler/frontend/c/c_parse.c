@@ -47912,10 +47912,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
     C_DIAGNOSTIC_RESERVATION_CENSUS(SEMANTIC, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
-    if (machine.ast_facts && !c_ast_facts_prepare(machine.ast_facts, syntax.ast, &preprocess, &result))
+    bool semantic_outputs_ready = !machine.ast_facts || c_ast_facts_prepare(machine.ast_facts, syntax.ast, &preprocess, &result);
+    if (!semantic_outputs_ready)
     {
+        // This setup failure precedes every query. Keep its single resource
+        // diagnostic and run the ordinary cleanup without entering the type
+        // machine's independent capacity-failure reporting path.
         c_analysis_failure(&result, S8("could not reserve the retained C semantic analysis node index"));
-        machine.failed = true;
     }
     BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
@@ -47926,7 +47929,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .token_end = UINT32_MAX,
     };
     CTypeId declarator_list_base = C_TYPE_ID_INVALID;
-    for (CParserDeclaration* syntax_declaration = syntax.first_declaration; syntax_declaration; syntax_declaration = syntax_declaration->next)
+    for (CParserDeclaration* syntax_declaration = syntax.first_declaration; semantic_outputs_ready && syntax_declaration; syntax_declaration = syntax_declaration->next)
     {
         u32 start = syntax_declaration->token_start;
         u32 index = start + syntax_declaration->token_count;
@@ -48692,7 +48695,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     c_parse_ast_identity_publish(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).
     c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result, &preprocess);
-    result.analysis_complete = true;
+    result.analysis_complete = semantic_outputs_ready;
     // The literal memo stays published: lowering reads the recorded bytes
     // and never records.
     scratch_end(machine_temporary);
