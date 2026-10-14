@@ -1553,7 +1553,7 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 sou
                                        .target = target,
                                        .data_layout = target_data_layout(target),
                                    });
-    *parse_out = c_parse_for_lowering(arena, *preprocess_out);
+    *parse_out = c_parse(arena, *preprocess_out);
     CIRLowerResult result;
     if (preprocess_out->diagnostic_count)
     {
@@ -1561,7 +1561,8 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 sou
     }
     else
     {
-        result = c_lower_to_ir(arena, source_path, *preprocess_out, *parse_out, target);
+        CAnalysisResult prepared = c_parse_for_lowering(arena, *preprocess_out);
+        result = c_lower_to_ir(arena, source_path, *preprocess_out, prepared, target);
     }
 
     return result;
@@ -9851,8 +9852,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_storage_growth(UnitTestArguments
                                                        .target = target_native,
                                                        .data_layout = target_data_layout(target_native),
                                                    });
-    CParseResult growth_parse = c_parse_for_lowering(parse_growth_temporary.arena, growth_tokens);
-    CIRLowerResult growth_ir = c_lower_to_ir(parse_growth_temporary.arena, S8("parse-storage-growth.c"), growth_tokens, growth_parse, target_native);
+    CParseResult growth_parse = c_parse(parse_growth_temporary.arena, growth_tokens);
+    CIRLowerResult growth_ir = c_lower_to_ir(parse_growth_temporary.arena, S8("parse-storage-growth.c"), growth_tokens, c_parse_for_lowering(parse_growth_temporary.arena, growth_tokens), target_native);
     u32 open_bracket_count = 0;
     for (u32 token_index = 0; token_index < growth_tokens.token_count; token_index += 1)
     {
@@ -11020,7 +11021,7 @@ BUSTER_GLOBAL_LOCAL void c_test_enum_scope_case(UnitTestArguments* arguments, Un
     CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
         .target = target, .data_layout = target_data_layout(target), .dialect = dialect,
     });
-    CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
+    CParseResult parse = c_parse(temporary.arena, tokens);
     BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
     BUSTER_TEST_RAW(arguments, accepted ? parse.diagnostic_count == 0 : parse.diagnostic_count != 0, source);
     if (accepted && parse.diagnostic_count == 0)
@@ -11057,7 +11058,7 @@ BUSTER_GLOBAL_LOCAL void c_test_enum_scope_case(UnitTestArguments* arguments, Un
         }
         BUSTER_TEST_RAW(arguments, kind == C_DIAGNOSTIC_REDEFINITION ? matching == 1 : matching != 0, source);
     }
-    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-scope.c"), tokens, parse, target,
+    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-scope.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target,
                                                         (CIRLowerOptions){.disable_direct_ssa = disable_direct_ssa});
     if (accepted)
     {
@@ -16975,9 +16976,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_ir(UnitTestArgument
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult ambiguous_promoted_parse = c_parse_for_lowering(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens);
-    CIRLowerResult ambiguous_promoted_ir = c_lower_to_ir(ambiguous_promoted_temporary.arena, S8("ambiguous-promoted.c"), ambiguous_promoted_tokens,
-                                                          ambiguous_promoted_parse, target_native);
+    CParseResult ambiguous_promoted_parse = c_parse(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens);
+    CIRLowerResult ambiguous_promoted_ir = c_lower_to_ir(ambiguous_promoted_temporary.arena, S8("ambiguous-promoted.c"), ambiguous_promoted_tokens, c_parse_for_lowering(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens), target_native);
     bool found_ambiguity = false;
     for (u32 diagnostic_index = 0; diagnostic_index < ambiguous_promoted_ir.diagnostic_count; diagnostic_index += 1)
     {
@@ -17273,9 +17273,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_union_initializer(UnitTestArgu
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult union_invalid_parse = c_parse_for_lowering(union_invalid_temporary.arena, union_invalid_tokens);
-    CIRLowerResult union_invalid_ir = c_lower_to_ir(union_invalid_temporary.arena, S8("invalid-union-initializer.c"), union_invalid_tokens,
-                                                    union_invalid_parse, target_native);
+    CParseResult union_invalid_parse = c_parse(union_invalid_temporary.arena, union_invalid_tokens);
+    CIRLowerResult union_invalid_ir = c_lower_to_ir(union_invalid_temporary.arena, S8("invalid-union-initializer.c"), union_invalid_tokens, c_parse_for_lowering(union_invalid_temporary.arena, union_invalid_tokens), target_native);
     BUSTER_TEST(arguments, union_invalid_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, union_invalid_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, union_invalid_ir.diagnostic_count == 1);
@@ -17322,9 +17321,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult deferred_assert_false_parse = c_parse_for_lowering(deferred_assert_false_temporary.arena, deferred_assert_false_tokens);
+    CParseResult deferred_assert_false_parse = c_parse(deferred_assert_false_temporary.arena, deferred_assert_false_tokens);
     CIRLowerResult deferred_assert_false_ir = c_lower_to_ir(deferred_assert_false_temporary.arena, S8("deferred-assert-false.c"),
-                                                            deferred_assert_false_tokens, deferred_assert_false_parse, target_native);
+                                                            deferred_assert_false_tokens, c_parse_for_lowering(deferred_assert_false_temporary.arena, deferred_assert_false_tokens), target_native);
     BUSTER_TEST(arguments, deferred_assert_false_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, deferred_assert_false_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, deferred_assert_false_parse.deferred_static_assert_count == 1);
@@ -17348,7 +17347,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
                 .target = target_native,
                 .data_layout = target_data_layout(target_native),
             });
-        CParseResult invalid_parse = c_parse_for_lowering(static_assert_type_temporary.arena, invalid_tokens);
+        CParseResult invalid_parse = c_parse(static_assert_type_temporary.arena, invalid_tokens);
         BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 1);
         if (invalid_parse.diagnostic_count == 1)
@@ -17374,9 +17373,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult valid_static_assert_parse = c_parse_for_lowering(static_assert_type_temporary.arena, valid_static_assert_tokens);
+    CParseResult valid_static_assert_parse = c_parse(static_assert_type_temporary.arena, valid_static_assert_tokens);
     CIRLowerResult valid_static_assert_ir = c_lower_to_ir(static_assert_type_temporary.arena, S8("static-assert-integer-controls.c"),
-                                                         valid_static_assert_tokens, valid_static_assert_parse, target_native);
+                                                         valid_static_assert_tokens, c_parse_for_lowering(static_assert_type_temporary.arena, valid_static_assert_tokens), target_native);
     BUSTER_TEST(arguments, valid_static_assert_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, valid_static_assert_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, valid_static_assert_ir.diagnostic_count == 0);
@@ -17387,9 +17386,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult narrowing_false_parse = c_parse_for_lowering(static_assert_type_temporary.arena, narrowing_false_tokens);
+    CParseResult narrowing_false_parse = c_parse(static_assert_type_temporary.arena, narrowing_false_tokens);
     CIRLowerResult narrowing_false_ir = c_lower_to_ir(static_assert_type_temporary.arena, S8("static-assert-narrowing-false.c"),
-                                                      narrowing_false_tokens, narrowing_false_parse, target_native);
+                                                      narrowing_false_tokens, c_parse_for_lowering(static_assert_type_temporary.arena, narrowing_false_tokens), target_native);
     BUSTER_TEST(arguments, narrowing_false_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, narrowing_false_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, narrowing_false_parse.deferred_static_assert_count == 1);
@@ -17453,8 +17452,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_diagnostic_ownership(U
                                                         .target = target_native,
                                                         .data_layout = target_data_layout(target_native),
                                                     });
-            CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-            CIRLowerResult ir = c_lower_to_ir_with_options(temporary.arena, S8("deferred-assert-ownership.c"), tokens, parse, target_native,
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult ir = c_lower_to_ir_with_options(temporary.arena, S8("deferred-assert-ownership.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target_native,
                                                               (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
             BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, cases[case_index].source);
@@ -17493,9 +17492,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestAr
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult deferred_assert_nonconstant_parse = c_parse_for_lowering(deferred_assert_nonconstant_temporary.arena, deferred_assert_nonconstant_tokens);
+    CParseResult deferred_assert_nonconstant_parse = c_parse(deferred_assert_nonconstant_temporary.arena, deferred_assert_nonconstant_tokens);
     CIRLowerResult deferred_assert_nonconstant_ir = c_lower_to_ir(deferred_assert_nonconstant_temporary.arena, S8("deferred-assert-nonconstant.c"),
-                                                                    deferred_assert_nonconstant_tokens, deferred_assert_nonconstant_parse,
+                                                                    deferred_assert_nonconstant_tokens, c_parse_for_lowering(deferred_assert_nonconstant_temporary.arena, deferred_assert_nonconstant_tokens),
                                                                     target_native);
     BUSTER_TEST(arguments, deferred_assert_nonconstant_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, deferred_assert_nonconstant_parse.diagnostic_count == 0);
@@ -17757,9 +17756,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect(UnitTestArguments* ar
                     }
                     // Use the ordinary semantic producer independently of the
                     // syntax-only constraint check, including its refusal case.
-                    CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
+                    CParseResult parse = c_parse(temporary.arena, tokens);
                     BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, cases[fixture].source);
-                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("file-tls-dialect.c"), tokens, parse,
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("file-tls-dialect.c"), tokens, c_parse_for_lowering(temporary.arena, tokens),
                         target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == (u64)cases[fixture].rejected, cases[fixture].source);
                     if (cases[fixture].rejected)
@@ -17970,9 +17969,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_local_static_initializer(UnitT
            " return value.first; }"
            " int main(void) { return invalid_static_local(); }\n"),
         (CPreprocessOptions){0});
-    CParseResult invalid_static_parse = c_parse_for_lowering(invalid_static_temporary.arena, invalid_static_tokens);
+    CParseResult invalid_static_parse = c_parse(invalid_static_temporary.arena, invalid_static_tokens);
     CIRLowerResult invalid_static_ir =
-        c_lower_to_ir(invalid_static_temporary.arena, S8("invalid-local-static-initializer.c"), invalid_static_tokens, invalid_static_parse, target_native);
+        c_lower_to_ir(invalid_static_temporary.arena, S8("invalid-local-static-initializer.c"), invalid_static_tokens, c_parse_for_lowering(invalid_static_temporary.arena, invalid_static_tokens), target_native);
     BUSTER_TEST(arguments, invalid_static_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, invalid_static_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, invalid_static_ir.diagnostic_count == 1);
@@ -18005,9 +18004,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
            " static int invalid_designator_fixed_negative[1] = { [-1] = 1 };"
            " static int invalid_designator_fixed_overflow[1] = { [2] = 1 };\n"),
         (CPreprocessOptions){0});
-    CParseResult invalid_designator_parse = c_parse_for_lowering(invalid_designator_temporary.arena, invalid_designator_tokens);
-    CIRLowerResult invalid_designator_ir = c_lower_to_ir(invalid_designator_temporary.arena, S8("invalid-designators.c"), invalid_designator_tokens,
-                                                         invalid_designator_parse, target_native);
+    CParseResult invalid_designator_parse = c_parse(invalid_designator_temporary.arena, invalid_designator_tokens);
+    CIRLowerResult invalid_designator_ir = c_lower_to_ir(invalid_designator_temporary.arena, S8("invalid-designators.c"), invalid_designator_tokens, c_parse_for_lowering(invalid_designator_temporary.arena, invalid_designator_tokens), target_native);
     bool found_nonconstant = false;
     bool found_negative = false;
     bool found_overflow = false;
@@ -18291,9 +18289,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_root_designators(UnitTestArgum
             .target = target_native,
             .data_layout = target_data_layout(target_native),
         });
-    CParseResult invalid_root_designator_parse = c_parse_for_lowering(invalid_root_designator_temporary.arena, invalid_root_designator_tokens);
+    CParseResult invalid_root_designator_parse = c_parse(invalid_root_designator_temporary.arena, invalid_root_designator_tokens);
     CIRLowerResult invalid_root_designator_ir = c_lower_to_ir(invalid_root_designator_temporary.arena, S8("invalid-root-designators.c"),
-                                                               invalid_root_designator_tokens, invalid_root_designator_parse, target_native);
+                                                               invalid_root_designator_tokens, c_parse_for_lowering(invalid_root_designator_temporary.arena, invalid_root_designator_tokens), target_native);
     bool found_root_member_diagnostic = false;
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_root_designator_ir.diagnostic_count; diagnostic_index += 1)
     {
@@ -35050,8 +35048,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArgument
     {
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source, (CPreprocessOptions){.source_path = S8("error-attribute.c")});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("error-attribute.c"), tokens, parse, target_native);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("error-attribute.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target_native);
         BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, cases[index].source);
         if (cases[index].message.length)
         {
@@ -46673,15 +46671,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_semantic_verdict(UnitTes
                     u32 diagnostic_count = 0;
                     if (route == 0)
                     {
-                        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-                        // The model-building entry point validates nothing,
-                        // so every deferred row reaches lowering unchecked.
+                        CParseResult parse = c_parse(temporary.arena, tokens);
+                        // The independent model arm retains unchecked verdicts;
+                        // lowering receives a separately completed authority.
                         BUSTER_TEST(arguments, parse.deferred_static_assert_count && !parse.deferred_static_assert_verdicts);
                         diagnostics = parse.diagnostics;
                         diagnostic_count = parse.diagnostic_count;
                         if (!diagnostic_count)
                         {
-                            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("static-assert-verdict.c"), tokens, parse, target, options);
+                            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("static-assert-verdict.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target, options);
                             diagnostics = lowered.diagnostics;
                             diagnostic_count = lowered.diagnostic_count;
                         }
@@ -49987,8 +49985,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && mirror.diagnostic_count == 0);
-        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, path, tokens, parse, target,
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, path, tokens, c_parse_for_lowering(temporary.arena, tokens), target,
             (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
         BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program);
         if (lower.program)
@@ -50099,8 +50097,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[row].source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("invalid-constraint-union.c"), tokens, parse, target);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("invalid-constraint-union.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
         // Direct lowering omits unused static bodies; their source-level
         // rejection belongs to the semantic-only mirror rather than codegen.
@@ -50121,8 +50119,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
             S8("int invalid(int value) {{ __asm__(\"\" : : \"{S8}\"(value)); return value; }}"), immediate_only[row]);
         CPreprocessResult tokens = c_preprocess(temporary.arena, immediate_source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("immediate-only-constraint.c"), tokens, parse, target);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("immediate-only-constraint.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target);
         BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1, immediate_only[row]);
         if (lower.diagnostic_count == 1)
         {
@@ -50143,8 +50141,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult tokens = c_preprocess(temporary.arena, wrong_target_sources[row],
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("wrong-target-constraint-union.c"), tokens, parse, target);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("wrong-target-constraint-union.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target);
         CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
         BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1 && mirror.diagnostic_count == 1, wrong_target_sources[row]);
@@ -50158,8 +50156,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult tokens = c_preprocess(temporary.arena, portable_source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, S8("portable-constraint-union.c"), tokens, parse, target,
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, S8("portable-constraint-union.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target,
             (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
         CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && mirror.diagnostic_count == 0);
@@ -50470,8 +50468,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                    " + values[rows - 1][columns - 1];"
                                                    " }\n"),
                                                 (CPreprocessOptions){0});
-    CParseResult vla_parse = c_parse_for_lowering(vla_temporary.arena, vla_tokens);
-    CIRLowerResult vla_ir = c_lower_to_ir(vla_temporary.arena, S8("vla.c"), vla_tokens, vla_parse, target_native);
+    CParseResult vla_parse = c_parse(vla_temporary.arena, vla_tokens);
+    CIRLowerResult vla_ir = c_lower_to_ir(vla_temporary.arena, S8("vla.c"), vla_tokens, c_parse_for_lowering(vla_temporary.arena, vla_tokens), target_native);
     BUSTER_TEST(arguments, vla_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, vla_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, vla_ir.diagnostic_count == 0);
@@ -50517,8 +50515,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                        " int: unselected(),"
                                                        " default: 3); }\n"),
                                                     (CPreprocessOptions){0});
-    CParseResult generic_parse = c_parse_for_lowering(generic_temporary.arena, generic_tokens);
-    CIRLowerResult generic_ir = c_lower_to_ir_with_options(generic_temporary.arena, S8("generic.c"), generic_tokens, generic_parse, target_native,
+    CParseResult generic_parse = c_parse(generic_temporary.arena, generic_tokens);
+    CIRLowerResult generic_ir = c_lower_to_ir_with_options(generic_temporary.arena, S8("generic.c"), generic_tokens, c_parse_for_lowering(generic_temporary.arena, generic_tokens), target_native,
                                                       (CIRLowerOptions){.disable_direct_ssa = true});
     BUSTER_TEST(arguments, generic_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, generic_parse.diagnostic_count == 0);
@@ -50557,7 +50555,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         CPreprocessResult ordinary_enum_tokens = c_preprocess(
             ordinary_enum_temporary.arena, S8("enum { ORDINARY_ENUM = 41 + 1 };\n"), (CPreprocessOptions){0});
         BUSTER_TEST(arguments, ordinary_enum_tokens.diagnostic_count == 0);
-        CParseResult ordinary_enum_parse = c_parse_for_lowering(ordinary_enum_temporary.arena, ordinary_enum_tokens);
+        CParseResult ordinary_enum_parse = c_parse(ordinary_enum_temporary.arena, ordinary_enum_tokens);
         BUSTER_TEST(arguments, ordinary_enum_parse.diagnostic_count == 0);
         c_test_scratch_end(ordinary_enum_temporary);
 
@@ -50576,10 +50574,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
             TemporalArena generic_constant_temporary = scratch_begin(0, 0);
             CPreprocessResult generic_constant_tokens =
                 c_preprocess(generic_constant_temporary.arena, generic_constant_source, (CPreprocessOptions){0});
-            CParseResult generic_constant_parse = c_parse_for_lowering(generic_constant_temporary.arena, generic_constant_tokens);
+            CParseResult generic_constant_parse = c_parse(generic_constant_temporary.arena, generic_constant_tokens);
             CIRLowerResult generic_constant_ir = c_lower_to_ir_with_options(
-                generic_constant_temporary.arena, S8("generic-constant-expression.c"), generic_constant_tokens,
-                generic_constant_parse, target_native, (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                generic_constant_temporary.arena, S8("generic-constant-expression.c"), generic_constant_tokens, c_parse_for_lowering(generic_constant_temporary.arena, generic_constant_tokens), target_native, (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
             BUSTER_TEST(arguments, generic_constant_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, generic_constant_parse.diagnostic_count == 0);
             BUSTER_TEST(arguments, generic_constant_ir.diagnostic_count == 0);
@@ -50597,10 +50594,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
             S8("_Static_assert(_Generic(1, int: 1, default: missing_identifier), \"unselected association\");\n"),
             (CPreprocessOptions){0});
         CParseResult unselected_generic_constant_parse =
-            c_parse_for_lowering(unselected_generic_constant_temporary.arena, unselected_generic_constant_tokens);
+            c_parse(unselected_generic_constant_temporary.arena, unselected_generic_constant_tokens);
         CIRLowerResult unselected_generic_constant_ir = c_lower_to_ir(
             unselected_generic_constant_temporary.arena, S8("unselected-generic-constant-expression.c"),
-            unselected_generic_constant_tokens, unselected_generic_constant_parse, target_native);
+            unselected_generic_constant_tokens, c_parse_for_lowering(unselected_generic_constant_temporary.arena, unselected_generic_constant_tokens), target_native);
         BUSTER_TEST(arguments, unselected_generic_constant_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, unselected_generic_constant_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, unselected_generic_constant_ir.diagnostic_count == 0);
@@ -50622,8 +50619,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                         (CPreprocessOptions){
                                                             .dialect = C_PREPROCESS_DIALECT_C23,
                                                         });
-        CParseResult nullptr_parse = c_parse_for_lowering(nullptr_temporary.arena, nullptr_tokens);
-        CIRLowerResult nullptr_ir = c_lower_to_ir(nullptr_temporary.arena, S8("nullptr.c"), nullptr_tokens, nullptr_parse, target_native);
+        CParseResult nullptr_parse = c_parse(nullptr_temporary.arena, nullptr_tokens);
+        CIRLowerResult nullptr_ir = c_lower_to_ir(nullptr_temporary.arena, S8("nullptr.c"), nullptr_tokens, c_parse_for_lowering(nullptr_temporary.arena, nullptr_tokens), target_native);
         BUSTER_TEST(arguments, nullptr_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, nullptr_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, nullptr_ir.diagnostic_count == 0);
@@ -50676,8 +50673,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                             (CPreprocessOptions){
                                                                 .dialect = C_PREPROCESS_DIALECT_C23,
                                                             });
-            CParseResult invalid_parse = c_parse_for_lowering(invalid_temporary.arena, invalid_tokens);
-            CIRLowerResult invalid_ir = c_lower_to_ir(invalid_temporary.arena, S8("invalid-nullptr.c"), invalid_tokens, invalid_parse, target_native);
+            CParseResult invalid_parse = c_parse(invalid_temporary.arena, invalid_tokens);
+            CIRLowerResult invalid_ir = c_lower_to_ir(invalid_temporary.arena, S8("invalid-nullptr.c"), invalid_tokens, c_parse_for_lowering(invalid_temporary.arena, invalid_tokens), target_native);
             BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 0);
             BUSTER_TEST(arguments, invalid_ir.diagnostic_count == 1);
@@ -50698,9 +50695,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                             (CPreprocessOptions){
                                                                 .dialect = C_PREPROCESS_DIALECT_C17,
                                                             });
-        CParseResult c17_nullptr_parse = c_parse_for_lowering(c17_nullptr_temporary.arena, c17_nullptr_tokens);
+        CParseResult c17_nullptr_parse = c_parse(c17_nullptr_temporary.arena, c17_nullptr_tokens);
         CIRLowerResult c17_nullptr_ir =
-            c_lower_to_ir(c17_nullptr_temporary.arena, S8("c17-nullptr-identifier.c"), c17_nullptr_tokens, c17_nullptr_parse, target_native);
+            c_lower_to_ir(c17_nullptr_temporary.arena, S8("c17-nullptr-identifier.c"), c17_nullptr_tokens, c_parse_for_lowering(c17_nullptr_temporary.arena, c17_nullptr_tokens), target_native);
         BUSTER_TEST(arguments, c17_nullptr_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, c17_nullptr_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, c17_nullptr_ir.diagnostic_count == 0);
@@ -50733,8 +50730,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                           (CPreprocessOptions){
                                                               .dialect = C_PREPROCESS_DIALECT_C23,
                                                           });
-        CParseResult constexpr_parse = c_parse_for_lowering(constexpr_temporary.arena, constexpr_tokens);
-        CIRLowerResult constexpr_ir = c_lower_to_ir(constexpr_temporary.arena, S8("constexpr.c"), constexpr_tokens, constexpr_parse, target_native);
+        CParseResult constexpr_parse = c_parse(constexpr_temporary.arena, constexpr_tokens);
+        CIRLowerResult constexpr_ir = c_lower_to_ir(constexpr_temporary.arena, S8("constexpr.c"), constexpr_tokens, c_parse_for_lowering(constexpr_temporary.arena, constexpr_tokens), target_native);
         BUSTER_TEST(arguments, constexpr_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, constexpr_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, constexpr_ir.diagnostic_count == 0);
@@ -50809,9 +50806,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                             "static int internal_plain(int value) { return value; }\n"
                             "int use(int* values) { return internal_bound(values) + internal_plain(values[0]); }\n"),
                          (CPreprocessOptions){0});
-        CParseResult static_bound_parse = c_parse_for_lowering(static_bound_temporary.arena, static_bound_tokens);
+        CParseResult static_bound_parse = c_parse(static_bound_temporary.arena, static_bound_tokens);
         CIRLowerResult static_bound_ir =
-            c_lower_to_ir(static_bound_temporary.arena, S8("static-array-bound.c"), static_bound_tokens, static_bound_parse, target_native);
+            c_lower_to_ir(static_bound_temporary.arena, S8("static-array-bound.c"), static_bound_tokens, c_parse_for_lowering(static_bound_temporary.arena, static_bound_tokens), target_native);
         BUSTER_TEST(arguments, static_bound_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, static_bound_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, static_bound_ir.diagnostic_count == 0);
@@ -50845,9 +50842,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                               (CPreprocessOptions){
                                                                   .dialect = C_PREPROCESS_DIALECT_C17,
                                                               });
-        CParseResult c17_constexpr_parse = c_parse_for_lowering(c17_constexpr_temporary.arena, c17_constexpr_tokens);
+        CParseResult c17_constexpr_parse = c_parse(c17_constexpr_temporary.arena, c17_constexpr_tokens);
         CIRLowerResult c17_constexpr_ir =
-            c_lower_to_ir(c17_constexpr_temporary.arena, S8("c17-constexpr-identifier.c"), c17_constexpr_tokens, c17_constexpr_parse, target_native);
+            c_lower_to_ir(c17_constexpr_temporary.arena, S8("c17-constexpr-identifier.c"), c17_constexpr_tokens, c_parse_for_lowering(c17_constexpr_temporary.arena, c17_constexpr_tokens), target_native);
         BUSTER_TEST(arguments, c17_constexpr_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, c17_constexpr_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, c17_constexpr_ir.diagnostic_count == 0);
@@ -50880,7 +50877,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                             (CPreprocessOptions){
                                                                 .dialect = C_PREPROCESS_DIALECT_C23,
                                                             });
-            CParseResult invalid_parse = c_parse_for_lowering(invalid_temporary.arena, invalid_tokens);
+            CParseResult invalid_parse = c_parse(invalid_temporary.arena, invalid_tokens);
             bool found_constexpr_diagnostic = false;
             for (u32 diagnostic_index = 0; diagnostic_index < invalid_parse.diagnostic_count; diagnostic_index += 1)
             {
@@ -50906,8 +50903,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                             (CPreprocessOptions){
                                                                 .dialect = C_PREPROCESS_DIALECT_C23,
                                                             });
-            CParseResult invalid_parse = c_parse_for_lowering(invalid_temporary.arena, invalid_tokens);
-            CIRLowerResult invalid_ir = c_lower_to_ir(invalid_temporary.arena, S8("invalid-constexpr.c"), invalid_tokens, invalid_parse, target_native);
+            CParseResult invalid_parse = c_parse(invalid_temporary.arena, invalid_tokens);
+            CIRLowerResult invalid_ir = c_lower_to_ir(invalid_temporary.arena, S8("invalid-constexpr.c"), invalid_tokens, c_parse_for_lowering(invalid_temporary.arena, invalid_tokens), target_native);
             BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 0);
             BUSTER_TEST(arguments, invalid_ir.diagnostic_count == 1);
@@ -50928,8 +50925,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                       (CPreprocessOptions){
                                                           .dialect = C_PREPROCESS_DIALECT_C23,
                                                       });
-        CParseResult float_parse = c_parse_for_lowering(float_temporary.arena, float_tokens);
-        CIRLowerResult float_ir = c_lower_to_ir(float_temporary.arena, S8("constexpr-float.c"), float_tokens, float_parse, target_native);
+        CParseResult float_parse = c_parse(float_temporary.arena, float_tokens);
+        CIRLowerResult float_ir = c_lower_to_ir(float_temporary.arena, S8("constexpr-float.c"), float_tokens, c_parse_for_lowering(float_temporary.arena, float_tokens), target_native);
         BUSTER_TEST(arguments, float_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, float_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, float_ir.diagnostic_count == 0);
@@ -50971,11 +50968,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                              (CPreprocessOptions){
                                                                  .dialect = C_PREPROCESS_DIALECT_C23,
                                                              });
-            CParseResult mutation_parse = c_parse_for_lowering(mutation_temporary.arena, mutation_tokens);
+            CParseResult mutation_parse = c_parse(mutation_temporary.arena, mutation_tokens);
             CIRLowerResult mutation_ir = {0};
             if (!mutation_parse.diagnostic_count)
             {
-                mutation_ir = c_lower_to_ir(mutation_temporary.arena, S8("constexpr-mutation.c"), mutation_tokens, mutation_parse, target_native);
+                mutation_ir = c_lower_to_ir(mutation_temporary.arena, S8("constexpr-mutation.c"), mutation_tokens, c_parse_for_lowering(mutation_temporary.arena, mutation_tokens), target_native);
             }
             BUSTER_TEST(arguments, mutation_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, mutation_parse.diagnostic_count + mutation_ir.diagnostic_count == 1);
@@ -50994,7 +50991,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                              (CPreprocessOptions){
                                                                  .dialect = C_PREPROCESS_DIALECT_C23,
                                                              });
-            CParseResult reserved_parse = c_parse_for_lowering(reserved_temporary.arena, reserved_tokens);
+            CParseResult reserved_parse = c_parse(reserved_temporary.arena, reserved_tokens);
             BUSTER_TEST(arguments, reserved_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, reserved_parse.diagnostic_count != 0);
             c_test_scratch_end(reserved_temporary);
@@ -51034,12 +51031,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         TemporalArena invalid_generic_temporary = scratch_begin(0, 0);
         CPreprocessResult invalid_generic_tokens =
             c_preprocess(invalid_generic_temporary.arena, invalid_generic_cases[case_index].source, (CPreprocessOptions){0});
-        CParseResult invalid_generic_parse = c_parse_for_lowering(invalid_generic_temporary.arena, invalid_generic_tokens);
+        CParseResult invalid_generic_parse = c_parse(invalid_generic_temporary.arena, invalid_generic_tokens);
         CIRLowerResult invalid_generic_ir = {0};
         if (!invalid_generic_parse.diagnostic_count)
         {
             invalid_generic_ir =
-                c_lower_to_ir(invalid_generic_temporary.arena, S8("invalid-generic.c"), invalid_generic_tokens, invalid_generic_parse, target_native);
+                c_lower_to_ir(invalid_generic_temporary.arena, S8("invalid-generic.c"), invalid_generic_tokens, c_parse_for_lowering(invalid_generic_temporary.arena, invalid_generic_tokens), target_native);
         }
         BUSTER_TEST(arguments, invalid_generic_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_generic_parse.diagnostic_count + invalid_generic_ir.diagnostic_count == 1);
@@ -51077,8 +51074,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                             "    }\n"
                             "}\n"),
                          (CPreprocessOptions){0});
-        CParseResult direct_ir_parse = c_parse_for_lowering(direct_ir_temporary.arena, direct_ir_tokens);
-        CIRLowerResult direct_ir = c_lower_to_ir(direct_ir_temporary.arena, S8("direct-ir-regression.c"), direct_ir_tokens, direct_ir_parse, target_native);
+        CParseResult direct_ir_parse = c_parse(direct_ir_temporary.arena, direct_ir_tokens);
+        CIRLowerResult direct_ir = c_lower_to_ir(direct_ir_temporary.arena, S8("direct-ir-regression.c"), direct_ir_tokens, c_parse_for_lowering(direct_ir_temporary.arena, direct_ir_tokens), target_native);
         BUSTER_TEST(arguments, direct_ir_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, direct_ir_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, direct_ir.diagnostic_count == 0);
@@ -55666,7 +55663,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tentative_alignment_merging(UnitTestAr
                 BUSTER_TEST_RAW(arguments, valid, cases[case_index].source);
                 if (BUSTER_REQUIRE(arguments, valid))
                 {
-                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tentative-alignment-merging.c"), tokens, analysis, target,
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tentative-alignment-merging.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target,
                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified &&
                                                  lowered.program->module_count == 1))
@@ -55698,9 +55695,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tentative_alignment_merging(UnitTestAr
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[case_index],
                     (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
-                CParseResult model = c_parse_for_lowering(temporary.arena, tokens);
+                CParseResult model = c_parse(temporary.arena, tokens);
                 BUSTER_TEST(arguments, !tokens.diagnostic_count && !model.diagnostic_count);
-                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("initialized-alignment-control.c"), tokens, model, target,
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("initialized-alignment-control.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
                 {
@@ -60735,7 +60732,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, preprocess);
+        CParseResult parse = c_parse(temporary.arena, preprocess);
         u32 reported = 0;
         bool located = false;
         for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
@@ -60773,8 +60770,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, preprocess);
-        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, parse, target_native);
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, c_parse_for_lowering(temporary.arena, preprocess), target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, valid[case_index]);
         c_test_scratch_end(temporary);
@@ -60796,7 +60793,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, trailing[case_index].source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, preprocess);
+        CParseResult parse = c_parse(temporary.arena, preprocess);
         u32 reported = 0;
         bool located = false;
         for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
@@ -60836,8 +60833,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
                                  .dialect = failed_assertions[case_index].dialect});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, preprocess);
-        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert.c"), preprocess, parse, target_native);
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert.c"), preprocess, c_parse_for_lowering(temporary.arena, preprocess), target_native);
         u32 reported = 0;
         bool located = false;
         for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count + lowered.diagnostic_count; diagnostic_index += 1)
@@ -60861,8 +60858,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, preprocess);
-        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, parse, target_native);
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, c_parse_for_lowering(temporary.arena, preprocess), target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, source);
         c_test_scratch_end(temporary);
@@ -60897,10 +60894,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, layout_source,
             (CPreprocessOptions){.target = layout_target, .data_layout = target_data_layout(layout_target), .dialect = C_PREPROCESS_DIALECT_C11});
-        CParseResult parse = c_parse_for_lowering(temporary.arena, preprocess);
+        CParseResult parse = c_parse(temporary.arena, preprocess);
         if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
         {
-            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("member-static-assert-layout.c"), preprocess, parse, layout_target,
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("member-static-assert-layout.c"), preprocess, c_parse_for_lowering(temporary.arena, preprocess), layout_target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
             {
@@ -67413,9 +67410,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
             TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
             CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[index],
                 (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
-            CParseResult parsed = c_parse_for_lowering(temporary.arena, tokens);
+            CParseResult parsed = c_parse(temporary.arena, tokens);
             BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
-            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-constraint.c"), tokens, parsed, target_native,
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-constraint.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target_native,
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid_sources[index]);
             c_test_scratch_end(temporary);

@@ -17,6 +17,10 @@ constructs a tree or runs another semantic pass. Explicit historical parser
 controls use `c_parse_ast_reference`; ordinary `c_parse_ast` builds the tree
 once and reads its declaration split. The caller's type-interning policy is
 unchanged.
+The model-only endpoint retains syntax as provenance while its semantic query
+uses the same tree-free method and type inventory as before. Independent model
+tests keep that output for inspection and prepare a separate full-authority
+result when they also exercise canonical lowering.
 
 At the end of lowering-constraint validation, file-scope tentative object
 definitions are checked against their final translation-unit types. An object

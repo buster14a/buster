@@ -49049,7 +49049,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                 u32 scalar_first = 0;
                                 u32 scalar_last = 0;
                                 // Temporary initializer-to-expression adapter (#4061 F5).
-                                if (!c_ir_node_expression_range(builder, scalar, &scalar_first, &scalar_last))
+                                if (!c_ir_node_expression_provenance(builder, scalar, &scalar_first, &scalar_last))
                                 {
                                     return false;
                                 }

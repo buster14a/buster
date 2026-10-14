@@ -47013,7 +47013,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
     C_CENSUS_PHASE_BEGIN(SEMANTIC);
+    // The compatibility model endpoint keeps its existing semantic query
+    // method and inventory. Retained syntax is provenance until a caller asks
+    // the full entrypoint to establish lowering constraints and node facts.
+    CAst const* ast = syntax.ast;
+    syntax.ast = 0;
+    syntax.ast_facts = 0;
     CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, false);
+    result.ast = ast;
     C_CENSUS_PHASE_END();
     return result;
 }

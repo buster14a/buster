@@ -55,6 +55,8 @@ tree and facts, retains those private reservations through lowering and skips
 all publication copies. Model-only `c_parse` retains its syntax but does not
 establish lowering constraints; explicit parse-to-lower callers use
 `c_parse_for_lowering`.
+The model query keeps its existing method and inventory without reading the
+retained AST or facts; the AST is provenance on that model-only result.
 
 **Preprocessing seal.** `c_preprocess` allocates everything in the phase arena,
 above that arena's entry position. Before returning, `c_preprocess_seal` copies
