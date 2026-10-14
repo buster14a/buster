@@ -2135,14 +2135,17 @@ subtree, including parameter declarators. A `typeof` replay restores heads in
 reverse creation order before records can be reused; stale emitted marks are
 verified against current node intervals and fall back to the kept records.
 An emitted group marks its new nodes and skips live covered intervals. Its
-first mark then names the enclosing interval, allowing the next parent to
-skip the whole interval without rewriting a skewed nest's descendants.
+own recycled row cannot certify an already marked interval while the fill
+runs. Its first mark then names the enclosing interval, allowing the next
+parent to skip it without rewriting a skewed nest's descendants.
 
 The runtime cases in `c_test_tree_hoisting_node_identity` exercise redundant
 parentheses,
 subscripts, synthetic argument groups and VLA `typeof` replay through both
-frontend SSA forms at `-g0` and `-g`. The existing skew fixture keeps the
-navigation bound.
+frontend SSA forms at `-g0` and `-g`. Its token-free private replay probe
+widens a recycled record's interval, checks all newly covered nodes, restores
+per-node heads and verifies that bracket and argument groups exclude their
+base and callee. The existing skew fixture keeps the navigation bound.
 
 ## Initializers, declarations and type queries from the tree
 
