@@ -467,6 +467,8 @@ BUSTER_F_DECL bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessRe
 
 // Bytes one type-machine frame row copies on every push.
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
+// Override production's derived frame limit for a structured refusal/recovery test.
+BUSTER_F_DECL void c_test_type_parse_frame_capacity_limit_set(u32 limit);
 
 // Rollback restores a speculative tag even after geometric type-row growth.
 BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,

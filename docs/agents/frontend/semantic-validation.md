@@ -590,15 +590,24 @@ records the historical generic-controller conversion question. The builtin's
 outermost-qualifier rule and constant-expression contract follow the
 [GCC documentation](https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html).
 
-Every type-machine push copies a whole `CTypeParseFrame`, so a frame holds
-neither a parse-result snapshot nor the token stream. The frames of one run
-share the root query's `CPreprocessResult` by pointer; the root outlives the
-run, which pops its frames before returning or failing. The few frame kinds
-that can abandon a partial parse (aggregate segments, typeof and `_Atomic`
-operands) snapshot into the machine's `frame_checkpoints` row for their own
-slot, and root snapshots and rollbacks are passed by pointer. A rollback that
-does not continue into a successful parse is masked by its root's rollback, so
-`c_test_type_parse_snapshot_rows` checks row independence directly.
+Production type-machine frames live in lazily allocated, stable blocks
+owned by the analysis machine arena. A frame keeps a pointer to its predecessor,
+while fixed-array query/test machines retain their bounded array storage. The
+production stack limit is derived with checked arithmetic from the input token
+count plus delimiter-based grammar allowance; it does not impose a fixed cast
+depth. The root query's `CPreprocessResult` is shared by pointer and outlives
+the run, which pops its frames before returning or failing.
+
+Rollback snapshots use a separate reusable pool rather than one
+`CParseResult` row per frame. Aggregate-segment frames (owned by the aggregate
+brace) and SCALAR frames that parse `typeof`/`_Atomic` operands (owned by
+their opening parenthesis) save snapshots; flat cast chains do not. Their live
+snapshot count is bounded by the delimiter census and checked separately. On
+failure the machine walks frames top-down, releases each frame's accounting,
+and recycles snapshot slots and emptied storage blocks. It then restores the
+oldest discarded `sizeof` task and scratch-arena marks.
+`c_test_type_parse_snapshot_rows` continues to check row independence in the
+fixed-array test machine.
 
 GNU `__attribute__((fallthrough));` and its `__fallthrough__` alias
 are null statements, including in C99/GNU11/C17. Leading attribute lists
