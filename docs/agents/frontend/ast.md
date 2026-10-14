@@ -2536,7 +2536,11 @@ unique path once over an explicit pending stack. Brace-elided continuations
 reuse their projected prefix, while a fresh designation has fresh path ids.
 An explicit nested list zeroes its subobject before its values, and its end
 copies a GNU range after the first element is initialized. Scalar ranges
-copy immediately after the single evaluated value is stored.
+copy immediately after the single evaluated value is stored. The range
+preflight tracks each explicit list owner and the nearest ranged path edge.
+An outer range prefix therefore does not make a fresh nested list's first
+range a chained designation. Closing that list restores the enclosing range
+context; further-designator and bare aggregate refusals remain unchanged.
 
 Each expression child carries its value node directly. The retained value
 and path tokens supply the original debug anchors for casts, stores,

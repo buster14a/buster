@@ -9486,6 +9486,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
         arguments, &result,
         S8("int runtime_range_inner(void) { int values[2][3] = { [0][0 ... 1] = 1 }; return values[0][1]; }\n"),
         S8("in function 'runtime_range_inner': a range designator after another designator is only supported for static aggregate initializers"));
+    c_test_case_range_lower_diagnostic(
+        arguments, &result,
+        S8("struct NestedRangePair { int first; int second; };"
+           " int runtime_range_nested_elided(void) {"
+           " struct NestedRangePair values[2][3] = { [0 ... 1] = { [0 ... 2] = 4 } }; return values[1][2].first; }\n"),
+        S8("in function 'runtime_range_nested_elided': a range designator whose value elides the braces of an aggregate element is only supported for static aggregate initializers"));
     c_test_auto_type_diagnostic(
         arguments, &result,
         S8("int strict_initializer_range_c11(void) { static int values[2] = { [0 ... 1] = 1 }; return values[0]; }\n"),
@@ -17333,6 +17339,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_plan_runtime(UnitTestArgum
         "    union { Vec vector; unsigned lanes[4]; } vector = {0};\n"
         "    Vec vectors[2] = {0};\n"
         "    if (vector.lanes[3] || vectors[0][1] || vectors[1][2]) return 12;\n"
+        "    trace = 0;\n"
+        "    struct Outer nested_ranges[2] = {[0 ... 1] = {.pairs = {[0 ... 1] = {t(4), t(5)}}, .after = t(6)}};\n"
+        "    if (trace != 456 || nested_ranges[0].pairs[1].y != 5 || nested_ranges[1].pairs[0].x != 4 || nested_ranges[0].after != 6 || nested_ranges[1].after != 6) return 13;\n"
         "    return 0;\n"
         "}\n");
     String8 input = buster_test_temporary_path(arguments->arena, S8("initializer-plan-runtime"), S8(".c"));

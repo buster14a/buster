@@ -33417,41 +33417,50 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
     }
 }
 
-// Runtime copies still initialize whole elements. Resolve each path's root
-// once, so an unrelated deep initializer beside a range stays linear. List
-// markers distinguish ranged brace contents from a suffix on the range item.
+// Runtime copies initialize whole elements within the explicit list that
+// selected them. A retained path includes all outer list prefixes, so its
+// parent is a further designator only when it differs from that list owner.
 BUSTER_C_INTERNAL bool c_ir_initializer_plan_runtime_ranges(CIntegerIrBuilder* builder, CInitializerPlan const* plan)
 {
+    typedef struct CIrInitializerRangeContext CIrInitializerRangeContext;
+    struct CIrInitializerRangeContext
+    {
+        u32 path;
+        u32 range;
+        u32 end;
+    };
     bool valid = true;
     bool ranged = false;
-    for (u32 path = 0; valid && path < plan->path_count; path += 1)
+    for (u32 path = 0; path < plan->path_count; path += 1)
     {
         CInitializerPath const* edge = plan->paths + path;
-        if (edge->first < edge->last)
-        {
-            ranged = true;
-            valid = edge->parent_plus_one == 0;
-            if (!valid) builder->failure_message = S8("a range designator after another designator is only supported for static aggregate initializers");
-        }
+        ranged |= edge->first < edge->last;
     }
     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    u32* roots = 0;
+    u32* ranges = 0;
     u32* pending = 0;
-    if (valid && ranged)
+    CIrInitializerRangeContext* contexts = 0;
+    if (ranged)
     {
         u64 position = builder->temporary_arena->position;
         valid = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), plan->path_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), plan->path_count, BUSTER_ALIGN_OF(u32));
+                c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), plan->path_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(CIrInitializerRangeContext),
+                                               plan->item_count, BUSTER_ALIGN_OF(CIrInitializerRangeContext));
         if (valid)
         {
-            roots = arena_allocate_zeroed(builder->temporary_arena, u32, plan->path_count);
+            ranges = arena_allocate(builder->temporary_arena, u32, plan->path_count);
             pending = arena_allocate(builder->temporary_arena, u32, plan->path_count);
+            contexts = arena_allocate(builder->temporary_arena, CIrInitializerRangeContext, plan->item_count);
+            memset(ranges, 0xff, sizeof(u32) * plan->path_count);
         }
+        // Resolve the nearest ranged ancestor of every edge once. Parents
+        // need not precede promoted-member children in the retained rows.
         for (u32 index = 0; valid && index < plan->path_count; index += 1)
         {
             u32 path = index + 1;
             u32 count = 0;
-            while (valid && path && !roots[path - 1])
+            while (valid && path && ranges[path - 1] == UINT32_MAX)
             {
                 valid = count < plan->path_count;
                 if (valid)
@@ -33461,20 +33470,30 @@ BUSTER_C_INTERNAL bool c_ir_initializer_plan_runtime_ranges(CIntegerIrBuilder* b
                     valid = path <= plan->path_count;
                 }
             }
-            u32 root = valid ? (path ? roots[path - 1] : pending[count - 1]) : 0;
-            while (valid && count) roots[pending[--count] - 1] = root;
+            u32 range = valid && path ? ranges[path - 1] : 0;
+            while (valid && count)
+            {
+                u32 resolved = pending[--count];
+                CInitializerPath const* edge = plan->paths + resolved - 1;
+                if (edge->first < edge->last) range = resolved;
+                ranges[resolved - 1] = range;
+            }
         }
     }
-    u32 active = 0;
+    u32 depth = 0;
     for (u32 index = 0; valid && ranged && index < plan->item_count; index += 1)
     {
         CInitializerItem const* item = plan->items + index;
         valid = item->path_plus_one <= plan->path_count;
-        u32 root = valid && item->path_plus_one ? roots[item->path_plus_one - 1] : 0;
-        CInitializerPath const* edge = root ? plan->paths + root - 1 : 0;
-        u32 range = edge && edge->first < edge->last ? root : 0;
-        if (range && range == item->path_plus_one && (item->flags & C_INITIALIZER_ITEM_LIST_BEGIN)) active = range;
-        if ((item->flags & C_INITIALIZER_ITEM_VALUE) && range && range != item->path_plus_one && range != active)
+        u32 range = valid && item->path_plus_one ? ranges[item->path_plus_one - 1] : 0;
+        u32 container = depth ? contexts[depth - 1].path : 0;
+        u32 active = depth ? contexts[depth - 1].range : 0;
+        if (valid && range && range != active)
+        {
+            valid = plan->paths[range - 1].parent_plus_one == container;
+            if (!valid) builder->failure_message = S8("a range designator after another designator is only supported for static aggregate initializers");
+        }
+        if (valid && (item->flags & C_INITIALIZER_ITEM_VALUE) && range && range != item->path_plus_one && range != active)
         {
             bool suffix = false;
             for (u32 path = item->path_plus_one; path != range; path = plan->paths[path - 1].parent_plus_one)
@@ -33486,8 +33505,22 @@ BUSTER_C_INTERNAL bool c_ir_initializer_plan_runtime_ranges(CIntegerIrBuilder* b
                 ? S8("a range designator followed by further designators is only supported for static aggregate initializers")
                 : S8("a range designator whose value elides the braces of an aggregate element is only supported for static aggregate initializers");
         }
-        if ((item->flags & C_INITIALIZER_ITEM_LIST_END) && range == active && range == item->path_plus_one) active = 0;
+        if (valid && (item->flags & C_INITIALIZER_ITEM_LIST_BEGIN))
+        {
+            valid = depth < plan->item_count && item->paired_item_plus_one > index + 1 && item->paired_item_plus_one <= plan->item_count;
+            if (valid)
+            {
+                contexts[depth++] = (CIrInitializerRangeContext){.path = item->path_plus_one,
+                    .range = range && range == item->path_plus_one ? range : active, .end = item->paired_item_plus_one};
+            }
+        }
+        else if (valid && (item->flags & C_INITIALIZER_ITEM_LIST_END))
+        {
+            valid = depth && contexts[depth - 1].path == item->path_plus_one && contexts[depth - 1].end == index + 1;
+            if (valid) depth -= 1;
+        }
     }
+    valid = valid && depth == 0;
     scratch_end(temporary);
     return valid;
 }
