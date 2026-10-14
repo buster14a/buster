@@ -36750,6 +36750,34 @@ BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, 
     return;
 }
 
+// Publish only the committed identity answers after all protected queries
+// have restored their table checkpoints. Lowering reads the chosen AST child
+// or the builtin's integer answer without reconstructing its arguments.
+BUSTER_C_INTERNAL void c_parse_ast_identity_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult const* result)
+{
+    CAstFacts* facts = machine->ast_facts;
+    for (u32 index = 0; facts && index < result->type_identity_query_count; index += 1)
+    {
+        CTypeIdentityQuery const* answer = result->type_identity_queries + index;
+        u32 node = c_ast_facts_locate(facts, &preprocess, answer->token_start, answer->token_end);
+        if (node != C_AST_NODE_INVALID)
+        {
+            if (answer->result_start != UINT32_MAX)
+            {
+                u32 selected = c_ast_facts_locate(facts, &preprocess, answer->result_start, answer->result_end);
+                c_ast_facts_store_selection(facts, node, selected);
+            }
+            else
+            {
+                c_ast_facts_store_constant(facts, node, (CAstConstantFact){
+                    .low = answer->result_end, .type = C_TYPE_ID_INVALID, .primitive_kind = C_TYPE_INT, .status = C_AST_CONSTANT_INTEGER,
+                });
+            }
+        }
+    }
+    return;
+}
+
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -47151,6 +47179,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // width rows and never opens that gate or evaluates incomplete members.
     c_parse_publish_deferred_bit_field_width_diagnostics(arena, &result, preprocess);
     c_parse_publish_declaration_facts(&machine, &result, preprocess);
+    c_parse_ast_identity_publish(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).
     c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result);
     result.analysis_complete = true;

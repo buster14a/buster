@@ -2764,6 +2764,7 @@ bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fac
         CAstConstantFact* previous = facts->constants + stored - 1;
         fact.offsetof_plus_one = fact.offsetof_plus_one ? fact.offsetof_plus_one : previous->offsetof_plus_one;
         fact.ext80_initializer_plus_one = fact.ext80_initializer_plus_one ? fact.ext80_initializer_plus_one : previous->ext80_initializer_plus_one;
+        fact.selected_node_plus_one = fact.selected_node_plus_one ? fact.selected_node_plus_one : previous->selected_node_plus_one;
         // A later unmodelled probe cannot erase an earlier certified scalar
         // result; destination initializer and path annotations remain separate.
         bool certified = previous->status == C_AST_CONSTANT_INTEGER || previous->status == C_AST_CONSTANT_FLOAT;
@@ -2775,10 +2776,29 @@ bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fac
         {
             previous->offsetof_plus_one = fact.offsetof_plus_one;
             previous->ext80_initializer_plus_one = fact.ext80_initializer_plus_one;
+            previous->selected_node_plus_one = fact.selected_node_plus_one;
         }
         facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
     }
     return valid;
+}
+
+u32 c_ast_facts_selection(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact fact = c_ast_facts_constant(facts, node);
+    return fact.selected_node_plus_one && fact.selected_node_plus_one - 1 < facts->node_count
+               ? fact.selected_node_plus_one - 1 : C_AST_NODE_INVALID;
+}
+
+bool c_ast_facts_store_selection(CAstFacts* facts, u32 node, u32 selected_node)
+{
+    u32 stored = facts && selected_node < facts->node_count ? c_ast_facts_constant_slot(facts, node) : 0;
+    if (stored)
+    {
+        facts->constants[stored - 1].selected_node_plus_one = selected_node + 1;
+        facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+    }
+    return stored != 0;
 }
 
 CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node)

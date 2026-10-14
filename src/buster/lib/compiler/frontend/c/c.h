@@ -1842,6 +1842,9 @@ struct CAstConstantFact
     u8 reserved[3];
     u32 offsetof_plus_one;
     u32 ext80_initializer_plus_one;
+    // A generic/choose expression's semantic selection, independent of
+    // whether its selected value has itself been queried as a constant.
+    u32 selected_node_plus_one;
 };
 
 typedef struct CAstOffsetofStep CAstOffsetofStep;
@@ -2806,6 +2809,8 @@ BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult c
 // bits and fault status are retained independently of type-query recipes.
 BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
 BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
+BUSTER_F_DECL u32 c_ast_facts_selection(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_selection(CAstFacts* facts, u32 node, u32 selected_node);
 BUSTER_F_DECL CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node);
 BUSTER_F_DECL bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid);
 BUSTER_F_DECL CAstExt80InitializerFact const* c_ast_facts_ext80_initializer(CAstFacts const* facts, u32 node);

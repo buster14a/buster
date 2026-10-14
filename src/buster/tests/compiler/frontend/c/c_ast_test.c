@@ -6559,12 +6559,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-    String8 valid_source = S8("enum { A = 1 + 2 * 3, B = 0 && (1 / 0), C = 1 ? 9 : (1 / 0) };\n"
+    String8 valid_source = S8("enum { A = 1 + 2 * 3, B = 0 && (1 / 0), C = 1 ? 9 : (1 / 0),\n"
+           " D = _Generic(0, int: 11, default: (1 / 0)), E = __builtin_choose_expr(0, (1 / 0), 13) };\n"
            "static int values[sizeof(unsigned long) + A];\n"
            "static int object; static int *address = &object;\n"
            "static double real = 1.25 + 2.5;\n"
            "static long double extended = 0x1.8p0L;\n"
-           "int f(void) { return values[0] + (address != 0); }\n");
+           "int f(void) { return values[0] + (address != 0) + __builtin_types_compatible_p(int, long); }\n");
     String8 sources[] = {
         valid_source,
         valid_source,
@@ -6595,6 +6596,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
             bool real = false;
             bool wide = false;
             bool extended = false;
+            bool eleven = false;
+            bool thirteen = false;
+            bool identity = false;
+            u32 selections = 0;
             for (u32 node = 0; node < built.ast.node_count; node += 1)
             {
                 CAstConstantFact value = c_ast_facts_constant(&facts, node);
@@ -6604,6 +6609,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
                     seven |= value.low == 7 && !value.high;
                     zero |= value.low == 0 && !value.high;
                     nine |= value.low == 9 && !value.high;
+                    eleven |= value.low == 11 && !value.high;
+                    thirteen |= value.low == 13 && !value.high;
+                }
+                u32 selected = c_ast_facts_selection(&facts, node);
+                if (selected != C_AST_NODE_INVALID)
+                {
+                    BUSTER_TEST(arguments, selected >= c_ast_subtree_begin(&built.ast, node) && selected < node &&
+                                           (built.ast.kinds[node] == C_AST_CALL || built.ast.kinds[node] == C_AST_GENERIC_SELECTION));
+                    selections += 1;
+                }
+                if (built.ast.kinds[node] == C_AST_CALL)
+                {
+                    u32 callee = c_ast_child_at(&built.ast, node, 0);
+                    String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[callee]]);
+                    identity |= string_equal(name, S8("__builtin_types_compatible_p")) && value.status == C_AST_CONSTANT_INTEGER && !value.low && !value.high;
                 }
                 if (value.status == C_AST_CONSTANT_FLOAT)
                 {
@@ -6620,7 +6640,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
             }
             bool native_ext80 = target_data_layout(preprocess.target).long_double_type.bit_width == 80;
             bool native_float128 = target_data_layout(preprocess.target).long_double_type.bit_width == 128;
-            BUSTER_TEST(arguments, invalid ? fault : seven && zero && nine && real && (!native_float128 || wide) && (!native_ext80 || extended) && !fault);
+            BUSTER_TEST(arguments, invalid ? fault : seven && zero && nine && eleven && thirteen && identity && selections == 2 && real &&
+                                                  (!native_float128 || wide) && (!native_ext80 || extended) && !fault);
             BUSTER_TEST(arguments, facts.constant_count && facts.constant_count <= facts.node_count && facts.constants_arena);
             BUSTER_TEST(arguments, c_ast_facts_constant(&facts, C_AST_NODE_INVALID).status == C_AST_CONSTANT_UNQUERIED);
             BUSTER_TEST(arguments, !c_ast_facts_ext80_initializer(&facts, C_AST_NODE_INVALID));

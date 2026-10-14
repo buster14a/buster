@@ -2366,6 +2366,11 @@ semantic destination significand and exponent independently of the source
 arithmetic fact. `c_parse_validate_static_scalar` publishes that annotation
 after its existing successful fold; aggregate leaf producers can publish
 the same annotation. Neither annotation adds a dense node column.
+The same sparse root also retains a generic/choose expression's selected
+child. A final semantic publication pass normalizes the committed identity
+answers to nodes; compatibility/classification answers become integer
+facts. Protected temporary records never reach that pass, and discarded
+arms are not evaluated to publish the selected root.
 
 A C type becomes an IR type the way it does today: through
 `builder->c_type_ir_map`, or `c_ir_vla_c_type` for a variably modified type.
