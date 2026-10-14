@@ -13467,9 +13467,9 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
     return true;
 }
 
-// Most of an element's tokens are none of these seven punctuators; one set
+// Most of an element's tokens are none of these delimiter/control punctuators; one set
 // test passes them without the end scan's ladder (#3102).
-#define C_PARSE_INITIALIZER_VALUE_STOPS (C_PUNCTUATOR_SET_DELIMITER_OPEN | C_PUNCTUATOR_SET_DELIMITER_CLOSE | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA))
+#define C_PARSE_INITIALIZER_VALUE_STOPS (C_PUNCTUATOR_SET_DELIMITER_OPEN | C_PUNCTUATOR_SET_DELIMITER_CLOSE | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_QUESTION) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COLON))
 
 BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess, u32 start, u32 limit)
 {
@@ -13477,6 +13477,7 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
+    u32 conditional_depth = 0;
     for (u32 index = start; index < limit; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -13494,8 +13495,12 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess
             braces += 1;
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
             braces -= braces != 0;
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-            return index;
+        else if (!parentheses && !brackets && !braces)
+        {
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION)) conditional_depth += 1;
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)) conditional_depth -= conditional_depth != 0;
+            else if (!conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA)) return index;
+        }
     }
     return limit;
 }
@@ -13681,6 +13686,18 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded) ||
             decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
+            // A braced string is one pointer element, rather than a character
+            // array's whole value. The existing inference refuses this shape
+            // and lowering completed it; publish that already accepted slot
+            // without introducing an extra expression query or model row.
+            if (plan && element_type.value < result->type_count && result->types[element_type.value].kind == C_TYPE_POINTER)
+            {
+                u32 path = c_parse_initializer_plan_path(result, plan, 0, plan->type, UINT32_MAX, 0, 0, UINT32_MAX);
+                c_parse_initializer_plan_item(machine, result, &preprocess, plan, element_type, path,
+                    string_start, string_end, string_start, C_INITIALIZER_ITEM_VALUE);
+                plan->inferred_count = 1;
+                plan->complete = !plan->failed;
+            }
             return false;
         }
         *count_out = decoded.element_count + 1;

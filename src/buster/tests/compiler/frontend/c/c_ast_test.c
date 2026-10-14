@@ -6461,7 +6461,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "struct S object = { .y = 4, 5, .text = {\"abc\"}, .x = 2 };\n"
                         "int table[] = { [2 ... 4] = 1, [3] = 9, 7 };\n"
                         "int matrix[2][2] = { 1, 2, 3, 4 };\n"
-                        "int f(void) { struct S local = { .y = 1, 2 }; return ((int[]){ 3, 4 })[0] + local.z; }\n");
+                        "char* names[] = { \"argument\" }; char letters[] = { \"abc\" };\n"
+                        "int f(void) { struct S local = { .y = 1, 2 }; int conditional[] = { 1 ? 2, 3 : 4, 5 };\n"
+                        "return ((int[]){ 3, 4 })[0] + local.z + conditional[1]; }\n");
     CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
     CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
     CAstFacts facts = {0};
@@ -6484,6 +6486,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         {
             BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
             plans += plan->complete;
+            if (plan->type.value < analysis.type_count && analysis.types[plan->type.value].kind == C_TYPE_ARRAY)
+            {
+                CType array = analysis.types[plan->type.value];
+                if (array.element_type.value < analysis.type_count && analysis.types[array.element_type.value].kind == C_TYPE_POINTER)
+                    BUSTER_TEST(arguments, plan->item_count == 1 && plan->items[0].path_plus_one != 0 && plan->inferred_count == 1);
+            }
             for (u32 path = 0; path < plan->path_count; path += 1)
             {
                 CInitializerPath edge = plan->paths[path];
