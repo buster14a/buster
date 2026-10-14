@@ -11,7 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
-| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
+| Implicit postorder syntax tree (default since 2026-10-13; `-fno-c-ast-pilot` opts out): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias/ifunc symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
@@ -39,11 +39,14 @@ controls. The external Clang `macro_disable.c` assertion remains unchanged.
 ## Macro filename prefix maps
 
 `CPreprocessOptions.macro_prefix_maps` supplies ordered
-`CMacroPrefixMap` entries; the last byte-prefix match is substituted once by
-`c_macro_builtin_token`. Only synthesized filename literals change.
-`CMacro` retains the immutable mapping view for the preprocess call and its
-directive-context bit; no final result retains this view. `__FILE__` reads
-the current logical filename, `__BASE_FILE__` the root, and
+`CMacroPrefixMap` entries; the last byte-prefix match is substituted once.
+For macro spellings, `c_macro_builtin_token` applies it only to synthesized
+filename literals. `CMacro` retains the immutable mapping view for the
+preprocess call and its directive-context bit. The result's arena-owned
+`CPreprocessDetail` retains a copy for parser-stage `__builtin_FILE()`, so it
+uses the same mapping as `__FILE__` without enlarging the frequently copied
+`CPreprocessResult`.
+`__FILE__` reads the current logical filename, `__BASE_FILE__` the root, and
 `__FILE_NAME__` the original basename before substitution. GCC-style
 directive expansions bypass mapping. Escaping happens after substitution
 through the existing literal renderer. Include identity/probes, dependencies,
@@ -287,12 +290,14 @@ static initializers. Positions come from the token's source map
 (`c_semantic_source_line`, `c_semantic_source_file`), so a macro-produced call
 reports its invocation and `#line` renumbers and renames it. In a macro
 invocation spanning lines, the reported line is the line of `__LINE__` there,
-which matches GCC; Clang reports the closing line. The
+which matches GCC; Clang reports the closing line. `__builtin_FILE()` applies
+the current logical filename's prefix map before building its literal, matching
+`__FILE__`; source maps and diagnostics keep their original names. The
 result types follow GCC; Clang 18 answers `unsigned int` and `char *`.
-Every use with an argument is diagnosed. `-fmacro-prefix-map` does not apply
-to the FILE spelling yet (#3917). `c_test_source_location_builtins` checks types, constant
-contexts and invalid arity on three targets in both SSA forms. It also runs the
-program in every allocator and form, with GCC and Clang as oracles.
+Every use with an argument is diagnosed. `c_test_source_location_builtins` checks types, constant contexts and invalid
+arity on three targets in both SSA forms, with absolute and relative mapped
+and unmapped `#line` controls. It also runs the original program in every
+allocator and form, with GCC and Clang as oracles.
 
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
@@ -359,6 +364,14 @@ AArch64, binary128 on Linux/Android AArch64). Availability, also the
 certified, validated canonical IR, the expected import symbols with the target's
 long double and `long` types, successful object writing, and the two refusals.
 `c_test_generic_float_builtins_runtime` runs the values on x86-64 Linux only.
+
+Explicit long-double math builtins—including the inline `fabsl`, `fmaxl`,
+`fminl`, `copysignl`, `powil` and `signbitl` spellings, special values,
+and the `l` libm forms—are available only on x86-64 and AArch64. The shared
+`c_semantic_math_long_double_builtin_supported_on_target` predicate drives
+both `__has_builtin` and parser validation. Wasm32, Wasm64, eBPF and other
+unsupported routes answer 0 and reject a call with a builtin- and target-specific
+diagnostic before its arguments reach IR lowering.
 
 ## Target ABI predefined macros
 

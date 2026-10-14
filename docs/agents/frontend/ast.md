@@ -7,8 +7,16 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and five consumers read it:
+included. **Status: default since 2026-10-13.** The
+[driver hook](#driver-pilot-hook) builds it on every C compile, by the
+[owner decision](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845)
+that put the switch ahead of steps 3 and 4 of the
+[lowering direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034).
+`-fno-c-ast-pilot` keeps the tree-free path as a reference arm until
+[#4058](https://github.com/buster14a/buster/issues/4058) deletes it. Lowering
+has the tree on that path as well: it builds one itself when the caller passes
+none ([retained facts](#retained-facts-for-lowering)). Five consumers read the
+tree:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
@@ -299,6 +307,59 @@ has their numbers and the open decision.
 **Never in IR.** No node id, column index or `CAst` pointer reaches canonical
 IR. Lowering reads the columns by node and emits only what it emits today.
 
+## Retained facts for lowering
+
+Step 1 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
+on #3102: each phase keeps its finished output for the next, and `c_gen.c`
+lowers from nodes and facts.
+
+- **The tree.** `CIRLowerOptions.syntax_tree` is never missing for lowering.
+  When the caller passes none, `c_lower_to_ir_tree_run` (`c_gen.c`) builds
+  the implicit tree from the final token stream with `c_ast_build`, keeps it
+  for the whole lowering call and releases it on the same thread before
+  returning. `-fsyntax-only` does not lower, so it builds no tree.
+  - A tree that cannot be reserved (`C_DIAGNOSTIC_SOURCE_TOO_LARGE`) fails the
+    unit with the builder's diagnostic. So does an extent table or span table
+    that cannot be reserved.
+  - A unit whose syntax the builder rejects lowers without a tree, keeping
+    lowering's own diagnostics, and is counted in `tree_rejections`. These are
+    inputs semantic analysis accepts and lowering diagnoses, such as
+    `[1 ... 2 ... 3]` designators and stray initializer separators. Step 3
+    makes the tree mandatory for lowering, so it must first have the builder
+    or analysis diagnose them.
+  - A hand-built stream with no symbol table no longer refuses the build: the
+    builder interns into a table of its own (`c_symbol_table_standalone`), in
+    its phase arena, whose ids no consumer compares with another table's.
+  - The builder reads `__fp16`, ARM's storage-only half, as a type word
+    (`C_AST_WORD_FP16`), as the parser does. The tree's specifier readers do
+    not treat it as a primitive, so they hand it to the type machine.
+- **Token spans.** `c_ast_spans_build` gives every node the span
+  [first, end) defined by `c_ast_span_rule`, which is also the
+  [typer](#tree-expression-typer)'s rule; there is one statement of it. It
+  is computed once per unit in index order, so each operand's span is known
+  before its parent. A per-start-token chain maps a token range back to its
+  node (`c_ast_spans_locate`, which strips balanced outer parentheses as the
+  typer's lookup does). This is the
+  [token-to-node map](#token-to-node-map-for-lowering)'s design A, built once
+  per unit instead of per body: 12 bytes per node and 4 per token, in a
+  private arena (`c_ir_syntax_spans_create`). Lowering keeps it in
+  `CIntegerIrBuilder.syntax_spans`. Token and node indices stay in that
+  arena; no node id reaches the IR.
+- **Types.** The tree typer's per-node C types are still body scratch in
+  analysis and run only under the pilot. They are not retained yet. Lowering's
+  expression IR types come from the values it emits; the C types its type
+  queries need (`sizeof` operands, `typeof`, type names) belong to the query
+  machine, which step 4 moves to nodes. Retaining typer facts is that step's
+  dependency, not this one's.
+- **Counts.** `CAstLowerStatistics` records the trees lowering built
+  (`trees_built`, `tree_nodes`, `tree_bytes`) and the span facts
+  (`span_nodes`, `span_bytes`), and the rejections above (`tree_rejections`).
+  `-v` prints them on every compile as `C_AST_RETAINED trees_built=<>
+  tree_rejections=<> tree_nodes=<> tree_bytes=<> span_nodes=<> span_bytes=<>`.
+
+Retained bytes are measured and reported, not budgeted per slice. The
+end-to-end measurement waits until lowering is complete (step 5).
+
 ## Layouts
 
 `CAstOptions.layout` selects a variant of the same tree:
@@ -361,7 +422,8 @@ The tree accepts two attribute placements that need node slots of their own:
 ## Driver pilot hook
 
 `ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` (see the
-[driver guide](../driver.md)) is off by default. When given, the C compile path
+[driver guide](../driver.md)) is on by default with the implicit layout;
+`-fno-c-ast-pilot` turns it off. When on, the C compile path
 calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
 phase boundary, so the build's time is part of `parse_ns` and of the `parse`
 phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree's
@@ -376,12 +438,21 @@ semantic analysis in `CParserResult.ast`, where the
 With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
-given one either), so the builder creates and retires its own. A build that is
-not complete fails the unit with the parse error class; its diagnostic is
-published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
-never reach the hook.
+given one either), so the builder creates and retires its own. A builder that
+cannot reserve its storage fails the unit with the parse error class and its
+diagnostic. A build the builder rejects on syntax no longer fails the unit:
+since the default switch the unit compiles without a tree, exactly as under `-fno-c-ast-pilot`, so its
+diagnostics come from `c_parse_ast` and analysis as before, and the driver
+counts it in `CompilerDriverCAstPilotResult.rejections`. On the corpus at the
+switch, every rejected unit was invalid input that also fails without the tree
+(missing `-std=c23` or `-D` options, deliberate syntax errors); the builder
+diagnosed the syntax error before analysis could give its semantic one.
+[#4069](https://github.com/buster14a/buster/issues/4069) owns making the tree
+mandatory, which needs those diagnoses in the builder or analysis first.
+`-E` and assembly inputs never reach the hook.
 
-Under `-v` the driver prints these rows with the other verbose counters:
+Under `-v` the driver prints these rows with the other verbose counters, plus
+`C_AST_REJECTED units=<n>` when the builder refused a unit:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
@@ -415,12 +486,9 @@ Under `-v` the driver prints these rows with the other verbose counters:
   reason=<CAstStatementFallback of the last fallback> fallback_token=<that
   body's `{`>`
 
-- `C_AST_LOWER bodies=<top-level function bodies lowering indexed>
-  conditionals=<conditional nodes in them> steps=<nodes and parentheses the
-  index build visited> answers=<root-conditional queries
-  answered true from the tree> negatives=<queries answered false because the
-  range holds no `?`> fallbacks=<queries inside an indexed body handed to the
-  token scan>`
+- `C_AST_LOWER steps=<nodes the root-conditional descents visited>
+  answers=<root-conditional queries answered true> negatives=<queries
+  answered false>`
 
 - `C_AST_FACTS nodes=<tree nodes> retained_bytes=<the facts' committed
   columns> regions=<typed regions published> candidates=<their expression
@@ -1552,79 +1620,63 @@ typedef.
 
 ## Lowering from the tree
 
-Under `-fc-ast-pilot` the driver also hands the tree to lowering, in
-`CIRLowerOptions.syntax_tree`. Without it, lowering reads tokens as before. The tree
-outlives lowering: the driver releases it at the end of the unit, after the
-backend. Lowering reads nodes only while `c_lower_to_ir_with_options` runs,
-and no IR record, type or source range refers to a node.
+Under `-fc-ast-pilot` the driver hands its tree to lowering, in
+`CIRLowerOptions.syntax_tree`, and releases it at the end of the unit, after
+the backend. Without the pilot, lowering builds and releases the unit's tree
+itself ([retained facts](#retained-facts-for-lowering)). Either way lowering
+reads nodes only while `c_lower_to_ir_with_options` runs, and no IR record,
+type or source range refers to a node.
 
-**First slice: root conditionals.** `c_ir_root_conditional` decides whether a
-token range, after its outer parentheses are stripped, is a `?:` at the root.
-If it is, it reports the `?` and the `:`. The expression, condition and
-logical-value steps and the query machine ask this about 800 k times on the
-self-host. Without a tree, a per-body prefix count of `?` tokens refuses a
-range that holds none (#3467), and the token scan walks the rest.
+**Root conditionals.** `c_ir_root_conditional` decides whether a token range,
+after its outer parentheses are stripped, is a `?:` at the root. If it is, it
+reports the `?` and the `:`. The expression, condition and logical-value steps
+and the query machine ask this about 800 k times on the self-host.
 
-With the tree, `c_ir_tree_conditionals_build` runs once, before the first
-function is lowered. It indexes every top-level function body's `CONDITIONAL`
-and `CONDITIONAL_OMITTED` nodes, and for each one it records three tokens:
-- **`?`**: the node's anchor.
-- **Start**: the condition's first token. This is the smallest anchor on its
-  leftmost path (the `&&` before a `LABEL_ADDRESS`). It is then widened over
-  each `(` whose `)` closes before the `?`, because the tree has no node for
-  parentheses.
-- **`:`**: the token before the else operand's first token, after stepping
-  back over that operand's opening parentheses. A `CONDITIONAL_OMITTED`'s `:`
-  is the token after its `?`.
+Since step 3 (c) it answers from the range's node (`c_ir_tree_range_node`) and
+its `CIrHoistFact` byte, which encode the token scan's own rules:
+- **False** unless the node's root region holds a `?` (`ROOT_QUESTION`) and no
+  assignment comes before the first root `?` (`ROOT_ASSIGNMENT`). An
+  assignment there makes the conditional its right operand (Lua's
+  `luaV_fastgeti` relies on this precedence).
+- **True** otherwise, with the stripped range, and the `?` and `:` of the first
+  conditional of the root region. The descent follows the one child that holds
+  the first root `?`, so it costs the root region's depth. As before, a
+  conditional after a root comma counts, and an empty middle operand counts
+  only in a GNU dialect.
 
-A record whose `:` cannot be found this way is left out, but its `?` is still
-indexed. Each body keeps its `?` tokens and its records in ascending order.
+The `:` is the token after the middle operand's widened span, or the one after
+the `?` of a `CONDITIONAL_OMITTED`. `CAstLowerStatistics` counts the answers,
+the negatives and the descent steps, and `-v` prints them as a `C_AST_LOWER`
+row. `c_test_tree_root_conditional_chains` holds the steps linear as chains
+double.
 
-The build's walks and widening are linear in the bodies' nodes. Postorder
-indexes every conditional on another's leftmost path before that one, so the
-walk for a first token stops at an indexed conditional and takes its first
-token and widened start. Those parentheses close before the earlier `?`, so they
-widen the later one too, and each `(` is widened over once. Without the
-memo, a left-nested chain `((a ? b : c) ? b : c) ...` walked its shared
-paths and parentheses again for every level, which was quadratic.
-`CAstLowerStatistics.steps` counts the walks and widening, and
-`c_test_tree_root_conditional_chains` requires that count to stay linear as
-chains double. Finding an indexed conditional is a binary search over the
-body's conditionals, which `steps` leaves out, so the whole build is
-O(n log n) in the worst case. Parenthesis matches come from the stream's delimiter array, so a
-stream with mismatched delimiters gets no index.
-
-A query inside a body is answered in one of three ways:
-- **False**, when no `?` lies in the range. Every `?` in a body is the anchor
-  of one of its conditional nodes, so the scan would find none.
-- **True**, when a record starts at the range's start and its `:` is before
-  the range's last token, unless an empty middle operand is refused outside
-  GNU dialects as the scan refuses it. From that start, the record's `?` is
-  the first root `?`, since a condition holds no unparenthesized `?` or
-  assignment. Its `:` is the one the scan pairs with that `?`. So the scan
-  returns the same four tokens.
-- **The token scan** for everything else: a range with a root comma or
-  assignment before the `?`, a range outside the body being lowered, and
-  file-scope initializers.
-
-Debug and sanitized builds check every answer against the scan.
-`CAstLowerStatistics` counts the answers, and `-v` prints them as a
-`C_AST_LOWER` row.
+The first slice's per-body index of conditional records
+(`c_ir_tree_conditionals_build`, its first-token memo and its three-way
+verdict), the token scan it fell back to (`c_ir_root_conditional_scan`) and the
+`?` count of the token prefix table are deleted.
 
 ## Expression lowering from the tree
 
-**Status: design only.** Nothing in this section is implemented, and the
-expression evaluator reads only tokens. This is slices 5 and 6 of the
-[lowering plan](https://github.com/buster14a/buster/issues/3102#issuecomment-6107599995).
-It depends on two pieces:
-- the tree hand-off to lowering (`CIRLowerOptions.syntax_tree`), which
-  slice 1 landed with the [root-conditional index](#lowering-from-the-tree);
-- a per-body index from an evaluator core's token range to its node, which
-  slice 2 owns and which has not landed. The root-conditional index maps
-  only `CONDITIONAL` nodes. The [token-to-node map](#token-to-node-map-for-lowering)
-  census prices that index.
+**Status: (a) to (c) are implemented; the owner frames still take their
+subtree's token range, and the step-4 callers read operand extents through
+marked temporary adapters.** This is
+step 3 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
+([#4059](https://github.com/buster14a/buster/issues/4059)). It lands as a
+short stack, each part byte-identical on its own:
+- **(a) hoisting from the tree**, below in [Hoisting from the tree](#hoisting-from-the-tree):
+  both prepasses read nodes, and their token scans are deleted;
+- **(b) the evaluator's walk**, below in [The evaluator's walk](#the-evaluators-walk):
+  the postorder walk replaces the evaluator's shunting-yard loop and
+  `c_ir_expression_core_capacity`;
+- **(c) root splits and operand ends from the node**, below in
+  [Root splits and operand ends](#root-splits-and-operand-ends): the
+  `EXPRESSION`, condition, logical- and conditional-value frames split at
+  their node's root operator, calls split their arguments from the `CALL`
+  node, and the root-split, group-fact and operand-end token walkers are
+  deleted.
 
-This section consumes both and does not rebuild them.
+The rest of this section is the design that (a) to (c) follow. It describes
+the token path as it was before (a).
 
 ### What the token path does
 
@@ -1681,7 +1733,7 @@ order as the token path. The token path's order for one core is:
 1. **Hoisted control groups**, in the token order of their `(`. These are
    the parenthesized `?:`, `&&`, `||`, assignment and comma groups that the
    control prepass records.
-2. **Hoisted calls**, in the order `c_ir_prepare_calls_discover` returns.
+2. **Hoisted calls**, in the order the call prepass returns (then `c_ir_prepare_calls_discover`).
    That order is the postorder of the hoisted calls' nesting forest: a call
    nested in another call's callee or arguments comes first, and siblings
    come in source order. That is the order in which `CALL` nodes occur in
@@ -1807,22 +1859,196 @@ that ends at a closer, the closer's token. It must be charged to the tree's
 retained bytes. The builder already knows that token when it appends the
 node.
 
-### Order of slices
+### Hoisting from the tree
 
-Each slice gets its own budgets in [Measurement plan](#measurement-plan)
-before its measured runs. Ceilings are from the census, net of #3445.
+`c_ir_prepare_control_expressions_step` and `c_ir_prepare_calls_step` keep their
+frames, but each takes its list from the core's node
+(`c_ir_tree_range_node`, through [the retained spans](#retained-facts-for-lowering)),
+not from a token scan:
+- **Control groups.** `c_ir_tree_control_groups` walks the subtree in source
+  order. The groups it can hoist are:
+  - a parenthesized node whose interior has a root `?:`, `&&`, `||` or
+    assignment, or a root comma with any of those anywhere;
+  - a subscript or array size with a root `?:`, `&&`, `||` or assignment;
+  - a call's whole argument list, when its callee does not end in a name.
 
-| Slice | Replaces | Ceiling, net of #3445 |
-|---|---|---:|
-| 5a | both prepasses, for a core that maps to a node: the hoist set comes from one enter-event walk of the core's subtree | ≈ 280 M (the non-empty prepasses) |
-| 5b | `c_ir_expression_core_capacity` and the postfix probe: an interval's node count and a `POST_INCREMENT`/`POST_DECREMENT` kind test | ≈ 39 M |
-| 5c | the operand loop: classification and shunting-yard become the postorder walk | part of the 371 M body, plus about 30 M of classification |
-| 6 | delimiter questions from lowering, after slices 1–5c | ≤ 68.6 M |
+  A parenthesis directly after a name (a call's own, `__extension__ (...)`)
+  opens no group unless it is the range's first token. The walk records a
+  group without entering it. It does not enter:
+  - a lazy operand (the right side of `&&`/`||`, a conditional's arms, a
+    statement expression);
+  - an unevaluated operand (`sizeof`, `_Alignof`);
+  - `_Generic` or `__builtin_choose_expr`;
+  - a group already recorded or being lowered.
 
-Slice 5a is first because it is the largest structure cost that #3445 leaves.
-It changes no emission, so its differential compares one ordered list per
-core. Its first implementable revision is the one where slice 2's
-range-to-node index has landed; until then nothing in this section ships.
+  The list is exact before the first group is lowered, because lowering a
+  group records only groups inside it.
+- **Calls.** `c_ir_tree_calls_discover` classifies each call at its `(`,
+  after its callee and before its arguments. Rows therefore come out in the
+  order of their `(` tokens, each row's parent is the innermost recorded call
+  whose arguments hold it, and a chain call (`get()(3)`) follows the call it
+  continues. A call is deferred when it is:
+  - in a lazy operand;
+  - after a comma: any operand after the first of a comma, an argument list
+    or an initializer list.
+
+  When it defers a call, the innermost active call notes `deferred_calls`.
+  The builtins that own their operands keep them.
+- **Facts.** One byte per node (`CIrHoistFact`, `c_ir_hoist_facts_build`), in
+  one pass in index order beside the spans, holds three things:
+  - the node's root region: the root `?`, `?:`/`&&`/`||`, comma, and an
+    assignment before the first root `?`;
+  - whether any assignment or control operator appears anywhere in it;
+  - whether its subtree holds a call or a hoistable group at all, so the walks
+    skip subtrees with neither.
+- **Temporary adapter.** The evaluator still consumes prepared records keyed
+  by token: `CIrPreparedControlExpression.open_index` and
+  `CIrPreparedCall.token_index`, `open_index` and `close_index`. The walks
+  therefore compute those tokens from node spans:
+  - the callee's first token (`c_ir_tree_callee_shape`, which follows member
+    chains and `[ ]` suffixes to their name);
+  - the group's delimiters.
+
+  Part (b) keys the records by node and deletes this adapter.
+- **Work stays linear on skewed expressions** (`c_test_tree_hoisting_skew`
+  counts `CAstLowerStatistics.hoist_steps`):
+  - A call already emitted is not entered again, so the arguments of
+    `f(g(h(...)))` do not walk the nesting again.
+  - When a control prepass has recorded every group it found, the nodes it
+    visited off its leftmost path are marked walked
+    (`CIrSyntaxSpans.walked`). A later walk skips them. A `typeof` replay that
+    releases records clears the marks.
+  - Stacks and lists double on demand, and the walk's scratch is released
+    when it ends.
+- **Deleted:** the token prepass loops, `c_ir_prepare_calls_discover`'s scan,
+  the lazy-operand scan (`CIrLazyOperandScan`), `c_ir_group_may_hold_preparable`
+  and its `PREPARABLE_INSIDE` group fact, `c_ir_subscript_callee_base` and
+  `c_ir_abstract_pointer_declarator`.
+- **No tree, no hoisting.** A core whose range no node spans fails with "no
+  syntax tree node spans this expression". A unit whose tree the builder
+  rejects lowers without a tree, and from (a) on its expressions fail this
+  way.
+
+  The builder now accepts the vendor standard attributes that tripped this
+  (`[[vendor::tag(gnu::error("m"))]]`): their argument clause is any balanced
+  token sequence, and the item keeps no argument nodes. The inputs the
+  builder still rejects in the test suite are invalid programs that semantic
+  analysis accepts and lowering diagnoses: `[1 ... 2 ... 3]` designators and
+  stray initializer separators in static initializers, invalid `asm`
+  operands, and an invalid `case` range. None of them reaches an expression
+  core, so their diagnostics are unchanged.
+
+### The evaluator's walk
+
+`c_ir_lower_expression_core_step` runs both prepasses, then evaluates its
+node (`c_ir_tree_range_node`) in postorder over an explicit stack of
+`CIrCoreWalkEntry` (`c_ir_lower_expression_core_walk`). The value stack and
+the walk stack start small and double in the temporary arena, so a core
+reserves what it holds rather than one slot per token.
+`c_ir_expression_core_capacity`, the operator stack, the precedence
+reductions and the postfix probe are deleted.
+
+- **Operators.** A unary, binary or cast node pushes its operands and
+  applies itself after them (`c_ir_apply_operation`). An `INDEX` that no
+  prepass hoisted, and a member access whose base is not a name chain,
+  apply to their base's value the same way. `EXTENSION` stands for its
+  operand.
+- **Units.** These nodes append one value, through a child frame where they
+  need one:
+  - literals;
+  - a name, with the member accesses and variable-length array subscripts
+    the place machine takes with it (`c_ir_core_chain_unit`);
+  - a prepared call, whose record ends where the node does;
+  - `sizeof` and `_Alignof`;
+  - `__builtin_offsetof`;
+  - `++` and `--`, prefix and postfix;
+  - `&&label`;
+  - a compound literal;
+  - a statement expression.
+- **Parentheses.** The parentheses around a node are met outermost first, as
+  the token path met each `(`. A group the control prepass hoisted
+  contributes its value. A group with a root conditional or logical operator
+  (innermost group only), a root comma, or an assignment anywhere lowers in
+  an `EXPRESSION` frame of its own. Any other group is transparent.
+- **Name chains.** A chain's nodes share their first token, which keys a
+  one-entry memo, so a chain is measured once however many of its nodes the
+  walk visits.
+- **Source tokens under `-g`.** A unary or binary operator's row takes its
+  anchor, the operator token. A cast's takes its `(`. An `INDEX` takes its
+  closing `]` (a hoisted or separately lowered subscript, its `[`). A member
+  access takes its `.` or `->`, which is the token before its anchor, the
+  member name. A failed operator reports the token the walk visited last, as
+  the token path reported the token whose arrival reduced it.
+- **Still token ranges** (the temporary adapter of part (c) and step 4):
+  - the place machine, the statement-expression and compound-literal
+    frames, and the `EXPRESSION` frames the walk pushes;
+  - the `sizeof` operand's type and value queries;
+  - the cast type (`c_ir_group_type_name`);
+  - `__builtin_offsetof`'s designator.
+- **Linear on skewed expressions.** `c_test_tree_evaluator_skew` counts
+  `CAstLowerStatistics.evaluator_steps` (walk steps, parenthesis levels and
+  name-chain descents) on left- and right-nested arithmetic, prefix chains,
+  casts, member chains, subscripts and parentheses.
+
+### Root splits and operand ends
+
+Part (c) moves the questions the frames around the evaluator asked of token
+ranges onto the range's node (`c_ir_tree_range_node`) and its `CIrHoistFact`
+byte.
+
+- **Calls.** A prepared call keeps its `CALL` node
+  (`CIrPreparedCall.node`), and `c_ir_call_arguments_counted` splits the
+  arguments from the node's children. A sole argument does not widen over
+  the call's own parentheses. `c_ir_call_argument_separator` is deleted.
+- **The `EXPRESSION` frame** splits at the node's root comma, assignment,
+  conditional or logical operator. `c_ir_root_first_token` walks the root
+  region in order over an explicit stack for the first root `+`, assignment
+  or `&&`/`||`. A hoisted argument list has no node of its own: its group
+  carries the call node (`C_IR_TREE_GROUP_STRIDE`), and the frame splits the
+  arguments as a comma expression would (`argument_starts`).
+- **Conditions.** `c_ir_lower_condition_step` strips parentheses, takes a
+  `!` over a chain, reads the `__builtin_expect` hint, and splits the
+  `&&`/`||` spine from the node. A spine is split once, into an array of its
+  left-nested operators (`CIrConditionTask.spine`), so a long chain costs its
+  length. A condition whose root is an assignment of a logical value,
+  `if (x = a || b)`, is a leaf: the token path split it at the `||` and
+  lowered `x = a` as its left operand
+  ([#4162](https://github.com/buster14a/buster/issues/4162),
+  `c_test_condition_assignment_of_logical`).
+- **Logical and conditional values** ask `c_ir_range_has_root_assignment` and
+  the node's `ANY_ASSIGNMENT` bit.
+- **Prepass filters.** `c_ir_range_may_prepare_control` and
+  `c_ir_range_may_prepare_calls` read the node's `ANY` and `HOLDS_CALL` bits.
+  The per-body token prefix table (`c_ir_token_prefix_build`) is deleted.
+- **Deleted token walkers.** `c_ir_group_fact` and its classifying pass,
+  `c_ir_group_is_logical_chain`, `c_ir_has_root_assignment`,
+  `c_ir_has_root_comma`, `c_ir_has_root_control_operator`,
+  `c_ir_has_root_question`, `c_ir_has_assignment_anywhere`,
+  `c_ir_has_control_operator_anywhere`, `c_ir_has_top_level_comma`,
+  `c_ir_unary_expression_end`, `c_ir_postfix_suffix_end` and
+  `c_ir_unevaluated_operand_end`.
+- **Temporary adapters for step 4.** The query machine, the constant
+  evaluator, the static-initializer and array-bound folds and the vendor
+  budget still take token ranges. Where they asked a token walk how far an
+  operand reaches, they read the node's span:
+  `c_ir_tree_unevaluated_operand_end` (a `sizeof`/`_Alignof` keyword's node),
+  `c_ir_tree_range_is_cast` and `c_ir_tree_anchored_node`. Each is marked
+  `TEMPORARY ADAPTER` in `c_gen.c`; step 4 deletes them with their callers.
+  The `sizeof` type machine's operator scan reads a `+`, `-`, `*` or `&`
+  right after `sizeof (T)` as a cast operand's prefix. The token walker
+  agreed, so `sizeof(sizeof(int) + 1.0f)` folded `size_t`'s 8. The
+  classifier now splits at the tier of the binary operator the tree has at
+  the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
+- **Still token ranges.** The place machine, the `sizeof`, compound-literal
+  and statement-expression frames take their subtree's token range, and the
+  prepared control and call records are keyed by their opening token.
+- **A unit the builder rejects.** Such a unit still lowers without a tree
+  (`tree_rejections`): its statements lower, and any expression that needs
+  the evaluator fails. These are inputs analysis accepts and lowering
+  diagnoses: invalid `__builtin_offsetof` designators, an omitted `?:`
+  operand outside a GNU dialect, `[a ... b ... c]` designators and case
+  ranges, empty initializer elements, a malformed global `asm`. Making the
+  tree mandatory first needs the builder or analysis to diagnose them.
 
 ## Initializers, declarations and type queries from the tree
 
@@ -2232,7 +2458,7 @@ differential tests pass.
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)); so do members' plain runs inside tag definitions ([members](#members)); the statement plan's [declaration hints](#statement-plan-from-the-tree) give block declarations their storage-class set and auto precheck from it. The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification and the switch label scan stay on tokens: by census neither pays for a tree read ([keyword gate](#statement-keyword-gate-in-lowerings-classification)), and the classification skips its typedef probe for statement keywords instead. |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
+| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Retired: the evaluator walks its node in postorder and the frames split at their node's root operator ([Expression lowering from the tree](#expression-lowering-from-the-tree)); the `c_ir_has_root_*` scans and the shunting-yard loop are deleted. |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | The facts are retained under `-fc-ast-pilot` and passed to lowering ([retained facts](#retained-facts), #4062), but no lowering consumer reads them yet. Not migrated. Step 4 of the owner direction deletes the query machine; see [Initializers, declarations and type queries from the tree](#initializers-declarations-and-type-queries-from-the-tree). Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
 
@@ -2302,6 +2528,19 @@ off is now an end-to-end comparison of the same checked frontend that includes
 the tree's build cost. Hosted measurements are diagnostic. Acceptance needs the Ryzen 7 9700X route required by
 [#2761](https://github.com/buster14a/buster/issues/2761) and described in
 [benchmarking](../benchmarking.md).
+
+**Since the default switch** (2026-10-13), the arms are renamed, not
+re-budgeted. The sections below were measured when the tree-free path was the
+default, so their "default path" and "D against A" mean the path that is now
+`-fno-c-ast-pilot`; they stay as recorded. Under the
+[owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034),
+lowering slices carry no per-slice budget. Work after the switch reports
+correctness and counters, the opt-out is the no-added-work reference arm
+while it exists, and the end-to-end measurement and the Zen 5 acceptance
+follow [#4058](https://github.com/buster14a/buster/issues/4058). The
+`ast-pilot-acceptance-v1` profile compares no flag against `-fc-ast-pilot`,
+so on a head after the switch its two arms are the same compile and it no
+longer measures the tree.
 
 For the pilot, the budgets for the self-host unity input (about 3.97 M tokens
 reach the parser) were declared before any timing was taken:

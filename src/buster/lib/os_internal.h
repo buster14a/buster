@@ -82,6 +82,25 @@ struct OsProcessCaptureTestResult
 BUSTER_F_DECL OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, ProcessSpawnResult spawn,
     OsProcessCaptureTestInput const* inputs, u64 input_count);
 
+#if BUSTER_WINDOWS
+// Calling-thread observation of the Windows captured-pipe deadline loop. The
+// scan limit is a test-only independent guard against a regression hanging a
+// native child; deadline progression is controlled without callbacks.
+typedef struct OsProcessWaitWindowsTestStats OsProcessWaitWindowsTestStats;
+struct OsProcessWaitWindowsTestStats
+{
+    u64 clock_calls;
+    u64 scans;
+    u64 progress_scans;
+    u64 child_polls;
+    u64 leader_exit_observations;
+    bool scan_limit_reached;
+};
+
+BUSTER_F_DECL void os_process_wait_windows_test_begin(u64 start_microseconds, u64 step_microseconds, u64 scan_limit);
+BUSTER_F_DECL OsProcessWaitWindowsTestStats os_process_wait_windows_test_end(void);
+#endif
+
 #if BUSTER_LINUX || BUSTER_MACOS
 // One failure on this thread in an ordinary (non-group) wait. WAIT/READ skip
 // the syscall and report ENOMEM/EBADF; CLOSE releases the real descriptor,
@@ -145,6 +164,7 @@ BUSTER_F_DECL bool os_linux_proc_context_select_self_test(String8 status, s32 pr
                                                            u32* namespace_index, u32* namespace_depth);
 BUSTER_F_DECL bool os_linux_proc_context_live_self_test(void);
 BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
+BUSTER_F_DECL bool os_linux_process_group_filter_self_test(void);
 BUSTER_F_DECL bool os_linux_proc_read_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif

@@ -203,6 +203,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 nested_sizeof_unary_source = S8(
+        "int main(void) {\n"
+        "    static unsigned long long nested_size = sizeof sizeof + 1;\n"
+        "    static unsigned long long nested_dereference = sizeof sizeof *(int*)0;\n"
+        "    static unsigned long long nested_alignof = sizeof _Alignof + 1;\n"
+        "    static int nested_extension = sizeof __extension__ + 1;\n"
+        "    static int nested_extension_cast = sizeof __extension__ (int)+1;\n"
+        "    static int nested_cast = sizeof +(int)+1;\n"
+        "    static unsigned long long nested_parenthesized = sizeof +(sizeof(int));\n"
+        "    static unsigned long long nested_type_name = sizeof sizeof(int);\n"
+        "    static unsigned long long nested_type_name_plus = sizeof sizeof(int) + 1;\n"
+        "    static unsigned long long nested_sizeof_statement = sizeof sizeof +({ int x = 0; x; });\n"
+        "    static unsigned long long nested_alignof_statement = sizeof _Alignof +({ int x = 0; x; });\n"
+        "    static int nested_extension_statement = sizeof __extension__ +({ int x = 0; x; });\n"
+        "    int side_effect = 0;\n"
+        "    int unevaluated_update = sizeof side_effect++;\n"
+        "    return nested_size != sizeof(void*) || nested_dereference != sizeof(void*) ||\n"
+        "           side_effect != 0 || unevaluated_update != sizeof(int) ||\n"
+        "           nested_alignof != sizeof(void*) || nested_extension != sizeof(int) ||\n"
+        "           nested_extension_cast != sizeof(int) || nested_cast != sizeof(int) ||\n"
+        "           nested_parenthesized != sizeof(void*) || nested_type_name != sizeof(void*) ||\n"
+        "           nested_type_name_plus != sizeof(void*) + 1 ||\n"
+        "           nested_sizeof_statement != sizeof(void*) || nested_alignof_statement != sizeof(void*) ||\n"
+        "           nested_extension_statement != sizeof(int);\n"
+        "}\n");
     struct
     {
         String8 source;
@@ -234,6 +259,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    _Static_assert(sizeof (values) == 4 * sizeof(int), \"parenthesized array\");\n"
             "    return sizeof values;\n"
             "}\n"), true, {0}},
+        {nested_sizeof_unary_source, true, {0}},
+        {S8("struct Incomplete;\n"
+            "int f(void) {\n"
+            "    static int invalid = sizeof sizeof(struct Incomplete);\n"
+            "    return invalid;\n"
+            "}\n"), false, {0}},
         {S8("int f(int n) {\n"
             "    _Static_assert(sizeof n == n, \"runtime value\");\n"
             "    return n;\n"
@@ -373,6 +404,156 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         }
         scratch_end(temporary);
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena runtime_temporary = arena_begin_temporal(arguments->arena);
+    Arena* runtime_arena = runtime_temporary.arena;
+    String8 runtime_input = buster_test_temporary_path(runtime_arena, S8("buster-nested-sizeof-unary-runtime"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(runtime_input, BUSTER_SLICE_TO_BYTE_SLICE(nested_sizeof_unary_source)));
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        String8 executable = buster_test_temporary_path(
+            runtime_arena, string_format(runtime_arena, S8("buster-nested-sizeof-unary-{u32}"), form), S8(".exe"));
+        String8 link_command[] = {
+            S8("-nostdinc"), S8("-g0"), S8("-std=gnu23"), forms[form], S8("-o"), executable, runtime_input,
+        };
+        CompilerDriverInvocation link_invocation = compiler_driver_parse_arguments(
+            runtime_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command));
+        BUSTER_TEST(arguments, link_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        CompilerDriverResult linked = compiler_driver_execute_invocation(runtime_arena, link_invocation);
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {executable};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(runtime_arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+    scratch_end(runtime_temporary);
+#endif
+    return result;
+}
+
+// Tentative file-scope objects must be complete by the end of the translation
+// unit, while an external unsized array is completed to one element only for
+// its final object layout. Keep syntax-only and object diagnostics identical.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_tentative_object_completeness(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool valid;
+        String8 diagnostic_fragment;
+        String8 symbol;
+        u64 symbol_size;
+    } cases[] = {
+        {S8("struct S;\nstruct S object;\nstruct S { int value; };\n"), true, {0}, S8("object"), 4},
+        {S8("extern struct S object;\n"), true, {0}, {0}, 0},
+        {S8("struct S;\nstruct S *object;\n"), true, {0}, {0}, 0},
+        {S8("int values[];\n"), true, {0}, S8("values"), 4},
+        {S8("struct S;\nstruct S *values[];\n"), true, {0}, S8("values"), sizeof(void*)},
+        {S8("int values[];\nint values[2];\n"), true, {0}, S8("values"), 8},
+        {S8("int values[];\nint values[2] = {0};\n"), true, {0}, S8("values"), 8},
+        {S8("static int values[2];\nstatic int values[];\n"), true, {0}, S8("values"), 8},
+        {S8("static int values[2] = {0};\nstatic int values[];\n"), true, {0}, S8("values"), 8},
+        {S8("static int values[] = {1, 2};\nstatic int values[];\n"), true, {0}, S8("values"), 8},
+        {S8("static int values[] = {[3] = 1};\nstatic int values[];\n"), true, {0}, S8("values"), 16},
+        {S8("static char values[] = \"hi\";\nstatic char values[];\n"), true, {0}, S8("values"), 3},
+        {S8("int matrix[][3];\n"), true, {0}, S8("matrix"), 12},
+        {S8("typedef int A[];\nA values;\n"), true, {0}, S8("values"), 4},
+        {S8("struct S;\nstruct S object;\n"), false, S8("tentative definition of 'object' has incomplete type"), {0}, 0},
+        {S8("struct S;\nstatic struct S object;\n"), false, S8("tentative definition of 'object' has incomplete type"), {0}, 0},
+        {S8("struct S;\nstatic struct S object;\nstruct S { int value; };\n"), false, S8("tentative definition of 'object' has incomplete type with internal linkage"), {0}, 0},
+        {S8("static int values[];\n"), false, S8("tentative definition of 'values' has incomplete type"), {0}, 0},
+        {S8("static int values[];\nstatic int values[2];\n"), false, S8("tentative definition of 'values' has incomplete type with internal linkage"), {0}, 0},
+        {S8("static int values[];\nstatic int values[2] = {0};\n"), false, S8("tentative definition of 'values' has incomplete type with internal linkage"), {0}, 0},
+        {S8("static int values[];\nstatic int values[] = {1, 2};\n"), false, S8("tentative definition of 'values' has incomplete type with internal linkage"), {0}, 0},
+        {S8("struct S;\nstruct S values[];\n"), false, S8("array element type must be a complete object type"), {0}, 0},
+        {S8("int values[];\nint read(void) { return (int)sizeof(values); }\n"), false, S8("incomplete type"), {0}, 0},
+        {S8("typedef int A[];\nA values;\nint read(void) { return (int)sizeof(A); }\n"), false, S8("incomplete type"), {0}, 0},
+    };
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot")};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-tentative-object-completeness"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source)));
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                String8 output = buster_test_temporary_path(
+                    arena, string_format(arena, S8("buster-tentative-object-completeness-{u32}-{u32}-{u32}"), case_index, dialect, frontend), S8(".o"));
+                String8 syntax_command[] = {S8("-nostdinc"), S8("-g0"), dialects[dialect], frontends[frontend], S8("-fsyntax-only"), input};
+                String8 object_command[] = {S8("-nostdinc"), S8("-g0"), dialects[dialect], frontends[frontend], S8("-c"), S8("-o"), output, input};
+                CompilerDriverInvocation syntax_invocation = compiler_driver_parse_arguments(
+                    arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+                CompilerDriverInvocation object_invocation = compiler_driver_parse_arguments(
+                    arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command));
+                BUSTER_TEST(arguments, syntax_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, object_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                CompilerDriverResult syntax = compiler_driver_execute_invocation(arena, syntax_invocation);
+                CompilerDriverResult object = compiler_driver_execute_invocation(arena, object_invocation);
+                BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[case_index].valid,
+                                string_format(arena, S8("source={S8}\ndiagnostic={S8}"), cases[case_index].source, syntax.diagnostic));
+                BUSTER_TEST(arguments, syntax.error == object.error);
+                BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
+                                string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+                                              cases[case_index].source, syntax.diagnostic, object.diagnostic));
+                BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
+                BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
+                BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
+                for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(syntax.diagnostic_count, object.diagnostic_count); diagnostic += 1)
+                {
+                    CompilerDiagnostic first = syntax.diagnostics[diagnostic];
+                    CompilerDiagnostic second = object.diagnostics[diagnostic];
+                    BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
+                    BUSTER_STRING_TEST(arguments, first.code, second.code);
+                    BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
+                }
+                if (cases[case_index].diagnostic_fragment.length)
+                {
+                    BUSTER_TEST_RAW(arguments,
+                                    compiler_driver_test_string_contains(syntax.diagnostic, cases[case_index].diagnostic_fragment),
+                                    string_format(arena, S8("source={S8}\ndiagnostic={S8}"),
+                                                  cases[case_index].source, syntax.diagnostic));
+                }
+                if (cases[case_index].valid)
+                {
+                    BUSTER_TEST(arguments, object.has_object);
+                    if (cases[case_index].symbol.length && object.has_object)
+                    {
+                        ObjectSymbol* symbol = 0;
+                        for (u32 symbol_index = 0; symbol_index < object.object.symbol_count && !symbol; symbol_index += 1)
+                        {
+                            ObjectSymbol* candidate = object.object.symbols + symbol_index;
+                            if (string_equal(candidate->name, cases[case_index].symbol))
+                            {
+                                symbol = candidate;
+                            }
+                        }
+                        BUSTER_TEST_RAW(arguments, symbol && symbol->size == cases[case_index].symbol_size,
+                                        string_format(arena, S8("source={S8}\nexpected symbol size={u64} actual={u64}"),
+                                                      cases[case_index].source, cases[case_index].symbol_size, symbol ? symbol->size : 0));
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, !object.has_object);
+                }
+                os_file_delete(output);
+            }
+        }
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -415,8 +596,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArgu
         delta[counter] = after.values[counter] - before.values[counter];
     }
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS] != 0);
+    // Every root query is answered by exactly one of: the memo, the tree
+    // (on by default since the #3102 switch), the literal path, the machine.
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_CACHE_HITS] + delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED] +
-                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_LITERAL_ANSWERS] == delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
+                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_LITERAL_ANSWERS] + delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_TREE_ROOTS] ==
+                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_QUERY_CHECKPOINTS] == delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] != 0 &&
                                delta[WORK_LEDGER_SNAPSHOT_FRAME_BYTES] % delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] == 0);
@@ -1240,6 +1424,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_flexible_initializers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_tag_array_type_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_sizeof_static_asserts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_tentative_object_completeness);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_work_ledger);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_pointer_return_redeclarations);

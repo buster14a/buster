@@ -30,6 +30,27 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Before publishing a named output, the driver compares the followed file
+identity of the destination with every positional input and each physical
+source or header file the C preprocessor opened, including forced `-include`
+and `#include_next` files. Virtual builtin resource headers have no filesystem
+identity and are not treated as files read from the working directory; real
+files with the same basename remain protected. System headers stay in the
+collision closure even when `-MMD` omits them from dependency text. A match
+fails with an argument diagnostic before staging or replacing the destination,
+preserving both the input and any existing output bytes. This catches direct,
+symbolic-link, hard-link and case aliases whenever the filesystem reports the
+same identity. Direct Wasm, SPIR-V and eBPF emitters use the same action-aware
+path selector for checking and publication, including their default artifact
+names. Native executable link outputs and `-MF` dependency outputs are checked
+against each unit's physical inputs before publication; multi-input links
+retain each C and preprocessed-assembly unit's physical closure through the
+final output check. For multi-input `-c` and `-emit-llvm`, every derived `.o`
+or `.bc` destination is checked against the full positional input set before
+any unit runs, so an earlier output cannot replace a later input. The check
+does not resolve implicit `-lNAME` library searches or compiler-generated
+secondary evidence outputs.
+
 Publication (`file_publish_checked`, `file_publish_slices_checked` and
 `file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
 the destination, closes it and renames it over the destination. It promises
@@ -217,6 +238,11 @@ must call it before starting their own gang, or before calling the driver from
 more than one thread, because the driver cannot release a gang it does not
 own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
+The x86-64 target prewarm is the existing one: every x86-64 process that
+generates code pays it once, on the first `codegen_prewarm_for_target`. On the
+Ryzen 7 9700X it costs 1.74 ms of the compiler's own time and 6.6 M retired
+instructions above an AArch64 compile of the same one-function unit
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md), #1125).
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
@@ -319,10 +345,15 @@ the batch.
 
 **Setup stays outside every input.** With metrics requested, before the first
 interval opens the driver runs `compiler_prewarm()` and
-`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and x86
-metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
-and primes first-touch page faults: it commits and touches a pooled TU arena
-(`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
+`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and target
+tables that used to land in input 0's `codegen` phase), and primes first-touch
+page faults. On the 9700X this setup put an x86-64 one-function input's
+`start_ns` at 2.4 ms and an AArch64 one's at 0.7 ms
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md)). It runs
+for every action, so a measured `-fsyntax-only` or `-E` pays a target prewarm
+that the same command without `-fmetrics-out` never runs; compare such runs
+only with each other (#4135). The priming commits and touches a pooled TU
+arena (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
 reuses) and the calling thread's scratch arenas once per thread, plus the
 result arena when a single input compiles in it. No warm-up input is needed.
 `compiler_driver_test_input_metrics` observes the completed setup calls and
@@ -710,8 +741,9 @@ disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
 
-`-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
-`implicit`) builds the [implicit postorder syntax
+`-fc-ast-pilot[=implicit|hybrid|explicit]` (default `implicit` since the
+[owner decision of 2026-10-13](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845);
+the bare flag is `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
 unit's declaration records then come from the tree
@@ -724,19 +756,25 @@ binder follows each function body's
 [statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
 answers its root-conditional splits from it
 ([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
-stage reads it. Only under the flag does analysis share the primitive and
+stage reads it. Only with the tree does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical, and a tree the builder rejects fails
-the unit with the parse error class and a located diagnostic published like
-`c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
+and every diagnostic are byte-identical to the tree-free path's. A builder that
+cannot reserve its storage fails the unit with the parse error class; a unit
+whose tree the builder rejects on syntax compiles without a tree, so it reports what
+`-fno-c-ast-pilot` reports; `-v` counts it in a `C_AST_REJECTED` row. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
 `C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
 `C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
-Except under `-fsyntax-only`, the flag also retains semantic analysis's
+Except under `-fsyntax-only`, the tree also retains semantic analysis's
 per-node facts for lowering
-([retained facts](frontend/ast.md#retained-facts)).
+([retained facts](frontend/ast.md#retained-facts)). `-fno-c-ast-pilot` selects
+the tree-free path: analysis and lowering answer every question from tokens,
+as they did before the switch, and no facts are retained. It is the reference
+arm for differentials and bisection, and
+[#4058](https://github.com/buster14a/buster/issues/4058) removes it once
+lowering reads only the tree. The last of the two flags wins.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`

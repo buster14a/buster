@@ -1,0 +1,126 @@
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:207:5: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  207 |     0x1p-25F16,
+      |     ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:208:6: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  208 |     -0x1p-25F16,
+      |      ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:217:5: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  217 |     65520.0F16,
+      |     ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:218:6: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  218 |     -65520.0F16,
+      |      ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:221:5: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  221 |     1e1000F16,
+      |     ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:222:5: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  222 |     1e-1000F16,
+      |     ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:304:15: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  304 |     out[10] = 0x1p-25F16;
+      |               ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:305:16: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  305 |     out[11] = -0x1p-25F16;
+      |                ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:314:15: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  314 |     out[20] = 65520.0F16;
+      |               ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:315:16: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  315 |     out[21] = -65520.0F16;
+      |                ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:318:15: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  318 |     out[24] = 1e1000F16;
+      |               ^
+/tmp/buster-tests-906972-6-30717927183772/buster-float16-codegen-source-906972-0.c:319:15: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  319 |     out[25] = 1e-1000F16;
+      |               ^
+12 warnings generated.
+tests/basic_c_wide_vector_abi.c:73:32: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   73 |     destination.value.vector = wide_abi_make(10u);
+      |                                ^
+tests/basic_c_wide_vector_abi.c:84:32: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   84 |     destination.value.vector = wide_abi_ninth(first.vector, second.vector, first.vector, second.vector,
+      |                                ^
+tests/basic_c_wide_vector_abi.c:96:9: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   96 |     if (wide_abi_varargs(7u, 11ull, first.vector, second.vector, 13ull) != expected) { result = 5; }
+      |         ^
+3 warnings generated.
+tests/basic_c_wide_vector_abi.c:35:1: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   35 | WideAbiVector wide_abi_make(unsigned int seed)
+      | ^
+tests/basic_c_wide_vector_abi.c:42:1: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   42 | WideAbiVector wide_abi_mix(WideAbiVector first, unsigned int tag, WideAbiVector second)
+      | ^
+tests/basic_c_wide_vector_abi.c:42:42: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   42 | WideAbiVector wide_abi_mix(WideAbiVector first, unsigned int tag, WideAbiVector second)
+      |                                          ^
+tests/basic_c_wide_vector_abi.c:49:1: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   49 | WideAbiVector wide_abi_ninth(WideAbiVector a, WideAbiVector b, WideAbiVector c, WideAbiVector d,
+      | ^
+tests/basic_c_wide_vector_abi.c:49:44: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   49 | WideAbiVector wide_abi_ninth(WideAbiVector a, WideAbiVector b, WideAbiVector c, WideAbiVector d,
+      |                                            ^
+5 warnings generated.
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:160:9: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  160 |     if (non_power_positioned(7, (F64x3){1.0, 2.0, 3.0}, 11) != 24.0)
+      |         ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:162:9: warning: AVX vector argument of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  162 |     if (non_power_positioned_u64(7, (U64x3){1, 2, 3}, 11) != 24)
+      |         ^
+2 warnings generated.
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:66:1: warning: AVX vector return of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   66 | U64x3 non_power_u64(U64x3 value)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:66:27: warning: AVX vector argument of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   66 | U64x3 non_power_u64(U64x3 value)
+      |                           ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:76:1: warning: AVX vector return of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   76 | F64x3 non_power_f64(F64x3 value)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:76:27: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   76 | F64x3 non_power_f64(F64x3 value)
+      |                           ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:81:1: warning: AVX vector return of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:81:29: warning: AVX vector argument of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      |                             ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:90:1: warning: AVX vector return of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:90:32: warning: AVX vector argument of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      |                                ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:99:1: warning: AVX vector return of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   99 | F64x3 non_power_add(F64x3 left, F64x3 right)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:99:27: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   99 | F64x3 non_power_add(F64x3 left, F64x3 right)
+      |                           ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:104:47: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  104 | double non_power_positioned(int before, F64x3 value, int after)
+      |                                               ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:109:68: warning: AVX vector argument of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  109 | unsigned long long non_power_positioned_u64(unsigned before, U64x3 value, unsigned after)
+      |                                                                    ^
+12 warnings generated.
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:81:1: warning: AVX vector return of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:81:29: warning: AVX vector argument of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      |                             ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:90:1: warning: AVX vector return of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      | ^
+/tmp/buster-tests-906972-6-30717927183772/buster-padded-vector-source-906972.c:90:32: warning: AVX vector argument of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      |                                ^
+4 warnings generated.
+/tmp/buster-tests-906972-6-30717927183772/buster-sysv-packed-x87-va-906972.c: In function ‘host_a32_variadic’:
+/tmp/buster-tests-906972-6-30717927183772/buster-sysv-packed-x87-va-906972.c:54:9: note: the ABI for passing parameters with 32-byte alignment has changed in GCC 4.6
+   54 |     A32 a = va_arg(ap, A32);
+      |         ^
+warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]
+1 warning generated.

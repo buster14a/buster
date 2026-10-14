@@ -2,10 +2,11 @@
 // alternate GPT headers and one partition entry, then compares the result with
 // a reference image. Not part of ide; built by the disk_builder CMake target.
 //
-// Map (search symbols): MBRPartitionRecord, ProtectiveMBR, GPTHeader,
-// VerificationError, verify_disk, FileWriter, crc32_compute, GPTPartitionEntry,
-// process_arguments, entry_point.
+// Map (search symbols): GPTHeader, FileWriter, crc32_compute,
+// GPTPartitionEntry, process_arguments, entry_point. MBR declarations and
+// verification helpers are in disk_builder_verification.h/.c.
 #include <buster/lib/base.h>
+#include <buster/apps/disk_builder_verification.h>
 #include <buster/lib/entry_point.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/os.h>
@@ -16,6 +17,7 @@
 #include <string.h>
 
 #if BUSTER_UNITY_BUILD
+#include <buster/apps/disk_builder_verification.c>
 #include <buster/lib/os.c>
 #include <buster/lib/entry_point.c>
 #include <buster/lib/arena.c>
@@ -27,31 +29,6 @@
 #include <buster/lib/float.c>
 #include <buster/lib/target.c>
 #endif
-
-typedef struct MBRPartitionRecord MBRPartitionRecord;
-struct MBRPartitionRecord
-{
-    u32 boot_indicator : 8;
-    u32 starting_chs : 24;
-    u32 os_type : 8;
-    u32 ending_chs : 24;
-    u32 starting_lba;
-    u32 size_in_lba;
-}
-BUSTER_PACKED;
-BUSTER_CT_CHECK(sizeof(MBRPartitionRecord) == 16);
-
-typedef struct ProtectiveMBR ProtectiveMBR;
-struct ProtectiveMBR
-{
-    u8 boot_code[440];
-    u32 unique_mbr_disk_signature;
-    u16 unknown;
-    MBRPartitionRecord partition_records[4];
-    u8 signature[2];
-};
-
-BUSTER_CT_CHECK(sizeof(ProtectiveMBR) == 512);
 
 typedef struct GPTHeader GPTHeader;
 struct GPTHeader
@@ -76,104 +53,6 @@ struct GPTHeader
 BUSTER_CT_CHECK(sizeof(GPTHeader) == 96);
 #define GPT_HEADER_SIZE (sizeof(GPTHeader) - sizeof(u32))
 BUSTER_CT_CHECK(GPT_HEADER_SIZE == 92);
-
-typedef enum VerificationError
-{
-    VERIFICATION_ERROR_DISK_SUCCESS,
-    VERIFICATION_ERROR_DISK_EMPTY,
-    VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED,
-    VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO,
-    VERIFICATION_ERROR_UNKNOWN_NOT_ZERO,
-    VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED,
-    VERIFICATION_ERROR_MBR_BAD_SIGNATURE,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA,
-    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA,
-} VerificationError;
-
-// The three records after the protective entry must be entirely zero; the scan
-// stops at the first non-zero one because that is already the whole answer.
-BUSTER_GLOBAL_LOCAL bool verify_disk_reserved_partitions_zeroed(ProtectiveMBR const* mbr)
-{
-    MBRPartitionRecord zero_record;
-    memset(&zero_record, 0, sizeof(zero_record));
-
-    bool result = true;
-    for (int i = 1; i < 4 && result; i += 1)
-    {
-        result = memcmp(&mbr->partition_records[i], &zero_record, sizeof(zero_record)) == 0;
-    }
-
-    return result;
-}
-
-// Reports the first thing wrong with the image. The checks are ordered so that
-// each one only runs once its predecessors have vouched for the bytes it reads:
-// the sector-size check guards the MBR cast, and the MBR checks guard the
-// protective partition record.
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL VerificationError verify_disk(u8* disk, u64 disk_size)
-{
-    VerificationError result = VERIFICATION_ERROR_DISK_SUCCESS;
-    if (disk_size == 0)
-    {
-        result = VERIFICATION_ERROR_DISK_EMPTY;
-    }
-    else if (disk_size % 512 != 0)
-    {
-        result = VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED;
-    }
-    else
-    {
-        ProtectiveMBR* mbr = (ProtectiveMBR*)disk;
-        MBRPartitionRecord* gpt_partition_record = &mbr->partition_records[0];
-
-        if (mbr->unique_mbr_disk_signature != 0)
-        {
-            result = VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO;
-        }
-        else if (mbr->unknown != 0)
-        {
-            result = VERIFICATION_ERROR_UNKNOWN_NOT_ZERO;
-        }
-        else if (!verify_disk_reserved_partitions_zeroed(mbr))
-        {
-            result = VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED;
-        }
-        else if (mbr->signature[0] != 0x55 || mbr->signature[1] != 0xaa)
-        {
-            result = VERIFICATION_ERROR_MBR_BAD_SIGNATURE;
-        }
-        else if (gpt_partition_record->boot_indicator != 0)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO;
-        }
-        else if (gpt_partition_record->starting_chs != 0x200)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512;
-        }
-        else if (gpt_partition_record->os_type != 0xee)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE;
-        }
-        else if (gpt_partition_record->ending_chs != 0xffffff)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS;
-        }
-        else if (gpt_partition_record->starting_lba != 1)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA;
-        }
-        else if (gpt_partition_record->size_in_lba != 0xffffff)
-        {
-            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA;
-        }
-    }
-
-    return result;
-}
 
 typedef struct FileWriter FileWriter;
 struct FileWriter
@@ -295,146 +174,158 @@ ProcessResult process_arguments(void)
 
 ProcessResult entry_point(void)
 {
+    ProcessResult process_result = PROCESS_RESULT_FAILED;
     Arena* arena = arena_create((ArenaCreation){0});
-    ByteSlice minimal_gpt = file_read(arena, S8("build/minimal_fat32.img"), (FileReadOptions){0});
-    u8* minimal = (u8*)minimal_gpt.pointer;
-    u64 sector_size = 512;
-
-    if (minimal_gpt.length)
-        BUSTER_CHECK(minimal_gpt.length % sector_size == 0);
-
-    u32 gpt_partition_entry_count = 128;
-    u64 expected_size = BUSTER_MB(64);
-
-    u8* mine = (u8*)arena_allocate_bytes(arena, expected_size, sector_size);
-    FileWriter w = file_writer_init(mine, minimal_gpt.length);
-    FileWriter* writer = &w;
-
-    u64 partition_record_count = 4;
-    file_pad(writer, sector_size - (partition_record_count * sizeof(MBRPartitionRecord) + 2));
-    MBRPartitionRecord* mbr_partition_records = file_allocate(writer, MBRPartitionRecord, partition_record_count);
-    u64 size_in_lba_u64_minus_1 = expected_size / sector_size - 1;
-    mbr_partition_records[0] = (MBRPartitionRecord){
-        .boot_indicator = 0,
-        .starting_chs = (u32)sector_size & 0xffffffu,
-        .os_type = 0xee,
-        .ending_chs = 0xffffff,
-        .starting_lba = 1,
-        .size_in_lba = size_in_lba_u64_minus_1 == (u64)(u32)size_in_lba_u64_minus_1 ? (u32)size_in_lba_u64_minus_1 : UINT32_MAX,
-    };
-    file_write_byte(writer, 0x55);
-    file_write_byte(writer, 0xaa);
-
-    GPTHeader* gpt_header = file_allocate(writer, GPTHeader, 1);
-    u64 first_usable_lba = 0x22;
-    *gpt_header = (GPTHeader){
-        .signature = EFI_PART_SIGNATURE,
-        .revision = 0x10000,
-        .header_size = GPT_HEADER_SIZE,
-        .header_crc32 = 0,
-        .reserved0 = 0,
-        .header_lba = 1,
-        .alternate_lba = size_in_lba_u64_minus_1,
-        .first_usable_lba = first_usable_lba,
-        .last_usable_lba = size_in_lba_u64_minus_1 - first_usable_lba + 1,
-        .partition_entry_lba = 2,
-        .partition_entry_count = gpt_partition_entry_count,
-        .partition_entry_size = sizeof(GPTPartitionEntry),
-    };
-    u8 guid[] = {
-        0xEC, 0x5C, 0x76, 0xEE, 0x47, 0x02, 0xCE, 0x4F, 0x90, 0xAA, 0x83, 0x5D, 0x69, 0xE8, 0xB0, 0xE0,
-    };
-    memcpy(gpt_header->disk_guid, guid, sizeof(guid));
-
-    file_align(writer, sector_size);
-
-    GPTPartitionEntry* gpt_partition_entry = file_allocate(writer, GPTPartitionEntry, 1);
-
-    u64 starting_lba = BUSTER_MB(1) / sector_size;
-
-    *gpt_partition_entry = (GPTPartitionEntry){
-        .starting_lba = starting_lba,
-        .ending_lba = 0x1f7ff,
-        .attributes = 0,
-    };
-    printf("ending lba: %llx\n", (unsigned long long)gpt_partition_entry->ending_lba);
-    u8 partition_type_guid[] = {
-        0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
-    };
-    u8 unique_partition_guid[] = {
-        0x23, 0x47, 0xEC, 0x4B, 0x15, 0xC8, 0x01, 0x4F, 0x9A, 0x64, 0xA1, 0xB0, 0x8B, 0x7C, 0xF9, 0xA5,
-    };
-    memcpy(gpt_partition_entry->partition_type_guid, partition_type_guid, sizeof(partition_type_guid));
-    memcpy(gpt_partition_entry->unique_partition_guid, unique_partition_guid, sizeof(unique_partition_guid));
-    bool name = true;
-    if (name)
+    DiskBuilderReferenceResult reference = {.status = DISK_BUILDER_REFERENCE_INVALID_ARGUMENT};
+    bool reference_valid = false;
+    if (arena)
     {
-        char16 partition_name_raw[] = {'b', 'u', 's', 't', 'e', 'r', 0};
-        String16 partition_name = (String16){
-            .pointer = partition_name_raw,
-            .length = BUSTER_ARRAY_LENGTH(partition_name_raw) - 1,
-        };
-        memcpy(gpt_partition_entry->partition_name, partition_name.pointer, partition_name.length * sizeof(char16));
+        reference = disk_builder_reference_read(arena, S8("build/minimal_fat32.img"));
+        reference_valid = disk_builder_reference_is_valid(reference);
     }
-
-    u8* gpt_partition_entry_bytes = &mine[gpt_header->partition_entry_lba * sector_size];
-    gpt_header->partition_entry_crc32 = crc32_compute(gpt_partition_entry_bytes, gpt_header->partition_entry_count * gpt_header->partition_entry_size);
-    gpt_header->header_crc32 = 0;
-    gpt_header->header_crc32 = crc32_compute((u8*)gpt_header, gpt_header->header_size);
-
-    GPTHeader* alternate_gpt_header = (GPTHeader*)&mine[gpt_header->alternate_lba * sector_size];
-    memcpy(alternate_gpt_header, gpt_header, GPT_HEADER_SIZE);
-    alternate_gpt_header->header_lba = gpt_header->alternate_lba;
-    alternate_gpt_header->alternate_lba = gpt_header->header_lba;
-    alternate_gpt_header->partition_entry_lba = gpt_header->last_usable_lba + 1;
-
-    GPTPartitionEntry* alternate_gpt_partition_entry = (GPTPartitionEntry*)&mine[alternate_gpt_header->partition_entry_lba * sector_size];
-    memcpy(alternate_gpt_partition_entry, gpt_partition_entry, sizeof(*gpt_partition_entry));
-    alternate_gpt_header->header_crc32 = 0;
-    alternate_gpt_header->header_crc32 = crc32_compute((u8*)alternate_gpt_header, alternate_gpt_header->header_size);
-
-    u8 fat32_mbr[] = {
-        0xEB, 0x58, 0x90, 0x6D, 0x6B, 0x66, 0x73, 0x2E, 0x66, 0x61, 0x74, 0x00, 0x02, 0x01, 0x20, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x20,
-        0x00, 0x08, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xF0, 0x01, 0x00, 0xD1, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00,
-        0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x29, 0x69, 0xBD, 0x09, 0x23, 0x42, 0x55, 0x53, 0x54,
-        0x45, 0x52, 0x20, 0x20, 0x20, 0x20, 0x20, 0x46, 0x41, 0x54, 0x33, 0x32, 0x20, 0x20, 0x20, 0x0E, 0x1F, 0xBE, 0x77, 0x7C, 0xAC, 0x22, 0xC0, 0x74, 0x0B,
-        0x56, 0xB4, 0x0E, 0xBB, 0x07, 0x00, 0xCD, 0x10, 0x5E, 0xEB, 0xF0, 0x32, 0xE4, 0xCD, 0x16, 0xCD, 0x19, 0xEB, 0xFE, 0x54, 0x68, 0x69, 0x73, 0x20, 0x69,
-        0x73, 0x20, 0x6E, 0x6F, 0x74, 0x20, 0x61, 0x20, 0x62, 0x6F, 0x6F, 0x74, 0x61, 0x62, 0x6C, 0x65, 0x20, 0x64, 0x69, 0x73, 0x6B, 0x2E, 0x20, 0x20, 0x50,
-        0x6C, 0x65, 0x61, 0x73, 0x65, 0x20, 0x69, 0x6E, 0x73, 0x65, 0x72, 0x74, 0x20, 0x61, 0x20, 0x62, 0x6F, 0x6F, 0x74, 0x61, 0x62, 0x6C, 0x65, 0x20, 0x66,
-        0x6C, 0x6F, 0x70, 0x70, 0x79, 0x20, 0x61, 0x6E, 0x64, 0x0D, 0x0A, 0x70, 0x72, 0x65, 0x73, 0x73, 0x20, 0x61, 0x6E, 0x79, 0x20, 0x6B, 0x65, 0x79, 0x20,
-        0x74, 0x6F, 0x20, 0x74, 0x72, 0x79, 0x20, 0x61, 0x67, 0x61, 0x69, 0x6E, 0x20, 0x2E, 0x2E, 0x2E, 0x20, 0x0D, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0xAA,
-    };
-
-    BUSTER_UNUSED(fat32_mbr);
-
-    bool match = true;
-    for (u64 i = 0; i < minimal_gpt.length; i += 1)
+    if (!arena)
     {
-        u8 mine_ch = mine[i];
-        u8 minimal_ch = minimal[i];
-        if (mine_ch != minimal_ch)
+        printf("Failed to create image-builder arena.\n");
+    }
+    else if (!reference_valid)
+    {
+        printf("Reference image rejected: status=%u size=%llu expected=%llu transferred=%llu error=%u cleanup_error=%u\n",
+               (u32)reference.status, (unsigned long long)reference.observed_size,
+               (unsigned long long)DISK_BUILDER_IMAGE_SIZE, (unsigned long long)reference.transferred,
+               reference.error, reference.cleanup_error);
+    }
+    if (arena && reference_valid)
+    {
+        u64 sector_size = DISK_BUILDER_SECTOR_SIZE;
+
+        u32 gpt_partition_entry_count = 128;
+        u64 expected_size = DISK_BUILDER_IMAGE_SIZE;
+
+        u8* mine = (u8*)arena_allocate_bytes(arena, expected_size, sector_size);
+        if (!mine)
         {
-            match = false;
-            printf("Failed to match character at [%llu]. Original: %x. Mine: %x\n", (unsigned long long)i, minimal_ch, mine_ch);
-            break;
+            printf("Failed to allocate 64 MiB output image.\n");
+        }
+        else
+        {
+            FileWriter w = file_writer_init(mine, expected_size);
+            FileWriter* writer = &w;
+
+            u64 partition_record_count = 4;
+            file_pad(writer, sector_size - (partition_record_count * sizeof(MBRPartitionRecord) + 2));
+            MBRPartitionRecord* mbr_partition_records = file_allocate(writer, MBRPartitionRecord, partition_record_count);
+            memset(mbr_partition_records, 0, partition_record_count * sizeof(*mbr_partition_records));
+            u64 size_in_lba_u64_minus_1 = expected_size / sector_size - 1;
+            disk_builder_mbr_write_u24_le(mbr_partition_records[0].starting_chs, (u32)sector_size);
+            mbr_partition_records[0].os_type = 0xee;
+            disk_builder_mbr_write_u24_le(mbr_partition_records[0].ending_chs, 0xffffff);
+            disk_builder_mbr_write_u32_le(mbr_partition_records[0].starting_lba, 1);
+            disk_builder_mbr_write_u32_le(
+                mbr_partition_records[0].size_in_lba,
+                disk_builder_protective_mbr_size_in_lba(expected_size));
+            file_write_byte(writer, 0x55);
+            file_write_byte(writer, 0xaa);
+
+            GPTHeader* gpt_header = file_allocate(writer, GPTHeader, 1);
+            u64 first_usable_lba = 0x22;
+            *gpt_header = (GPTHeader){
+                .signature = EFI_PART_SIGNATURE,
+                .revision = 0x10000,
+                .header_size = GPT_HEADER_SIZE,
+                .header_crc32 = 0,
+                .reserved0 = 0,
+                .header_lba = 1,
+                .alternate_lba = size_in_lba_u64_minus_1,
+                .first_usable_lba = first_usable_lba,
+                .last_usable_lba = size_in_lba_u64_minus_1 - first_usable_lba + 1,
+                .partition_entry_lba = 2,
+                .partition_entry_count = gpt_partition_entry_count,
+                .partition_entry_size = sizeof(GPTPartitionEntry),
+            };
+            u8 guid[] = {
+                0xEC, 0x5C, 0x76, 0xEE, 0x47, 0x02, 0xCE, 0x4F, 0x90, 0xAA, 0x83, 0x5D, 0x69, 0xE8, 0xB0, 0xE0,
+            };
+            memcpy(gpt_header->disk_guid, guid, sizeof(guid));
+
+            file_align(writer, sector_size);
+
+            GPTPartitionEntry* gpt_partition_entry = file_allocate(writer, GPTPartitionEntry, 1);
+
+            u64 starting_lba = BUSTER_MB(1) / sector_size;
+
+            *gpt_partition_entry = (GPTPartitionEntry){
+                .starting_lba = starting_lba,
+                .ending_lba = 0x1f7ff,
+                .attributes = 0,
+            };
+            printf("ending lba: %llx\n", (unsigned long long)gpt_partition_entry->ending_lba);
+            u8 partition_type_guid[] = {
+                0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
+            };
+            u8 unique_partition_guid[] = {
+                0x23, 0x47, 0xEC, 0x4B, 0x15, 0xC8, 0x01, 0x4F, 0x9A, 0x64, 0xA1, 0xB0, 0x8B, 0x7C, 0xF9, 0xA5,
+            };
+            memcpy(gpt_partition_entry->partition_type_guid, partition_type_guid, sizeof(partition_type_guid));
+            memcpy(gpt_partition_entry->unique_partition_guid, unique_partition_guid, sizeof(unique_partition_guid));
+            bool name = true;
+            if (name)
+            {
+                char16 partition_name_raw[] = {'b', 'u', 's', 't', 'e', 'r', 0};
+                String16 partition_name = (String16){
+                    .pointer = partition_name_raw,
+                    .length = BUSTER_ARRAY_LENGTH(partition_name_raw) - 1,
+                };
+                memcpy(gpt_partition_entry->partition_name, partition_name.pointer, partition_name.length * sizeof(char16));
+            }
+
+            u8* gpt_partition_entry_bytes = &mine[gpt_header->partition_entry_lba * sector_size];
+            gpt_header->partition_entry_crc32 = crc32_compute(gpt_partition_entry_bytes, gpt_header->partition_entry_count * gpt_header->partition_entry_size);
+            gpt_header->header_crc32 = 0;
+            gpt_header->header_crc32 = crc32_compute((u8*)gpt_header, gpt_header->header_size);
+
+            GPTHeader* alternate_gpt_header = (GPTHeader*)&mine[gpt_header->alternate_lba * sector_size];
+            memcpy(alternate_gpt_header, gpt_header, GPT_HEADER_SIZE);
+            alternate_gpt_header->header_lba = gpt_header->alternate_lba;
+            alternate_gpt_header->alternate_lba = gpt_header->header_lba;
+            alternate_gpt_header->partition_entry_lba = gpt_header->last_usable_lba + 1;
+
+            GPTPartitionEntry* alternate_gpt_partition_entry = (GPTPartitionEntry*)&mine[alternate_gpt_header->partition_entry_lba * sector_size];
+            memcpy(alternate_gpt_partition_entry, gpt_partition_entry, sizeof(*gpt_partition_entry));
+            alternate_gpt_header->header_crc32 = 0;
+            alternate_gpt_header->header_crc32 = crc32_compute((u8*)alternate_gpt_header, alternate_gpt_header->header_size);
+
+            u8 fat32_mbr[] = {
+                0xEB, 0x58, 0x90, 0x6D, 0x6B, 0x66, 0x73, 0x2E, 0x66, 0x61, 0x74, 0x00, 0x02, 0x01, 0x20, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x20,
+                0x00, 0x08, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xF0, 0x01, 0x00, 0xD1, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00,
+                0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x29, 0x69, 0xBD, 0x09, 0x23, 0x42, 0x55, 0x53, 0x54,
+                0x45, 0x52, 0x20, 0x20, 0x20, 0x20, 0x20, 0x46, 0x41, 0x54, 0x33, 0x32, 0x20, 0x20, 0x20, 0x0E, 0x1F, 0xBE, 0x77, 0x7C, 0xAC, 0x22, 0xC0, 0x74, 0x0B,
+                0x56, 0xB4, 0x0E, 0xBB, 0x07, 0x00, 0xCD, 0x10, 0x5E, 0xEB, 0xF0, 0x32, 0xE4, 0xCD, 0x16, 0xCD, 0x19, 0xEB, 0xFE, 0x54, 0x68, 0x69, 0x73, 0x20, 0x69,
+                0x73, 0x20, 0x6E, 0x6F, 0x74, 0x20, 0x61, 0x20, 0x62, 0x6F, 0x6F, 0x74, 0x61, 0x62, 0x6C, 0x65, 0x20, 0x64, 0x69, 0x73, 0x6B, 0x2E, 0x20, 0x20, 0x50,
+                0x6C, 0x65, 0x61, 0x73, 0x65, 0x20, 0x69, 0x6E, 0x73, 0x65, 0x72, 0x74, 0x20, 0x61, 0x20, 0x62, 0x6F, 0x6F, 0x74, 0x61, 0x62, 0x6C, 0x65, 0x20, 0x66,
+                0x6C, 0x6F, 0x70, 0x70, 0x79, 0x20, 0x61, 0x6E, 0x64, 0x0D, 0x0A, 0x70, 0x72, 0x65, 0x73, 0x73, 0x20, 0x61, 0x6E, 0x79, 0x20, 0x6B, 0x65, 0x79, 0x20,
+                0x74, 0x6F, 0x20, 0x74, 0x72, 0x79, 0x20, 0x61, 0x67, 0x61, 0x69, 0x6E, 0x20, 0x2E, 0x2E, 0x2E, 0x20, 0x0D, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0xAA,
+            };
+
+            BUSTER_UNUSED(fat32_mbr);
+
+            bool match = false;
+            bool complete = disk_builder_reference_compare_and_publish(
+                reference, (ByteSlice){.pointer = mine, .length = expected_size}, S8("build/mine.img"), &match);
+            printf("MATCH: %s\n", match ? "TRUE" : "FALSE");
+            process_result = complete ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
         }
     }
-
-    printf("MATCH: %s\n", match ? "TRUE" : "FALSE");
-
-    bool written = file_write(S8("build/mine.img"), (ByteSlice){.pointer = mine, .length = minimal_gpt.length});
-
-    return (match && written) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return process_result;
 }

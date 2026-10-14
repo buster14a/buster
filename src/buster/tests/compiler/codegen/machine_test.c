@@ -10505,9 +10505,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitT
         for (u32 slot = 0; slot < MACHINE_INSTRUCTION_OPERAND_COUNT; slot += 1)
         {
             u32 role = slot < info->operand_count ? info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u) : MACHINE_OPERAND_ROLE_NONE;
-            u32 uses = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
-            u32 define_only = (row.role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u;
-            u32 use_define = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u;
+            u32 uses = ((u32)row.role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
+            u32 define_only = ((u32)row.role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u;
+            u32 use_define = ((u32)row.role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u;
             projection_exact &= uses == (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
             projection_exact &= (define_only | use_define) == (u32)(role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
             projection_exact &= !(define_only && use_define);
@@ -13859,9 +13859,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                             atomic_store16_short_call((_Atomic unsigned __int128*)atomic_store16_short_cell, atomic_store16_value);
                             for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
                             {
-                                unsigned char expected_byte = byte_index < short_size
-                                    ? (unsigned char)(atomic_store16_value >> (byte_index * 8u))
-                                    : 0;
+                                unsigned char expected_byte = (unsigned char)(byte_index < short_size
+                                    ? atomic_store16_value >> (byte_index * 8u)
+                                    : 0);
                                 atomic_store16_short_bytes_match &= atomic_store16_short_cell[byte_index] == expected_byte;
                             }
                         }

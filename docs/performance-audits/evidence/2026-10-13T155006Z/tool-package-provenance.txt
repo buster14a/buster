@@ -1,0 +1,46 @@
+Installed From  : extra
+Name            : perf
+Version         : 7.2.10-1
+Description     : Linux kernel performance auditing tool
+Architecture    : x86_64
+URL             : https://www.kernel.org
+Licenses        : GPL-2.0-only
+Groups          : linux-tools
+Provides        : None
+Depends On      : glibc  perl  python  slang  elfutils  libunwind  binutils  numactl  audit  coreutils  glib2  xz  zlib  libelf  bash  zstd  libcap  libtraceevent  openssl  libsframe.so  llvm-libs  libpfm
+Optional Deps   : None
+Required By     : None
+Optional For    : None
+Conflicts With  : None
+Replaces        : None
+Installed Size  : 24.45 MiB
+Packager        : Christian Heusel <gromit@archlinux.org>
+Build Date      : Mon Oct 12 12:07:21 2026
+Install Date    : Tue Oct 13 09:28:41 2026
+Install Reason  : Explicitly installed
+Install Script  : No
+Validated By    : Signature
+
+Installed From  : extra
+Name            : strace
+Version         : 7.2-1
+Description     : A diagnostic, debugging and instructional userspace tracer
+Architecture    : x86_64
+URL             : https://strace.io/
+Licenses        : LGPL-2.1-or-later
+Groups          : None
+Provides        : None
+Depends On      : glibc  libunwind
+Optional Deps   : None
+Required By     : None
+Optional For    : htop
+Conflicts With  : None
+Replaces        : None
+Installed Size  : 1689.90 KiB
+Packager        : Carl Smedstad <carsme@archlinux.org>
+Build Date      : Mon Sep  7 08:32:48 2026
+Install Date    : Sun Sep 27 20:37:47 2026
+Install Reason  : Explicitly installed
+Install Script  : No
+Validated By    : Signature
+

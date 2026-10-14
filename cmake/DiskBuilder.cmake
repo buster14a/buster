@@ -14,7 +14,8 @@ if (BUSTER_LINK_LIBC AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUSTER_FUZZ_
         set(BUSTER_DISK_BUILDER_ARCHITECTURE_MODULE x86_64)
     endif()
     executable_add(disk_builder OFF src/buster/apps/disk_builder.c
-        MODULES os entry_point arena integer string file hash time float target ${BUSTER_DISK_BUILDER_ARCHITECTURE_MODULE})
+        MODULES os entry_point arena integer string file hash time float target ${BUSTER_DISK_BUILDER_ARCHITECTURE_MODULE}
+        SOURCES src/buster/apps/disk_builder_verification.c)
     if (UNIX)
         target_link_libraries(disk_builder PRIVATE m)
     endif()
