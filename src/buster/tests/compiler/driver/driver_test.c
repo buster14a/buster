@@ -36176,6 +36176,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_resource_field(String8 text, Strin
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_resource_wait_clean(ProcessWaitResult wait)
+{
+    bool result = wait.result != PROCESS_RESULT_NOT_EXISTENT && !wait.timed_out && !wait.termination_requested && !wait.forcibly_terminated &&
+                  !wait.capture_failed && !wait.output_truncated && !wait.capture_limit_exceeded && !wait.process_tree_cleanup_failed &&
+                  !wait.process_group_reservation_retained && !wait.process_group_ownership_lost && !wait.cleanup_error.v && !wait.pending_windows_owner_id;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessWaitResult compiler_driver_test_resource_child(Arena* arena, String8 library, u64 limit, SliceString8 command)
 {
     SliceString8 inherited_keys = program_state->input.environment_keys;
@@ -36195,7 +36203,10 @@ BUSTER_GLOBAL_LOCAL ProcessWaitResult compiler_driver_test_resource_child(Arena*
         }
     }
     ProcessSpawnResult child = os_process_spawn(command, (SliceString8){keys, count}, (SliceString8){values, count},
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1});
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1,
+                              .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64), [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                                                 .total = BUSTER_KB(128)},
+                              .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
     ProcessWaitResult result = {.result = PROCESS_RESULT_NOT_EXISTENT};
     if (child.handle) result = os_process_wait_deadline(arena, child, 30000000);
     return result;
@@ -36224,10 +36235,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_limit(UnitTestAr
         "__attribute__((constructor)) static void begin(void) { const char *s=getenv(\"BUSTER_DRIVER_RLIMIT_AS\");\n"
         " if(s) { char *end=0; errno=0; unsigned long long n=strtoull(s,&end,10); struct rlimit r={0};\n"
         " int ok=!errno && end!=s && !*end && getrlimit(RLIMIT_AS,&r)==0;\n"
-        " if(n) { ok=ok && (unsigned long long)(rlim_t)n==n && (r.rlim_max==RLIM_INFINITY || (rlim_t)n<=r.rlim_max);\n"
-        " if(ok) { r.rlim_cur=(rlim_t)n; ok=setrlimit(RLIMIT_AS,&r)==0; } }\n"
-        " if(ok) ok=getrlimit(RLIMIT_AS,&r)==0 && (!n || (unsigned long long)r.rlim_cur==n);\n"
-        " fprintf(stderr,\"BUSTER_RLIMIT_AS baseline_bytes=%llu requested_bytes=%llu applied_bytes=%llu applied=%d\\n\",vm(0),n,(unsigned long long)r.rlim_cur,ok);\n"
+        " if(n) ok=ok && (unsigned long long)(rlim_t)n==n && (r.rlim_max==RLIM_INFINITY || (rlim_t)n<=r.rlim_max);\n"
+        " else ok=ok && r.rlim_max==RLIM_INFINITY;\n"
+        " if(ok) { r.rlim_cur=n?(rlim_t)n:RLIM_INFINITY; ok=setrlimit(RLIMIT_AS,&r)==0; }\n"
+        " if(ok) ok=getrlimit(RLIMIT_AS,&r)==0 && r.rlim_cur==(n?(rlim_t)n:RLIM_INFINITY);\n"
+        " fprintf(stderr,\"BUSTER_RLIMIT_AS baseline_bytes=%llu requested_bytes=%llu applied_bytes=%llu hard_bytes=%llu applied=%d\\n\",vm(0),n,(unsigned long long)r.rlim_cur,(unsigned long long)r.rlim_max,ok);\n"
         " if(!ok) _exit(125); ready=1; } }\n"
         "__attribute__((destructor)) static void finish(void) { if(ready) fprintf(stderr,\"BUSTER_RLIMIT_VM peak_bytes=%llu\\n\",vm(1)); }\n");
     bool written = file_write(observer_source, BUSTER_SLICE_TO_BYTE_SLICE(observer_text)) &&
@@ -36242,12 +36254,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_limit(UnitTestAr
         host[count++] = observer_source; host[count++] = S8("-o"); host[count++] = observer;
         ProcessSpawnResult built = os_process_spawn((SliceString8){host, count}, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                  .use_process_environment = 1, .search_path = 1});
+                                  .use_process_environment = 1, .search_path = 1, .new_process_group = 1,
+                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64), [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                                                     .total = BUSTER_KB(128)},
+                                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
         ProcessWaitResult build = {.result = PROCESS_RESULT_NOT_EXISTENT};
         if (built.handle) build = os_process_wait_deadline(arena, built, 30000000);
-        BUSTER_TEST_RAW(arguments, !build.timed_out && build.result == PROCESS_RESULT_SUCCESS,
-                        BYTE_SLICE_TO_STRING(8, build.streams[STANDARD_STREAM_ERROR]));
-        if (BUSTER_REQUIRE(arguments, !build.timed_out && build.result == PROCESS_RESULT_SUCCESS))
+        bool build_ready = compiler_driver_test_resource_wait_clean(build) && build.result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST_RAW(arguments, build_ready, BYTE_SLICE_TO_STRING(8, build.streams[STANDARD_STREAM_ERROR]));
+        if (BUSTER_REQUIRE(arguments, build_ready))
         {
             String8 metrics_option = string_format(arena, S8("-fmetrics-out={S8}"), metrics);
             String8 single[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-g0"), S8("-nostdinc"),
@@ -36255,8 +36270,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_limit(UnitTestAr
             ProcessWaitResult measured = compiler_driver_test_resource_child(arena, observer, 0, (SliceString8)BUSTER_ARRAY_TO_SLICE(single));
             String8 measured_error = BYTE_SLICE_TO_STRING(8, measured.streams[STANDARD_STREAM_ERROR]);
             u64 peak = 0;
-            bool observed = compiler_driver_test_resource_field(measured_error, S8("BUSTER_RLIMIT_VM peak_bytes="), &peak);
-            BUSTER_TEST_RAW(arguments, !measured.timed_out && measured.result == PROCESS_RESULT_SUCCESS && observed && peak, measured_error);
+            bool observed = compiler_driver_test_resource_wait_clean(measured) && measured.result == PROCESS_RESULT_SUCCESS &&
+                            compiler_driver_test_resource_field(measured_error, S8("BUSTER_RLIMIT_VM peak_bytes="), &peak);
+            BUSTER_TEST_RAW(arguments, observed && peak, measured_error);
             ByteSlice single_reference = file_read(arena, output, (FileReadOptions){0});
             // One copy of the named preprocessing token-stream reservation is
             // slack for ASLR/setup variation; it is smaller than another TU.
@@ -36266,16 +36282,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_limit(UnitTestAr
             u64 limit = limit_valid ? peak + slack : 0;
             if (BUSTER_REQUIRE(arguments, limit_valid && single_reference.pointer && single_reference.length))
             {
-                ProcessWaitResult finite_single = compiler_driver_test_resource_child(arena, observer, limit, (SliceString8)BUSTER_ARRAY_TO_SLICE(single));
+                bool single_removed = os_file_delete(output);
+                BUSTER_TEST(arguments, single_removed);
+                ProcessWaitResult finite_single = single_removed ? compiler_driver_test_resource_child(arena, observer, limit, (SliceString8)BUSTER_ARRAY_TO_SLICE(single)) :
+                                                                  (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
                 String8 finite_error = BYTE_SLICE_TO_STRING(8, finite_single.streams[STANDARD_STREAM_ERROR]);
                 u64 applied = 0;
-                BUSTER_TEST_RAW(arguments, !finite_single.timed_out && finite_single.result == PROCESS_RESULT_SUCCESS &&
-                    compiler_driver_test_resource_field(finite_error, S8("applied_bytes="), &applied) && applied == limit, finite_error);
+                bool finite_single_ready = compiler_driver_test_resource_wait_clean(finite_single) && finite_single.result == PROCESS_RESULT_SUCCESS &&
+                    compiler_driver_test_resource_field(finite_error, S8("applied_bytes="), &applied) && applied == limit;
+                BUSTER_TEST_RAW(arguments, finite_single_ready, finite_error);
                 ByteSlice finite_object = file_read(arena, output, (FileReadOptions){0});
                 BUSTER_TEST(arguments, finite_object.length == single_reference.length &&
                     finite_object.pointer && memory_compare(finite_object.pointer, single_reference.pointer, single_reference.length));
                 ByteSlice reference = {0};
-                for (u32 mode = 0; mode < 4; mode += 1)
+                bool admission = finite_single_ready;
+                for (u32 mode = 0; mode < 4 && admission; mode += 1)
                 {
                     bool finite = mode >= 2;
                     String8 jobs = mode & 1 ? S8("-fcompile-jobs=2") : S8("-fcompile-jobs=1");
@@ -36287,16 +36308,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_limit(UnitTestAr
                     String8 error = BYTE_SLICE_TO_STRING(8, child.streams[STANDARD_STREAM_ERROR]);
                     String8 records = BYTE_SLICE_TO_STRING(8, file_read(arena, metrics, (FileReadOptions){0}));
                     ByteSlice image = file_read(arena, output, (FileReadOptions){0});
-                    bool success = !child.timed_out && child.result == PROCESS_RESULT_SUCCESS;
+                    admission = compiler_driver_test_resource_wait_clean(child);
+                    BUSTER_TEST_RAW(arguments, admission, error);
+                    bool success = admission && child.result == PROCESS_RESULT_SUCCESS;
                     if (!finite) BUSTER_TEST_RAW(arguments, success, error);
                     if (finite)
                     {
                         applied = 0;
-                        BUSTER_TEST_RAW(arguments, !child.timed_out &&
+                        BUSTER_TEST_RAW(arguments, admission &&
                             compiler_driver_test_resource_field(error, S8("applied_bytes="), &applied) && applied == limit, error);
                     }
                     if (success)
                     {
+                        BUSTER_TEST(arguments, image.pointer && image.length && !string_equal(BYTE_SLICE_TO_STRING(8, image), sentinel));
                         BUSTER_TEST(arguments, string_first_sequence(records, S8("status=ok")) != BUSTER_STRING_NO_MATCH);
                         if (!mode) reference = image;
                         else BUSTER_TEST(arguments, reference.pointer && image.pointer && image.length == reference.length &&
@@ -36305,7 +36329,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_limit(UnitTestAr
                     else if (finite)
                     {
                         u64 requested = 0;
-                        BUSTER_TEST_RAW(arguments, child.result == PROCESS_RESULT_FAILED &&
+                        BUSTER_TEST_RAW(arguments, admission && child.result == PROCESS_RESULT_FAILED &&
+                            WIFEXITED((int)child.platform_status) && WEXITSTATUS((int)child.platform_status) == 1 &&
                             compiler_driver_test_resource_field(error, S8("could not reserve "), &requested) && requested, error);
                         BUSTER_TEST_RAW(arguments, string_first_sequence(records, S8("status=failed error=driver.resource")) != BUSTER_STRING_NO_MATCH &&
                             string_first_sequence(records, S8("diagnostic_code_hex=6472697665722e7265736f75726365")) != BUSTER_STRING_NO_MATCH, records);
