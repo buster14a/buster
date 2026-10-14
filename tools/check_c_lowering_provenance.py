@@ -160,7 +160,13 @@ def violations(source: str) -> list[Token]:
                 while cursor < len(lexed) and lexed[cursor].spelling not in {";", ",", "{"}:
                     rhs.append(lexed[cursor].spelling)
                     cursor += 1
-                if any(word in aliases for word in rhs) and lexed[index - 1].spelling not in aliases:
+                # An API that reads preprocessing provenance does not return
+                # the preprocessing object. Propagate direct value/pointer
+                # copies only, rather than tainting unrelated return values
+                # and then every same-named local in the translation unit.
+                copied = [word for word in rhs if word not in {"(", ")", "&", "*"}]
+                copy = len(copied) == 1 and copied[0] in aliases
+                if copy and lexed[index - 1].spelling not in aliases:
                     aliases.add(lexed[index - 1].spelling)
                     changed = True
     result = []
@@ -197,7 +203,7 @@ def violations(source: str) -> list[Token]:
             # alias (or its syntax_tree field), so the immediate receiver
             # must be that alias. More elaborate expressions first bind an
             # explicit CAst pointer, keeping the boundary reviewable.
-            forbidden |= any(name in aliases for name in owner) or not owner or owner[0] not in ast_aliases
+            forbidden |= not owner or owner[0] in aliases or owner[0] not in ast_aliases
         if forbidden:
             result.append(token)
     return result

@@ -16,6 +16,9 @@ class LoweringProvenanceTests(unittest.TestCase):
             CSourceAnchor anchor = c_source_anchor_at(&builder->preprocess, ast->tokens[node]);
             String8 text = c_source_anchor_spelling(&builder->preprocess, anchor);
             IrSourceRange source = {.offset = anchor.offset, .length = anchor.length};
+            CPreprocessResult const* source_view = &builder->preprocess;
+            u32 selected = source_view ? ast->tokens[node] : 0;
+            u32 other = c_source_anchor_spelling(source_view, anchor).length ? ast->tokens[node] : selected;
             CType const* type = parse->types + facts->types[node];
             if (type->kind == C_TYPE_POINTER) use(type->element_type);
         '''

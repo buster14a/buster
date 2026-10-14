@@ -12,9 +12,9 @@ BUSTER_C_INTERNAL CVendorBuiltinBudget c_ir_sse2_runtime_shift_budget(String8 na
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_sse2_runtime_shift(CIntegerIrBuilder* builder,
                                                         CIrSse2ImmediateShiftBuiltin entry,
-                                                        IrValueId input, IrValueId count, CToken token)
+                                                        IrValueId input, IrValueId count, CSourceAnchor token)
 {
-    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrSourceRange source = c_ir_anchor_source_range(builder, token);
     IrValueId result = IR_VALUE_ID_INVALID;
     bool arithmetic = entry.operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT;
     bool logical = entry.operation == IR_BINARY_VECTOR_SHIFT_LEFT || entry.operation == IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT;
