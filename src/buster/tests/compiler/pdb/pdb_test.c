@@ -1220,6 +1220,7 @@ typedef DWORD (WINAPI PdbTestSymGetOptions)(void);
 typedef DWORD (WINAPI PdbTestSymSetOptions)(DWORD);
 typedef DWORD64 (WINAPI PdbTestSymLoadModule)(HANDLE, HANDLE, PCWSTR, PCWSTR, DWORD64, DWORD, PMODLOAD_DATA, DWORD);
 typedef BOOL (WINAPI PdbTestSymFromName)(HANDLE, PCWSTR, PSYMBOL_INFOW);
+typedef BOOL (WINAPI PdbTestSymGetModuleInfo)(HANDLE, DWORD64, PIMAGEHLP_MODULEW64);
 
 typedef union PdbTestDbghelpProcedure PdbTestDbghelpProcedure;
 union PdbTestDbghelpProcedure
@@ -1231,7 +1232,20 @@ union PdbTestDbghelpProcedure
     PdbTestSymSetOptions* set_options;
     PdbTestSymLoadModule* load_module;
     PdbTestSymFromName* from_name;
+    PdbTestSymGetModuleInfo* get_module_info;
 };
+#endif
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL String8 pdb_test_reader_wide_text(Arena* arena, WCHAR const* text, u32 capacity)
+{
+    u32 length = 0;
+    while (length < capacity && text[length])
+    {
+        length += 1;
+    }
+    return string8_from_string16(arena, (String16){.pointer = (char16*)text, .length = length}, false);
+}
 #endif
 
 // This diagnostic reports every collision lookup, including misses. Positive
@@ -1258,8 +1272,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
         PdbTestDbghelpProcedure set_options = {.procedure = GetProcAddress(library, "SymSetOptions")};
         PdbTestDbghelpProcedure load_module = {.procedure = GetProcAddress(library, "SymLoadModuleExW")};
         PdbTestDbghelpProcedure from_name = {.procedure = GetProcAddress(library, "SymFromNameW")};
+        PdbTestDbghelpProcedure get_module_info = {.procedure = GetProcAddress(library, "SymGetModuleInfoW64")};
         bool exports = initialize.initialize && cleanup.cleanup && get_options.get_options && set_options.set_options &&
-                       load_module.load_module && from_name.from_name;
+                       load_module.load_module && from_name.from_name && get_module_info.get_module_info;
         if (BUSTER_REQUIRE(arguments, exports))
         {
             String8 path = buster_test_temporary_path(arguments->arena, S8("buster-mixed-gsi"), S8(".pdb"));
@@ -1280,12 +1295,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                     if (BUSTER_REQUIRE(arguments, initialized != 0))
                     {
                         DWORD64 requested_base = UINT64_C(0x10000000);
-                        DWORD64 base = load_module.load_module(session, 0, path_wide.pointer, 0, requested_base, 0x2000, 0, 0);
+                        String16 module_name = string16_from_string8(arguments->arena, S8("mixed"), true);
+                        DWORD64 base = load_module.load_module(session, 0, path_wide.pointer, module_name.pointer, requested_base, 0x2000, 0, 0);
                         DWORD load_error = base ? 0 : GetLastError();
-                        arguments->show(arguments, S8("PDB_GSI_LOOKUP loaded={u32} base={u64} error={u32}\n"),
+                        arguments->show(arguments, S8("PDB_GSI_LOOKUP registered={u32} base={u64} error={u32}\n"),
                                         (u32)(base != 0), (u64)base, (u32)load_error);
                         if (BUSTER_REQUIRE(arguments, base == requested_base))
                         {
+                            IMAGEHLP_MODULEW64 info = {.SizeOfStruct = (DWORD)sizeof(IMAGEHLP_MODULEW64)};
+                            BOOL info_ok = get_module_info.get_module_info(session, base, &info);
+                            DWORD info_error = info_ok ? 0 : GetLastError();
+                            String8 info_name = pdb_test_reader_wide_text(arguments->arena, info.ModuleName, BUSTER_ARRAY_LENGTH(info.ModuleName));
+                            String8 image_name = pdb_test_reader_wide_text(arguments->arena, info.ImageName, BUSTER_ARRAY_LENGTH(info.ImageName));
+                            String8 pdb_name = pdb_test_reader_wide_text(arguments->arena, info.LoadedPdbName, BUSTER_ARRAY_LENGTH(info.LoadedPdbName));
+                            arguments->show(arguments,
+                                S8("PDB_GSI_MODULE info={u32} sym_type={u32} symbols={u32} module={S8} image={S8} pdb={S8} pdb_unmatched={u32} dbg_unmatched={u32} error={u32}\n"),
+                                (u32)(info_ok != 0), (u32)info.SymType, (u32)info.NumSyms, info_name, image_name, pdb_name,
+                                (u32)(info.PdbUnmatched != 0), (u32)(info.DbgUnmatched != 0), (u32)info_error);
+                            BUSTER_TEST(arguments, info_ok && info.SymType == SymPdb);
                             u32 missing = 0;
                             for (u32 index = 0; index < names.length; index += 1)
                             {
@@ -1294,7 +1321,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                 PSYMBOL_INFOW symbol = (PSYMBOL_INFOW)arena_allocate_zeroed_bytes(arguments->arena, symbol_bytes, BUSTER_ALIGN_OF(SYMBOL_INFOW));
                                 symbol->SizeOfStruct = (ULONG)sizeof(SYMBOL_INFOW);
                                 symbol->MaxNameLen = 64;
-                                BOOL found = from_name.from_name(session, query.pointer, symbol);
+                                BOOL bare_found = from_name.from_name(session, query.pointer, symbol);
+                                DWORD bare_error = bare_found ? 0 : GetLastError();
+                                String8 qualified = string_format(arguments->arena, S8("mixed!{S8}"), names.pointer[index]);
+                                String16 qualified_query = string16_from_string8(arguments->arena, qualified, true);
+                                memset(symbol, 0, symbol_bytes);
+                                symbol->SizeOfStruct = (ULONG)sizeof(SYMBOL_INFOW);
+                                symbol->MaxNameLen = 64;
+                                BOOL found = from_name.from_name(session, qualified_query.pointer, symbol);
                                 DWORD lookup_error = found ? 0 : GetLastError();
                                 u64 expected_address = (u64)base + 0x1000 + (u64)index * 4;
                                 bool exact = found && symbol->NameLen == query.length &&
@@ -1302,9 +1336,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                              symbol->Address == expected_address;
                                 missing += !found;
                                 arguments->show(arguments,
-                                    S8("PDB_GSI_LOOKUP permutation={u32} count={u64} index={S8} name={S8} found={u32} exact={u32} address={u64} expected={u64} error={u32}\n"),
+                                    S8("PDB_GSI_LOOKUP permutation={u32} count={u64} index={S8} name={S8} bare_found={u32} bare_error={u32} qualified=1 found={u32} exact={u32} address={u64} expected={u64} error={u32}\n"),
                                     permutation, names.length, publics_only ? S8("publics") : S8("globals"), names.pointer[index],
-                                    (u32)(found != 0), (u32)exact, found ? (u64)symbol->Address : 0, expected_address, (u32)lookup_error);
+                                    (u32)(bare_found != 0), (u32)bare_error, (u32)(found != 0), (u32)exact, found ? (u64)symbol->Address : 0, expected_address, (u32)lookup_error);
                                 BUSTER_TEST(arguments, !found || exact);
                                 // The final two names are isolated ASCII and
                                 // UTF-8 controls, so a broken provider or name
