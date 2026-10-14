@@ -875,7 +875,17 @@ incomplete or refused; `preflight` exits 3 when the tool cannot run here.
   below the effect is `within-effect`, and anything else is `inconclusive`.
   `time` records wall, user and system time, peak RSS, faults and context
   switches through `wait4`, which includes reaped descendants. `perf-stat`
-  records each event's scope, and refuses an event that is unsupported, not
+  accepts event names with optional `:u` (user) or `:k` (kernel) scope.
+  An explicit scope matches only that scope; an unqualified request accepts
+  a single observed scope, which must remain the same across every run and
+  both arms. The receipt retains the requested spelling in the metric name
+  and the observed scope in its `scope` field (`unqualified`, `u`, or `k`).
+  Other modifier combinations or event syntax are refused before any run;
+  ambiguous matching counters are missing. A comparison must select one
+  primary scope (`instructions` for work reduction, `task-clock` for native
+  runtime); multiple primary scopes leave the result incomplete. A scoped
+  result establishes only the selected scope. `perf-stat` refuses an event
+  that is unsupported, not
   counted, or ran less than 50% of the time. A multiplexed event is marked.
   Denied counters are reported as denied; do not weaken host security to
   get them.
