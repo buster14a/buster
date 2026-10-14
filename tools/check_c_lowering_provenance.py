@@ -129,7 +129,7 @@ def splice_lines(source: str) -> tuple[str, list[int]]:
     return "".join(pieces), positions
 
 
-def include_names(source: str) -> list[str]:
+def include_names(source: str) -> list[tuple[str, bool]]:
     source, _ = splice_lines(source)
     pieces = []
     previous = 0
@@ -137,10 +137,19 @@ def include_names(source: str) -> list[str]:
         word = match.group()
         if word.startswith(("//", "/*")):
             pieces.append(source[previous:match.start()])
-            pieces.append("\n" * word.count("\n"))
+            pieces.append(" " + "\n" * word.count("\n"))
             previous = match.end()
     pieces.append(source[previous:])
-    return re.findall(r'^\s*#\s*include\s*"([^"\n]+\.c)"', "".join(pieces), re.MULTILINE)
+    result = []
+    for match in re.finditer(r"^[ \t]*#[ \t]*(include(?:_next)?)\b([^\n]*)", "".join(pieces), re.MULTILINE):
+        operand = match.group(2).strip()
+        included = re.fullmatch(r'"([^"\n]+)"|<([^>\n]+)>', operand)
+        if match.group(1) != "include" or not included:
+            raise ValueError(f"lowering includes require a literal quoted or angle path: #{match.group(1)} {operand}")
+        name = included.group(1) or included.group(2)
+        if name.endswith(".c"):
+            result.append((name, included.group(2) is not None))
+    return result
 
 
 def violations(source: str) -> list[Token]:
@@ -216,7 +225,7 @@ def violations(source: str) -> list[Token]:
 
 
 def lowering_sources(root: Path) -> list[Path]:
-    directory = root / "src/buster/lib/compiler/frontend/c"
+    directory = (root / "src/buster/lib/compiler/frontend/c").resolve()
     # The semantic vendor metadata module is compiled independently. The
     # lowering boundary includes every implementation c_gen incorporates,
     # following nested includes too, rather than guessing from filename stems.
@@ -229,9 +238,10 @@ def lowering_sources(root: Path) -> list[Path]:
             seen.add(path)
             result.append(path)
             source = path.read_text(encoding="utf-8")
-            for name in include_names(source):
-                included = (path.parent / name).resolve()
-                if not included.is_relative_to(directory.resolve()):
+            for name, src_relative in include_names(source):
+                # Repository angle includes use src/, quoted ones the owning file.
+                included = ((root / "src" if src_relative else path.parent) / name).resolve()
+                if not included.is_relative_to(directory):
                     raise ValueError(f"lowering include escapes its frontend boundary: {included}")
                 pending.append(included)
     return sorted(result)
@@ -242,14 +252,19 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     failures = 0
-    sources = lowering_sources(args.root)
-    for path in sources:
-        found = violations(path.read_text(encoding="utf-8"))
-        failures += len(found)
-        for token in found[:20]:
-            print(f"{path}:{token.line}: token structure is forbidden in lowering: {token.spelling}")
-        if len(found) > 20:
-            print(f"{path}: {len(found) - 20} additional violations")
+    sources = []
+    try:
+        sources = lowering_sources(args.root)
+        for path in sources:
+            found = violations(path.read_text(encoding="utf-8"))
+            failures += len(found)
+            for token in found[:20]:
+                print(f"{path}:{token.line}: token structure is forbidden in lowering: {token.spelling}")
+            if len(found) > 20:
+                print(f"{path}: {len(found) - 20} additional violations")
+    except (OSError, ValueError) as error:
+        failures += 1
+        print(f"C_LOWERING_PROVENANCE incomplete scan: {error}")
     print(f"C_LOWERING_PROVENANCE files={len(sources)} violations={failures}")
     return int(failures != 0)
 

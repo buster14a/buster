@@ -6064,10 +6064,13 @@ Owned AST token indices may select source anchors, but source ranges never
 recover a structural node.
 
 `python3 -B tools/check_c_lowering_provenance.py` checks `c_gen.c` and every
-implementation it includes. The required CI lint and queue-lint jobs run that
-guard and `check_c_lowering_provenance_test.py`. The regression plants direct,
-aliased and included-unit token grammar reads and requires command failure;
-comments and string literals remain prose. The guard rejects token types and
+implementation it includes, following nested quoted paths and angle paths
+relative to `src/`. Missing implementation files, paths outside the frontend
+boundary and nonliteral include directives fail the scan. The required CI lint
+and queue-lint jobs run that guard and `check_c_lowering_provenance_test.py`.
+The regression plants direct, aliased and included-unit token grammar reads
+and requires command failure; comments and string literals remain prose.
+The guard rejects token types and
 getters, raw preprocessing token columns, range-to-node recovery and parser
 grammar helpers. Its named model-helper allowlist consists only of audited
 target layouts and finished semantic tables. It has no test-build exception

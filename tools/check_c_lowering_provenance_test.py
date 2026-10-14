@@ -110,20 +110,48 @@ class LoweringProvenanceTests(unittest.TestCase):
             root = Path(temporary)
             directory = root / "src/buster/lib/compiler/frontend/c"
             directory.mkdir(parents=True)
-            (directory / "c_gen.c").write_text('/*\n#include "not-code.c"\n*/\n#include "c_vendor_lowering.c"\n', encoding="utf-8")
-            (directory / "c_vendor_lowering.c").write_text('#include "c_vendor_private.c"\n', encoding="utf-8")
-            (directory / "c_vendor_private.c").write_text("CToken planted;\n", encoding="utf-8")
             (directory / "c_vendor_builtin.c").write_text("CToken semantic_only;\n", encoding="utf-8")
-            self.assertEqual(3, len(lowering_sources(root)))
-            checked = subprocess.run([sys.executable, str(Path(__file__).with_name("check_c_lowering_provenance.py")), "--root", str(root)],
-                                     capture_output=True, text=True, check=False)
-            self.assertEqual(1, checked.returncode)
-            self.assertIn("c_vendor_private.c:1", checked.stdout)
-            self.assertIn("files=3 violations=1", checked.stdout)
-            (directory / "c_vendor_private.c").write_text("CSourceAnchor source;\n", encoding="utf-8")
-            checked = subprocess.run([sys.executable, str(Path(__file__).with_name("check_c_lowering_provenance.py")), "--root", str(root)],
-                                     capture_output=True, text=True, check=False)
-            self.assertEqual(0, checked.returncode)
+            root_includes = ['#include "c_vendor_lowering.c"\n',
+                             '#include <buster/lib/compiler/frontend/c/c_vendor_lowering.c>\n',
+                             '#inc\\\nlude <buster/lib/compiler/frontend/c/c_vendor_lowering.c>\n']
+            nested_includes = ['#include "c_vendor_private.c"\n',
+                               '#include /* implementation */ <buster/lib/compiler/frontend/c/c_vendor_private.c>\n']
+            for root_include in root_includes:
+                for nested_include in nested_includes:
+                    with self.subTest(root_include=root_include, nested_include=nested_include):
+                        (directory / "c_gen.c").write_text('/*\n#include <not-code.c>\n*/\n' + root_include, encoding="utf-8")
+                        (directory / "c_vendor_lowering.c").write_text(nested_include, encoding="utf-8")
+                        (directory / "c_vendor_private.c").write_text("CToken planted;\n", encoding="utf-8")
+                        self.assertEqual(3, len(lowering_sources(root)))
+                        checked = subprocess.run([sys.executable, str(Path(__file__).with_name("check_c_lowering_provenance.py")), "--root", str(root)],
+                                                 capture_output=True, text=True, check=False)
+                        self.assertEqual(1, checked.returncode)
+                        self.assertIn("c_vendor_private.c:1", checked.stdout)
+                        self.assertIn("files=3 violations=1", checked.stdout)
+                        (directory / "c_vendor_private.c").write_text("CSourceAnchor source;\n", encoding="utf-8")
+                        checked = subprocess.run([sys.executable, str(Path(__file__).with_name("check_c_lowering_provenance.py")), "--root", str(root)],
+                                                 capture_output=True, text=True, check=False)
+                        self.assertEqual(0, checked.returncode)
+
+    def test_incomplete_include_discovery_fails_the_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "src/buster/lib/compiler/frontend/c"
+            directory.mkdir(parents=True)
+            cases = [('#include "missing.c"\n', "missing.c"),
+                     ('#include <buster/lib/compiler/frontend/c/missing.c>\n', "missing.c"),
+                     ('#include "../outside.c"\n', "escapes its frontend boundary"),
+                     ('#include <buster/lib/compiler/frontend/outside.c>\n', "escapes its frontend boundary"),
+                     ('#include LOWERING_IMPLEMENTATION\n', "require a literal quoted or angle path"),
+                     ('#include_next <buster/lib/compiler/frontend/c/missing.c>\n', "require a literal quoted or angle path")]
+            for source, diagnostic in cases:
+                with self.subTest(source=source):
+                    (directory / "c_gen.c").write_text(source, encoding="utf-8")
+                    checked = subprocess.run([sys.executable, str(Path(__file__).with_name("check_c_lowering_provenance.py")), "--root", str(root)],
+                                             capture_output=True, text=True, check=False)
+                    self.assertEqual(1, checked.returncode)
+                    self.assertIn("incomplete scan", checked.stdout)
+                    self.assertIn(diagnostic, checked.stdout)
 
     def test_required_ci_runs_the_guard_and_planted_read_suite(self):
         source = Path(__file__).resolve().parents[1].joinpath(".github/workflows/ci.yml").read_text(encoding="utf-8")

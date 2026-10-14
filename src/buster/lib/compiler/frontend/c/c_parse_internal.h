@@ -374,8 +374,8 @@ BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CPar
 // keyword: its size always, and its signedness where lowering's answer
 // carries an integer type. Rows of different producers for one keyword are
 // compared with each other too. Output is unchanged: nothing reads the rows
-// but the comparison. Paths: the C_IR_QUERY_FRAME_SIZEOF resolver and the
-// body's prediction fallback after it.
+// but the comparison. The checked constant-node resolver records its settled
+// sizeof answer; the historical prediction-path row is retained and stays zero.
 enum
 {
     C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER,
@@ -385,8 +385,7 @@ enum
     C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH,
     // The sizes agree but lowering's integer type has the other signedness.
     C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH,
-    // The resolver gave no answer for an operand with a row; the body may
-    // still settle it through the prediction path.
+    // The node resolver gave no answer for an operand with a row.
     C_TEST_SIZEOF_HANDOFF_DECLINED,
     // A lowering answer for a `sizeof` keyword with no row in its scope.
     C_TEST_SIZEOF_HANDOFF_UNMATCHED,

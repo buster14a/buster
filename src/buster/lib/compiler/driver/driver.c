@@ -7599,9 +7599,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* tot
 // label releases (c_ast_release); its storage record lives in the unit's
 // arena. Nothing reads it after the unit. The driver has no phase
 // arena to lend (c_preprocess is not given one either), so the builder makes
-// and retires a private one. The caller fails the unit when the builder could
-// not reserve its storage, and otherwise compiles an incomplete tree's unit
-// without one, counting it in `rejections`.
+// and retires a private one. Reservation failure immediately fails the unit.
+// Syntax rejection counts in `rejections` and retains its diagnostics while
+// semantic checking preserves diagnostic precedence; incomplete syntax never lowers.
 // Under -v three diagnostic passes over a finished tree are timed with the
 // same clock as the build: one c_ast_walk over the root, one linear pass over
 // the kinds column counting CALL nodes, and c_ast_children over every node
@@ -9037,7 +9037,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // Filled once the source is preprocessed; the end label releases its
     // private arenas, which nothing the result holds points into.
     CPreprocessResult preprocess = {0};
-    // The -fc-ast-pilot tree, empty without the hook. It reads the
+    // The mandatory retained tree. It reads the
     // preprocessing result by index, so the end label releases its column
     // arenas first.
     CAst pilot_tree = {0};
@@ -9353,9 +9353,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
                                                                                          invocation.enable_pinned_debug_locals),
-                                                                    // Lowering reads the pilot's tree, which is released at
-                                                                    // `end:`, after lowering; without the pilot it builds and
-                                                                    // releases the unit's tree itself.
+                                                                    // Lowering borrows the completed retained tree, which
+                                                                    // `end:` releases after its last consumer. Missing syntax
+                                                                    // is a refusal; lowering never rebuilds it.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = &result.c_ast.lower,
                                                                     .syntax_facts = syntax.ast_facts});

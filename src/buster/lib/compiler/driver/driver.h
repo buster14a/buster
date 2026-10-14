@@ -574,10 +574,10 @@ struct CompilerDriverFallbackRecord
 };
 
 // What the -fc-ast-pilot hook measured, summed over the inputs that built a
-// tree. `units` is zero when the hook did not run; `rejections` counts the
-// units whose tree the builder refused on syntax, which compiled without one. The walk, scan and
-// children rows are diagnostic passes over the finished tree and are timed
-// only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
+// complete tree. `units` is zero when no tree completed; `rejections` counts
+// units refused on syntax, whose retained diagnostics prevent lowering. The
+// walk, scan and children rows are diagnostic passes over the finished tree,
+// timed only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
 // over the kinds column counting CALL nodes (`scan_calls`), and
 // c_ast_children over every node into a scratch buffer (`child_entries` is
 // the sum of the child counts it returned).
