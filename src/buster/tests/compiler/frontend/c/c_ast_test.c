@@ -7217,6 +7217,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments
                     BUSTER_TEST_RAW(arguments, mask == cases[index].functions,
                         string_format(temporary.arena, S8("unit owner case={u32} form={u32} expected={u32} found={u32}"),
                             index, form, cases[index].functions, mask));
+                    if (index == 0 && form == 0)
+                    {
+                        CAstFacts missing_facts = *analysis.ast_facts;
+                        missing_facts.matches = 0;
+                        CParseResult missing = analysis;
+                        missing.ast_facts = &missing_facts;
+                        CIRLowerResult refused = c_lower_to_ir(temporary.arena, S8("missing-unit-provenance.c"), preprocess, missing, target_native);
+                        BUSTER_TEST(arguments, refused.program == 0 && refused.diagnostic_count == 1 &&
+                                              refused.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                    }
                     if (index == 2)
                     {
                         u32 key = 0;
@@ -7251,6 +7261,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_budget_nodes(UnitTestArgume
     CAstVendorBudgetCase const cases[] = {
         {S8("int live(unsigned short n) { return sizeof(__builtin_bit_cast(__fp16, n)); }\n"), {0}},
         {S8("int live(int n) { return sizeof((__fp16)n); }\n"), {0}},
+        {S8("int live(unsigned short n) { return sizeof(int[sizeof(__builtin_bit_cast(__fp16,n))]); }\n"), {0}},
         {S8("int live(int n) { return (int)(__fp16)n; }\n"), S8("__fp16 cast expression has no canonical implementation")},
         {S8("int live(unsigned short n) { return (int)__builtin_bit_cast(__fp16,n); }\n"),
          S8("__builtin_bit_cast destination __fp16 has no canonical implementation")},

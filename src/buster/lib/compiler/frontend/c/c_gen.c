@@ -3164,14 +3164,6 @@ struct CIntegerIrBuilder
     // array are skipped entirely; malformed streams leave it null and keep
     // the per-body scan's exact verdicts.
     u32 const* stream_matching_delimiters_plus_one;
-    // Borrowed from the parse position index when it is built: ascending
-    // positions of identifier-then-colon pairs outside aggregate member
-    // bodies. label_candidates_valid distinguishes
-    // "no labels anywhere" from "no index"; only the latter falls back to
-    // scanning every body token.
-    u32 const* label_candidate_positions;
-    u32 label_candidate_count;
-    bool label_candidates_valid;
     u32 prepared_call_count;
     u32 prepared_call_capacity;
     u32 body_token_start;
@@ -59427,10 +59419,11 @@ BUSTER_C_INTERNAL bool c_ir_vendor_budget_operand_is_variable(CIntegerIrBuilder*
 {
     CAst const* ast = builder->syntax_tree;
     CAstFacts const* facts = builder->syntax_facts;
-    bool variable = node < ast->node_count && ast->kinds[node] == C_AST_TYPE_NAME && node < facts->node_count &&
-                    (facts->flags[node] & C_AST_FACT_TYPED) && (facts->payloads[node] & C_AST_TYPE_NAME_VARIABLY_MODIFIED);
+    bool type_name = node < ast->node_count && ast->kinds[node] == C_AST_TYPE_NAME && node < facts->node_count &&
+                     (facts->flags[node] & C_AST_FACT_TYPED);
+    bool variable = type_name && (facts->payloads[node] & C_AST_TYPE_NAME_VARIABLY_MODIFIED);
     CIrRetainedTypeReference reference = {0};
-    CType const* type = c_ir_vendor_budget_fact_type(builder, node, &reference);
+    CType const* type = type_name ? 0 : c_ir_vendor_budget_fact_type(builder, node, &reference);
     u64 remaining = (u64)builder->parse.type_count + facts->recipe_count;
     while (!variable && type && remaining && (type->kind == C_TYPE_ARRAY || type->kind == C_TYPE_POINTER))
     {
@@ -59690,15 +59683,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // Scopes are final here, so every builder copy of this parse result can
     // answer c_parse_scope_for_token by descent instead of a full scope scan.
     if (!parse.scope_children_offsets) c_parse_index_scope_children(&parse, temporary_arena);
-    // The token stream is final too: the position index's one classifying
-    // pass replaces the per-body label scans below, so force it now rather
-    // than letting the first body pay the build.
-    c_parse_position_index_ensure(&parse, preprocess);
-    bool label_candidates_valid = parse.position_index && parse.position_index->built;
-    u32 const* label_candidate_positions = label_candidates_valid ? parse.position_index->label_candidate_positions : 0;
-    u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
-    u32 const* stream_matching_delimiters_plus_one =
-        label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
+    // The producer already published this immutable provenance column. Its
+    // remaining legacy query consumers share it without classifying source.
+    u32 const* stream_matching_delimiters_plus_one = options.syntax_facts->matches;
     // The bodies the statement walker enters by brace (GitHub #4060).
     CIrBodyNodes body_nodes = tree_arena ? c_ir_body_nodes_build(tree_arena, options.syntax_tree, body_function_count)
                                          : (CIrBodyNodes){0};
@@ -62285,9 +62272,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .cleanup_flag_base = cleanup_offsets[declaration_index],
             .cleanup_flag_count = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index],
             .stream_matching_delimiters_plus_one = stream_matching_delimiters_plus_one,
-            .label_candidate_positions = label_candidate_positions,
-            .label_candidate_count = label_candidate_count,
-            .label_candidates_valid = label_candidates_valid,
             .prepared_call_capacity = prepared_call_capacity ? (u32)prepared_call_capacity : 1,
             .prepared_call_node_start = prepared_node_start,
             .prepared_call_node_count = prepared_node_count,
@@ -62883,7 +62867,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 so
             incomplete_assertion = row;
         }
         if (!parse.lowering_validated || !options.syntax_tree || !options.syntax_facts ||
-            !parse.declaration_bindings_complete || !assertions_complete)
+            !parse.declaration_bindings_complete || !assertions_complete ||
+            (preprocess.token_count && options.syntax_facts && !options.syntax_facts->matches))
         {
             *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
                 .message = !parse.lowering_validated ? S8("C IR lowering requires completed source constraints; use c_parse_for_lowering") :

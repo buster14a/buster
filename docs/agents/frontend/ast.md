@@ -290,6 +290,10 @@ finished builtin identities, result types and storage-half admission facts.
 Unevaluated operands are skipped by node kind and retained variable-bound
 answers; vector lane counts use finished type/recipe references and scalar
 layout. Budgeting performs no syntax scan or semantic type query.
+The finished semantic index supplies the remaining delimiter-provenance
+column. Lowering rejects a missing column for a nonempty stream before IR
+allocation; it performs no late position-index build. Label tables enumerate
+nodes and need no identifier-colon candidate positions.
 
 Finished symbol properties are sparse `CDeclarationBinding` rows in the
 result's arena. `CDeclaration.binding_plus_one` and a static or extern local's
