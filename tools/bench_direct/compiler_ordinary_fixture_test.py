@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -238,7 +239,8 @@ def retain_case(case) -> None:
             errors.append(problem)
     destination = EXPORT_ROOT / case._testMethodName
     destination.mkdir()
-    roots = {"fixture": case.export,
+    roots = {"host-preflight": case.directory / "host-preflight",
+             "fixture": case.export,
              "initialization-evidence": case.directory / "initialize-evidence",
              "ordinary-evidence": case.evidence,
              "raw-lab": case.work / "lab", "raw-throughput": case.work / "throughput",
@@ -319,6 +321,18 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(setattr, compare, "OWNED_PHASE_CONTEXT", self.prior)
         self.addCleanup(retain_case, self)
+        # Retain the actual resolver inputs before any MAIN version probe can
+        # fail. Version output alone cannot identify a crashing executable.
+        self.host_preflight = self.directory / "host-preflight"
+        self.host_preflight.mkdir()
+        command = shutil.which("cmake")
+        resolved = Path(command).resolve(strict=True) if command else None
+        write(self.host_preflight / "cmake-identity.json", dict(DIAGNOSTIC,
+            command=command, resolved=str(resolved) if resolved else None,
+            sha256=digest(resolved) if resolved else None,
+            environment={key: os.environ.get(key) for key in
+                         ("PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "LC_ALL")},
+            python_path=sys.executable, trusted_root=str(compare.TRUSTED_ROOT)))
         initialization_work = self.directory / "initialize-work"
         initialization_evidence = self.directory / "initialize-evidence"
         initialization_work.mkdir()
@@ -605,6 +619,32 @@ class ActualOrdinaryMeasure(unittest.TestCase):
             cwd=self.directory, capture_output=True, text=True, timeout=30, start_new_session=True)
         self.assertNotEqual(refused.returncode, 0)
         self.assertNotEqual(refused.stdout.strip(), str(impostor))
+
+    def test_cmake_version_direct_control_and_native_owner_reach_clean_exit(self):
+        # The direct control uses the same argv/cwd/environment as the owned
+        # probe. Its result is diagnosis only, never a fallback or retry that
+        # can qualify a failed native attempt (#4147).
+        identity_path = self.host_preflight / "cmake-identity.json"
+        identity = json.loads(identity_path.read_bytes())
+        self.assertIsNotNone(identity["resolved"], "CMake is a mandatory preflight tool")
+        argv = [identity["resolved"], "--version"]
+        result = subprocess.run(argv, cwd=compare.TRUSTED_ROOT,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30, start_new_session=True)
+        write(self.host_preflight / "cmake-direct.json", dict(DIAGNOSTIC,
+            argv=argv, cwd=str(compare.TRUSTED_ROOT),
+            returncode=result.returncode, stdout=result.stdout.decode(errors="replace"),
+            stderr=result.stderr.decode(errors="replace")))
+        native = self.initialization_context.execute(argv, compare.TRUSTED_ROOT,
+            self.directory / "initialize-evidence" / "cmake.log", 30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        self.assertEqual(native.stdout, result.stdout)
+        self.assertEqual(native.stderr, result.stderr)
+        self.assertEqual(digest(Path(identity["resolved"])), identity["sha256"])
+        lookup = self.initialization_context.execute(["cmake", "--version"], compare.TRUSTED_ROOT,
+            self.directory / "initialize-evidence" / "cmake-lookup.log", 30)
+        self.assertEqual(lookup.stdout, native.stdout)
+        self.assertEqual(lookup.stderr, native.stderr)
 
     def test_normal_main_snapshot_initializes_owned_preflight_before_all_children(self):
         identity = self.identity("main")

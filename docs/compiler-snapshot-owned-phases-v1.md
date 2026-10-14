@@ -172,3 +172,10 @@ These options alone grant no physical authority. The rollout remains disabled
 until the predeclared preparation, comparability, sampling and complete whole-job
 utility evidence is reviewed. Rollback retains the supported owned legacy long
 route at H. Historical unwrapped job costs cannot establish its utility.
+
+The hosted diagnostic bundle also retains each fixture's resolved CMake path,
+executable SHA-256 and the named loader/PATH/locale inputs before its version
+probe. A separate fixture compares direct `cmake --version` with the same
+argv, checkout and environment through the canonical native owner. These are
+diagnostic observations for signal failures such as #4147; a successful direct
+control never substitutes for a failed native receipt or admits later phases.
