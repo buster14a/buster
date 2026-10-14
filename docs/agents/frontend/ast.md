@@ -2974,9 +2974,14 @@ required. These producers still restore their semantic checkpoints completely.
 The obsolete token TYPE_NAME, COMPOUND_TYPE and COMPOUND_ELEMENT_COUNT frame
 families and declarator walkers are removed. Transitional range callers locate
 an exact retained TYPE_NAME boundary; their remaining expression/operand and
-VLA readers are still an explicit retirement task. TYPEOF source expression
-projection is pending the EXPRESSION_TYPE consumer; this checkpoint does not
-claim complete query-machine retirement or a green full object comparison.
+VLA readers are still an explicit retirement task. TYPEOF and atomic-specifier operands now request their exact TYPE_NAME or
+STRICT EXPRESSION_TYPE child through the shared scheduler. Stable source
+TYPE_NAME constructor projections have one owner per function subtree, shared
+by constant and runtime readers; TYPEOF retains its local projection effects.
+The body token opener cache and its negative probe states are removed. VLA
+TYPEOF shells retain the operand node alongside diagnostic provenance. This
+checkpoint does not claim complete query-machine retirement or a green full
+object comparison.
 
 On frozen main `2c2c46fc9` unity input, the current producer census describes
 all 1,787,510 typed-region expression candidates with zero missing, appended

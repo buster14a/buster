@@ -145,7 +145,7 @@
 //   A parenthesized group's type-name probe enters through
 //   c_ir_group_type_name (c_ir_query_group_type_name from inside the
 //   machine), which requires an exact retained TYPE_NAME and preserves its
-//   ordinary per-group constructor memo. The type materializer reads sparse
+//   source-node constructor projection ownership. The type materializer reads sparse
 //   semantic recipes and explicit node children; it has no token grammar.
 // - Calls are discovered and lowered before the surrounding expression
 //   consumes their values (c_ir_tree_calls_discover,
@@ -2809,6 +2809,7 @@ struct CIrVlaArrayType
     CArrayBound bound;
     u32 typeof_start;
     u32 typeof_end;
+    u32 typeof_node_plus_one;
     CIrVlaValue cast_shape;
 };
 
@@ -3148,11 +3149,10 @@ struct CIntegerIrBuilder
     u32* prepared_call_node_slots;
     u32 prepared_call_node_start;
     u32 prepared_call_node_count;
-    // Type-name probe answers per body token, indexed like
-    // body token offset by the `(` that opens the probed group: 0 is
-    // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
-    // c_ir_group_type_name owns it and says which groups are never stored.
-    u32* group_type_names;
+    // Constructor projections per source TYPE_NAME in this function subtree.
+    // All exact node consumers share source constructor ownership; zero is
+    // unmaterialized, one declined, and any other value is IrTypeId plus two.
+    u32* source_type_projections;
     u32* matching_delimiters_plus_one;
     // Whole-stream matching-delimiter array borrowed from the parse position
     // index, non-null only when the index scanned the stream with zero
@@ -4375,6 +4375,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_retained_atomic_alias(CIntegerIrBuilder* builder
     CAst const* ast = builder->syntax_tree;
     CAstFacts const* facts = builder->syntax_facts;
     IrTypeId result = IR_TYPE_ID_INVALID;
+    CTypeId alias = C_TYPE_ID_INVALID;
     bool atomic = false;
     u32 next = name;
     for (u32 depth = 0; next != C_AST_NODE_INVALID && depth < ast->extents[name]; depth += 1)
@@ -4393,13 +4394,63 @@ BUSTER_C_INTERNAL IrTypeId c_ir_retained_atomic_alias(CIntegerIrBuilder* builder
                 next = c_ast_child_at(ast, child, 0);
             }
             else if (ast->kinds[child] == C_AST_TYPEDEF_NAME && (facts->flags[child] & C_AST_FACT_BOUND) &&
-                     facts->types[child] < builder->parse.type_count && builder->parse.types[facts->types[child]].is_atomic)
+                     facts->types[child] < builder->parse.type_count)
             {
-                result = builder->c_type_ir_map[facts->types[child]];
+                alias = (CTypeId){facts->types[child]};
             }
         }
     }
-    return atomic ? result : IR_TYPE_ID_INVALID;
+    if (atomic && alias.value < builder->parse.type_count)
+    {
+        CType const* type = builder->parse.types + alias.value;
+        if (type->is_atomic) result = builder->c_type_ir_map[alias.value];
+        else
+        {
+            bool aligned = false;
+            for (u32 index = 0; index < builder->parse.type_alignment_count && !aligned; index += 1)
+                aligned = builder->parse.type_alignments[index].type_index == alias.value;
+            if (aligned && type->unqualified_type.value < builder->parse.type_count)
+                result = c_ir_add_qualified_type(builder->program, builder->c_type_ir_map[type->unqualified_type.value], true, type->is_volatile);
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CIrVlaArrayType* c_ir_vla_array_type(CIntegerIrBuilder* builder, IrTypeId type);
+
+BUSTER_C_INTERNAL IrTypeId c_ir_retained_typeof_array(CIntegerIrBuilder* builder, IrTypeId type, u32 operand)
+{
+    CIrVlaArrayType* array = c_ir_vla_array_type(builder, type);
+    IrTypeId result = type;
+    if (array)
+    {
+        result = ir_program_add_type(builder->program, *ir_type_from_id(&builder->program->types, type));
+        CIrVlaArrayType* copy = arena_allocate(builder->arena, CIrVlaArrayType, 1);
+        CAstSpans const* spans = builder->syntax_facts->spans;
+        *copy = (CIrVlaArrayType){.next = builder->vla_array_types, .type = result, .bound = array->bound,
+            .typeof_start = spans->first[operand], .typeof_end = spans->end[operand], .typeof_node_plus_one = operand + 1};
+        builder->vla_array_types = copy;
+    }
+    return result;
+}
+
+// A source type-name constructor has one owner across constant, type and
+// runtime consumers. TYPEOF retains its existing local projection effects.
+BUSTER_C_INTERNAL u32* c_ir_source_type_projection_slot(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    u32* slot = 0;
+    bool stable = builder->source_type_projections && node >= builder->prepared_call_node_start &&
+                  node - builder->prepared_call_node_start < builder->prepared_call_node_count &&
+                  ast->tokens[node] > builder->body_token_start && ast->tokens[node] - builder->body_token_start <= builder->body_token_count;
+    if (stable)
+    {
+        u32 specifiers = c_ast_child_at(ast, node, 0);
+        for (u32 child = c_ast_subtree_begin(ast, specifiers); child < specifiers && stable; child += 1)
+            stable = ast->kinds[child] != C_AST_TYPEOF && ast->kinds[child] != C_AST_TYPEOF_UNQUAL;
+        if (stable) slot = builder->source_type_projections + node - builder->prepared_call_node_start;
+    }
+    return slot;
 }
 
 BUSTER_C_INTERNAL bool c_ir_type_name_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
@@ -4409,13 +4460,50 @@ BUSTER_C_INTERNAL bool c_ir_type_name_node_attempt(CIntegerIrBuilder* builder, C
     bool admitted = facts && ast && frame->node < facts->node_count && ast->kinds[frame->node] == C_AST_TYPE_NAME &&
                     (facts->flags[frame->node] & C_AST_FACT_TYPED);
     frame->result_type = IR_TYPE_ID_INVALID;
-    if (admitted)
+    u32* slot = admitted ? c_ir_source_type_projection_slot(builder, frame->node) : 0;
+    if (slot && *slot)
+    {
+        frame->result_type = *slot == 1 ? IR_TYPE_ID_INVALID : (IrTypeId){.value = *slot - 2};
+        admitted = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+    }
+    else if (admitted)
     {
         CIrRetainedTypeReference reference = {.index = facts->types[frame->node],
                                               .recipe = (facts->flags[frame->node] & C_AST_FACT_RECIPE) != 0};
         u32 specifiers = c_ast_child_at(ast, frame->node, 0);
         CIrRetainedTypeReference base = {.index = facts->types[specifiers], .recipe = (facts->flags[specifiers] & C_AST_FACT_RECIPE) != 0};
-        admitted = c_ir_retained_type_materialize(builder, frame, reference, base, c_ir_retained_atomic_alias(builder, frame->node));
+        IrTypeId source = c_ir_retained_atomic_alias(builder, frame->node);
+        u32 dependency = C_AST_NODE_INVALID;
+        bool expression = false;
+        u32 first = c_ast_subtree_begin(ast, specifiers);
+        for (u32 end = specifiers; end > first && dependency == C_AST_NODE_INVALID;)
+        {
+            u32 child = end - 1;
+            end = c_ast_subtree_begin(ast, child);
+            u32 kind = ast->kinds[child];
+            if (kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL || kind == C_AST_ATOMIC_SPECIFIER)
+            {
+                dependency = c_ast_child_at(ast, child, 0);
+                expression = ast->kinds[dependency] != C_AST_TYPE_NAME;
+            }
+        }
+        if (dependency != C_AST_NODE_INVALID)
+        {
+            CIrNodeQueryFrame answer = {0};
+            admitted = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = dependency,
+                .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME,
+                .view = C_IR_AST_TYPE_STRICT}, &answer) && answer.success;
+            if (admitted)
+            {
+                CIrRetainedTypeState* state = (CIrRetainedTypeState*)frame->state;
+                source = state ? state->base_type : source.value != IR_ID_UNDERLYING_INVALID ? source
+                                                  : expression ? c_ir_retained_typeof_array(builder, answer.result_type, dependency) : answer.result_type;
+                CType const* type = c_ir_retained_type(builder, base);
+                source = type ? c_ir_retained_qualify(builder, type, source) : IR_TYPE_ID_INVALID;
+            }
+        }
+        if (admitted) admitted = c_ir_retained_type_materialize(builder, frame, reference, base, source);
+        if (slot && !builder->queries->has_request) *slot = admitted ? frame->result_type.value + 2 : 1;
     }
     return admitted;
 }
@@ -6110,121 +6198,16 @@ BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u
     return close != C_AST_NODE_INVALID && c_ir_type_name_node_at(builder, open + 1, close) != C_AST_NODE_INVALID;
 }
 
-// The memo slot for the group opening at `open`, in the body-token array
-// body-local type-name cache spans: a `(` outside the body -- a parameter
-// bound's declarator, a global initializer -- has none and is probed each
-// time.
-BUSTER_C_INTERNAL u32* c_ir_group_type_name_slot(CIntegerIrBuilder* builder, u32 open)
-{
-    u32* slot = 0;
-    if (builder->group_type_names && open >= builder->body_token_start && open - builder->body_token_start < builder->body_token_count)
-    {
-        slot = builder->group_type_names + (open - builder->body_token_start);
-    }
-    return slot;
-}
-
-// TYPEOF operand construction is a query effect, so that specifier keeps
-// its existing repeated materialization behavior. Ordinary names are stable.
-BUSTER_C_INTERNAL bool c_ir_group_type_name_memoizable(CIntegerIrBuilder* builder, u32 open, u32 close)
-{
-    u32 node = c_ir_type_name_node_at(builder, open + 1, close);
-    bool result = node != C_AST_NODE_INVALID;
-    if (result)
-    {
-        u32 specifiers = c_ast_child_at(builder->syntax_tree, node, 0);
-        for (u32 child = c_ast_subtree_begin(builder->syntax_tree, specifiers); child < specifiers && result; child += 1)
-        {
-            u32 kind = builder->syntax_tree->kinds[child];
-            result = kind != C_AST_TYPEOF && kind != C_AST_TYPEOF_UNQUAL;
-        }
-    }
-    return result;
-}
-
-BUSTER_C_INTERNAL u32 c_ir_group_type_name_encode(IrTypeId type)
-{
-    return type.value == IR_ID_UNDERLYING_INVALID ? 1 : type.value + 2;
-}
-
-BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name_decode(u32 encoded)
-{
-    IrTypeId result;
-    if (encoded == 1)
-    {
-        result = IR_TYPE_ID_INVALID;
-    }
-    else
-    {
-        result = (IrTypeId){.value = encoded - 2};
-    }
-    return result;
-}
-
-// The type name the group `open .. close` (a `(` and its matching `)`)
-// spells, or invalid: c_ir_type_name over the interior, asked once per
-// opener.  The gate refuses the groups that cannot be one before the query
-// machine runs, and the memo answers the second and third probe of one `(`
-// -- the expression steps, the unary-end scan and the call preparer each ask
-// -- so the probe itself, unchanged, stays the reference for both.
+// Transitional range callers select an exact retained TYPE_NAME only.
 BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close)
 {
-    IrTypeId result;
-    u32* slot = c_ir_group_type_name_slot(builder, open);
-    if (slot && *slot)
-    {
-        result = c_ir_group_type_name_decode(*slot);
-    }
-    else if (c_ir_type_name_node_at(builder, open + 1, close) == C_AST_NODE_INVALID)
-    {
-        result = IR_TYPE_ID_INVALID;
-        if (slot)
-        {
-            *slot = 1;
-        }
-    }
-    else
-    {
-        result = c_ir_type_name(builder, open + 1, close);
-        if (!builder->queries->has_request && slot && c_ir_group_type_name_memoizable(builder, open, close))
-        {
-            *slot = c_ir_group_type_name_encode(result);
-        }
-    }
-    return result;
+    return c_ir_type_name_node(builder, c_ir_type_name_node_at(builder, open + 1, close));
 }
 
-// c_ir_query_type_name over the same group, for callers that run inside the
-// query machine: the gate and the memo answer without raising a request, and
-// a request the probe raises passes through unanswered -- has_request set,
-// type_out untouched -- exactly as before.
 BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close, IrTypeId* type_out)
 {
-    bool resolved;
-    u32* slot = c_ir_group_type_name_slot(builder, open);
-    if (slot && *slot)
-    {
-        *type_out = c_ir_group_type_name_decode(*slot);
-        resolved = type_out->value != IR_ID_UNDERLYING_INVALID;
-    }
-    else if (c_ir_type_name_node_at(builder, open + 1, close) == C_AST_NODE_INVALID)
-    {
-        *type_out = IR_TYPE_ID_INVALID;
-        resolved = false;
-        if (slot)
-        {
-            *slot = 1;
-        }
-    }
-    else
-    {
-        resolved = c_ir_query_type_name(builder, open + 1, close, true, type_out);
-        if (!builder->queries->has_request && slot && c_ir_group_type_name_memoizable(builder, open, close))
-        {
-            *slot = c_ir_group_type_name_encode(*type_out);
-        }
-    }
-    return resolved;
+    *type_out = c_ir_group_type_name(builder, open, close);
+    return type_out->value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_C_INTERNAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)
@@ -62205,7 +62188,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             (!cleanup_capacity || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrValueId), cleanup_capacity, BUSTER_ALIGN_OF(IrValueId))) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedCall), call_array_capacity, BUSTER_ALIGN_OF(CIrPreparedCall)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_node_array_capacity, BUSTER_ALIGN_OF(u32)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_node_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             (stream_matching_delimiters_plus_one || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32))) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
@@ -62386,7 +62369,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.cleanup_flags = cleanup_capacity ? arena_allocate(lowering_temporary.arena, IrValueId, cleanup_capacity) : 0;
         builder.prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, call_array_capacity);
         builder.prepared_call_node_slots = arena_allocate(lowering_temporary.arena, u32, prepared_node_array_capacity);
-        builder.group_type_names = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+        builder.source_type_projections = arena_allocate(lowering_temporary.arena, u32, prepared_node_array_capacity);
         builder.matching_delimiters_plus_one = stream_matching_delimiters_plus_one ? 0 : arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         builder.prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
                                                               prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
@@ -62404,10 +62387,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * prepared_node_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
         memset(builder.prepared_call_node_slots, 0, sizeof(u32) * prepared_node_array_capacity);
-        for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
-        {
-            builder.group_type_names[token_offset] = 0;
-        }
+        memset(builder.source_type_projections, 0, sizeof(u32) * prepared_node_array_capacity);
         if (!builder.stream_matching_delimiters_plus_one)
         {
             for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)

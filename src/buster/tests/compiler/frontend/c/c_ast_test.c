@@ -7899,7 +7899,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_projection(UnitTestA
     CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
         S8("typedef _Atomic(int) Atomic __attribute__((aligned(32)));"
            "int f(void){return sizeof(void(*(*)(void*,const char*))(void)) + sizeof((int[]){1,2,3})"
-           " + _Alignof(_Atomic Atomic) + sizeof((char*[]){\"x\"});}"), C_PREPROCESS_DIALECT_GNU17);
+           " + _Alignof(_Atomic Atomic) + sizeof((char*[]){\"x\"}) + sizeof(__typeof__((0, (void(*)(void))0)));}"), C_PREPROCESS_DIALECT_GNU17);
     CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     CAstFacts facts = {0};
     if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
