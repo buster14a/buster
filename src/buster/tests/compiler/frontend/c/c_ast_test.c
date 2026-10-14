@@ -6829,6 +6829,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_node_tasks(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_bound_owners(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int A[3]; static int a[sizeof(int) + 1];\n"
+        "void f(int n, int p[static n + 1], int (*q)[n + 2]) {\n"
+        " int v[n + 3]; int (*r)[sizeof(int (*)(int)) + n]; (void)p; (void)q; (void)v; (void)r; }\n");
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.ast_facts = &facts;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && facts.bound_count == analysis.array_bound_count && facts.bound_arena);
+            u64 rows = 0;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            difference = difference.length ? difference : c_ast_corpus_models_differ(temporary.arena, &plain, &analysis, &rows);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            u32 owners = 0;
+            for (u32 index = 0; index < analysis.array_bound_count; index += 1)
+            {
+                CArrayBound bound = analysis.array_bounds[index];
+                u32 node = c_ast_facts_bound_node(&facts, index);
+                if (bound.token_count && !bound.is_star)
+                {
+                    BUSTER_TEST(arguments, node < built.ast.node_count && (built.ast.kinds[node] == C_AST_ADD || built.ast.kinds[node] == C_AST_NUMBER));
+                    bool first = true;
+                    for (u32 previous = 0; previous < index; previous += 1) first &= c_ast_facts_bound_node(&facts, previous) != node;
+                    owners += first;
+                }
+                else BUSTER_TEST(arguments, node == C_AST_NODE_INVALID);
+            }
+            BUSTER_TEST(arguments, owners == 6 && c_ast_facts_bound_node(&facts, facts.bound_count) == C_AST_NODE_INVALID);
+            u32 count = facts.bound_count;
+            u32* snapshot = arena_allocate(temporary.arena, u32, count);
+            memcpy(snapshot, facts.bound_nodes, sizeof(u32) * count);
+            CAnalysisResult repeated = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            difference = c_ast_corpus_models_differ(temporary.arena, &analysis, &repeated, &rows);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            BUSTER_TEST(arguments, facts.bound_count == count && !memcmp(snapshot, facts.bound_nodes, sizeof(u32) * count));
+            u64 copied = c_ast_facts_retain_in_arena(temporary.arena, &facts);
+            BUSTER_TEST(arguments, copied >= sizeof(u32) * count && !facts.bound_arena && facts.bound_count == count &&
+                                   !memcmp(snapshot, facts.bound_nodes, sizeof(u32) * count));
+            BUSTER_TEST(arguments, !c_ast_facts_prepare_bound_nodes(&facts, count));
+        }
+        c_ast_facts_release(&facts);
+        BUSTER_TEST(arguments, !facts.bound_nodes && !facts.bound_count && !facts.bound_arena);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8021,6 +8080,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_bound_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);

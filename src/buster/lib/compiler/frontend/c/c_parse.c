@@ -9697,6 +9697,7 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                                               CScopeId scope, u32 begin, u32 end, bool body);
 BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
                                                   CScopeId scope, u32 begin, u32 end);
+BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult preprocess, CArrayBound bound);
 
 BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, bool body)
 {
@@ -10447,9 +10448,11 @@ BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CP
             !recipe->count_is_constant)
         {
             CArrayBound bound = recipe->bound;
-            CScopeId bound_scope = c_parse_scope_for_token(result, scope, bound.token_start);
+            u32 start = c_parse_array_bound_expression_start(preprocess, bound);
+            recipe->bound_node = c_ast_facts_locate(facts, &preprocess, start, bound.token_start + bound.token_count);
+            CScopeId bound_scope = c_parse_scope_for_token(result, scope, start);
             CIntegerConstant value = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, bound_scope,
-                                                                  bound.token_start, bound.token_start + bound.token_count);
+                                                                  start, bound.token_start + bound.token_count);
             recipe->count_is_constant = value.valid && !value.is_negative && !value.magnitude_high;
             recipe->resolved_count = recipe->count_is_constant ? value.magnitude : 0;
         }
@@ -38215,6 +38218,24 @@ BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, 
     return;
 }
 
+// Only final committed bound indices escape. Speculative type queries may
+// create rows with reused indices, so publication follows their rollback.
+BUSTER_C_INTERNAL void c_parse_ast_bound_owners_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult const* result)
+{
+    CAstFacts* facts = machine->ast_facts;
+    if (facts && c_ast_facts_prepare_bound_nodes(facts, result->array_bound_count))
+    {
+        for (u32 index = 0; index < result->array_bound_count; index += 1)
+        {
+            CArrayBound bound = result->array_bounds[index];
+            facts->bound_nodes[index] = bound.token_count && !bound.is_star && bound.token_start <= preprocess.token_count &&
+                                       bound.token_count <= preprocess.token_count - bound.token_start
+                ? c_ast_facts_locate(facts, &preprocess, c_parse_array_bound_expression_start(preprocess, bound), bound.token_start + bound.token_count) : C_AST_NODE_INVALID;
+        }
+    }
+    return;
+}
+
 // Publish only the committed identity answers after all protected queries
 // have restored their table checkpoints. Lowering reads the chosen AST child
 // or the builtin's integer answer without reconstructing its arguments.
@@ -48661,6 +48682,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_parse_type_name_facts(&machine, preprocess, &result, (CScopeId){0}, 0, syntax.ast->node_count, false);
     }
     c_parse_ast_identity_publish(&machine, preprocess, &result);
+    c_parse_ast_bound_owners_publish(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).
     c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result, &preprocess);
     result.analysis_complete = semantic_outputs_ready;

@@ -2452,6 +2452,14 @@ selected root. This publication slice adds no type inventory and no
 lowering fallback. The constant grammar walker remains until the node
 consumer replaces it in the next slice.
 
+Committed C array-bound indices have a separate four-byte node slot each.
+Semantic finish publishes that correspondence once from the completed model,
+after protected queries have rolled back. The table keeps no C row or value;
+its exact expression owner leads to the existing constant fact or node task.
+Its checked private arena is charged to retained bytes, released with the
+facts, and compact-copied to the unit arena for convenience/model entrypoints.
+Repeated analysis keeps the model inventory and owner correspondence stable.
+
 Sparse annotations share a constant root's slot. An `offsetof` plan records
 ordered member offsets and index operand nodes with their element sizes;
 an absent plan differs from a recorded invalid designator. The semantic

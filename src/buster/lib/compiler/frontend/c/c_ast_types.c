@@ -2728,10 +2728,39 @@ BUSTER_GLOBAL_LOCAL u64 c_ast_facts_retained_size(CAstFacts const* facts)
     return (facts->arena ? facts->arena->position - arena_minimum_position : 0) +
            (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
            (facts->recipe_arena ? facts->recipe_arena->position - arena_minimum_position : 0) +
-           (facts->constants_arena ? facts->constants_arena->position - arena_minimum_position : 0);
+           (facts->constants_arena ? facts->constants_arena->position - arena_minimum_position : 0) +
+           (facts->bound_arena ? facts->bound_arena->position - arena_minimum_position : 0);
 }
 
 // Metadata-only roots remain UNQUERIED until a semantic scalar query runs.
+u32 c_ast_facts_bound_node(CAstFacts const* facts, u32 bound_index)
+{
+    return facts && facts->bound_nodes && bound_index < facts->bound_count ? facts->bound_nodes[bound_index] : C_AST_NODE_INVALID;
+}
+
+bool c_ast_facts_prepare_bound_nodes(CAstFacts* facts, u32 count)
+{
+    bool prepared = facts && facts->constants_arena;
+    if (prepared && count != facts->bound_count)
+    {
+        u64 reserved = (u64)count * sizeof(u32) + C_AST_FACT_HEADROOM;
+        Arena* arena = count && reserved <= ARENA_MAX_RESERVATION
+            ? c_frontend_arena_create((ArenaCreation){.reserved_size = reserved, .initial_size = C_AST_FACT_HEADROOM,
+                                                      .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+        prepared = !count || arena != 0;
+        if (prepared)
+        {
+            if (facts->bound_arena) arena_destroy(facts->bound_arena, 1);
+            facts->bound_arena = arena;
+            facts->bound_nodes = count ? arena_allocate(arena, u32, count) : 0;
+            facts->bound_count = count;
+            if (count) memset(facts->bound_nodes, 0xff, sizeof(u32) * count);
+            facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+        }
+    }
+    return prepared;
+}
+
 BUSTER_GLOBAL_LOCAL u32 c_ast_facts_constant_slot(CAstFacts* facts, u32 node)
 {
     u32 stored = 0;
@@ -2903,6 +2932,10 @@ void c_ast_facts_release(CAstFacts* facts)
     facts->recipes = 0;
     facts->recipe_count = 0;
     facts->recipe_failed = false;
+    if (facts->bound_arena) arena_destroy(facts->bound_arena, 1);
+    facts->bound_arena = 0;
+    facts->bound_nodes = 0;
+    facts->bound_count = 0;
     if (facts->constants_arena)
     {
         arena_destroy(facts->constants_arena, 1);
@@ -2950,6 +2983,7 @@ u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
         retained.index_arena = 0;
         retained.recipe_arena = 0;
         retained.constants_arena = 0;
+        retained.bound_arena = 0;
         retained.types = arena_allocate(arena, u32, facts->node_count);
         retained.payloads = arena_allocate(arena, u32, facts->node_count);
         retained.flags = arena_allocate(arena, u8, facts->node_count);
@@ -2986,6 +3020,8 @@ u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
             memcpy(retained.constants, facts->constants, sizeof(*facts->constants) * facts->constant_count);
         }
         retained.constant_capacity = facts->constant_count;
+        retained.bound_nodes = facts->bound_count ? arena_allocate(arena, u32, facts->bound_count) : 0;
+        if (facts->bound_count) memcpy(retained.bound_nodes, facts->bound_nodes, sizeof(u32) * facts->bound_count);
         retained.offsetof_plans = facts->offsetof_plan_count ? arena_allocate(arena, CAstOffsetofPlan, facts->offsetof_plan_count) : 0;
         if (facts->offsetof_plan_count)
         {

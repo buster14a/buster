@@ -1985,6 +1985,11 @@ struct CAstFacts
     CAstConstantFact* constants;
     u32 constant_count;
     u32 constant_capacity;
+    // Original committed C array bounds keep their exact expression owner.
+    // This table has one slot per bound, separate from the C model rows.
+    Arena* bound_arena;
+    u32* bound_nodes;
+    u32 bound_count;
     CAstOffsetofPlan* offsetof_plans;
     CAstOffsetofStep* offsetof_steps;
     CAstExt80InitializerFact* ext80_initializers;
@@ -2922,6 +2927,8 @@ BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult c
 // Sparse semantic constant results. Missing nodes answer UNQUERIED; integer
 // bits and fault status are retained independently of type-query recipes.
 BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL u32 c_ast_facts_bound_node(CAstFacts const* facts, u32 bound_index);
+BUSTER_F_DECL bool c_ast_facts_prepare_bound_nodes(CAstFacts* facts, u32 count);
 BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
 BUSTER_F_DECL u32 c_ast_facts_selection(CAstFacts const* facts, u32 node);
 // Normalized semantic builtin family on a CALL; zero for an ordinary call
