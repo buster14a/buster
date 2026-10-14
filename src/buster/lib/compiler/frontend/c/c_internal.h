@@ -1810,6 +1810,7 @@ BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_C_EXTERN bool c_ast_types_facts_uncached(void);
 #endif
+BUSTER_C_EXTERN void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u32 root, u8* required);
 BUSTER_C_EXTERN CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess);
 BUSTER_C_EXTERN void c_ast_types_facts_limits(CAstTypeBody const* region, u32* begin, u32* end);
 BUSTER_C_EXTERN bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out);

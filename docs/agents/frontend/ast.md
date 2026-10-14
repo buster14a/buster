@@ -3023,6 +3023,16 @@ TYPEOF shells retain the operand node alongside diagnostic provenance. This
 checkpoint does not claim complete query-machine retirement or a green full
 object comparison.
 
+Required expression operands outside typed regions now use the same final
+checkpoint completion: sizeof/alignof/typeof expression subtrees and retained
+array-bound owner subtrees. This includes file-scope `sizeof(call())` bounds and
+parameter-bound calls. Their existing semantic callable result and bindings
+are retained before lowering asks F1; the consumer never reparses a callee
+signature. Temporary marks are one bit per node, checked and released after
+publication. Existing region candidates are not queried a second time, and
+already completed outside compound facts are counted when their required
+subtree becomes a candidate region.
+
 On frozen main `2c2c46fc9` unity input, the current producer census describes
 all 1,787,510 typed-region expression candidates with zero missing, appended
 state or stale gaps, and all 60,387 TYPE_NAME nodes. The 29 uncovered function

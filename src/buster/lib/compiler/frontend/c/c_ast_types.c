@@ -3105,6 +3105,23 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_fact_kind(u32 kind)
     return c_ast_types_kind_classes[kind] != C_AST_TYPE_CLASS_UNTYPED && kind != C_AST_INITIALIZER_LIST;
 }
 
+// Unevaluated query operands also need F1 outside bodies and initializers.
+// Mark their complete expression subtrees before the final completion pass.
+BUSTER_C_SHARED void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u32 root, u8* required)
+{
+    for (u32 node = c_ast_subtree_begin(ast, root); node <= root; node += 1)
+    {
+        if (c_ast_types_fact_kind(ast->kinds[node]) && !(facts->flags[node] & C_AST_FACT_EXPRESSION))
+        {
+            facts->flags[node] |= C_AST_FACT_EXPRESSION;
+            facts->statistics.candidates += 1;
+            facts->statistics.machine += (facts->flags[node] & C_AST_FACT_TYPED) != 0;
+            facts->statistics.strings += (facts->flags[node] & C_AST_FACT_STRING) != 0;
+            required[node / 8] |= (u8)(1u << (node % 8));
+        }
+    }
+}
+
 BUSTER_C_SHARED CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess)
 {
     CAstTypeBody* body = machine->ast_facts && machine->ast_facts->flags ? machine->ast_types : 0;

@@ -8309,6 +8309,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_projection(UnitTestA
     return result;
 }
 
+// File-scope sizeof/typeof operands never enter a body or initializer region.
+// Their expression facts still retain the semantic callable return authority.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unevaluated_operand_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("long counted_long(void);int values[sizeof(counted_long())];"
+           "struct R{long value;};struct R get_record(void);typedef __typeof__(get_record().value) Value;"
+           "int main(void){return sizeof(values)!=sizeof(int)*sizeof(long);}"), C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+    {
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        syntax.ast = &built.ast;
+        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        syntax.ast_facts = &facts;
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+        String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+        difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+        BUSTER_TEST_RAW(arguments, !difference.length, difference);
+        u32 calls = 0;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_CALL)
+            {
+                BUSTER_TEST(arguments, (facts.flags[node] & (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED)) == (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED));
+                BUSTER_TEST(arguments, !(facts.flags[node] & C_AST_FACT_RECIPE) && facts.types[node] < analysis.type_count &&
+                                       analysis.types[facts.types[node]].kind == (calls ? C_TYPE_STRUCT : C_TYPE_LONG));
+                u32 callee = c_ast_child_at(&built.ast, node, 0);
+                BUSTER_TEST(arguments, (facts.flags[callee] & C_AST_FACT_BOUND) && facts.payloads[callee] < analysis.entity_count);
+                calls += 1;
+            }
+        }
+        BUSTER_TEST(arguments, calls == 2 && !facts.statistics.stale && !facts.recipe_failed);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("unevaluated-operands.c"), preprocess, analysis, target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Completed indirection facts compose from their children. Query count is
 // bounded independently of the grouped function designator's input depth.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
@@ -8514,6 +8560,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);

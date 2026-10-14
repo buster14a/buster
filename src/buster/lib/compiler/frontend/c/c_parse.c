@@ -9699,6 +9699,101 @@ BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CP
                                                   CScopeId scope, u32 begin, u32 end);
 BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult preprocess, CArrayBound bound);
 
+// One retained expression completion, shared by typed regions and the
+// required unevaluated operands outside them. All transient model changes
+// are captured before the same checkpoint rollback.
+BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                       CScopeId node_scope, u32 node, u32 first, u32 end)
+{
+    CAstFacts* facts = machine->ast_facts;
+    u32 slot = machine->expression_queries && machine->expression_query_result == result && first >= machine->expression_query_start &&
+                       first < machine->expression_query_end
+                   ? first - machine->expression_query_start
+                   : UINT32_MAX;
+    CParseExpressionQuery saved_query = slot != UINT32_MAX ? machine->expression_queries[slot] : (CParseExpressionQuery){0};
+    u8 saved_flags = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0;
+    CParseResult checkpoint = *result;
+    u32 mutation_mark = machine->mutation_count;
+    u32 recipe_mark = facts->recipe_count;
+    machine->committed_mutation_count = mutation_mark;
+    CTypeId type = C_TYPE_ID_INVALID;
+    u32 derived_recipe = C_AST_FACT_NONE;
+    // Deep indirection chains already have their completed child
+    // fact. Re-reading every nested prefix would be quadratic.
+    bool derived = machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE &&
+                   c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
+    bool valid = derived || c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
+    if (!valid)
+    {
+        valid = c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
+        if (valid && derived_recipe == C_AST_FACT_NONE && slot != UINT32_MAX)
+        {
+            c_parse_expression_query_publish(machine, slot, end, node_scope, type, 0);
+        }
+    }
+    facts->statistics.completion_queries += !derived;
+    // A valid root drops the records of the rows it mutated; they
+    // are still in place, so the rollback below can undo them.
+    bool mutated = machine->committed_mutation_count > mutation_mark;
+    machine->mutation_count = mutated ? machine->committed_mutation_count : machine->mutation_count;
+    bool sound = !mutated && !machine->failed && c_parse_region_facts_sound(machine, result, &checkpoint, mutation_mark);
+    bool appended = result->type_count != checkpoint.type_count || result->array_bound_count != checkpoint.array_bound_count ||
+                    result->type_alignment_count != checkpoint.type_alignment_count ||
+                    result->interned_type_count != checkpoint.interned_type_count ||
+                    result->interned_qualified_count != checkpoint.interned_qualified_count;
+    bool kept = sound && valid && type.value < checkpoint.type_count;
+    bool string = sound && valid && !kept &&
+                  c_ast_types_facts_string(facts, result, machine->syntax_tree, node, type, checkpoint.type_count);
+    if (sound && derived_recipe != C_AST_FACT_NONE)
+    {
+        facts->types[node] = derived_recipe;
+        facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_RECIPE;
+        facts->statistics.completed += 1;
+        facts->statistics.recipes += 1;
+    }
+    else if (kept)
+    {
+        c_ast_types_facts_record(facts, node, type, machine->result_nonplace_projection);
+    }
+    else if (string)
+    {
+        facts->statistics.completed += 1;
+        facts->statistics.strings += 1;
+    }
+    else if (sound && valid && c_ast_types_facts_recipe(facts, result, &preprocess, node, type, checkpoint.type_count))
+    {
+        facts->flags[node] |= machine->result_nonplace_projection ? C_AST_FACT_NONPLACE : 0;
+    }
+    else if (sound && !valid && c_ast_types_facts_identity(facts, result, machine->syntax_tree, &preprocess, node))
+    {
+        // Its explicit semantic form is the fact: no callable C
+        // row is invented for a builtin or implicit name object.
+    }
+    else
+    {
+        CAstFactGap gap = machine->failed                                       ? C_AST_FACT_GAP_BUSY
+                          : !sound || (valid && type.value < result->type_count) ? C_AST_FACT_GAP_APPENDS
+                                                                                  : C_AST_FACT_GAP_INVALID;
+        facts->statistics.gaps[gap] += 1;
+    }
+    if (facts->recipe_count > recipe_mark)
+    {
+        bool saved_checkpoint = machine->fact_checkpoint_active;
+        machine->fact_checkpoint_active = true;
+        c_parse_type_recipe_bounds(machine, preprocess, result, node_scope, recipe_mark, facts->recipe_count);
+        machine->fact_checkpoint_active = saved_checkpoint;
+    }
+    if (!sound || appended)
+    {
+        c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+        if (slot != UINT32_MAX)
+        {
+            machine->expression_queries[slot] = saved_query;
+            machine->expression_query_flags[slot] = saved_flags;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, bool body)
 {
     CAstTypeBody* region = machine->ast_facts ? c_ast_types_facts_begin(machine, &preprocess) : 0;
@@ -9735,92 +9830,7 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
             else
             {
                 CScopeId node_scope = body ? c_parse_scope_for_token(result, scope, first) : scope;
-                u32 slot = machine->expression_queries && machine->expression_query_result == result && first >= machine->expression_query_start &&
-                                   first < machine->expression_query_end
-                               ? first - machine->expression_query_start
-                               : UINT32_MAX;
-                CParseExpressionQuery saved_query = slot != UINT32_MAX ? machine->expression_queries[slot] : (CParseExpressionQuery){0};
-                u8 saved_flags = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0;
-                CParseResult checkpoint = *result;
-                u32 mutation_mark = machine->mutation_count;
-                u32 recipe_mark = facts->recipe_count;
-                machine->committed_mutation_count = mutation_mark;
-                CTypeId type = C_TYPE_ID_INVALID;
-                u32 derived_recipe = C_AST_FACT_NONE;
-                // Deep indirection chains already have their completed child
-                // fact. Re-reading every nested prefix would be quadratic.
-                bool derived = machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE &&
-                               c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
-                bool valid = derived || c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
-                if (!valid)
-                {
-                    valid = c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
-                    if (valid && derived_recipe == C_AST_FACT_NONE && slot != UINT32_MAX)
-                    {
-                        c_parse_expression_query_publish(machine, slot, end, node_scope, type, 0);
-                    }
-                }
-                facts->statistics.completion_queries += !derived;
-                // A valid root drops the records of the rows it mutated; they
-                // are still in place, so the rollback below can undo them.
-                bool mutated = machine->committed_mutation_count > mutation_mark;
-                machine->mutation_count = mutated ? machine->committed_mutation_count : machine->mutation_count;
-                bool sound = !mutated && !machine->failed && c_parse_region_facts_sound(machine, result, &checkpoint, mutation_mark);
-                bool appended = result->type_count != checkpoint.type_count || result->array_bound_count != checkpoint.array_bound_count ||
-                                result->type_alignment_count != checkpoint.type_alignment_count ||
-                                result->interned_type_count != checkpoint.interned_type_count ||
-                                result->interned_qualified_count != checkpoint.interned_qualified_count;
-                bool kept = sound && valid && type.value < checkpoint.type_count;
-                bool string = sound && valid && !kept &&
-                              c_ast_types_facts_string(facts, result, machine->syntax_tree, node, type, checkpoint.type_count);
-                if (sound && derived_recipe != C_AST_FACT_NONE)
-                {
-                    facts->types[node] = derived_recipe;
-                    facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_RECIPE;
-                    facts->statistics.completed += 1;
-                    facts->statistics.recipes += 1;
-                }
-                else if (kept)
-                {
-                    c_ast_types_facts_record(facts, node, type, machine->result_nonplace_projection);
-                }
-                else if (string)
-                {
-                    facts->statistics.completed += 1;
-                    facts->statistics.strings += 1;
-                }
-                else if (sound && valid && c_ast_types_facts_recipe(facts, result, &preprocess, node, type, checkpoint.type_count))
-                {
-                    facts->flags[node] |= machine->result_nonplace_projection ? C_AST_FACT_NONPLACE : 0;
-                }
-                else if (sound && !valid && c_ast_types_facts_identity(facts, result, machine->syntax_tree, &preprocess, node))
-                {
-                    // Its explicit semantic form is the fact: no callable C
-                    // row is invented for a builtin or implicit name object.
-                }
-                else
-                {
-                    CAstFactGap gap = machine->failed                                       ? C_AST_FACT_GAP_BUSY
-                                      : !sound || (valid && type.value < result->type_count) ? C_AST_FACT_GAP_APPENDS
-                                                                                              : C_AST_FACT_GAP_INVALID;
-                    facts->statistics.gaps[gap] += 1;
-                }
-                if (facts->recipe_count > recipe_mark)
-                {
-                    bool saved_checkpoint = machine->fact_checkpoint_active;
-                    machine->fact_checkpoint_active = true;
-                    c_parse_type_recipe_bounds(machine, preprocess, result, node_scope, recipe_mark, facts->recipe_count);
-                    machine->fact_checkpoint_active = saved_checkpoint;
-                }
-                if (!sound || appended)
-                {
-                    c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
-                    if (slot != UINT32_MAX)
-                    {
-                        machine->expression_queries[slot] = saved_query;
-                        machine->expression_query_flags[slot] = saved_flags;
-                    }
-                }
+                c_parse_retained_fact_complete(machine, preprocess, result, node_scope, node, first, end);
             }
             if (facts->recipe_failed && !machine->failed)
             {
@@ -9839,6 +9849,87 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
         machine->runtime_expression_constraints = runtime;
         machine->constant_evaluation_mode = saved_mode;
     }
+}
+
+// The semantic unit owns sizeof/alignof/typeof operand facts even when the
+// surrounding declaration never creates a typed body/initializer region.
+BUSTER_C_INTERNAL void c_parse_unevaluated_operand_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result)
+{
+    CAstFacts* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    u64 mark = machine->scratch_arena->position;
+    u64 bytes = ast ? ((u64)ast->node_count + 7) / 8 : 0;
+    bool eligible = facts && ast && facts->spans && !machine->failed && !result->diagnostic_count;
+    bool room = machine->scratch_arena->position <= machine->scratch_arena->reserved_size && bytes <= machine->scratch_arena->reserved_size - machine->scratch_arena->position;
+    u8* required = eligible && room ? arena_allocate_zeroed(machine->scratch_arena, u8, bytes) : 0;
+    if (eligible && !required)
+    {
+        facts->recipe_failed = true;
+        machine->failed = true;
+        c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve unevaluated operand fact completion marks"));
+    }
+    if (required)
+    {
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            u32 kind = ast->kinds[node];
+            if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL)
+            {
+                u32 operand = c_ast_child_at(ast, node, 0);
+                if (ast->kinds[operand] != C_AST_TYPE_NAME) c_ast_types_facts_require(facts, ast, operand, required);
+            }
+        }
+        for (u32 bound = 0; bound < facts->bound_count; bound += 1)
+        {
+            u32 operand = c_ast_facts_bound_node(facts, bound);
+            if (operand != C_AST_NODE_INVALID) c_ast_types_facts_require(facts, ast, operand, required);
+        }
+        CAstTypeBody* saved_region = machine->ast_types;
+        CParseExpressionQuery* saved_queries = machine->expression_queries;
+        CConstantEvaluationMode mode = machine->constant_evaluation_mode;
+        bool checked = machine->validate_expression_constraints;
+        bool runtime = machine->runtime_expression_constraints;
+        bool protected = machine->fact_checkpoint_active;
+        machine->ast_types = 0;
+        machine->expression_queries = 0;
+        machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE;
+        machine->validate_expression_constraints = false;
+        machine->runtime_expression_constraints = false;
+        machine->fact_checkpoint_active = true;
+        u64 completion_mark = machine->scratch_arena->position;
+        for (u32 node = 0; node < ast->node_count && !machine->failed; node += 1)
+        {
+            if ((required[node / 8] & (1u << (node % 8))) && !(facts->flags[node] & C_AST_FACT_TYPED))
+            {
+                u32 first = facts->spans->first[node];
+                u32 end = facts->spans->end[node];
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){0}, first);
+                if (ast->kinds[node] == C_AST_IDENTIFIER && first < preprocess.token_count)
+                {
+                    u32 use = c_parse_identifier_use_index(result, ast->tokens[node]);
+                    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[ast->tokens[node]]);
+                    if (entity.value < result->entity_count)
+                    {
+                        facts->payloads[node] = entity.value;
+                        facts->statistics.bound += !(facts->flags[node] & C_AST_FACT_BOUND);
+                        facts->flags[node] |= C_AST_FACT_BOUND;
+                    }
+                }
+                if (first != C_AST_SPAN_NONE && first < end && end <= preprocess.token_count)
+                    c_parse_retained_fact_complete(machine, preprocess, result, scope, node, first, end);
+                else facts->statistics.gaps[C_AST_FACT_GAP_UNSPANNED] += 1;
+                arena_set_position(machine->scratch_arena, completion_mark);
+            }
+        }
+        machine->ast_types = saved_region;
+        machine->expression_queries = saved_queries;
+        machine->constant_evaluation_mode = mode;
+        machine->validate_expression_constraints = checked;
+        machine->runtime_expression_constraints = runtime;
+        machine->fact_checkpoint_active = protected;
+    }
+    arena_set_position(machine->scratch_arena, mark);
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -48885,6 +48976,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     c_parse_ast_identity_publish(&machine, preprocess, &result);
     c_parse_ast_bound_owners_publish(&machine, preprocess, &result);
+    c_parse_unevaluated_operand_facts(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).
     c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result, &preprocess);
     result.analysis_complete = semantic_outputs_ready;
