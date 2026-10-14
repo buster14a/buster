@@ -18482,35 +18482,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
            " static int invalid_designator_fixed_overflow[1] = { [2] = 1 };\n"),
         (CPreprocessOptions){0});
     CParseResult invalid_designator_parse = c_parse(invalid_designator_temporary.arena, invalid_designator_tokens);
-    CIRLowerResult invalid_designator_ir = c_lower_to_ir(invalid_designator_temporary.arena, S8("invalid-designators.c"), invalid_designator_tokens, c_parse_for_lowering(invalid_designator_temporary.arena, invalid_designator_tokens), target_native);
-    bool found_nonconstant = false;
-    bool found_negative = false;
-    bool found_overflow = false;
-    bool found_empty_range = false;
-    bool found_negative_range = false;
-    bool found_outside_range = false;
-    bool found_outside_bounds = false;
-    for (u32 diagnostic_index = 0; diagnostic_index < invalid_designator_ir.diagnostic_count; diagnostic_index += 1)
-    {
-        String8 message = invalid_designator_ir.diagnostics[diagnostic_index].message;
-        found_nonconstant |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is not an integer constant expression"));
-        found_negative |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
-        found_overflow |= string_starts_with_sequence(message, S8("C IR lowering: array designator index exceeds the target object size"));
-        found_empty_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator range is empty"));
-        found_negative_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
-        found_outside_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
-        found_outside_bounds |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
-    }
+    CParseResult prepared = c_parse_for_lowering(invalid_designator_temporary.arena, invalid_designator_tokens);
+    CIRLowerResult invalid_designator_ir = c_lower_to_ir(invalid_designator_temporary.arena, S8("invalid-designators.c"),
+        invalid_designator_tokens, prepared, target_native);
     BUSTER_TEST(arguments, invalid_designator_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, invalid_designator_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, invalid_designator_ir.diagnostic_count == 9);
-    BUSTER_TEST(arguments, found_nonconstant);
-    BUSTER_TEST(arguments, found_negative);
-    BUSTER_TEST(arguments, found_overflow);
-    BUSTER_TEST(arguments, found_empty_range);
-    BUSTER_TEST(arguments, found_negative_range);
-    BUSTER_TEST(arguments, found_outside_range);
-    BUSTER_TEST(arguments, found_outside_bounds);
+    // Finished semantic refusals stop the combined unit before lowering. Keep
+    // the independent model oracle, and check every old lower refusal below
+    // in its own unit so an earlier semantic error cannot mask another case.
+    BUSTER_TEST(arguments, prepared.diagnostic_count == 5 && invalid_designator_ir.diagnostic_count == 5 &&
+        !invalid_designator_ir.program && !invalid_designator_ir.canonical_ir_certified);
+    for (u32 index = 0; index < prepared.diagnostic_count && index < invalid_designator_ir.diagnostic_count; index += 1)
+    {
+        BUSTER_TEST(arguments, string_equal(prepared.diagnostics[index].message, invalid_designator_ir.diagnostics[index].message) &&
+            prepared.diagnostics[index].kind == invalid_designator_ir.diagnostics[index].kind &&
+            prepared.diagnostics[index].location.line == invalid_designator_ir.diagnostics[index].location.line &&
+            prepared.diagnostics[index].location.column == invalid_designator_ir.diagnostics[index].location.column);
+    }
+    struct { String8 declaration; String8 message; u32 column; } const cases[] = {
+        {S8("static int invalid_designator_nonconstant[] = { [invalid_designator_value] = 1 };"),
+         S8("C IR lowering: array designator index is not an integer constant expression for incomplete array type of 'invalid_designator_nonconstant'"), 87},
+        {S8("static int invalid_designator_negative[] = { [-1] = 1 };"),
+         S8("C IR lowering: array designator index is negative for incomplete array type of 'invalid_designator_negative'"), 84},
+        {S8("static int invalid_designator_overflow[] = { [18446744073709551615ULL] = 1 };"),
+         S8("C IR lowering: array designator index exceeds the target object size for incomplete array type of 'invalid_designator_overflow'"), 83},
+        {S8("static int invalid_designator_empty_range[8] = { [5 ... 2] = 1 };"),
+         S8("C IR lowering: array designator range is empty"), 90},
+        {S8("static int invalid_designator_negative_range[8] = { [-1 ... 2] = 1 };"),
+         S8("C IR lowering: array designator range is empty"), 94},
+        {S8("static int invalid_designator_outside_range[4] = { [2 ... 5] = 1 };"),
+         S8("C IR lowering: array designator index is outside the array bounds"), 89},
+        {S8("static int invalid_designator_fixed_nonconstant[1] = { [invalid_designator_value] = 1 };"),
+         S8("C IR lowering: array designator index is not an integer constant expression"), 94},
+        {S8("static int invalid_designator_fixed_negative[1] = { [-1] = 1 };"),
+         S8("C IR lowering: array designator index is outside the array bounds"), 90},
+        {S8("static int invalid_designator_fixed_overflow[1] = { [2] = 1 };"),
+         S8("C IR lowering: array designator index is outside the array bounds"), 90},
+    };
+    u32 diagnostic_count = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena one = arena_begin_temporal(invalid_designator_temporary.arena);
+        String8 source = string_format(one.arena, S8("static int invalid_designator_value; {S8}"), cases[index].declaration);
+        CPreprocessResult tokens = c_preprocess(one.arena, source, (CPreprocessOptions){0});
+        CParseResult model = c_parse(one.arena, tokens);
+        CParseResult checked = c_parse_for_lowering(one.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(one.arena, S8("invalid-designator.c"), tokens, checked, target_native);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !model.diagnostic_count);
+        diagnostic_count += (u32)lowered.diagnostic_count;
+        if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1 && !lowered.canonical_ir_certified))
+        {
+            BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                string_equal(lowered.diagnostics[0].message, cases[index].message) &&
+                lowered.diagnostics[0].location.line == 1 && lowered.diagnostics[0].location.column == cases[index].column);
+        }
+        scratch_end(one);
+    }
+    BUSTER_TEST(arguments, diagnostic_count == 9);
     c_test_scratch_end(invalid_designator_temporary);
     // A second `...` is a syntax error the tree builder reports.
     c_test_tree_rejection(arguments, &result, S8("static int invalid_designator_multiple_range[8] = { [1 ... 2 ... 3] = 1 };\n"),
