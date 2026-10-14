@@ -85,6 +85,7 @@ class LoweringProvenanceTests(unittest.TestCase):
             c_parse_index_declarations(&parse, scratch);
             c_type_parse_buffer_size_add(&size, count, element_size, alignment);
             c_semantic_integer_rank(C_TYPE_INT);
+            c_semantic_vendor_immediate_limit(name, argument);
             c_semantic_source_line(&preprocess, ast->tokens[node]);
         '''
         self.assertEqual([], violations(source))

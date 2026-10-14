@@ -323,7 +323,7 @@ BUSTER_C_INTERNAL u64* c_declaration_specifier_sets_build(Arena* arena, CPreproc
                         case C_AST_WORD_EXTERN: sets[index] |= C_SYMBOL_WELL_KNOWN_BIT(EXTERN); break;
                         case C_AST_WORD_INLINE:
                         {
-                            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[item]]);
+                            String8 spelling = c_source_anchor_spelling(&preprocess, c_source_anchor_at(&preprocess, ast->tokens[item]));
                             sets[index] |= string_equal(spelling, S8("__inline")) ? C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)
                                            : string_equal(spelling, S8("__inline__")) ? C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT)
                                            : C_SYMBOL_WELL_KNOWN_BIT(INLINE);

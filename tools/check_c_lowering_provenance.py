@@ -65,6 +65,7 @@ SEMANTIC_READS = {
     "c_semantic_simd_builtin", "c_semantic_source_file", "c_semantic_source_line",
     "c_semantic_source_location_builtin", "c_semantic_sse2_immediate_shift_builtin",
     "c_semantic_vendor_builtin_signature", "c_semantic_vendor_builtin_supported",
+    "c_semantic_vendor_immediate_limit",
 }
 FORBIDDEN_RANGE_GRAMMAR = {
     "c_ir_count_string_literal_range_for_target",
