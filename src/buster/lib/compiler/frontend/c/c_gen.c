@@ -18726,6 +18726,7 @@ struct CIrLowerFrame
         {
             u32 start;
             u32 end;
+            u32 node_plus_one;
         } range;
         struct
         {
@@ -18741,6 +18742,8 @@ struct CIrLowerFrame
             u32 false_end;
             u32 nested_start;
             u32 nested_end;
+            u32 false_node_plus_one;
+            u32 nested_node_plus_one;
         } arithmetic_conditional;
         struct
         {
@@ -18773,6 +18776,9 @@ struct CIrLowerFrame
             IrValueId value;
             u32 start;
             u32 end;
+            // The exact subtree currently lowered. Zero is reserved for
+            // the temporary range-boundary adapters at frame entry.
+            u32 node_plus_one;
             u32 task_count;
             u32 task_capacity;
             // A call's argument list lowered as one comma expression: the
@@ -19014,6 +19020,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowe
         builder->failure_message = S8("C lowering machine frame capacity exceeded");
         builder->failure_token_index = c_ir_lower_frame_token_index(frame);
         return false;
+    }
+    // TEMPORARY ADAPTER (#3102 step 4): declaration, query and assembly
+    // owners still hand their expression operands over as token ranges.
+    // Resolve those ranges at this boundary once. Tree-owned expressions
+    // pass the exact node, including each comma and assignment continuation.
+    if (frame.kind == C_IR_LOWER_FRAME_EXPRESSION && !frame.as.expression.node_plus_one && frame.as.expression.argument_count <= 1)
+    {
+        frame.as.expression.node_plus_one = c_ir_tree_range_node(builder, frame.as.expression.start, frame.as.expression.end) + 1;
     }
     frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
     machine->frames[machine->frame_count++] = frame;
@@ -25190,6 +25204,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
                                                     {
                                                         .start = open + 1,
                                                         .end = close,
+                                                        .node_plus_one = wrapping || argument_count > 1 ? node + 1 : node,
                                                         .argument_starts = argument_starts,
                                                         .argument_count = argument_count,
                                                     },
@@ -38188,7 +38203,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_enter(CIntegerIrBuilder* builder, CIrL
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT;
             status = c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                         .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                        .as.expression = {.start = open + 1, .end = close},
+                                                        .as.expression = {.start = open + 1, .end = close, .node_plus_one = node + 1},
                                                     })
                          ? C_IR_CORE_SUSPENDED
                          : C_IR_CORE_FAILED;
@@ -38558,7 +38573,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_subscript(CIntegerIrBuilder* builder, 
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_INDEX;
         status = c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                     .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                    .as.expression = {.start = open + 1, .end = close},
+                                                    .as.expression = {.start = open + 1, .end = close, .node_plus_one = subscript + 1},
                                                 })
                      ? C_IR_CORE_SUSPENDED
                      : C_IR_CORE_FAILED;
@@ -39379,10 +39394,9 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_core_wrapped(CIntegerIrBuilder* builde
 // ROOT_ASSIGNMENT, the token scan's own rules). The descent follows the child
 // that holds the first root `?`, so it costs the depth of the root region. A
 // GNU `?:` with no middle operand counts only in a GNU dialect.
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
-                                             u32* colon, u32* expression_end)
+BUSTER_C_INTERNAL bool c_ir_node_root_conditional(CIntegerIrBuilder* builder, u32 node, u32* expression_start, u32* question,
+                                                  u32* colon, u32* expression_end, u32* conditional_node_out)
 {
-    u32 node = c_ir_tree_range_node(builder, start, end);
     bool result = false;
     u64 steps = 0;
     if (node != C_AST_NODE_INVALID)
@@ -39427,6 +39441,7 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
                 result = !refused;
                 if (result)
                 {
+                    if (conditional_node_out) *conditional_node_out = cursor;
                     *expression_start = builder->syntax_spans->first[node];
                     *question = question_token;
                     *colon = colon_token;
@@ -39442,6 +39457,14 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
         builder->hoist_statistics->steps += steps;
     }
     return result;
+}
+
+// Temporary range boundary for the condition and type-query owners. The
+// expression owner already holds its subtree and asks the node reader above.
+BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                             u32* colon, u32* expression_end)
+{
+    return c_ir_node_root_conditional(builder, c_ir_tree_range_node(builder, start, end), expression_start, question, colon, expression_end, 0);
 }
 
 struct CIrConditionTask
@@ -41328,7 +41351,7 @@ BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u3
 // is the operator `which` names; UINT32_MAX when there is none. The walk
 // visits the region in order over an explicit stack: a prefix operator's
 // token before its operand, any other operator's after its first operand.
-BUSTER_C_INTERNAL u32 c_ir_root_first_token(CIntegerIrBuilder* builder, u32 node, CIrRootToken which)
+BUSTER_C_INTERNAL u32 c_ir_root_first_node(CIntegerIrBuilder* builder, u32 node, CIrRootToken which)
 {
     CAst const* ast = builder->syntax_tree;
     u64 mark = builder->temporary_arena->position;
@@ -41351,7 +41374,7 @@ BUSTER_C_INTERNAL u32 c_ir_root_first_token(CIntegerIrBuilder* builder, u32 node
         bool resumed = entry.deferred != 0;
         if ((prefix || resumed) && matches)
         {
-            found = ast->tokens[entry.node];
+            found = entry.node;
         }
         else
         {
@@ -41372,12 +41395,18 @@ BUSTER_C_INTERNAL u32 c_ir_root_first_token(CIntegerIrBuilder* builder, u32 node
             }
             if (!prefix && !resumed && !limit && matches)
             {
-                found = ast->tokens[entry.node];
+                found = entry.node;
             }
         }
     }
     builder->temporary_arena->position = mark;
     return found;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_root_first_token(CIntegerIrBuilder* builder, u32 node, CIrRootToken which)
+{
+    u32 found = c_ir_root_first_node(builder, node, which);
+    return found != C_AST_NODE_INVALID ? builder->syntax_tree->tokens[found] : UINT32_MAX;
 }
 
 // The trailing expression statement of a statement-expression body, which is
@@ -42563,34 +42592,27 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     // that shape through the expression path and recover its final load's
     // operand in EXPRESSION_PLACE (the same recovery used for
     // parenthesized member assignments above).
-    bool parenthesized_base_suffix = false;
-    if (start < assignment && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    CAst const* ast = builder->syntax_tree;
+    u32 left = c_ast_child_at(ast, frame->as.expression.node_plus_one - 1, 0);
+    u32 kind = ast->kinds[left];
+    bool suffix = kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX;
+    bool parenthesized_place = c_ir_core_spelled_parenthesis(builder, left) && (!suffix || c_ir_core_wraps(builder, left, start));
+    if (!parenthesized_place && kind == C_AST_DEREFERENCE)
     {
-        u32 close = c_ir_matching_delimiter_cached(builder, start, assignment, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                   C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        parenthesized_base_suffix =
-            close < assignment && close + 1 < assignment &&
-            (c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_DOT) ||
-             c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_ARROW) ||
-             c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACKET));
+        u32 pointer = c_ast_child_at(ast, left, 0);
+        parenthesized_place = c_ir_core_spelled_parenthesis(builder, pointer) || ast->kinds[pointer] == C_AST_ADDRESS;
     }
-    bool parenthesized_place =
-        start < assignment &&
-        ((c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) && !parenthesized_base_suffix) ||
-         (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
-          (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-           c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_AMPERSAND))));
     // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
     // pointer while forming the place. The place machine parses an
     // identifier and its field/subscript suffixes, not an update, so
     // route this shape through the expression path too and recover the
     // place from the load it ends with, exactly as above.
-    if (!parenthesized_place && start < assignment && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
+    if (!parenthesized_place && kind == C_AST_DEREFERENCE)
     {
-        for (u32 index = start + 1; index < assignment; index += 1)
+        for (u32 node = c_ast_subtree_begin(ast, left); node < left; node += 1)
         {
-            if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_PLUS_PLUS) ||
-                c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_MINUS_MINUS))
+            u32 update = ast->kinds[node];
+            if (update == C_AST_PRE_INCREMENT || update == C_AST_PRE_DECREMENT || update == C_AST_POST_INCREMENT || update == C_AST_POST_DECREMENT)
             {
                 parenthesized_place = true;
                 break;
@@ -42599,7 +42621,7 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     }
     bool pushed = parenthesized_place
                       ? c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                                     .as.expression = {.start = start, .end = assignment}})
+                                                                     .as.expression = {.start = start, .end = assignment, .node_plus_one = left + 1}})
                       : c_ir_lower_place_frame_push(builder, start, assignment);
     return pushed;
 }
@@ -42703,6 +42725,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
+        frame->as.expression.node_plus_one = c_ast_child_at(builder->syntax_tree, frame->as.expression.node_plus_one - 1, 1) + 1;
         frame->as.expression.start = assignment + 1;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
@@ -42745,6 +42768,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 }
                 frame->as.expression.start = task.as.arithmetic_conditional.nested_start;
                 frame->as.expression.end = task.as.arithmetic_conditional.nested_end;
+                frame->as.expression.node_plus_one = task.as.arithmetic_conditional.nested_node_plus_one;
                 frame->as.expression.value = IR_VALUE_ID_INVALID;
                 unwind = false;
                 break;
@@ -42776,6 +42800,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 }
                 frame->as.expression.start = task.as.arithmetic_conditional.false_start;
                 frame->as.expression.end = task.as.arithmetic_conditional.false_end;
+                frame->as.expression.node_plus_one = task.as.arithmetic_conditional.false_node_plus_one;
                 frame->as.expression.value = IR_VALUE_ID_INVALID;
                 unwind = false;
                 break;
@@ -42853,6 +42878,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 }
                 frame->as.expression.start = task.as.range.start;
                 frame->as.expression.end = task.as.range.end;
+                frame->as.expression.node_plus_one = task.as.range.node_plus_one;
                 frame->as.expression.value = IR_VALUE_ID_INVALID;
                 unwind = false;
                 break;
@@ -42902,10 +42928,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             }
             frame->as.expression.argument_count -= 1;
             u32 last_start = frame->as.expression.argument_starts[frame->as.expression.argument_count];
+            u32 call = frame->as.expression.node_plus_one - 1;
+            u32 argument = c_ast_child_at(builder->syntax_tree, call, frame->as.expression.argument_count + 1);
             if (!c_ir_expression_task_push(builder, frame,
                                            (CIrLowerFrame){
                                                .kind = C_IR_LOWER_FRAME_COMMA_COMPLETION,
-                                               .as.range = {.start = last_start, .end = end},
+                                               .as.range = {.start = last_start, .end = end, .node_plus_one = argument + 1},
                                            },
                                            last_start - 1))
             {
@@ -42913,13 +42941,17 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 return;
             }
             frame->as.expression.end = last_start - 1;
+            if (frame->as.expression.argument_count == 1)
+            {
+                frame->as.expression.node_plus_one = c_ast_child_at(builder->syntax_tree, call, 1) + 1;
+            }
             continue;
         }
-        u32 node = c_ir_tree_range_node(builder, start, end);
+        u32 node = frame->as.expression.node_plus_one - 1;
         while (node != C_AST_NODE_INVALID && builder->syntax_tree->kinds[node] == C_AST_EXTENSION && builder->syntax_spans->first[node] == start)
         {
             start += 1;
-            node = c_ir_tree_range_node(builder, start, end);
+            node = c_ast_child_at(builder->syntax_tree, node, 0);
         }
         if (node == C_AST_NODE_INVALID)
         {
@@ -42929,6 +42961,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->as.expression.start = start;
+        frame->as.expression.node_plus_one = node + 1;
         u32 kind = builder->syntax_tree->kinds[node];
         u32 node_first = builder->syntax_spans->first[node];
         u32 node_end = builder->syntax_spans->end[node];
@@ -42957,26 +42990,43 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         u32 conditional_question = 0;
         u32 conditional_colon = 0;
         u32 conditional_end = 0;
-        if (c_ir_root_conditional(builder, start, end, &conditional_start, &conditional_question, &conditional_colon, &conditional_end))
+        u32 conditional = C_AST_NODE_INVALID;
+        if (c_ir_node_root_conditional(builder, node, &conditional_start, &conditional_question, &conditional_colon, &conditional_end, &conditional))
         {
             // `c ? x + (d ? y : z) : w`: the true operand adds a conditional
             // to the first root `+` of its root region.
-            u32 middle = c_ir_tree_range_node(builder, conditional_question + 1, conditional_colon);
-            u32 plus = middle != C_AST_NODE_INVALID && !c_ir_core_wrapped(builder, middle)
-                           ? c_ir_root_first_token(builder, middle, C_IR_ROOT_TOKEN_PLUS)
-                           : UINT32_MAX;
+            u32 middle = builder->syntax_tree->kinds[conditional] == C_AST_CONDITIONAL ? c_ast_child_at(builder->syntax_tree, conditional, 1)
+                                                                                    : C_AST_NODE_INVALID;
+            u32 plus_node = middle != C_AST_NODE_INVALID && !c_ir_core_wrapped(builder, middle)
+                               ? c_ir_root_first_node(builder, middle, C_IR_ROOT_TOKEN_PLUS)
+                               : C_AST_NODE_INVALID;
+            u32 plus = plus_node != C_AST_NODE_INVALID ? builder->syntax_tree->tokens[plus_node] : UINT32_MAX;
             plus = plus < conditional_colon ? plus : conditional_colon;
             u32 nested_start = plus + 1;
             u32 nested_end = conditional_colon;
-            c_ir_expression_core_range(builder, &nested_start, &nested_end);
+            // Only a root addition's right operand is the suffix beginning
+            // just past this first `+`; a suffix of a left-nested operator
+            // region has no subtree and did not take the compatibility path.
+            u32 nested = middle != C_AST_NODE_INVALID && plus_node == middle && builder->syntax_tree->kinds[middle] == C_AST_ADD
+                             ? c_ast_child_at(builder->syntax_tree, middle, 1)
+                             : C_AST_NODE_INVALID;
+            while (nested != C_AST_NODE_INVALID && builder->syntax_tree->kinds[nested] == C_AST_COMMA)
+            {
+                nested = c_ast_child_at(builder->syntax_tree, nested, 1);
+            }
+            if (nested != C_AST_NODE_INVALID)
+            {
+                nested_start = builder->syntax_spans->first[nested];
+                nested_end = builder->syntax_spans->end[nested];
+            }
             u32 nested_expression_start = 0;
             u32 nested_question = 0;
             u32 nested_colon = 0;
             u32 nested_expression_end = 0;
             bool nested_conditional =
-                plus > conditional_question + 1 && plus + 1 < conditional_colon &&
-                c_ir_root_conditional(builder, nested_start, nested_end, &nested_expression_start, &nested_question, &nested_colon,
-                                      &nested_expression_end);
+                plus > conditional_question + 1 && plus + 1 < conditional_colon && nested != C_AST_NODE_INVALID &&
+                c_ir_node_root_conditional(builder, nested, &nested_expression_start, &nested_question, &nested_colon,
+                                           &nested_expression_end, 0);
             if (nested_conditional)
             {
                 IrTypeId true_type = c_ir_predict_expression_type(builder, conditional_question + 1, conditional_colon);
@@ -43010,6 +43060,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                             .false_end = conditional_end,
                             .nested_start = nested_start,
                             .nested_end = nested_end,
+                            .false_node_plus_one = c_ast_child_at(builder->syntax_tree, conditional, 2) + 1,
+                            .nested_node_plus_one = nested + 1,
                         },
                 };
                 if (result_type.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
@@ -43022,6 +43074,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 }
                 frame->as.expression.start = conditional_question + 1;
                 frame->as.expression.end = plus;
+                frame->as.expression.node_plus_one = c_ast_child_at(builder->syntax_tree, middle, 0) + 1;
                 frame->as.expression.pending_true_block = true_block;
                 frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CONDITION;
                 if (!c_ir_lower_condition_frame_push(builder, conditional_start, conditional_question, true_block, false_block, source))
@@ -43059,6 +43112,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 }
                 frame->as.expression.start = type_close + 2;
                 frame->as.expression.end = end - 1;
+                frame->as.expression.node_plus_one = c_ir_tree_range_node(builder, type_close + 2, end - 1) + 1;
                 continue;
             }
         }
@@ -43152,6 +43206,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                                                    {
                                                        .start = last_comma + 1,
                                                        .end = end,
+                                                       .node_plus_one = c_ast_child_at(builder->syntax_tree, node, 1) + 1,
                                                    },
                                            },
                                            last_comma))
@@ -43160,6 +43215,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 return;
             }
             frame->as.expression.end = last_comma;
+            frame->as.expression.node_plus_one = c_ast_child_at(builder->syntax_tree, node, 0) + 1;
             continue;
         }
         // A root assignment: its place first, its value after.
@@ -43182,7 +43238,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         u32 colon = 0;
         u32 expression_end = 0;
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VALUE;
-        if (c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+        if (c_ir_node_root_conditional(builder, node, &expression_start, &question, &colon, &expression_end, 0))
         {
             if (!c_ir_lower_conditional_value_frame_push(builder, start, end))
             {
@@ -48326,6 +48382,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                               {
                                                   .start = anchor + 2,
                                                   .end = condition_close,
+                                                  .node_plus_one = c_ast_child_at(ast, node, 0) + 1,
                                               },
                                       });
                 state->task_count = task_count;
@@ -48621,6 +48678,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                   {
                                                       .start = anchor + 1,
                                                       .end = semicolon,
+                                                      .node_plus_one = c_ast_child_at(ast, node, 0) + 1,
                                                   },
                                           });
                     state->task_count = task_count;
@@ -48643,6 +48701,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                               {
                                                   .start = anchor + 2,
                                                   .end = semicolon,
+                                                  .node_plus_one = c_ast_child_at(ast, node, 0) + 1,
                                               },
                                       });
                 state->task_count = task_count;

@@ -1688,7 +1688,10 @@ verdict), the token scan it fell back to (`c_ir_root_conditional_scan`) and the
 
 ## Expression lowering from the tree
 
-**Status: (a) to (c) and CALL record identity are implemented; the owner frames still take their
+**Status: (a) to (c), CALL record identity and control group identity are
+implemented. The statement-expression owner takes
+its node directly, and the `EXPRESSION` owner retains its current subtree
+through root splits and continuations. The remaining owner frames still take their
 subtree's token range, and the step-4 callers read operand extents through
 marked temporary adapters.** This is
 step 3 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
@@ -2060,6 +2063,12 @@ byte.
   or `&&`/`||`. A hoisted argument list has no node of its own: its group
   carries the call node (`C_IR_TREE_GROUP_STRIDE`), and the frame splits the
   arguments as a comma expression would (`argument_starts`).
+  Its root is retained in `node_plus_one`: comma and assignment continuations
+  carry their exact children, and an argument-list continuation takes its
+  next argument from the CALL's children. The assignment's place route reads
+  the operand's node kinds and wrapper facts. Declaration, query and assembly
+  boundaries still hand over token ranges; the marked entry adapter resolves
+  each once, before the expression frame runs.
 - **Conditions.** `c_ir_lower_condition_step` strips parentheses, takes a
   `!` over a chain, reads the `__builtin_expect` hint, and splits the
   `&&`/`||` spine from the node. A spine is split once, into an array of its
