@@ -46900,6 +46900,32 @@ BUSTER_C_INTERNAL CAstTypeRecipe const* c_ir_constant_recipe_node(CIntegerIrBuil
     return facts && index < facts->recipe_count ? facts->recipes + index : 0;
 }
 
+// The semantic half-layout producer certifies only these exact retained
+// pointer/array/vector chains. Their numeric query answer needs no runtime
+// scalar representation, and reading it must not create canonical C rows.
+BUSTER_C_INTERNAL bool c_ir_storage_half_layout_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    bool valid = facts && node < facts->node_count && (facts->flags[node] & C_AST_FACT_TYPED);
+    CIrRetainedTypeReference reference = {.index = valid ? facts->types[node] : C_AST_FACT_NONE,
+        .recipe = valid && (facts->flags[node] & C_AST_FACT_RECIPE) != 0};
+    u64 remaining = facts ? (u64)builder->parse.type_count + facts->recipe_count : 0;
+    bool half = false;
+    while (valid && !half && remaining)
+    {
+        CType const* type = c_ir_retained_type(builder, reference);
+        valid = type && (type->kind == C_TYPE_FP16_STORAGE || type->kind == C_TYPE_POINTER ||
+                         type->kind == C_TYPE_ARRAY || type->kind == C_TYPE_VECTOR);
+        if (valid)
+        {
+            half = type->kind == C_TYPE_FP16_STORAGE;
+            if (!half) reference = c_ir_retained_nested(builder, reference, type->element_type);
+        }
+        remaining -= 1;
+    }
+    return valid && half;
+}
+
 BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_node(CIntegerIrBuilder* builder, u32 node)
 {
     CAstFacts const* facts = builder->syntax_facts;
@@ -47341,9 +47367,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             CAstFacts const* facts = builder->syntax_facts;
             u32 operand_flags = facts && operand < facts->node_count ? facts->flags[operand] : 0;
             bool bit_field = expression && alignment && (operand_flags & C_AST_FACT_BIT_FIELD);
-            CType const* semantic_operand = (operand_flags & C_AST_FACT_TYPED) ? c_ir_retained_type(builder,
-                (CIrRetainedTypeReference){.index = facts->types[operand], .recipe = (operand_flags & C_AST_FACT_RECIPE) != 0}) : 0;
-            bool storage_half = semantic_operand && semantic_operand->kind == C_TYPE_FP16_STORAGE;
+            bool storage_half = c_ir_storage_half_layout_node(builder, operand);
             if (expression && !c_ir_sizeof_operand_admit_node(builder, operand))
             {
                 admitted = false;
@@ -47354,7 +47378,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 builder->failure_token_index = builder->syntax_spans->first[operand];
                 admitted = false;
             }
-            else if (expression && (ast->kinds[operand] == C_AST_CALL || storage_half) && fact.status == C_AST_CONSTANT_INTEGER)
+            else if ((storage_half || (expression && ast->kinds[operand] == C_AST_CALL)) && fact.status == C_AST_CONSTANT_INTEGER)
             {
                 // Sizing a call reads its finished result layout without
                 // constructing or evaluating its callee and arguments. A
@@ -47384,6 +47408,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 bool settled = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = operand,
                     .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME, .view = C_IR_AST_TYPE_STRICT}, &type);
                 admitted = settled && type.success;
+                if (settled && !admitted && storage_half && !builder->failure_message.length)
+                {
+                    builder->failure_message = S8("the operand's type has no canonical IR representation");
+                    builder->failure_token_index = ast->tokens[operand];
+                }
                 if (settled && !admitted && expression) c_ir_sizeof_statement_expression_admit_node(builder, node, operand);
                 if (settled && !admitted && expression && !alignment)
                 {

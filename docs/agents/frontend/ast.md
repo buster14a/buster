@@ -2594,6 +2594,10 @@ Statement-expression tails use their value context, including an incomplete
 array's decay. An unlowered variably modified object follows only its retained
 name, dereference and index nodes to the existing scalar or pointer layout;
 an arithmetic tail that the original resolver refused keeps its diagnostic.
+Storage-half layout queries retain the numeric layout of their complete
+pointer, array or vector graph. Lowering consumes that certified F3 answer for
+type-name and expression operands without constructing a runtime half type;
+an unresolved variably modified layout keeps its original refusal.
 
 | Query frame | Replacement |
 |---|---|

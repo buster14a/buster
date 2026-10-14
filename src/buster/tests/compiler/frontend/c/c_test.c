@@ -48050,11 +48050,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         S8("float f(void) { return (float)sizeof(__fp16) + (float)(__fp16)1; }\n"),
         S8("float f(unsigned short bits) { return (float)sizeof(__builtin_bit_cast(__fp16, bits)) + (float)__builtin_bit_cast(__fp16, bits); }\n"),
         S8("float f(void) { return __builtin_convertvector((v4h){0}, v4f)[0] + (float)sizeof(v4h); }\n"),
+        S8("unsigned long f(int n) { return _Alignof(__fp16[n]); }\n"),
     };
     String8 messages[] = {
         S8("__fp16 cast expression has no canonical implementation"),
         S8("__builtin_bit_cast destination __fp16 has no canonical implementation"),
         S8("__fp16 vector conversion has no canonical implementation"),
+        S8("the operand's type has no canonical IR representation"),
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
