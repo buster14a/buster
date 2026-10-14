@@ -44524,10 +44524,12 @@ BUSTER_C_INTERNAL bool c_ir_syntax_delimiters_build(CPreprocessResult const* pre
 }
 
 BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CPreprocessResult const* preprocess, u32 const* matches_plus_one,
-                                                           CAstLowerStatistics* statistics)
+                                                           CAstFacts const* facts, CAstLowerStatistics* statistics)
 {
     CIrSyntaxSpans* result = 0;
     bool wanted = ast && ast->node_count && preprocess->token_count < UINT32_MAX;
+    bool retained = wanted && facts && facts->spans && facts->spans->node_count == ast->node_count;
+    matches_plus_one = retained ? facts->matches : matches_plus_one;
     bool own_matches = wanted && !matches_plus_one;
     // The arena is reserved at exactly what the columns need, so it always
     // holds them; only the reservation itself can fail. Without the stream's
@@ -44538,8 +44540,8 @@ BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CPre
     u64 reservation = 0;
     bool sized = wanted &&
                  c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(CIrSyntaxSpans), 1, BUSTER_ALIGN_OF(CIrSyntaxSpans)) &&
-                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), 3 * (u64)ast->node_count, BUSTER_ALIGN_OF(u32)) &&
-                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), tokens, BUSTER_ALIGN_OF(u32)) &&
+                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), retained ? 0 : 3 * (u64)ast->node_count, BUSTER_ALIGN_OF(u32)) &&
+                 c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), retained ? 0 : tokens, BUSTER_ALIGN_OF(u32)) &&
                  c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u8), ast->node_count, BUSTER_ALIGN_OF(u8)) &&
                  c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u8), ((u64)ast->node_count + 7) / 8, BUSTER_ALIGN_OF(u8)) &&
                  c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(u32), own_matches ? 2 * tokens : 0, BUSTER_ALIGN_OF(u32)) &&
@@ -44560,7 +44562,14 @@ BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CPre
         }
         if (result->matches)
         {
-            c_ast_spans_build(arena, ast, preprocess->tokens, (u32)preprocess->token_count, result->matches, &result->spans);
+            if (retained)
+            {
+                result->spans = *facts->spans;
+            }
+            else
+            {
+                c_ast_spans_build(arena, ast, preprocess->tokens, (u32)preprocess->token_count, result->matches, &result->spans);
+            }
             result->hoist = arena_allocate(arena, u8, ast->node_count);
             result->walked = arena_allocate_zeroed(arena, u8, ((u64)ast->node_count + 7) / 8);
             c_ir_hoist_facts_build(ast, &result->spans, preprocess->tokens, result->matches, result->hoist);
@@ -62339,7 +62348,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // The span facts, which file-scope constants and initializers read as
     // well as function bodies; null when their arena cannot be reserved,
     // which fails the unit below.
-    CIrSyntaxSpans* syntax_spans = c_ir_syntax_spans_create(options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
+    CIrSyntaxSpans* syntax_spans = c_ir_syntax_spans_create(options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one, options.syntax_facts,
                                                             options.ast_lower_statistics);
     IrSymbolId* entity_symbols = arena_allocate(arena, IrSymbolId, parse.entity_count);
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)

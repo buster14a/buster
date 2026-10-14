@@ -6300,6 +6300,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
         syntax.ast_facts = &facts;
         CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
         BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, facts.spans && facts.index_arena && facts.matches);
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_DECLARATOR_NAME)
+            {
+                BUSTER_TEST(arguments, c_ast_facts_locate(&facts, &preprocess, ast->tokens[node], ast->tokens[node] + 1) == node);
+            }
+        }
+        BUSTER_TEST(arguments, c_ast_facts_locate(&facts, &preprocess, 0, (u32)preprocess.token_count + 1) == C_AST_NODE_INVALID);
         String8 difference = c_ast_corpus_analyses_differ(arena, &plain, &analysis);
         difference = difference.length ? difference : c_ast_corpus_model_differ(arena, &plain, &analysis);
         BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
@@ -6360,7 +6369,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
         BUSTER_TEST(arguments, checked == 7);
         c_ast_facts_release(&facts);
         c_ast_facts_release(&facts);
-        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.statistics.stale == 0);
+        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.index_arena == 0 && facts.spans == 0 && facts.statistics.stale == 0);
     }
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);

@@ -6585,6 +6585,7 @@ bool c_ast_span_rule(CAstSpanInput const* input, u32 node, u32* first_out, u32* 
     u32 end = C_AST_SPAN_NONE;
     switch (kind)
     {
+    case C_AST_DECLARATOR_NAME:
     case C_AST_IDENTIFIER:
     case C_AST_NUMBER:
     case C_AST_CHARACTER:
