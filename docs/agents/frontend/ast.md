@@ -2523,6 +2523,16 @@ and grow toward the unit token bound only as needed. Dimension layouts settle
 from inner to outer, with checked target size_t counts and object-size products;
 a zero outer dimension cannot conceal an oversized inner array.
 
+Pending array dimensions also mark their exact bound source identity in a
+checked sparse active set. Reentering an active bound refuses the cycle;
+settled siblings can reuse that source after the owning dimension resumes.
+The constant stack refuses its hard capacity before another child can write
+past it. A completed semantic model can contain a local declaration before
+its declarator was visible: a lone sizeof operand inside that declaration's
+own bound selects an earlier outer binding when present. The NORMAL fold
+publishes that committed operand identity with its answer; protected TYPE
+queries return only numeric receipts or cycle blame, never temporary rows.
+
 ### Type queries
 
 The node task scheduler checkpoint uses exact `(kind, node, view)` keys for

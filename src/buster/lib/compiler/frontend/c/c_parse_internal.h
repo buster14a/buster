@@ -466,6 +466,7 @@ struct CTestSizeofArrayWork
     u64 bound_requests;
     u64 numeric_receipts;
     u64 certified_reads;
+    u64 cycle_refusals;
 };
 BUSTER_F_DECL CTestSizeofArrayWork c_test_sizeof_array_work_take(void);
 

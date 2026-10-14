@@ -7687,6 +7687,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTest
         c_ast_release(&built.ast);
         c_test_scratch_end(temporary);
     }
+    struct { String8 source; bool valid; bool cyclic; } const dependencies[] = {
+        {S8("int f(void){int a[sizeof(a)];return 0;}"), false, true},
+        {S8("int f(void){int a[sizeof(a)+1];return 0;}"), false, true},
+        {S8("int f(void){typedef char T[sizeof(T)];return 0;}"), false, true},
+        {S8("int f(void){int a[sizeof(char[sizeof(a)])];return 0;}"), false, true},
+        {S8("int f(void){int a[sizeof(b)],b[sizeof(a)];return 0;}"), false, false},
+        {S8("int a[3]; int f(void){int a[sizeof(a)];return sizeof(a)!=48;}"), true, false},
+        {S8("int f(void){int a[3];{int a[sizeof(a)];return sizeof(a)!=48;}}"), true, false},
+        {S8("typedef char T[3]; int f(void){typedef char T[sizeof(T)];return sizeof(T)!=3;}"), true, false},
+        {S8("int f(int n){int a[n];a[0]=7;return sizeof(a)!=n*sizeof(int)||a[0]!=7;}"), true, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dependencies); index += 1)
+    {
+        for (u32 policy = 0; policy < 2; policy += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, dependencies[index].source, C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+            CAstFacts facts = {0};
+            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &built.ast;
+                syntax.type_interning = policy != 0;
+                syntax.reference_tokens = true;
+                c_test_sizeof_array_work_take();
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                CTestSizeofArrayWork plain_work = c_test_sizeof_array_work_take();
+                syntax.reference_tokens = false;
+                syntax.ast_facts = &facts;
+                CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                CTestSizeofArrayWork work = c_test_sizeof_array_work_take();
+                u64 rows = 0;
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
+                if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
+                BUSTER_TEST(arguments, plain.ast_facts == 0 && retained.ast_facts == &facts);
+                BUSTER_TEST_RAW(arguments, !difference.length, difference);
+                BUSTER_TEST_RAW(arguments, dependencies[index].valid ? !retained.diagnostic_count : retained.diagnostic_count != 0,
+                                dependencies[index].source);
+                BUSTER_TEST_RAW(arguments, dependencies[index].cyclic ? work.cycle_refusals && plain_work.cycle_refusals &&
+                    work.cycle_refusals <= 16 && plain_work.cycle_refusals <= 16 : !work.cycle_refusals && !plain_work.cycle_refusals,
+                    dependencies[index].source);
+                string_print(S8("SIZEOF_ARRAY_CYCLE case={u32} policy={u32} cycles={u64} plain_cycles={u64}\n"),
+                             index, policy, work.cycle_refusals, plain_work.cycle_refusals);
+                if (dependencies[index].valid)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("array-bound-source-point.c"), preprocess, retained, target_native);
+                    BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("array source-point canonical validation"));
+                }
+            }
+            c_ast_facts_release(&facts);
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+
     return result;
 }
 

@@ -3248,6 +3248,7 @@ struct CParseSizeofArrayAnswers
     CParseSizeofArrayAnswer* rows;
     u32 count;
     u32 capacity;
+    u32 cyclic_token_plus_one;
 };
 
 BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -40063,6 +40064,72 @@ struct CParseConstantTask
     u8 state;
 };
 
+typedef struct CParseArrayDependency CParseArrayDependency;
+struct CParseArrayDependency
+{
+    u32 start;
+    u32 end;
+    bool active;
+};
+typedef struct CParseArrayDependencies CParseArrayDependencies;
+struct CParseArrayDependencies
+{
+    CParseArrayDependency* rows;
+    u32 count;
+    u32 capacity;
+};
+
+// Exact bound source identities survive private type copies. Keep only the
+// active dependency path marked; a later sibling may reuse a settled bound.
+BUSTER_C_INTERNAL CParseArrayDependency* c_parse_array_dependency(Arena* arena, CParseArrayDependencies* dependencies,
+                                                                 u32 start, u32 end, bool create)
+{
+    bool reserved = true;
+    if (create && dependencies->count >= dependencies->capacity / 2)
+    {
+        u32 capacity = dependencies->capacity ? dependencies->capacity * 2 : 16;
+        reserved = capacity > dependencies->capacity;
+        CParseArrayDependency* rows = reserved ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseArrayDependency, capacity) : 0;
+        reserved &= rows != 0;
+        if (reserved)
+        {
+            memset(rows, 0, (u64)capacity * sizeof(*rows));
+            for (u32 index = 0; index < dependencies->capacity; index += 1)
+            {
+                CParseArrayDependency row = dependencies->rows[index];
+                if (row.end)
+                {
+                    u64 hash = (u64)row.start * 0x9e3779b97f4a7c15ull ^ (u64)row.end * 0xbf58476d1ce4e5b9ull;
+                    u32 slot = (u32)(hash ^ (hash >> 32)) & (capacity - 1);
+                    while (rows[slot].end) slot = (slot + 1) & (capacity - 1);
+                    rows[slot] = row;
+                }
+            }
+            dependencies->rows = rows;
+            dependencies->capacity = capacity;
+        }
+    }
+    CParseArrayDependency* dependency = 0;
+    if (reserved && dependencies->capacity)
+    {
+        u64 hash = (u64)start * 0x9e3779b97f4a7c15ull ^ (u64)end * 0xbf58476d1ce4e5b9ull;
+        u32 slot = (u32)(hash ^ (hash >> 32)) & (dependencies->capacity - 1);
+        while (dependencies->rows[slot].end &&
+               (dependencies->rows[slot].start != start || dependencies->rows[slot].end != end))
+            slot = (slot + 1) & (dependencies->capacity - 1);
+        if (dependencies->rows[slot].end || create)
+        {
+            dependency = dependencies->rows + slot;
+            if (!dependency->end)
+            {
+                *dependency = (CParseArrayDependency){.start = start, .end = end};
+                dependencies->count += 1;
+            }
+        }
+    }
+    return dependency;
+}
+
 // Scalar facts are stack values; semantic constant evaluation never registers an IR type.
 BUSTER_C_INTERNAL IrType c_parse_constant_scalar_type(CParseResult* result, Target target, CTypeId type)
 {
@@ -40720,7 +40787,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_imaginary_cast(CParseResult* r
 BUSTER_C_INTERNAL void c_parse_sizeof_array_answer_record(CTypeParseMachine* machine, u32 start, u32 end, u64 size)
 {
     CParseSizeofArrayAnswers* answers = machine->sizeof_array_answers;
-    if (answers)
+    if (answers && answers->arena)
     {
         bool reserved = true;
         if (answers->count == answers->capacity)
@@ -40745,6 +40812,51 @@ BUSTER_C_INTERNAL void c_parse_sizeof_array_answer_record(CTypeParseMachine* mac
         }
     }
     return;
+}
+
+// A declarator is not visible inside its own array bound. The completed
+// model may already contain that row when a protected sizeof query runs.
+// Skip only candidates whose array source owns this exact reference token.
+BUSTER_C_INTERNAL CEntityId c_parse_array_bound_outer_entity(CParseResult* result, CPreprocessResult preprocess,
+                                                         CScopeId scope, u32 token_index)
+{
+    CEntityId found = C_ENTITY_ID_INVALID;
+    bool skipped = false;
+    CToken token = preprocess.tokens[token_index];
+    String8 name = c_token_spelling(preprocess.spelling_base, token);
+    u32 symbol = c_parse_symbol_or_intern(result, token.symbol, name);
+    while (scope.value != C_ID_UNDERLYING_INVALID && found.value >= result->entity_count)
+    {
+        u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
+        u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
+        for (CEntityId entity = result->entity_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
+             entity = result->entities[entity.value].next_in_lookup)
+        {
+            CEntity const* candidate = result->entities + entity.value;
+            if (candidate->scope.value == scope.value && candidate->symbol == symbol && (symbol || string_equal(candidate->name, name)) &&
+                c_parse_entity_visible_at(preprocess, result->entities + entity.value, token_index))
+            {
+                bool incomplete = false;
+                CTypeId array = candidate->type;
+                u32 remaining = result->type_count;
+                while (remaining && array.value < result->type_count && result->types[array.value].kind == C_TYPE_ARRAY)
+                {
+                    CType row = result->types[array.value];
+                    if (row.array_bound < result->array_bound_count)
+                    {
+                        CArrayBound bound = result->array_bounds[row.array_bound];
+                        incomplete |= token_index >= bound.token_start && token_index - bound.token_start < bound.token_count;
+                    }
+                    array = row.element_type;
+                    remaining -= 1;
+                }
+                skipped |= incomplete;
+                if (!incomplete) { found = entity; break; }
+            }
+        }
+        scope = result->scopes[scope.value].parent;
+    }
+    return skipped ? found : C_ENTITY_ID_INVALID;
 }
 
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
@@ -40890,7 +41002,31 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
                                    ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[operand_start])
                                    : C_ENTITY_ID_INVALID;
             bool shadowed_object = shadow.value < result->entity_count && result->entities[shadow.value].kind != C_ENTITY_TYPEDEF;
-            if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && !shadowed_object)
+            CEntityId outer = operand_start + 1 == operand_end && preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER
+                ? c_parse_array_bound_outer_entity(result, preprocess, scope, operand_start) : C_ENTITY_ID_INVALID;
+            if (outer.value < result->entity_count)
+            {
+                type = result->entities[outer.value].type;
+                cursor = operand_end;
+                // This source-point owner is a committed earlier entity.
+                // Publish its operand identity together with the normal scalar
+                // answer, never from a speculative TYPE checkpoint.
+                CAstFacts* facts = machine->ast_facts;
+                if (facts && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && !result->protected_type_constant_query)
+                {
+                    u32 node = c_ast_facts_locate(facts, &preprocess, operand_start, operand_end);
+                    if (node != C_AST_NODE_INVALID)
+                    {
+                        bool changed = !(facts->flags[node] & C_AST_FACT_TYPED) || facts->types[node] != type.value ||
+                                       !(facts->flags[node] & C_AST_FACT_BOUND) || facts->payloads[node] != outer.value;
+                        facts->statistics.bound += !(facts->flags[node] & C_AST_FACT_BOUND);
+                        facts->flags[node] = (u8)((facts->flags[node] & ~(C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE)) | C_AST_FACT_BOUND);
+                        facts->payloads[node] = outer.value;
+                        if (changed) c_ast_types_facts_record(facts, node, type, false);
+                    }
+                }
+            }
+            else if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && !shadowed_object)
             {
                 // Read the full abstract declarator, including a pointer
                 // grouped before array or function suffixes.
@@ -40967,7 +41103,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         {
             value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
         }
-        if (array_query && machine->sizeof_array_answers && value.valid &&
+        if (array_query && machine->sizeof_array_answers && machine->sizeof_array_answers->arena && value.valid &&
             size > c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width))
         {
             value.valid = false;
@@ -41186,6 +41322,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
     // Guarded while a function body is validated (#1256): a miss answers
     // "not a constant" and the caller reports the exhausted body.
     CParseConstantTask* tasks = retained_size ? 0 : C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseConstantTask, capacity);
+    CParseArrayDependencies dependencies = {0};
     u32 count = tasks && start < end;
     if (tasks)
     {
@@ -41193,10 +41330,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
     }
     while (count)
     {
-        if (count == capacity && capacity < maximum)
+        if (count == capacity)
         {
-            u32 grown_capacity = capacity <= maximum / 2 ? capacity * 2 : maximum;
-            CParseConstantTask* grown = C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseConstantTask, grown_capacity);
+            u32 grown_capacity = capacity < maximum ? (capacity <= maximum / 2 ? capacity * 2 : maximum) : 0;
+            CParseConstantTask* grown = grown_capacity ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseConstantTask, grown_capacity) : 0;
             if (grown)
             {
                 memcpy(grown, tasks, (u64)count * sizeof(*tasks));
@@ -41472,6 +41609,13 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     CParseSizeofArrayAnswers answers = {.arena = arena};
                     CIntegerConstant query = c_parse_type_integer_constant_query_core(arena, preprocess, result, scope, begin, limit, false, 0, 0, 0, &answers);
                     last.valid = query.valid && !query.is_negative && !query.magnitude_high;
+                    if (answers.cyclic_token_plus_one)
+                    {
+                        last.faulted = true;
+                        if (!result->protected_type_constant_query && !result->diagnostic_count)
+                            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[answers.cyclic_token_plus_one - 1]),
+                                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("array bound depends on its own incomplete array type"));
+                    }
                     if (last.valid)
                     {
                         last.integer = query.magnitude;
@@ -41539,6 +41683,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             u64 maximum_product = c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width);
             if (task->state == 12)
             {
+                CArrayBound completed = result->array_bounds[result->types[task->array_types[task->array_count - 1].value].array_bound];
+                CParseArrayDependency* dependency = c_parse_array_dependency(arena, &dependencies,
+                    c_parse_array_bound_expression_start(preprocess, completed), completed.token_start + completed.token_count, false);
+                if (dependency) dependency->active = false;
                 IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, last.type);
                 bool integral = scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN;
                 bool nonnegative = !scalar.is_signed || !ir_integer_sign_bit((IrInteger){.low = last.integer, .high = last.integer_high}, scalar.bit_width);
@@ -41572,6 +41720,19 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     task->left.valid &= !bound.is_star && child_start < child_end && child_end <= preprocess.token_count;
                     if (task->left.valid)
                     {
+                        CParseArrayDependency* dependency = c_parse_array_dependency(arena, &dependencies, child_start, child_end, true);
+                        task->left.valid = dependency && !dependency->active;
+                        if (dependency && dependency->active)
+                        {
+                            task->left.faulted = true;
+                            if (machine->sizeof_array_answers && !machine->sizeof_array_answers->cyclic_token_plus_one)
+                                machine->sizeof_array_answers->cyclic_token_plus_one = child_start + 1;
+#if BUSTER_INCLUDE_TESTS
+                            c_parse_sizeof_array_work.cycle_refusals += 1;
+#endif
+                        }
+                        if (!task->left.valid) break;
+                        dependency->active = true;
 #if BUSTER_INCLUDE_TESTS
                         c_parse_sizeof_array_work.bound_requests += 1;
 #endif
@@ -41945,6 +42106,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                                                                             String8* syntax_error, u32* syntax_token, u32* member_alignment, CParseSizeofArrayAnswers* array_answers)
 {
     CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
+    CParseSizeofArrayAnswers cycle = {0};
     if (member_alignment) *member_alignment = 0;
     if (start < end && end <= preprocess.token_count && end - start <= UINT32_MAX - 16)
     {
@@ -42119,7 +42281,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                 .frame_capacity = capacity,
                 .mutation_capacity = capacity,
                 .expression_task_capacity = capacity,
-                .sizeof_array_answers = array_answers,
+                .sizeof_array_answers = array_answers ? array_answers : &cycle,
                 .constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE,
                 .enum_sizeof_expression_query = sizeof_expression_query,
             };
@@ -42211,6 +42373,12 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                                                                                                query_member_count, query_width_count,
                                                                                                query_diagnostic_count);
             invalid_query_width |= syntax_invalid_query_width;
+            CParseSizeofArrayAnswers* answers = query_machine.sizeof_array_answers;
+            if (answers->cyclic_token_plus_one)
+            {
+                if (syntax_error) *syntax_error = S8("array bound depends on its own incomplete array type");
+                if (syntax_token) *syntax_token = answers->cyclic_token_plus_one - 1;
+            }
             if (invalid_query_width || refused)
             {
                 constant.valid = false;
@@ -49612,14 +49780,20 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
             c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = index}, &array_size, &array_alignment) &&
             array_size <= c_array_object_size_limit(pointer_bits)) continue;
         u64 query_mark = machine->scratch_arena->position;
+        String8 dependency_error = {0};
+        u32 dependency_token = start;
         CIntegerConstant count = bound.has_inferred_count ? (CIntegerConstant){.magnitude = bound.inferred_count, .valid = true}
-            : c_parse_type_integer_constant_query(machine->scratch_arena, preprocess, result, scope, start, end, 0, 0, 0);
+            : c_parse_type_integer_constant_query(machine->scratch_arena, preprocess, result, scope, start, end,
+                                                   &dependency_error, &dependency_token, 0);
         u64 element_size = 0;
         u32 alignment = 0;
         bool oversized = count.valid && !count.is_negative &&
             c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type.element_type, &element_size, &alignment) &&
             element_size && (count.magnitude_high || !c_array_object_size_valid(pointer_bits, element_size, count.magnitude));
         arena_set_position(machine->scratch_arena, query_mark);
+        if (!result->diagnostic_count && string_equal(dependency_error, S8("array bound depends on its own incomplete array type")))
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[dependency_token]),
+                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, dependency_error);
         if (oversized && start < preprocess.token_count)
         {
             CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]);
