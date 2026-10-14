@@ -94,6 +94,7 @@ BUSTER_F_DECL CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena
 BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
 // Blocks the direct SSA finish-time read walk has stepped to on this thread.
 BUSTER_F_DECL u64 c_test_ir_ssa_forward_steps(void);
+BUSTER_F_DECL bool c_test_ir_ssa_leading_sizeof(CAst const* ast, u32 node, u64* visits);
 // Block rows indexed by the optional loop-exit shortcut on this thread.
 BUSTER_F_DECL u64 c_test_ir_ssa_loop_exit_blocks(void);
 BUSTER_F_DECL bool c_test_ir_ssa_loop_exits_refusal(void);

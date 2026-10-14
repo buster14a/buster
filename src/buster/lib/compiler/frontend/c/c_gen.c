@@ -5887,6 +5887,45 @@ BUSTER_C_INTERNAL bool c_ir_ssa_local_eligible(CIntegerIrBuilder* builder, CEnti
     return eligible;
 }
 
+// Keep the existing conservative admission of short-circuit right operands
+// beginning with an unevaluated layout query. Groups and prefix operators
+// own a different source boundary. Higher-precedence binary/base spines of
+// distinct logical right operands do not overlap, so the census stays linear
+// in node visits; retained group lookup adds its indexed search cost.
+BUSTER_C_INTERNAL bool c_ir_ssa_leading_sizeof(CAst const* ast, u32 node, u64* visits)
+{
+    bool result = false;
+    bool walking = ast && node < ast->node_count;
+    if (visits) *visits = 0;
+    while (walking)
+    {
+        if (visits) *visits += 1;
+        u32 kind = ast->kinds[node];
+        bool postfix = kind == C_AST_CALL || kind == C_AST_INDEX || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW ||
+                       kind == C_AST_POST_INCREMENT || kind == C_AST_POST_DECREMENT;
+        bool binary = kind >= C_AST_MULTIPLY && kind <= C_AST_BIT_OR;
+        if (c_ir_span_wrapped(ast, node))
+            walking = false;
+        else if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE)
+        {
+            result = true;
+            walking = false;
+        }
+        else if (binary || postfix)
+            node = c_ast_child_at(ast, node, 0);
+        else
+            walking = false;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_ir_ssa_leading_sizeof(CAst const* ast, u32 node, u64* visits)
+{
+    return c_ir_ssa_leading_sizeof(ast, node, visits);
+}
+#endif
+
 BUSTER_C_INTERNAL u32 c_ir_ssa_event(CIntegerIrBuilder* builder, u32 local, u32 opcode, IrValueId value, IrSourceRange source)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
@@ -51125,6 +51164,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             prepared_control_expression_capacity += kind == C_AST_CALL || kind == C_AST_GENERIC_SELECTION ||
                                                     kind == C_AST_INDEX || kind == C_AST_DECLARATOR_ARRAY;
             direct_ssa_enabled &= kind != C_AST_LABEL_ADDRESS && kind != C_AST_ASM;
+            if (direct_ssa_enabled && kind == C_AST_LOGICAL_AND)
+                direct_ssa_enabled = !c_ir_ssa_leading_sizeof(options.syntax_tree, node - 1, 0);
         }
         // Sparse groups are sorted by owner. Select the definition's interval
         // once instead of searching its group list separately for every node.

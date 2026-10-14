@@ -2712,6 +2712,19 @@ private context arenas remain canonical projection machinery.
 
 ### Unit capacity facts
 
+Direct SSA keeps the existing conservative admission for a short-circuit
+right operand beginning with an unevaluated layout query. The node census
+checks `LOGICAL_AND` right operands with `c_ir_ssa_leading_sizeof`, following
+only higher-precedence binary left operands and postfix bases to
+`SIZEOF_EXPRESSION`/`SIZEOF_TYPE`. Retained expression groups, casts and all
+prefix operators, including GNU extension, end that spine. Nonleading queries
+do not change admission. This carries forward the migration's source-shape
+policy; it is not a claim of a semantic hazard or a performance improvement.
+Spines of distinct logical right operands do not overlap without crossing a
+group or logical boundary, so total visited nodes are linear; group membership
+uses the existing indexed lookup. No token lookup, new fact array or pass is
+added.
+
 The existing semantic token census publishes `identifier_token_count` and
 `string_literal_fragment_count` in `CParseResult`. The lower-capacity plan
 reads these finished counts, retaining its original allocation bounds without

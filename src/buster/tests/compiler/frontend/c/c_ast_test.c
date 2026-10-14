@@ -6912,6 +6912,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_promoted_depth(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_ssa_leading_sizeof_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    struct { String8 expression; bool barrier; } const cases[] = {
+        {S8("c && sizeof(int) <= n"), true},
+        {S8("c && sizeof c + 3 <= n"), true},
+        {S8("c && (sizeof(int) <= n)"), false},
+        {S8("c && (sizeof(int)) <= n"), false},
+        {S8("c && (unsigned)sizeof(int) <= n"), false},
+        {S8("c && __extension__ sizeof(int) <= n"), false},
+        {S8("c && __extension__ (sizeof(int) <= n)"), false},
+        {S8("c && n <= sizeof(int)"), false},
+        {S8("c && !sizeof(int)"), false},
+        {S8("sizeof(int) && n"), false},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        TemporalArena one = arena_begin_temporal(temporary.arena);
+        String8 source = string_format(one.arena,
+            S8("int f(int c, unsigned n) {{ int value = 0; if ({S8}) value = 3; return value; }}"), cases[row].expression);
+        CPreprocessResult preprocess = c_ast_test_preprocess(one.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult analysis = c_parse_for_lowering(one.arena, preprocess);
+        u32 logical = C_AST_NODE_INVALID;
+        for (u32 node = 0; analysis.ast && node < analysis.ast->node_count; node += 1)
+            if (analysis.ast->kinds[node] == C_AST_LOGICAL_AND) logical = node;
+        if (BUSTER_REQUIRE(arguments, analysis.ast && logical != C_AST_NODE_INVALID && !analysis.diagnostic_count))
+        {
+            u64 visits = 0;
+            bool barrier = c_test_ir_ssa_leading_sizeof(analysis.ast, logical - 1, &visits);
+            BUSTER_TEST(arguments, barrier == cases[row].barrier && visits && visits <= 4);
+            CIRLowerResult lowered = c_lower_to_ir(one.arena, S8("ssa-layout-admission.c"), preprocess, analysis, target_native);
+            if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified))
+                BUSTER_TEST(arguments, cases[row].barrier ? lowered.direct_ssa.locals == 0 : lowered.direct_ssa.locals != 0);
+        }
+        scratch_end(one);
+    }
+    u32 const depth = 4096;
+    String8* parts = arena_allocate(temporary.arena, String8, depth + 1);
+    parts[0] = S8("sizeof(int)");
+    for (u32 index = 1; index <= depth; index += 1) parts[index] = S8("+0");
+    String8 spine = string_join_arena(temporary.arena, (SliceString8){parts, depth + 1}, false);
+    String8 source = string_format(temporary.arena, S8("int f(int c, unsigned n) {{ return c && {S8} <= n; }}"), spine);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    if (BUSTER_REQUIRE(arguments, !built.diagnostic_count && built.ast.node_count))
+    {
+        u64 visits = 0;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_LOGICAL_AND)
+                BUSTER_TEST(arguments, c_test_ir_ssa_leading_sizeof(&built.ast, node - 1, &visits));
+        }
+        BUSTER_TEST(arguments, visits == depth + 2 && visits < built.ast.node_count);
+    }
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_refusal_cause(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9207,6 +9267,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_promoted_depth);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_ssa_leading_sizeof_admission);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_refusal_cause);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
