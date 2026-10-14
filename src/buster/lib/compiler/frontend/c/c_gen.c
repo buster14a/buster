@@ -25039,43 +25039,6 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
     return result;
 }
 
-// The comma that separates `va_arg`'s list operand from its type name, or
-// `end` when the range holds none.  Only parentheses and brackets nest here:
-// a type name carries no brace-enclosed initializer.
-BUSTER_C_INTERNAL u32 c_ir_va_arg_type_separator(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    u32 separator = start;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    while (separator < end)
-    {
-        CToken current = builder->preprocess.tokens[separator];
-        if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (!parentheses && !brackets && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-        {
-            break;
-        }
-        separator += 1;
-    }
-
-    return separator;
-}
-
 // Classify the exact CALL or GENERIC_SELECTION from retained semantic
 // identity and callee type facts (c_ir_tree_calls_discover).
 BUSTER_C_INTERNAL CIrPreparedCall c_ir_call_classify(CIntegerIrBuilder* builder, u32 node)
