@@ -168,7 +168,7 @@
 //   c_parse_label_address_prefix_with_typedef, _at typedef-aware label proof
 //   c_parse_label_address_group_may_be_type         indexed logical rejection
 //   c_parse_label_expression_has_value, _root     raw provenance and comparison roots
-//   c_parse_label_expression                       bounded logical-boolean provenance
+//   c_parse_label_expression                       bounded logical/conditional provenance
 //   c_parse_statement_end                          goto, label addresses
 //   c_parse_statement_plan_build,                 the statement plan read from
 //   c_parse_bind_plan_segment,                    the syntax tree, its

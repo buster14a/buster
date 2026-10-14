@@ -679,12 +679,20 @@ ordinary integer produced by canonical pointer equality. Logical `&&` and
 operand's label provenance is consumed by a comparison. An explicit guarded
 worklist splits top-level logical operands once and uses indexed delimiter
 jumps for nested groups; it never recurses. Direct label-pointer truth
-conversion and conditional, comma and cast transports retain the conservative
-policy; pointer return/call/static-storage and invalid computed targets remain
-rejected. `c_test_label_comparison_logicals` covers the frozen typeof witness,
+conversion and comma and cast transports retain the conservative policy.
+A conditional consumes its condition as control and transports only its result
+arms. The GNU omitted true arm still transports the condition's value. The
+same guarded worklist uses the semantic conditional/delimiter index to route
+these ranges without recursion or an AST requirement; reference-token and
+retained-tree semantic diagnostics must agree. Pointer result arms,
+return/call/static-storage and invalid computed targets remain rejected.
+`c_test_label_comparison_logicals` covers the frozen typeof witness,
 a plain reduction, nesting, both logical operators, short circuits and
 exactly-once effects, with independent hosted GCC/Clang expected-value runs and
-tree-free/pilot, SSA/memory and FAST/QUALITY controls.
+reference-token/retained-tree semantic parity, debug/no-debug, SSA/memory and
+FAST/QUALITY controls. The computed-goto machine fixture additionally retains
+its original ten functions, including the comparison-conditioned ordinary
+integer return, through both native backend selectors and allocators.
 Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and
