@@ -4191,13 +4191,6 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
     };
 }
 
-// Token access at lowering's source boundary returns spelling only. The
-// anchor is retained provenance; callers cannot inspect grammar through it.
-BUSTER_C_INTERNAL String8 c_ir_source_spelling(CPreprocessResult const* preprocess, u32 token_index)
-{
-    return token_index < preprocess->token_count ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]) : (String8){0};
-}
-
 // Source extent of a block scope: from its first token to the token that
 // ends it (the closing brace of a compound statement, the first token after
 // a loop's controlled statement). A block whose end is unknown, or lands in
