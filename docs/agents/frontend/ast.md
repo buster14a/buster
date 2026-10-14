@@ -2172,6 +2172,14 @@ byte.
   takes the preceding access token as provenance. The member-chain token
   probe and place/VLA delimiter walks are deleted. Type-name queries retain
   their marked step-4 boundary and their original row-creation order.
+- **Assignment statements.** `BODY_ASSIGNMENT_STATEMENT` retains the
+  statement expression's node, and a discarded void-cast assignment takes
+  its exact operand. Assignment, direct index and prefix/postfix update
+  routes read kinds and retained groups; child requests carry the exact left,
+  right or subscript node. The direct index base is emitted in its previous
+  order even when another suffix follows it. The statement delimiter scan,
+  duplicate field/identifier/index classifiers and range-only place push
+  adapter are deleted.
 - **Prepass filters.** `c_ir_node_may_prepare_control` and
   `c_ir_node_may_prepare_calls` read the node's `ANY` and `HOLDS_CALL` bits.
   The per-body token prefix table (`c_ir_token_prefix_build`) is deleted.
