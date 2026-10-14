@@ -2579,6 +2579,13 @@ are removed. Source ranges remain diagnostic and emission provenance only.
 Each query kind becomes a fact read on the node its owner frame was handed.
 The machine, its keys, its memo and its resumes are deleted:
 
+Runtime alignment queries retain the semantic producer's nonzero declared
+object or member alignment in F3, including packed placement. Lowering still
+projects the operand's type before applying that answer and rejects a
+bit-field from its retained member flag. A plain `typeof(type-name)` wrapper
+projects its completed child F2 graph, so prototype parameter names remain
+scoped to that child without a second scalar-specifier parse.
+
 | Query frame | Replacement |
 |---|---|
 | `TYPE_NAME`, and `c_ir_group_type_name` / `c_ir_query_group_type_name` | The node kind decides: a `CAST`, `SIZEOF_TYPE`, `ALIGNOF_TYPE` or `COMPOUND_LITERAL` has a `TYPE_NAME` child, and an expression does not. The type is F2. No probe and no memo. |

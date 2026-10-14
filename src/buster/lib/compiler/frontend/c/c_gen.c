@@ -47230,11 +47230,18 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             IrType const* projected_operand = 0;
             CAstFacts const* facts = builder->syntax_facts;
             u32 operand_flags = facts && operand < facts->node_count ? facts->flags[operand] : 0;
+            bool bit_field = expression && alignment && (operand_flags & C_AST_FACT_BIT_FIELD);
             CType const* semantic_operand = (operand_flags & C_AST_FACT_TYPED) ? c_ir_retained_type(builder,
                 (CIrRetainedTypeReference){.index = facts->types[operand], .recipe = (operand_flags & C_AST_FACT_RECIPE) != 0}) : 0;
             bool storage_half = semantic_operand && semantic_operand->kind == C_TYPE_FP16_STORAGE;
             if (expression && !c_ir_sizeof_operand_admit_node(builder, operand))
             {
+                admitted = false;
+            }
+            else if (bit_field)
+            {
+                builder->failure_message = S8("the alignment of the _Alignof operand's object is not an integer constant expression");
+                builder->failure_token_index = builder->syntax_spans->first[operand];
                 admitted = false;
             }
             else if (expression && (ast->kinds[operand] == C_AST_CALL || storage_half) && fact.status == C_AST_CONSTANT_INTEGER)

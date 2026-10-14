@@ -11713,6 +11713,44 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
 BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
                                                   CScopeId scope, u32 begin, u32 end);
 BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult preprocess, CArrayBound bound);
+BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                        CScopeId scope, u32 start, u32 end, u32* alignment);
+
+// A runtime alignment query needs the same declared-object answer as a
+// static assertion. Its exact expression node owns this numeric fact; no C
+// type from the protected semantic query survives the checkpoint.
+BUSTER_C_INTERNAL void c_parse_ast_object_alignment_publish(CTypeParseMachine* machine, CPreprocessResult preprocess,
+                                                            CParseResult* result, u32 node)
+{
+    CAst const* ast = machine->syntax_tree;
+    CAstFacts* facts = machine->ast_facts;
+    bool query = ast && facts && facts->spans && node < ast->node_count && ast->kinds[node] == C_AST_ALIGNOF_EXPRESSION &&
+                 !result->diagnostic_count && c_ast_facts_constant(facts, node).status == C_AST_CONSTANT_UNQUERIED;
+    if (query)
+    {
+        u32 operand = c_ast_child_at(ast, node, 0);
+        u32 first = facts->spans->first[operand];
+        u32 end = facts->spans->end[operand];
+        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){0}, first);
+        CParseResult checkpoint = *result;
+        u32 mutation_mark = machine->mutation_count;
+        u64 scratch_mark = machine->scratch_arena->position;
+        u32 alignment = 0;
+        bool valid = first != C_AST_SPAN_NONE && first < end && end <= preprocess.token_count &&
+                     c_parse_alignof_object_alignment(machine, result, preprocess, scope, first, end, &alignment);
+        valid = valid && alignment && !machine->failed && result->diagnostic_count == checkpoint.diagnostic_count;
+        c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+        arena_set_position(machine->scratch_arena, scratch_mark);
+        if (valid && !c_ast_facts_store_constant(facts, node, (CAstConstantFact){.low = alignment,
+            .type = C_TYPE_ID_INVALID, .primitive_kind = c_parse_size_type_kind(preprocess.target), .status = C_AST_CONSTANT_INTEGER}))
+        {
+            facts->recipe_failed = true;
+            machine->failed = true;
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[ast->tokens[node]]),
+                C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve declared-object alignment facts"));
+        }
+    }
+}
 
 // Storage half has a semantic object layout but no runtime scalar IR
 // representation. Retain that numeric answer from completed type authority,
@@ -11996,6 +12034,7 @@ BUSTER_C_INTERNAL void c_parse_unevaluated_operand_facts(CTypeParseMachine* mach
                 }
                 arena_set_position(machine->scratch_arena, completion_mark);
             }
+            c_parse_ast_object_alignment_publish(machine, preprocess, result, node);
         }
         machine->ast_types = saved_region;
         machine->expression_queries = saved_queries;
@@ -12737,6 +12776,32 @@ BUSTER_C_INTERNAL void c_parse_compound_array_facts(CTypeParseMachine* machine, 
     arena_set_position(machine->scratch_arena, scratch_mark);
 }
 
+// A plain typeof(type-name) wrapper projects its completed child authority.
+// The scalar specifier reader cannot parse an abstract function declarator;
+// its child has already published that row-free graph in postorder.
+BUSTER_C_INTERNAL bool c_parse_typeof_type_name_fact(CAstFacts* facts, CAst const* ast, u32 node)
+{
+    u32 specifiers = c_ast_child_at(ast, node, 0);
+    bool projected = c_ast_child_count(ast, node) == 1 && c_ast_child_count(ast, specifiers) == 1;
+    u32 wrapper = projected ? c_ast_child_at(ast, specifiers, 0) : C_AST_NODE_INVALID;
+    projected = projected && ast->kinds[wrapper] == C_AST_TYPEOF;
+    u32 source = projected ? c_ast_child_at(ast, wrapper, 0) : C_AST_NODE_INVALID;
+    projected = projected && ast->kinds[source] == C_AST_TYPE_NAME && (facts->flags[source] & C_AST_FACT_TYPED);
+    if (projected)
+    {
+        u32 owners[] = {specifiers, node};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(owners); index += 1)
+        {
+            u32 owner = owners[index];
+            facts->types[owner] = facts->types[source];
+            facts->flags[owner] = (u8)((facts->flags[owner] & ~(u32)C_AST_FACT_RECIPE) | C_AST_FACT_TYPED | C_AST_FACT_MACHINE |
+                                     (facts->flags[source] & C_AST_FACT_RECIPE));
+        }
+        facts->payloads[node] = facts->payloads[source] & C_AST_TYPE_NAME_VARIABLY_MODIFIED;
+    }
+    return projected;
+}
+
 // TYPE_NAME keeps both its specifier base and its final abstract declarator
 // type. The semantic parser remains their producer; the whole completion is
 // undone once its row-free graph and parameter rows have been published.
@@ -12780,7 +12845,8 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                     facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_BOUND;
                 }
             }
-            if (ast->kinds[node] == C_AST_TYPE_NAME && !(facts->flags[node] & C_AST_FACT_TYPED) && !machine->failed)
+            if (ast->kinds[node] == C_AST_TYPE_NAME && !(facts->flags[node] & C_AST_FACT_TYPED) && !machine->failed &&
+                !c_parse_typeof_type_name_fact(facts, ast, node))
             {
                 u32 first = ast->tokens[node];
                 u32 after = ast->data[node];
