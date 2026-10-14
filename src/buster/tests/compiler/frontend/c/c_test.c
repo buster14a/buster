@@ -6898,7 +6898,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
 {
     UnitTestResult result = {0};
     String8 sources[] = {
-        S8("void *test(int width, volatile int rows[][width], int i) { return &((rows[i])); }"),
+        S8("volatile void *test(int width, volatile int rows[][width], int i) { return &((rows[i])); }"),
         S8("void *test(int width, char rows[][width]) { return &(rows + 1); }"),
         S8("void *test(int width, char rows[][width]) { return &(rows[1] + 1); }"),
         S8("void *test(int width, char rows[][width]) { return &(&rows[1]); }"),
@@ -6945,6 +6945,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
             }
             c_test_scratch_end(temporary);
         }
+    }
+    // The original spelling discards the row's volatile qualification. It
+    // belongs to the full-constraint rejection arm, while the positive form
+    // above still proves that taking the array address never loads its row.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("void *test(int width, volatile int rows[][width], int i) { return &((rows[i])); }"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult rejected = c_parse_for_lowering(temporary.arena, tokens);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && rejected.analysis_complete && rejected.diagnostic_count == 1);
+        if (BUSTER_REQUIRE(arguments, rejected.diagnostic_count == 1))
+        {
+            BUSTER_STRING_TEST(arguments, rejected.diagnostics[0].message,
+                S8("in function 'test': cannot convert from 'volatile int (*)[width]' to 'void *': incompatible pointer types"));
+        }
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("vla-row-qualifier-drop.c"), tokens, rejected, target_native);
+        BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified && lowered.diagnostic_count == rejected.diagnostic_count);
+        c_preprocess_release(&tokens);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
