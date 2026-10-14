@@ -6488,6 +6488,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         u32 promoted = 0;
         u32 nested = 0;
         u32 flexible = 0;
+        u32 explicit_paths = 0;
+        u32 implicit_paths = 0;
         for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
         {
             BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
@@ -6511,6 +6513,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                 CInitializerPath edge = plan->paths[path];
                 BUSTER_TEST(arguments, edge.container.value < analysis.type_count && edge.parent_plus_one <= plan->path_count);
                 ranged += edge.first != edge.last;
+                explicit_paths += (edge.flags & C_INITIALIZER_PATH_EXPLICIT) != 0;
+                implicit_paths += (edge.flags & C_INITIALIZER_PATH_EXPLICIT) == 0;
+                if (edge.first != edge.last) BUSTER_TEST(arguments, (edge.flags & C_INITIALIZER_PATH_EXPLICIT) != 0);
                 if (edge.member != UINT32_MAX && edge.container.value < analysis.type_count)
                 {
                     CType container = analysis.types[edge.container.value];
@@ -6537,6 +6542,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         }
         BUSTER_TEST(arguments, plans >= 5 && values >= 14 && ranged > 0 && promoted > 0 && nested > 0);
         BUSTER_TEST(arguments, flexible == 2);
+        BUSTER_TEST(arguments, explicit_paths && implicit_paths);
     }
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);

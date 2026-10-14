@@ -2226,6 +2226,11 @@ struct CSizeofOperandType
 // project a root object through member or array edges; member indices are
 // relative to the container's member list, UINT32_MAX names an array edge.
 // A ranged edge selects [first,last], evaluating its value only once.
+typedef enum CInitializerPathFlag
+{
+    C_INITIALIZER_PATH_EXPLICIT = 1,
+} CInitializerPathFlag;
+
 typedef struct CInitializerPath CInitializerPath;
 struct CInitializerPath
 {
@@ -2237,6 +2242,8 @@ struct CInitializerPath
     // UINT32_MAX uses the current value anchor; other rows retain the
     // member/bracket source needed by the original FIELD/INDEX emission.
     u32 source_token;
+    // Selection semantics is separate from emission provenance.
+    u8 flags;
 };
 
 typedef enum CInitializerItemFlag

@@ -12412,13 +12412,13 @@ BUSTER_C_INTERNAL bool c_parse_initializer_plan_reserve(CParseResult* result, CI
 }
 
 BUSTER_C_INTERNAL u32 c_parse_initializer_plan_path(CParseResult* result, CInitializerPlan* plan, u32 parent_plus_one,
-                                                       CTypeId container, u32 member, u64 first, u64 last, u32 source_token)
+                                                       CTypeId container, u32 member, u64 first, u64 last, u32 source_token, u8 flags)
 {
     u32 path_plus_one = parent_plus_one;
     if (plan && !plan->failed && c_parse_initializer_plan_reserve(result, plan, true))
     {
         plan->paths[plan->path_count++] = (CInitializerPath){
-            .container = container, .member = member, .first = first, .last = last, .parent_plus_one = parent_plus_one, .source_token = source_token,
+            .container = container, .member = member, .first = first, .last = last, .parent_plus_one = parent_plus_one, .source_token = source_token, .flags = flags,
         };
         path_plus_one = plan->path_count;
     }
@@ -12439,7 +12439,7 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_plan_continuation_path(CParseResult* r
         for (u32 walk = path_plus_one; walk && !plan->failed;)
         {
             CInitializerPath edge = plan->paths[walk - 1];
-            c_parse_initializer_plan_path(result, plan, 0, edge.container, edge.member, edge.last, edge.last, edge.source_token);
+            c_parse_initializer_plan_path(result, plan, 0, edge.container, edge.member, edge.last, edge.last, edge.source_token, edge.flags);
             walk = edge.parent_plus_one;
         }
         if (!plan->failed)
@@ -12521,7 +12521,7 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_plan_item(CTypeParseMachine* machine, 
                 {
                     u32 value_end = c_parse_initializer_value_end(*preprocess, cursor, limit);
                     u32 child_node = c_ast_child_at(machine->syntax_tree, node, child);
-                    u32 child_path = c_parse_initializer_plan_path(result, plan, path_plus_one, type, child, 0, 0, UINT32_MAX);
+                    u32 child_path = c_parse_initializer_plan_path(result, plan, path_plus_one, type, child, 0, 0, UINT32_MAX, 0);
                     c_parse_initializer_plan_append(result, plan, (CInitializerItem){.type = type, .node = child_node,
                         .path_plus_one = child_path, .source_token = cursor, .range_source_token = cursor,
                         .value_start = cursor, .value_end = value_end,
@@ -13534,7 +13534,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                 }
                 current = result->types[current.value].element_type;
             }
-            path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, path_container, UINT32_MAX, index, last, first ? UINT32_MAX : cursor);
+            path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, path_container, UINT32_MAX, index, last, first ? UINT32_MAX : cursor, C_INITIALIZER_PATH_EXPLICIT);
             cursor = close + 1;
         }
         else
@@ -13626,7 +13626,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                 u32 edge_begin = plan->path_count;
                 for (u32 link = 0; link <= work[found_work].depth && !plan->failed; link += 1)
                 {
-                    c_parse_initializer_plan_path(result, plan, 0, work[walk].type, field_on_path, 0, 0, !first || work[found_work].depth ? cursor + 1 : UINT32_MAX);
+                    c_parse_initializer_plan_path(result, plan, 0, work[walk].type, field_on_path, 0, 0, !first || work[found_work].depth ? cursor + 1 : UINT32_MAX, C_INITIALIZER_PATH_EXPLICIT);
                     field_on_path = work[walk].via_field;
                     walk = work[walk].parent;
                 }
@@ -13679,7 +13679,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
     if (frame->root)
     {
         designator->value_type = frame->element_type;
-        if (plan) path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, plan->type, UINT32_MAX, selected, selected, UINT32_MAX);
+        if (plan) path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, plan->type, UINT32_MAX, selected, selected, UINT32_MAX, 0);
     }
     else
     {
@@ -13693,7 +13693,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
         if (type->kind == C_TYPE_ARRAY || type->kind == C_TYPE_VECTOR)
         {
             designator->value_type = type->element_type;
-            path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, frame->type, UINT32_MAX, selected, selected, UINT32_MAX);
+            path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, frame->type, UINT32_MAX, selected, selected, UINT32_MAX, 0);
         }
         else
         {
@@ -13704,7 +13704,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             }
             designator->value_type = member->type;
             u32 member_index = (u32)(member - result->members) - type->member_start;
-            path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, frame->type, member_index, 0, 0, UINT32_MAX);
+            path_plus_one = c_parse_initializer_plan_path(result, plan, path_plus_one, frame->type, member_index, 0, 0, UINT32_MAX, 0);
         }
     }
     designator->path_plus_one = path_plus_one;
@@ -13996,7 +13996,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             // without introducing an extra expression query or model row.
             if (plan && element_type.value < result->type_count && result->types[element_type.value].kind == C_TYPE_POINTER)
             {
-                u32 path = c_parse_initializer_plan_path(result, plan, 0, plan->type, UINT32_MAX, 0, 0, UINT32_MAX);
+                u32 path = c_parse_initializer_plan_path(result, plan, 0, plan->type, UINT32_MAX, 0, 0, UINT32_MAX, 0);
                 c_parse_initializer_plan_item(machine, result, &preprocess, plan, element_type, path,
                     string_start, string_end, string_start, C_INITIALIZER_ITEM_VALUE);
                 plan->inferred_count = 1;
