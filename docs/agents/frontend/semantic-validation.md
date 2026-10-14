@@ -606,9 +606,11 @@ array spelling, so `c_parse_update_operand_modifiable` and the read-only check
 apply C17 6.7.6.3p7 themselves: `argv++` on `char *argv[]` updates the
 adjusted pointer, a local or member array stays unmodifiable, and a `const`
 inside the brackets (`CArrayBound.is_const`, `int a[const 2]`) makes that
-pointer read-only here and in `c_ir_mark_local_read_only`. A qualified
-typedef'd array parameter (`const L2 v`) is still treated as a const pointer
-on both paths; C17 6.7.3p10 qualifies its element instead.
+pointer read-only here and in `c_ir_mark_local_read_only`. A qualifier on an
+array typedef (`const L2 v`) reaches its element graph per C17 6.7.3p10.
+The adjusted pointer remains mutable; const elements reject writes and
+volatile elements retain volatile canonical accesses. Bound identities and
+alignment owners stay on the copied array chain (#4183).
 The embedded modification-destination sources in `compiler_driver_tests`
 run these shapes under every allocator and both frontend forms; the
 equivalence table holds their rejected neighbours.
