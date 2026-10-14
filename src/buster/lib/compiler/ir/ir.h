@@ -966,8 +966,9 @@ struct IrFastStatistics
 // callers are visited in module order rather than by profit (#48).
 // The 16-row callee limit keeps the one-line field predicates the self-host
 // spends its calls in; with the syntax tree built on every compile, 14- and
-// 16-row predicates are among them, and a 13-row limit gave up part of the
-// stage-2 benefit for no measurable stage-1 time (#3854). The optional
+// 16-row predicates are among them. On one tree, a 13-row limit executed about
+// 0.16% more stage-2 instructions (cachegrind); stage-1 time and RSS of either
+// limit on the current tree are unmeasured (#3854). The optional
 // per-caller growth stays 2048 rows, twice the 64-site times 16-row budget it
 // was sized from, rather than following the callee limit.
 #define IR_INLINE_TINY_INSTRUCTIONS 16u

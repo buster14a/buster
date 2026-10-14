@@ -774,12 +774,15 @@ band" premise no longer held. The 9700X `canonical-inline-self-host-v1`
 receipt for 13/5 at `e4d15cbc` (run 38434056637) measured stage-1 wall
 1.0251, instructions 1.0115 and peak RSS 1.0136; stage-2 wall 1.0011 (no
 detectable difference), instructions 0.9924 and peak RSS 1.0155; code bytes
-1.0071. The #3877 receipt for 16/5 on an older tree measured stage-1 wall
-1.0260. Re-run on that tree, the cachegrind sweep gave stage-2 instructions
-0.9925 at 13 rows, 0.9919 at 14 and 0.9909 at 16 (`.text` +0.71%, +0.76%,
-+0.82%). So 13 rows gave up about a sixth of the remaining stage-2 saving for
-no measurable stage-1 wall. A static size cut is tuned to one workload; the
-callee limit is not where the stage-1 cost lives.
+1.0071. The #3877 receipt for 16/5 measured stage-1 wall 1.0260, but on an
+older tree, so the two 9700X runs are not a controlled comparison of callee
+limits. On the `e4d15cbc` tree, a diagnostic cachegrind sweep gave stage-2
+instructions of 0.9925 at 13 rows, 0.9919 at 14 and 0.9909 at 16 (`.text`
++0.71%, +0.76%, +0.82%). So 16 rows executes about 0.16% fewer stage-2
+instructions than 13, at slightly larger code size. Stage-1 wall time and peak
+RSS for the restored 16-row setting remain unmeasured on the current tree. A
+static size cut is also tuned to one workload: the 14-16-row band went from
+never executed to hot when the workload changed.
 
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
