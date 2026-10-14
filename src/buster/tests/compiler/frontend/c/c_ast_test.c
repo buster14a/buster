@@ -7483,6 +7483,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments*
                         "int aliased_object __attribute__((alias(\"plain\")));\n"
                         "void ctor(void) __attribute__((constructor(101)));\n"
                         "void doomed(void) __attribute__((error(\"bad\\n\" \"call\")));\n"
+                        "[[gnu::unused, vendor::tag({gnu::error(\"ignored\")})]] void opaque(void);\n"
+                        "[[vendor::tag({gnu::error(\"ignored\")}), gnu::error(\"real\")]] void sibling(void);\n"
                         "int renamed asm(\"link_name\");\n"
                         "int sectioned __attribute__((section(\".payload\")));\n"
                         "_Noreturn void stopped(void);\n"
@@ -7514,6 +7516,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments*
             BUSTER_TEST(arguments, row == C_AST_NODE_INVALID);
             checked += 1;
         }
+        if (string_equal(declaration->name, S8("opaque")))
+        {
+            BUSTER_TEST(arguments, row == C_AST_NODE_INVALID);
+            checked += 1;
+        }
         if (row < analysis.declaration_binding_count)
         {
             CDeclarationBinding const* binding = analysis.declaration_bindings + row;
@@ -7540,6 +7547,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments*
             if (string_equal(declaration->name, S8("doomed")))
             {
                 BUSTER_TEST(arguments, binding->error_attribute_token_plus_one && string_equal(binding->error_message, S8("bad\\ncall")));
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("sibling")))
+            {
+                BUSTER_TEST(arguments, binding->error_attribute_token_plus_one && string_equal(binding->error_message, S8("real")));
                 checked += 1;
             }
             if (string_equal(declaration->name, S8("renamed")))
@@ -7593,8 +7605,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments*
             }
         }
     }
-    BUSTER_TEST_RAW(arguments, checked == 14, string_format(arena, S8("symbol binding checked={u32} rows={u32}"), checked, analysis.declaration_binding_count));
-    BUSTER_TEST(arguments, analysis.declaration_binding_count == 12 &&
+    BUSTER_TEST_RAW(arguments, checked == 16, string_format(arena, S8("symbol binding checked={u32} rows={u32}"), checked, analysis.declaration_binding_count));
+    BUSTER_TEST(arguments, analysis.declaration_binding_count == 13 &&
                                analysis.declaration_binding_copy_bytes >= (u64)analysis.declaration_binding_count * sizeof(CDeclarationBinding) &&
                                analysis.declaration_binding_retained_bytes >= (u64)analysis.declaration_binding_count * sizeof(CDeclarationBinding));
     String8 growth = {0};

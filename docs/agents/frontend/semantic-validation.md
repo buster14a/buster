@@ -87,6 +87,12 @@ call functions retain the statement-expression refusal. The parser and folder
 use the same bounded tail range. Bodies with declarations, multiple statements
 or an evaluated nested statement expression remain nonconstant. File-scope
 statement expressions remain rejected by the separate file-scope constraint.
+That constraint excludes opaque unknown-namespace attribute argument clauses:
+`[[vendor::tag({gnu::error("m")})]]` is a balanced token sequence, with no
+expression or GNU error binding inside it. The retained ATTRIBUTE_SCOPED
+namespace/name nodes and the semantic candidate index bound that context;
+the existing token proof still checks real GNU expression operands, including
+known attribute arguments and definition parameters outside the body.
 The registered driver regression checks the constant-only runtime result
 alongside aggregate and nonconstant-tail refusals.
 

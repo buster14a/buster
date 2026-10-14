@@ -42530,14 +42530,32 @@ BUSTER_C_INTERNAL String8 c_parse_unknown_member_designator_message(CParseResult
     return message;
 }
 
+// Mark a known source interval without interpreting its payload.
+BUSTER_C_INTERNAL void c_parse_token_mask_range(u64* mask, u32 start, u32 end)
+{
+    u32 index = start;
+    while (index < end)
+    {
+        if (!(index & 63) && end - index >= 64)
+        {
+            mask[index >> 6] = UINT64_MAX;
+            index += 64;
+        }
+        else
+        {
+            mask[index >> 6] |= (u64)1 << (index & 63);
+            index += 1;
+        }
+    }
+}
+
 // Reports the `(` of every GNU statement expression `({` outside a function
-// body. GCC and Clang allow one only inside a function, so each of these is
-// at file scope: in an initializer (#3364), a declaration's specifiers, a
-// typeof operand, an array bound or an attribute argument (#3437). Left to the
-// later passes, a typeof operand was accepted silently and an array bound was
-// reported as a variably modified type. The function bodies are marked in a
-// token bitmap, so no declaration order is assumed, and a translation unit
-// without a statement expression allocates nothing.
+// body. The semantic token proof still covers initializers, specifiers, typeof,
+// bounds and parsed attribute expressions. Bodies and opaque unknown-namespace
+// attribute payloads are excluded contexts; the latter are balanced token
+// sequences, not expressions (C23 6.7.13.2), in the retained syntax contract.
+// A unit without a candidate allocates nothing, and diagnostics stay in source
+// order regardless of declaration/node order.
 BUSTER_C_INTERNAL void c_parse_validate_file_scope_statement_expressions(CParseResult* result, CPreprocessResult preprocess)
 {
     u32 token_count = (u32)preprocess.token_count;
@@ -42556,19 +42574,26 @@ BUSTER_C_INTERNAL void c_parse_validate_file_scope_statement_expressions(CParseR
             {
                 u32 start = BUSTER_MIN(declaration->body_start, token_count);
                 u32 end = (u32)BUSTER_MIN((u64)declaration->body_start + declaration->body_token_count, (u64)token_count);
-                u32 index = start;
-                while (index < end)
+                c_parse_token_mask_range(bodies, start, end);
+            }
+        }
+        CAst const* ast = result->ast;
+        // The candidate population above already prepared this semantic
+        // index, including for syntax-only units that retain no node facts.
+        CTokenPositionIndex const* contexts = result->position_index;
+        for (u32 node = 0; ast && contexts && contexts->built && node < ast->node_count; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_ATTRIBUTE_SCOPED && !ast->data[node])
+            {
+                u32 space = node - 1;
+                String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[space]]);
+                bool opaque = !string_equal(name, S8("gnu")) && !string_equal(name, S8("__gnu__")) &&
+                              !string_equal(name, S8("clang")) && !string_equal(name, S8("_Clang"));
+                u32 open = ast->tokens[node] + 1;
+                u32 after = open < token_count ? contexts->matching_delimiters_plus_one[open] : 0;
+                if (opaque && after > open && after <= token_count)
                 {
-                    if (!(index & 63) && end - index >= 64)
-                    {
-                        bodies[index >> 6] = UINT64_MAX;
-                        index += 64;
-                    }
-                    else
-                    {
-                        bodies[index >> 6] |= (u64)1 << (index & 63);
-                        index += 1;
-                    }
+                    c_parse_token_mask_range(bodies, open, after);
                 }
             }
         }
