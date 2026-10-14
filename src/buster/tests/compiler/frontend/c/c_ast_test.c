@@ -7000,6 +7000,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_entrypoints(UnitTestArgum
     return result;
 }
 
+// Full type names retain their semantic base and abstract constructor graph,
+// including nested function parameters and VLA bound node identity.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("typedef int T; void f(int n) { (void)sizeof(T); (void)sizeof(int (*)[n]); (void)sizeof(int (*)(int, double)); }"),
+        S8("void f(void) { (void)sizeof(int (*(*)(double))[3]); (void)sizeof(_Atomic(int*)); (void)sizeof(int (*)(int[3])); }"),
+        S8("struct S { int a; }; void f(int c) { (void)((struct S){0}); (void)(c ? (struct S){1} : (struct S){2}); (void)sizeof(struct { int a; }); }"),
+        S8("void f(int n) { (void)sizeof(__typeof__(n)); (void)sizeof(int (*)[n + 1]); }"),
+        S8("struct S { char* p; unsigned long n; }; void f(int c) { (void)(c ? ((struct S){.p = \"x\", .n = 1}).p : ((struct S){.p = \"y\", .n = 2}).p); (void)(c ? ((struct S){.p = \"x\", .n = 1}).p : 0); }"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[source_index], C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.ast_facts = &facts;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+            BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+            BUSTER_TEST(arguments, facts.statistics.type_names && !facts.statistics.missing_type_names && !facts.recipe_failed);
+            for (u32 node = 0; node < built.ast.node_count; node += 1)
+            {
+                if (built.ast.kinds[node] == C_AST_TYPE_NAME)
+                {
+                    u32 base = c_ast_child_at(&built.ast, node, 0);
+                    BUSTER_TEST(arguments, (facts.flags[node] & C_AST_FACT_TYPED) && (facts.flags[base] & C_AST_FACT_TYPED));
+                    u32 type = facts.types[node];
+                    bool recipe = (facts.flags[node] & C_AST_FACT_RECIPE) != 0;
+                    BUSTER_TEST(arguments, recipe ? type < facts.recipe_count && facts.recipes[type].form == C_AST_TYPE_RECIPE_DERIVATION
+                                                 : type < analysis.type_count);
+                    if (source_index == 1)
+                    {
+                        BUSTER_TEST(arguments, !(facts.payloads[node] & C_AST_TYPE_NAME_VARIABLY_MODIFIED));
+                    }
+                }
+            }
+            for (u32 index = 0; index < facts.recipe_count; index += 1)
+            {
+                CAstTypeRecipe const* recipe = facts.recipes + index;
+                if (recipe->form == C_AST_TYPE_RECIPE_DERIVATION && recipe->type.kind == C_TYPE_ARRAY && recipe->bound.token_count)
+                {
+                    BUSTER_TEST(arguments, recipe->bound_node != C_AST_NODE_INVALID);
+                    if (source_index == 1)
+                    {
+                        BUSTER_TEST(arguments, recipe->count_is_constant && recipe->resolved_count == 3);
+                    }
+                }
+                if (recipe->form == C_AST_TYPE_RECIPE_DERIVATION && recipe->type.kind == C_TYPE_FUNCTION && recipe->type.parameter_count)
+                {
+                    u32 first = recipe->parameter_recipe_begin + recipe->type.parameter_start - recipe->parameter_row_begin;
+                    BUSTER_TEST(arguments, first + recipe->type.parameter_count <= facts.recipe_count);
+                    for (u32 parameter = 0; parameter < recipe->type.parameter_count; parameter += 1)
+                    {
+                        BUSTER_TEST(arguments, facts.recipes[first + parameter].form == C_AST_TYPE_RECIPE_PARAMETER);
+                        CAstTypeRecipe const* row = facts.recipes + first + parameter;
+                        if (row->parameter_source_type.value >= row->row_begin)
+                        {
+                            u32 source = row->recipe_begin + row->parameter_source_type.value - row->row_begin;
+                            BUSTER_TEST(arguments, source < facts.recipe_count && facts.recipes[source].form == C_AST_TYPE_RECIPE_DERIVATION);
+                        }
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, !facts.statistics.stale);
+            if (source_index == 2 || source_index == 4)
+            {
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    if (built.ast.kinds[node] == C_AST_CONDITIONAL)
+                    {
+                        BUSTER_TEST(arguments, facts.flags[node] & C_AST_FACT_TYPED);
+                        u32 type = facts.types[node];
+                        bool recipe = (facts.flags[node] & C_AST_FACT_RECIPE) != 0;
+                        CType const* row = recipe ? type < facts.recipe_count ? &facts.recipes[type].type : 0
+                                                  : type < analysis.type_count ? analysis.types + type : 0;
+                        BUSTER_TEST(arguments, row && row->kind == (source_index == 4 ? C_TYPE_POINTER : C_TYPE_STRUCT));
+                    }
+                }
+            }
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7041,6 +7139,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);

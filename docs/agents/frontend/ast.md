@@ -2793,8 +2793,24 @@ older table remains a published row. Fresh-completion fixtures cover qualified
 array elements, decayed pointers, pointer conditionals and transitive string
 arrays, and compare the semantic model with publication disabled. Builtin
 callee identities and implicit function-name objects have explicit forms.
-Type-name publication and the lowering consumer migration remain open; this
-producer commit does not claim retirement of the query machine.
+Type-name publication retains the final abstract-declarator type and its
+DECL_SPECIFIERS base. TYPE_NAME payload bit
+`C_AST_TYPE_NAME_VARIABLY_MODIFIED` comes from the semantic producer. A fresh
+function type retains its parameter rows, including each parameter
+`parameter_source_type` before array/function adjustment, so the written
+constructor can still be materialized before its parameter value type.
+Recipes carry `recipe_begin`/`recipe_end`, numeric constant array counts, and
+node references for nonconstant bounds. Completion runs use the protected TYPE
+constant-evaluation mode and restore the full semantic checkpoint after
+publication. No new C row or IR type is emitted by this producer.
+
+On frozen main `2c2c46fc9` unity input, the current producer census describes
+all 1,787,510 typed-region expression candidates with zero missing, appended
+state or stale gaps, and all 60,387 TYPE_NAME nodes. The 29 uncovered function
+expression nodes and 6,096 outside-region nodes remain explicitly counted;
+this is not a claim that every expression in the unit has a fact. The
+lowering consumer migration remains open and this producer checkpoint does
+not claim retirement of the query machine.
 
 ## Consumer and retirement map
 

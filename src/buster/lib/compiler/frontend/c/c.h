@@ -1731,6 +1731,12 @@ typedef enum CAstFactFlag
     C_AST_FACT_RECIPE = 1u << 7,
 } CAstFactFlag;
 
+// TYPE_NAME payload, independent of expression/declaration payload forms.
+typedef enum CAstTypeNameFlag
+{
+    C_AST_TYPE_NAME_VARIABLY_MODIFIED = 1u << 0,
+} CAstTypeNameFlag;
+
 typedef enum CAstTypeRecipeForm
 {
     C_AST_TYPE_RECIPE_DERIVATION,
@@ -1739,6 +1745,9 @@ typedef enum CAstTypeRecipeForm
     C_AST_TYPE_RECIPE_BUILTIN,
     // The implicit function-name object: const char[name length + 1].
     C_AST_TYPE_RECIPE_FUNCTION_NAME,
+    // One parameter appended by a type-name query, referenced by its
+    // function row through parameter_row_begin/parameter_recipe_begin.
+    C_AST_TYPE_RECIPE_PARAMETER,
 } CAstTypeRecipeForm;
 
 // A row-free semantic type. All rows appended by its query are copied into
@@ -1749,16 +1758,26 @@ typedef enum CAstTypeRecipeForm
 typedef struct CAstTypeRecipe CAstTypeRecipe;
 struct CAstTypeRecipe
 {
-    CType type;
+    union
+    {
+        CType type;
+        CParameter parameter;
+    };
     CArrayBound bound;
     CTypeAlignment alignment;
+    u64 resolved_count;
     u32 bound_node;
     u32 row_begin;
     u32 recipe_begin;
+    u32 recipe_end;
+    u32 parameter_row_begin;
+    u32 parameter_recipe_begin;
+    CTypeId parameter_source_type;
     u32 declaration;
     u32 builtin;
     CAstTypeRecipeForm form;
     bool has_alignment;
+    bool count_is_constant;
 };
 
 // Why a fact candidate has no type.
@@ -1803,6 +1822,9 @@ struct CAstFactStatistics
     u64 recipes;
     u64 builtin_identities;
     u64 function_names;
+    u64 type_names;
+    u64 typed_type_names;
+    u64 missing_type_names;
     u64 gaps[C_AST_FACT_GAP_COUNT];
     u64 uncovered;
     u64 outside;

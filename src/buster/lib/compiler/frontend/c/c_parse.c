@@ -1970,6 +1970,31 @@ BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseRes
     }
 }
 
+// Publication-only provenance for parameters whose written array/function
+// type is adjusted by semantic analysis. Lowering still materializes that
+// written constructor before taking its parameter value type.
+BUSTER_C_INTERNAL void c_parse_type_fact_parameter_write(CTypeParseMachine* machine, u32 row, CTypeId type)
+{
+    if (machine->fact_parameter_sources)
+    {
+        bool room = row >= machine->fact_parameter_begin && row - machine->fact_parameter_begin < machine->fact_parameter_capacity;
+        if (room)
+        {
+            machine->fact_parameter_sources[row - machine->fact_parameter_begin] = type;
+        }
+        machine->failed = machine->failed || !room;
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_type_fact_parameter_move(CTypeParseMachine* machine, u32 from, u32 to)
+{
+    if (machine->fact_parameter_sources && from >= machine->fact_parameter_begin &&
+        from - machine->fact_parameter_begin < machine->fact_parameter_capacity)
+    {
+        c_parse_type_fact_parameter_write(machine, to, machine->fact_parameter_sources[from - machine->fact_parameter_begin]);
+    }
+}
+
 BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start);
 
 // Restrict applies to an object pointer, or an array whose elements are
@@ -2022,7 +2047,7 @@ BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CPar
     else
     {
         machine->committed_mutation_count = machine->mutation_count;
-        machine->mutation_count = mutation_mark;
+        machine->mutation_count = machine->fact_checkpoint_active ? machine->mutation_count : mutation_mark;
     }
     if (machine->failed)
     {
@@ -8010,7 +8035,7 @@ BUSTER_C_INTERNAL u32 c_parse_expression_bit_field_width(Arena* arena, CPreproce
     return width;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+BUSTER_C_SHARED CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 
 BUSTER_C_SHARED bool c_parse_expression_real_kind(CTypeKind kind)
@@ -9638,14 +9663,25 @@ BUSTER_GLOBAL_LOCAL bool c_parse_region_facts_sound(CTypeParseMachine const* mac
 // they mint no callable or array row. Other failures remain counted gaps.
 // `scope` is a body's declaration scope, which each node's scope descends
 // from, or an initializer's own scope.
+BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                              CScopeId scope, u32 begin, u32 end, bool body);
+BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                  CScopeId scope, u32 begin, u32 end);
+
 BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, bool body)
 {
     CAstTypeBody* region = machine->ast_facts ? c_ast_types_facts_begin(machine, &preprocess) : 0;
     if (region)
     {
         CAstFacts* facts = machine->ast_facts;
+        u32 region_begin = 0;
+        u32 region_end = 0;
+        c_ast_types_facts_limits(region, &region_begin, &region_end);
+        c_parse_type_name_facts(machine, preprocess, result, scope, region_begin, region_end, body);
         bool checked = machine->validate_expression_constraints;
         bool runtime = machine->runtime_expression_constraints;
+        CConstantEvaluationMode saved_mode = machine->constant_evaluation_mode;
+        machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE;
 #if BUSTER_INCLUDE_TESTS
         CParseExpressionQuery* saved_queries = machine->expression_queries;
         machine->expression_queries = c_ast_types_facts_uncached() ? 0 : machine->expression_queries;
@@ -9676,6 +9712,7 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 u8 saved_flags = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0;
                 CParseResult checkpoint = *result;
                 u32 mutation_mark = machine->mutation_count;
+                u32 recipe_mark = facts->recipe_count;
                 machine->committed_mutation_count = mutation_mark;
                 CTypeId type = C_TYPE_ID_INVALID;
                 bool valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
@@ -9733,6 +9770,13 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                                                                                               : C_AST_FACT_GAP_INVALID;
                     facts->statistics.gaps[gap] += 1;
                 }
+                if (facts->recipe_count > recipe_mark)
+                {
+                    bool saved_checkpoint = machine->fact_checkpoint_active;
+                    machine->fact_checkpoint_active = true;
+                    c_parse_type_recipe_bounds(machine, preprocess, result, node_scope, recipe_mark, facts->recipe_count);
+                    machine->fact_checkpoint_active = saved_checkpoint;
+                }
                 if (!sound || appended)
                 {
                     c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
@@ -9758,6 +9802,7 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
 #endif
         machine->validate_expression_constraints = checked;
         machine->runtime_expression_constraints = runtime;
+        machine->constant_evaluation_mode = saved_mode;
     }
 }
 
@@ -10160,11 +10205,12 @@ BUSTER_C_SHARED void c_sizeof_handoff_compare(CParseResult* result, CPreprocessR
 // reads `int (*)[3]`. A `(` opens a group when a pointer, another group or an
 // array bound follows it; otherwise it starts a parameter list. The mirror of
 // this reader in lowering is c_ir_type_name_declarator.
-BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                     CScopeId scope, u32 start, u32 end)
+BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name_detail(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId scope, u32 start, u32 end, CTypeId* base_out)
 {
     u32 cursor = start;
     CTypeId type = c_parse_type_name_specifiers(machine, result, preprocess, scope, start, end, &cursor);
+    *base_out = type;
     u64 mark = machine->scratch_arena->position;
     u32 level_end = end;
     bool finished = type.value >= result->type_count;
@@ -10215,6 +10261,200 @@ BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name(CTypeParseMachine* machine,
     }
     arena_set_position(machine->scratch_arena, mark);
     return type;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                     CScopeId scope, u32 start, u32 end)
+{
+    CTypeId base = C_TYPE_ID_INVALID;
+    return c_parse_identity_type_name_detail(machine, result, preprocess, scope, start, end, &base);
+}
+
+BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMachine* machine, Arena* arena,
+                                                                  CPreprocessResult preprocess, CParseResult* result,
+                                                                  CScopeId scope, u32 start, u32 end);
+
+BUSTER_C_INTERNAL bool c_parse_type_is_variably_modified(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                           CScopeId scope, CTypeId type);
+
+// A type recipe must never call the lowering constant engine to recover its
+// array count. Resolve it with the semantic producer while its checkpoint
+// still stands; nonconstant bounds keep only their already indexed node.
+BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                  CScopeId scope, u32 begin, u32 end)
+{
+    CAstFacts* facts = machine->ast_facts;
+    for (u32 index = begin; index < end; index += 1)
+    {
+        CAstTypeRecipe* recipe = facts->recipes + index;
+        if (recipe->form == C_AST_TYPE_RECIPE_DERIVATION && recipe->type.kind == C_TYPE_ARRAY && recipe->bound.token_count &&
+            !recipe->count_is_constant)
+        {
+            CArrayBound bound = recipe->bound;
+            CScopeId bound_scope = c_parse_scope_for_token(result, scope, bound.token_start);
+            CIntegerConstant value = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, bound_scope,
+                                                                  bound.token_start, bound.token_start + bound.token_count);
+            recipe->count_is_constant = value.valid && !value.is_negative && !value.magnitude_high;
+            recipe->resolved_count = recipe->count_is_constant ? value.magnitude : 0;
+        }
+    }
+}
+
+// TYPE_NAME keeps both its specifier base and its final abstract declarator
+// type. The semantic parser remains their producer; the whole completion is
+// undone once its row-free graph and parameter rows have been published.
+BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                              CScopeId scope, u32 begin, u32 end, bool body)
+{
+    CAstFacts* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    if (facts && facts->spans && ast)
+    {
+        CAstTypeBody* saved_region = machine->ast_types;
+        bool checked = machine->validate_expression_constraints;
+        bool runtime = machine->runtime_expression_constraints;
+        CConstantEvaluationMode saved_mode = machine->constant_evaluation_mode;
+        machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE;
+        bool saved_checkpoint = machine->fact_checkpoint_active;
+        CParseExpressionQuery* saved_queries = machine->expression_queries;
+        machine->expression_queries = 0;
+        machine->ast_types = 0;
+        machine->validate_expression_constraints = false;
+        machine->runtime_expression_constraints = body;
+        machine->fact_checkpoint_active = true;
+        u64 scratch_mark = machine->scratch_arena->position;
+        for (u32 node = begin; node < end; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_TYPE_NAME && !(facts->flags[node] & C_AST_FACT_TYPED) && !machine->failed)
+            {
+                u32 first = ast->tokens[node];
+                u32 after = ast->data[node];
+                CScopeId node_scope = c_parse_scope_for_token(result, scope, first);
+                CParseResult checkpoint = *result;
+                u32 mutation_mark = machine->mutation_count;
+                CTypeId* saved_sources = machine->fact_parameter_sources;
+                u32 saved_begin = machine->fact_parameter_begin;
+                u32 saved_capacity = machine->fact_parameter_capacity;
+                u64 capacity64 = (u64)after - first + 64;
+                u32 capacity = capacity64 <= UINT32_MAX ? (u32)capacity64 : 0;
+                machine->fact_parameter_sources = capacity ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CTypeId, capacity) : 0;
+                machine->fact_parameter_begin = checkpoint.parameter_count;
+                machine->fact_parameter_capacity = capacity;
+                if (machine->fact_parameter_sources)
+                {
+                    memset(machine->fact_parameter_sources, 0xff, sizeof(CTypeId) * capacity);
+                }
+                facts->recipe_failed = facts->recipe_failed || !machine->fact_parameter_sources;
+                machine->failed = machine->failed || !machine->fact_parameter_sources;
+                CTypeId base = C_TYPE_ID_INVALID;
+                CTypeId type = machine->failed ? C_TYPE_ID_INVALID : c_parse_identity_type_name_detail(machine, result, preprocess, node_scope, first, after, &base);
+                bool sound = type.value < result->type_count && base.value < result->type_count && !machine->failed &&
+                             result->diagnostic_count == checkpoint.diagnostic_count && result->member_count == checkpoint.member_count &&
+                             result->enum_member_count == checkpoint.enum_member_count && result->entity_count == checkpoint.entity_count &&
+                             result->scope_count == checkpoint.scope_count && result->alignment_count == checkpoint.alignment_count;
+                for (u32 mutation = mutation_mark; sound && mutation < machine->mutation_count; mutation += 1)
+                {
+                    sound = machine->mutations[mutation].id.value >= checkpoint.type_count;
+                }
+                bool variably_modified = sound && c_parse_type_is_variably_modified(machine, result, preprocess, node_scope, type);
+                u32 recipe_begin = sound && (type.value >= checkpoint.type_count || base.value >= checkpoint.type_count)
+                                       ? c_ast_types_facts_snapshot(facts, result, &preprocess, &checkpoint) : C_AST_FACT_NONE;
+                sound = sound && (recipe_begin != C_AST_FACT_NONE ||
+                                  (type.value < checkpoint.type_count && base.value < checkpoint.type_count));
+                if (sound && recipe_begin != C_AST_FACT_NONE)
+                {
+                    u32 parameter_begin = recipe_begin + result->type_count - checkpoint.type_count;
+                    for (u32 parameter = checkpoint.parameter_count; parameter < result->parameter_count; parameter += 1)
+                    {
+                        u32 index = parameter - checkpoint.parameter_count;
+                        CTypeId source = index < machine->fact_parameter_capacity ? machine->fact_parameter_sources[index] : C_TYPE_ID_INVALID;
+                        if (source.value < result->type_count)
+                        {
+                            facts->recipes[parameter_begin + index].parameter_source_type = source;
+                        }
+                    }
+                    c_parse_type_recipe_bounds(machine, preprocess, result, node_scope, recipe_begin, facts->recipe_count);
+                }
+                u32 nodes[] = {c_ast_child_at(ast, node, 0), node};
+                CTypeId types[] = {base, type};
+                for (u32 index = 0; sound && index < BUSTER_ARRAY_LENGTH(nodes); index += 1)
+                {
+                    bool recipe = types[index].value >= checkpoint.type_count;
+                    facts->types[nodes[index]] = recipe ? recipe_begin + types[index].value - checkpoint.type_count : types[index].value;
+                    facts->flags[nodes[index]] |= (u8)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | (recipe ? C_AST_FACT_RECIPE : 0u));
+                }
+                if (sound)
+                {
+                    facts->payloads[node] = variably_modified ? C_AST_TYPE_NAME_VARIABLY_MODIFIED : 0;
+                }
+                c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+                machine->fact_parameter_sources = saved_sources;
+                machine->fact_parameter_begin = saved_begin;
+                machine->fact_parameter_capacity = saved_capacity;
+                arena_set_position(machine->scratch_arena, scratch_mark);
+                if (facts->recipe_failed)
+                {
+                    c_parse_diagnostic(result, first < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[first])
+                                                                           : (CSourceLocation){0},
+                                       C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve retained C type-name recipes"));
+                    machine->failed = true;
+                }
+            }
+        }
+        // A compound object's declared type is its TYPE_NAME, not a scalar
+        // from the braced expression's last initializer. Keep completed array
+        // facts from their inference producer; nonarrays read this authority.
+        for (u32 node = begin; node < end; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_COMPOUND_LITERAL)
+            {
+                u32 name = c_ast_child_at(ast, node, 0);
+                u32 flags = facts->flags[name];
+                bool recipe = (flags & C_AST_FACT_RECIPE) != 0;
+                CType const* type = recipe ? facts->types[name] < facts->recipe_count ? &facts->recipes[facts->types[name]].type : 0
+                                          : facts->types[name] < result->type_count ? result->types + facts->types[name] : 0;
+                if ((flags & C_AST_FACT_TYPED) && type && type->kind != C_TYPE_ARRAY)
+                {
+                    bool completed = (facts->flags[node] & (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED)) == C_AST_FACT_EXPRESSION;
+                    facts->statistics.completed += completed;
+                    facts->statistics.recipes += completed && recipe;
+                    facts->types[node] = facts->types[name];
+                    facts->flags[node] = (u8)((facts->flags[node] & ~(u32)(C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE)) |
+                                             C_AST_FACT_TYPED | (recipe ? C_AST_FACT_RECIPE : 0u));
+                }
+            }
+            else if ((ast->kinds[node] == C_AST_MEMBER || ast->kinds[node] == C_AST_MEMBER_ARROW) &&
+                     (facts->flags[node] & C_AST_FACT_MACHINE))
+            {
+                // The range machine can answer a compound member with the
+                // last initializer's scalar type. Its retained aggregate now
+                // settles the member through the ordinary semantic lookup.
+                CParseResult checkpoint = *result;
+                u32 mutation_mark = machine->mutation_count;
+                CTypeId type = C_TYPE_ID_INVALID;
+                u32 recipe = C_AST_FACT_NONE;
+                if (c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &recipe))
+                {
+                    u32 captured = recipe == C_AST_FACT_NONE && type.value >= checkpoint.type_count
+                                    ? c_ast_types_facts_snapshot(facts, result, &preprocess, &checkpoint) : C_AST_FACT_NONE;
+                    if (type.value < checkpoint.type_count || recipe != C_AST_FACT_NONE || captured != C_AST_FACT_NONE)
+                    {
+                        bool temporary = recipe != C_AST_FACT_NONE || type.value >= checkpoint.type_count;
+                        facts->types[node] = recipe != C_AST_FACT_NONE ? recipe : temporary ? captured + type.value - checkpoint.type_count : type.value;
+                        facts->flags[node] = (u8)((facts->flags[node] & ~(u32)C_AST_FACT_RECIPE) | (temporary ? C_AST_FACT_RECIPE : 0u));
+                    }
+                }
+                c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+                arena_set_position(machine->scratch_arena, scratch_mark);
+            }
+        }
+        machine->fact_checkpoint_active = saved_checkpoint;
+        machine->expression_queries = saved_queries;
+        machine->ast_types = saved_region;
+        machine->validate_expression_constraints = checked;
+        machine->runtime_expression_constraints = runtime;
+        machine->constant_evaluation_mode = saved_mode;
+    }
 }
 
 // First top-level separator in the original stream. Nested type names,
@@ -20503,6 +20743,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
     }
     for (u32 bound = frame->definition_type_start; bound < result->array_bound_count; bound += 1)
         result->array_bounds[bound].is_parameter_declarator = true;
+    c_parse_type_fact_parameter_write(machine, result->parameter_count, frame->type);
     frame->type = c_parse_adjust_parameter_type(result, frame->type);
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, frame->name),
@@ -20892,6 +21133,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         bool sentinel = false;
         bool sole = !frame->written_parameter_count && c_token_is_punctuator(&preprocess.tokens[frame->scan_index], C_PUNCTUATOR_RIGHT_PARENTHESIS);
         bool parameter_valid = c_parse_parameter_list_void_valid(result, preprocess, parameter, sole, frame->segment_start, &sentinel);
+        c_parse_type_fact_parameter_move(machine, result->parameter_count - 1, frame->parameter_start + frame->written_parameter_count);
         result->parameters[frame->parameter_start + frame->written_parameter_count] = parameter;
         frame->written_parameter_count += !sentinel;
         result->parameter_count -= 1;
@@ -23829,6 +24071,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     }
     for (u32 bound = first_bound; bound < result->array_bound_count; bound += 1)
         result->array_bounds[bound].is_parameter_declarator = true;
+    c_parse_type_fact_parameter_write(machine, result->parameter_count, type);
     type = c_parse_adjust_parameter_type(result, type);
     BUSTER_VALIDATE(result->parameter_count < result->parameter_capacity);
     result->parameters[result->parameter_count++] = (CParameter){
@@ -24410,6 +24653,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                         CParameter parameter = result->parameters[result->parameter_count - 1];
                         bool sentinel = false;
                         valid = c_parse_parameter_list_void_valid(result, preprocess, parameter, list_end && !written_parameter_count, segment_start, &sentinel);
+                        c_parse_type_fact_parameter_move(machine, result->parameter_count - 1, parameter_start + written_parameter_count);
                         result->parameters[parameter_start + written_parameter_count] = parameter;
                         written_parameter_count += !sentinel;
                         result->parameter_count -= 1;
@@ -25491,7 +25735,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_pointer_type(Arena* arena, CPrepro
     return type;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+BUSTER_C_SHARED CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end)
 {
     left = c_parse_auto_decay_type(result, left);
@@ -27768,6 +28012,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                     bool sentinel = false;
                     valid = c_parse_parameter_list_void_valid(result, preprocess, parameter,
                                                                index == close && !parameter_count, segment_start, &sentinel);
+                    c_parse_type_fact_parameter_move(machine, result->parameter_count - 1, parameter_start + parameter_count);
                     result->parameters[parameter_start + parameter_count] = parameter;
                     parameter_count += !sentinel;
                     result->parameter_count -= 1;
@@ -47218,6 +47463,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // gates the ordinary member-constraint pass. This publishes only retained
     // width rows and never opens that gate or evaluates incomplete members.
     c_parse_publish_deferred_bit_field_width_diagnostics(arena, &result, preprocess);
+    // Type names outside typed bodies/initializers keep the same producer
+    // contract, including sizeof/typeof operands and file-scope casts.
+    if (machine.ast_facts && !result.diagnostic_count)
+    {
+        c_parse_type_name_facts(&machine, preprocess, &result, (CScopeId){0}, 0, syntax.ast->node_count, false);
+    }
     c_parse_publish_declaration_facts(&machine, &result, preprocess);
     c_parse_ast_identity_publish(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).

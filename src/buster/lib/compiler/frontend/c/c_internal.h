@@ -1638,6 +1638,14 @@ struct CTypeParseMachine
     // c_type_parse_root_finish dropped its records (the records stay in
     // place): the completion run reads it to undo a run that mutated a row.
     u32 committed_mutation_count;
+    // A retained type-name completion runs several ordinary roots before
+    // restoring its outer checkpoint. Keep their undo records until then.
+    bool fact_checkpoint_active;
+    // Source parameter types before the semantic array/function adjustment,
+    // only while a retained type-name completion owns this scratch slice.
+    CTypeId* fact_parameter_sources;
+    u32 fact_parameter_begin;
+    u32 fact_parameter_capacity;
     // The body binder's statement plan (c_parse_statement_plan_build) reads
     // the same tree: `ast_statement_bodies` holds the `{` of every top-level
     // function definition, ascending, and its COMPOUND_STATEMENT node, built
@@ -1844,14 +1852,17 @@ BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
 BUSTER_C_EXTERN bool c_ast_types_facts_uncached(void);
 #endif
 BUSTER_C_EXTERN CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess);
+BUSTER_C_EXTERN void c_ast_types_facts_limits(CAstTypeBody const* region, u32* begin, u32* end);
 BUSTER_C_EXTERN bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out);
 BUSTER_C_EXTERN void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeId type, bool nonplace);
 // A string literal's fact in structural form from the array row the machine
 // answered for it (C_AST_FACT_STRING); false, and nothing kept, when the row
 // is not a string literal's or its element row is at or past `rows`.
 BUSTER_C_EXTERN bool c_ast_types_facts_string(CAstFacts* facts, CParseResult const* result, CAst const* ast, u32 node, CTypeId array, u32 rows);
+BUSTER_C_EXTERN u32 c_ast_types_facts_snapshot(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess, CParseResult const* checkpoint);
 BUSTER_C_EXTERN bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess, u32 node, CTypeId type, u32 rows);
 BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult const* result, CAst const* ast, CPreprocessResult const* preprocess, u32 node);
+BUSTER_C_EXTERN CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
 BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
 BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);

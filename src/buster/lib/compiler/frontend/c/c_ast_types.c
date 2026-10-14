@@ -3081,6 +3081,12 @@ BUSTER_C_SHARED CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine
     return body;
 }
 
+BUSTER_C_SHARED void c_ast_types_facts_limits(CAstTypeBody const* region, u32* begin, u32* end)
+{
+    *begin = region->begin;
+    *end = region->node + 1;
+}
+
 BUSTER_C_SHARED bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out)
 {
     bool found = false;
@@ -3151,20 +3157,25 @@ BUSTER_GLOBAL_LOCAL CAstTypeRecipe* c_ast_types_recipes_append(CAstFacts* facts,
     return appended;
 }
 
-// Capture the complete temporary row run before the semantic checkpoint is
-// restored. Published rows and parameter/member slices already existed; no
-// new member/parameter slice is admitted by c_parse_region_facts_sound.
-BUSTER_C_SHARED bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess,
-                                               u32 node, CTypeId type, u32 rows)
+// Capture the complete temporary row and parameter runs before restoring the
+// semantic checkpoint. Function parameter references use the parallel run's
+// base; both kinds of rows remain in the same sparse, pointer-free array.
+BUSTER_C_SHARED u32 c_ast_types_facts_snapshot(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess,
+                                               CParseResult const* checkpoint)
 {
-    bool kept = rows <= type.value && type.value < result->type_count;
+    u32 rows = checkpoint->type_count;
     u32 count = result->type_count - rows;
+    u32 parameters = result->parameter_count - checkpoint->parameter_count;
     u32 base = facts->recipe_count;
-    CAstTypeRecipe* recipes = kept ? c_ast_types_recipes_append(facts, count) : 0;
-    kept = recipes != 0;
-    if (kept)
+    bool room = count <= C_AST_FACT_NONE - parameters;
+    CAstTypeRecipe* recipes = room && count + parameters ? c_ast_types_recipes_append(facts, count + parameters) : 0;
+    u32 answer = recipes ? base : C_AST_FACT_NONE;
+    for (u32 index = 0; recipes && index < count + parameters; index += 1)
     {
-        for (u32 index = 0; index < count; index += 1)
+        recipes[index] = (CAstTypeRecipe){.row_begin = rows, .recipe_begin = base, .recipe_end = base + count + parameters,
+                                        .parameter_row_begin = checkpoint->parameter_count, .parameter_recipe_begin = base + count,
+                                        .declaration = C_AST_FACT_NONE, .bound_node = C_AST_NODE_INVALID};
+        if (index < count)
         {
             CType row = result->types[rows + index];
             CTypeAlignment const* alignment = c_parse_type_alignment(result, (CTypeId){.value = rows + index});
@@ -3172,10 +3183,33 @@ BUSTER_C_SHARED bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult con
                                     ? result->array_bounds[row.array_bound] : (CArrayBound){0};
             u32 bound_node = bound.token_count ? c_ast_facts_locate(facts, preprocess, bound.token_start, bound.token_start + bound.token_count)
                                              : C_AST_NODE_INVALID;
-            recipes[index] = (CAstTypeRecipe){.type = row, .bound = bound, .bound_node = bound_node, .row_begin = rows,
-                                                  .recipe_begin = base, .alignment = alignment ? *alignment : (CTypeAlignment){0},
-                                                  .has_alignment = alignment != 0, .declaration = C_AST_FACT_NONE};
+            recipes[index].type = row;
+            recipes[index].bound = bound;
+            recipes[index].resolved_count = bound.inferred_count;
+            recipes[index].count_is_constant = bound.has_inferred_count;
+            recipes[index].bound_node = bound_node;
+            recipes[index].alignment = alignment ? *alignment : (CTypeAlignment){0};
+            recipes[index].has_alignment = alignment != 0;
         }
+        else
+        {
+            recipes[index].parameter = result->parameters[checkpoint->parameter_count + index - count];
+            recipes[index].parameter_source_type = recipes[index].parameter.type;
+            recipes[index].form = C_AST_TYPE_RECIPE_PARAMETER;
+        }
+    }
+    return answer;
+}
+
+BUSTER_C_SHARED bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess,
+                                               u32 node, CTypeId type, u32 rows)
+{
+    bool kept = rows <= type.value && type.value < result->type_count;
+    CParseResult checkpoint = {.type_count = rows, .parameter_count = result->parameter_count};
+    u32 base = kept ? c_ast_types_facts_snapshot(facts, result, preprocess, &checkpoint) : C_AST_FACT_NONE;
+    kept = base != C_AST_FACT_NONE;
+    if (kept)
+    {
         facts->types[node] = base + type.value - rows;
         facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_RECIPE;
         facts->statistics.completed += 1;
@@ -3288,7 +3322,16 @@ BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParse
             base = base.type->kind == C_TYPE_POINTER ? c_ast_types_fact_nested(facts, result, base, base.type->element_type)
                                                      : (CAstFactTypeReference){.index = C_AST_FACT_NONE};
         }
-        if (base.type && kind == C_AST_CALL && base.type->kind == C_TYPE_FUNCTION)
+        u32 child_flags = facts->flags[child];
+        CAstTypeRecipe const* callee = (child_flags & (C_AST_FACT_TYPED | C_AST_FACT_RECIPE)) == (C_AST_FACT_TYPED | C_AST_FACT_RECIPE) &&
+                                              facts->types[child] < facts->recipe_count ? facts->recipes + facts->types[child] : 0;
+        if (kind == C_AST_CALL && callee && callee->form == C_AST_TYPE_RECIPE_BUILTIN && callee->builtin == C_SYMBOL_BUILTIN_VA_ARG)
+        {
+            u32 argument = c_ast_child_at(ast, node, c_ast_child_count(ast, node) - 1);
+            answer = ast->kinds[argument] == C_AST_TYPE_NAME ? c_ast_types_fact_node(facts, result, argument)
+                                                           : (CAstFactTypeReference){.index = C_AST_FACT_NONE};
+        }
+        else if (base.type && kind == C_AST_CALL && base.type->kind == C_TYPE_FUNCTION)
         {
             answer = c_ast_types_fact_nested(facts, result, base, base.type->return_type);
         }
@@ -3339,21 +3382,16 @@ BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParse
         {
             answer = left;
         }
-        else if (kind == C_AST_CONDITIONAL && left.type && right.type && !left.recipe && !right.recipe &&
-                 left.type->kind == right.type->kind && (left.type->kind == C_TYPE_STRUCT || left.type->kind == C_TYPE_UNION))
+        else if (kind == C_AST_CONDITIONAL && left.type && right.type && !left.recipe && !right.recipe)
         {
-            CTypeId a = {.value = c_ast_types_unqualified_row(result, (CTypeId){.value = left.index})};
-            CTypeId b = {.value = c_ast_types_unqualified_row(result, (CTypeId){.value = right.index})};
-            if (c_parse_types_compatible(machine->scratch_arena, result, *preprocess, a, b))
-            {
-                CType qualifiers = {.is_const = left.type->is_const || right.type->is_const,
-                                    .is_volatile = left.type->is_volatile || right.type->is_volatile,
-                                    .is_restrict = left.type->is_restrict || right.type->is_restrict,
-                                    .is_atomic = left.type->is_atomic || right.type->is_atomic};
-                CTypeId merged = qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict || qualifiers.is_atomic
-                                     ? c_parse_add_qualified_type(result, a, qualifiers) : a;
-                answer = c_ast_types_fact_reference(facts, result, merged.value, false);
-            }
+            u32 a = c_ast_child_at(ast, node, children - 2);
+            u32 b = c_ast_child_at(ast, node, children - 1);
+            CScopeId scope = c_parse_scope_for_token(result, (CScopeId){0}, ast->tokens[node]);
+            CTypeId type = c_parse_conditional_expression_type(machine->scratch_arena, *preprocess, result, scope,
+                                                              (CTypeId){.value = left.index}, (CTypeId){.value = right.index},
+                                                              facts->spans->first[a], facts->spans->end[a],
+                                                              facts->spans->first[b], facts->spans->end[b]);
+            answer = c_ast_types_fact_reference(facts, result, type.value, false);
         }
     }
     bool valid = answer.type != 0;
@@ -3411,6 +3449,12 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
                 facts->types[node] = C_AST_FACT_NONE;
                 facts->flags[node] = (u8)(flags & ~(u32)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING | C_AST_FACT_RECIPE));
                 statistics->stale += 1;
+            }
+            if (kind == C_AST_TYPE_NAME)
+            {
+                statistics->type_names += 1;
+                statistics->typed_type_names += (facts->flags[node] & C_AST_FACT_TYPED) != 0;
+                statistics->missing_type_names += (facts->flags[node] & C_AST_FACT_TYPED) == 0;
             }
             if (!(flags & C_AST_FACT_EXPRESSION) && c_ast_types_fact_kind(kind))
             {
