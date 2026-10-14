@@ -2208,6 +2208,13 @@ byte.
   result from the exact second-child `TYPE_NAME` query. The separator scanner
   remains only in the temporary F2 query adapter. String-length function-name
   shortcuts use the argument's semantic function-name recipe.
+  Runtime builtin constant probes query the exact cached argument node:
+  atomic orders, object-size modes, alignment and offsets, lock-free sizes,
+  immediate operands, constant probes and frame levels. Shuffle selectors
+  retain their signed `-1` sentinel and validate both integer limbs before
+  emitting the existing target operand. Conditional leaf-zero conversion
+  queries its retained leaf node. These continuations do not recover a
+  constant operand from a token range.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment

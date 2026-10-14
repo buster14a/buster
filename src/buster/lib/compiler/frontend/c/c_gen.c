@@ -25204,16 +25204,41 @@ BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate(CIntegerIrBuilder* build
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_atomic_memory_order(CIntegerIrBuilder* builder, u32 start, u32 end, IrMemoryOrder* order_out)
+// These runtime builtin parameters preserve the existing low-word contract.
+// Their exact argument node is the constant query's only syntax authority.
+BUSTER_C_INTERNAL bool c_ir_integer_constant_node(CIntegerIrBuilder* builder, u32 node, u64* value_out)
+{
+    CIrConstantValue value = {0};
+    bool valid = c_ir_constant_evaluate_node(builder, node, &value) && value.kind == C_IR_CONSTANT_INTEGER;
+    if (valid) *value_out = value.integer;
+    return valid;
+}
+
+// Shuffle selectors retain the semantic -1 sentinel and reject a wider
+// positive value before passing its low word to the target builtin.
+BUSTER_C_INTERNAL bool c_ir_vendor_selector_node(CIntegerIrBuilder* builder, u32 node, u64* selector_out)
+{
+    CIrConstantValue value = {0};
+    bool valid = c_ir_constant_evaluate_node(builder, node, &value) && value.kind == C_IR_CONSTANT_INTEGER;
+    IrType* type = valid ? ir_type_from_id(&builder->program->types, value.type) : 0;
+    u32 width = type ? type->kind == IR_TYPE_BOOLEAN ? 1u : type->bit_width : 0;
+    valid = valid && c_ir_constant_type_is_integer(type) && width && width <= 128;
+    IrInteger bits = valid ? ir_integer_mask((IrInteger){.low = value.integer, .high = value.integer_high}, width) : (IrInteger){0};
+    bool negative = valid && type->is_signed && ir_integer_sign_bit(bits, width);
+    CIrWideInteger negated = negative ? c_ir_wide_negate((CIrWideInteger){.low = bits.low, .high = bits.high})
+                                     : (CIrWideInteger){.low = bits.low, .high = bits.high};
+    IrInteger magnitude = ir_integer_mask((IrInteger){.low = negated.low, .high = negated.high}, width);
+    valid = valid && !magnitude.high && (!negative || magnitude.low == 1);
+    if (valid) *selector_out = negative ? UINT64_MAX : magnitude.low;
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_atomic_memory_order(CIntegerIrBuilder* builder, u32 node, IrMemoryOrder* order_out)
 {
     u64 value = 0;
-    if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, start, end, &value) ||
-        value >= IR_MEMORY_ORDER_COUNT)
-    {
-        return false;
-    }
-    *order_out = (IrMemoryOrder)value;
-    return true;
+    bool valid = c_ir_integer_constant_node(builder, node, &value) && value < IR_MEMORY_ORDER_COUNT;
+    if (valid) *order_out = (IrMemoryOrder)value;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, IrMemoryOrder failure)
@@ -26595,7 +26620,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             if (selected->builtin_constant_p)
             {
                 CIrConstantValue value = {0};
-                bool constant = argument_count == 1 && c_ir_constant_evaluate(builder, starts[0], ends[0], &value) &&
+                bool constant = argument_count == 1 && c_ir_constant_evaluate_node(builder, c_ir_call_argument_node(builder, selected, 0), &value) &&
                                 c_ir_constant_normalize(builder, &value) && value.kind != C_IR_CONSTANT_INVALID && value.kind != C_IR_CONSTANT_UNKNOWN &&
                                 value.kind != C_IR_CONSTANT_LVALUE;
                 selected->result = c_ir_emit_integer_value_typed(builder, constant ? 1 : 0, false, token, builder->s32_type);
@@ -26662,7 +26687,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return false;
                 }
                 u64 mode = 0;
-                if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &mode) || mode > 3)
+                if (!c_ir_integer_constant_node(builder, c_ir_call_argument_node(builder, selected, 1), &mode) || mode > 3)
                 {
                     return false;
                 }
@@ -26706,8 +26731,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 u64 alignment = 0;
                 u64 offset = 0;
                 if ((argument_count != 2 && argument_count != 3) ||
-                    !c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &alignment) || !alignment ||
-                    (argument_count == 3 && !c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[2], ends[2], &offset)))
+                    !c_ir_integer_constant_node(builder, c_ir_call_argument_node(builder, selected, 1), &alignment) || !alignment ||
+                    (argument_count == 3 && !c_ir_integer_constant_node(builder, c_ir_call_argument_node(builder, selected, 2), &offset)))
                 {
                     return false;
                 }
@@ -26807,7 +26832,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 // `__sync_synchronize()` carries its ordering in its name.
                 IrMemoryOrder order = IR_MEMORY_ORDER_SEQUENTIAL;
-                if (selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE && !c_ir_atomic_memory_order(builder, starts[0], ends[0], &order))
+                if (selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE && !c_ir_atomic_memory_order(builder, c_ir_call_argument_node(builder, selected, 0), &order))
                 {
                     return false;
                 }
@@ -26831,7 +26856,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // documented to be usable as a null pointer constant, which is
                 // what most callers pass.
                 u64 size = 0;
-                if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[0], ends[0], &size))
+                if (!c_ir_integer_constant_node(builder, c_ir_call_argument_node(builder, selected, 0), &size))
                 {
                     return false;
                 }
@@ -27027,7 +27052,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 order = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR ? IR_MEMORY_ORDER_RELEASE : IR_MEMORY_ORDER_ACQUIRE;
             }
             if (!selected->builtin_atomic_sequential && selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_INIT &&
-                !c_ir_atomic_memory_order(builder, starts[order_index], ends[order_index], &order))
+                !c_ir_atomic_memory_order(builder, c_ir_call_argument_node(builder, selected, order_index), &order))
             {
                 return false;
             }
@@ -27168,7 +27193,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrTypeId expected_type =
                     expected_place.value < builder->function->value_count ? builder->function->values[expected_place.value].canonical_type : IR_TYPE_ID_INVALID;
                 if (expected_type.value != value_type_id.value ||
-                    !c_ir_atomic_memory_order(builder, starts[failure_order_index], ends[failure_order_index], &failure_order) ||
+                    !c_ir_atomic_memory_order(builder, c_ir_call_argument_node(builder, selected, failure_order_index), &failure_order) ||
                     !c_ir_atomic_compare_orders_valid(order, failure_order))
                 {
                     return false;
@@ -27897,7 +27922,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             u64 immediate = 0;
             if (shape.immediate_count &&
-                (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[shape.operand_count], ends[shape.operand_count], &immediate) ||
+                (!c_ir_integer_constant_node(builder, c_ir_call_argument_node(builder, selected, shape.operand_count), &immediate) ||
                  immediate >= entry.immediate_limit))
             {
                 builder->failure_token_index = starts[shape.operand_count];
@@ -28000,9 +28025,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 if (!fixed && generic.operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR && argument >= 2)
                 {
                     u64 selector = 0;
-                    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, starts[written]);
-                    if (!c_semantic_vendor_selector(builder->temporary_arena, &builder->parse, builder->preprocess, scope,
-                                                    starts[written], ends[written], &selector))
+                    if (!c_ir_vendor_selector_node(builder, c_ir_call_argument_node(builder, selected, written), &selector))
                         return C_IR_PREPARED_CALL_STEP_FAILED;
                     selected->arguments[argument] = c_ir_emit_integer_value_typed(builder, selector == UINT64_MAX ? 1 : selector,
                         selector == UINT64_MAX, token, c_ir_builder_scalar_type(builder, C_TYPE_LONG_LONG));
@@ -28397,7 +28420,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         {
             CIrConstantValue frame_level = {0};
             if (selected->close_index <= selected->open_index + 1 ||
-                !c_ir_constant_evaluate(builder, selected->open_index + 1, selected->close_index, &frame_level) || frame_level.kind != C_IR_CONSTANT_INTEGER)
+                !c_ir_constant_evaluate_node(builder, c_ir_call_argument_node(builder, selected, 0), &frame_level) || frame_level.kind != C_IR_CONSTANT_INTEGER)
             {
                 builder->failure_message = selected->builtin_return_address ? S8("__builtin_return_address requires an integer constant level")
                                                                             : S8("__builtin_frame_address requires an integer constant level");
@@ -40095,8 +40118,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != frame->as.conditional.leaf_type.value)
         {
             u64 branch_constant = 0;
-            if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, frame->as.conditional.leaf_start,
-                                                frame->as.conditional.leaf_end, &branch_constant) ||
+            if (!c_ir_integer_constant_node(builder, frame->as.conditional.leaf_node_plus_one - 1, &branch_constant) ||
                 branch_constant)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
