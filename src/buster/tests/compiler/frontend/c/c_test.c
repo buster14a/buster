@@ -2537,8 +2537,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_chain_work_growth(UnitTestArgu
             c_test_scratch_end(temporary);
         }
     }
-    // A real returned-function chain starts a prepared callee at '(': the
-    // independent publication fact must retain its full reference scan.
+    // A returned-function chain has distinct CALL nodes with the same first
+    // token. Node lookup consumes each result without a reference-token scan.
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     CPreprocessResult preprocess = {0};
     CParseResult parse = {0};
@@ -2547,11 +2547,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_chain_work_growth(UnitTestArgu
         S8("typedef int (*F)(int); F get(void); int chained(void){ return get()(3); }"),
         S8("logical-work-positive-chain.c"), target_native, &preprocess, &parse);
     BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
-#if BUSTER_REFERENCE_CHECKS
-    BUSTER_TEST(arguments, c_test_logical_call_reference_rows() > call_start);
-#else
     BUSTER_TEST(arguments, c_test_logical_call_reference_rows() == call_start);
-#endif
     c_test_scratch_end(temporary);
     return result;
 }
@@ -43378,6 +43374,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting(UnitTestArguments* argum
     return result;
 }
 
+// Prepared control identities: redundant wrappers reuse one result, a
+// bracket covers only its subscript, and synthetic CALL argument groups leave
+// their callee and call live. Parameter bounds live before the function body.
+// VLA typeof replays release records, after which later groups reuse their
+// slots without inheriting the old identity or emitted containment marks.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting_node_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_prepared_control_identity_replay());
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_WINDOWS
+    String8 source = S8(
+        "static int ticks;\n"
+        "static int effect(int n) { ticks += 1; return n; }\n"
+        "static int sum(int a, int b) { return a + b; }\n"
+        "static int (*pick(void))(int, int) { ticks += 1; return sum; }\n"
+        "static int bound(int n, int values[effect(n) ? 2 : 3]) { return values[0]; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int a = 0;\n"
+        "    int values[2] = {8, 9};\n"
+        "    int (*fp)(int, int) = sum;\n"
+        "    ticks = 0;\n"
+        "    int x = ((((effect(1) ? effect(2) : effect(3))))) + effect(4);\n"
+        "    if (x != 6 || ticks != 3) return 1;\n"
+        "    ticks = 0;\n"
+        "    x = values[effect(1) ? 1 : 0] + effect(2);\n"
+        "    if (x != 11 || ticks != 2) return 2;\n"
+        "    ticks = 0;\n"
+        "    x = (*fp)(effect(1), a ? effect(2) : effect(3));\n"
+        "    if (x != 4 || ticks != 2) return 3;\n"
+        "    ticks = 0;\n"
+        "    x = pick()(effect(1), a ? effect(2) : effect(3));\n"
+        "    if (x != 4 || ticks != 3) return 4;\n"
+        "    ticks = 0;\n"
+        "    if (!(((((effect(1) ? effect(2) : effect(3))))) && effect(4)) || ticks != 3) return 5;\n"
+        "    ticks = 0;\n"
+        "    x = bound(1, values);\n"
+        "    if (x != 8 || ticks != 1) return 6;\n"
+        "    int n = 2;\n"
+        "    int array[n];\n"
+        "    ticks = 0;\n"
+        "    typeof(*(effect(1) ? &array : &array)) copy;\n"
+        "    copy[1] = 7;\n"
+        "    if (ticks != 1 || copy[1] != 7) return 7;\n"
+        "    typeof(*(effect(1), &array)) copy2;\n"
+        "    copy2[1] = effect(5) ? effect(6) : effect(7);\n"
+        "    if (ticks != 4 || copy2[1] != 6) return 8;\n"
+        "    return 0;\n"
+        "}\n");
+    String8 path = buster_test_temporary_path(arguments->arena, S8("control-node-identity"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 debug = 0; debug < 2; debug += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("control-node-identity-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                                     debug ? S8("-g") : S8("-g0"), S8("-o"), output, path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                string_format(temporary.arena, S8("control identity form={u32} debug={u32}: {S8}"), form, debug, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                        string_format(temporary.arena, S8("control identity form={u32} debug={u32}: failed case {u32}, timed_out={u32}"),
+                                                      form, debug, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // The hoisting walks on deeply skewed expressions: no recursion, and work
 // linear in the depth (CAstLowerStatistics.hoist_steps). Each shape is
 // lowered at depth n and 2n; doubling the depth may at most double the steps,
@@ -44376,6 +44459,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             "int grouped_pointer(void) { RESET(); Unary pointer = twice; int value = (*(pointer))(6); return value == 12 && invoke_calls == 1; }\n"
             "int main(void) { return !grouped_member() || !grouped_condition(0) || !grouped_condition(1) || !grouped_pointer(); }\n"),
         BYTE_SLICE_TO_STRING(8, indexed_input),
+        // #3102: each CALL owns its identity, even when a producing call,
+        // member/index designator and final call share the first token.
+        S8(
+            "static int factory_calls, invoke_calls, index_calls, arg_calls, trace;\n"
+            "typedef int (*Unary)(int);\n"
+            "static int twice(int value) { invoke_calls += 1; trace = trace * 10 + value; return value * 2; }\n"
+            "static Unary tget(void) { factory_calls += 1; return twice; }\n"
+            "struct Holder { Unary callback; };\n"
+            "static struct Holder holder = { twice };\n"
+            "static Unary table[2] = { twice, twice };\n"
+            "static struct Holder *get_holder(void) { factory_calls += 1; return &holder; }\n"
+            "static Unary *get_table(void) { factory_calls += 1; return table; }\n"
+            "static int index_once(void) { index_calls += 1; return 1; }\n"
+            "static int arg(int value) { arg_calls += 1; return value; }\n"
+            "typedef __typeof__(tget()(0)) ChainResult;\n"
+            "typedef __typeof__(get_holder()->callback(0)) MemberResult;\n"
+            "typedef __typeof__(get_table()[0](0)) IndexedResult;\n"
+            "_Static_assert(__builtin_types_compatible_p(ChainResult, int), \"chain result type\");\n"
+            "#define RESET() factory_calls = 0; invoke_calls = 0; index_calls = 0; arg_calls = 0; trace = 0\n"
+            "int shared_member(void) { RESET(); int value = get_holder()->callback(arg(4)); return value == 8 && factory_calls == 1 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int shared_index(void) { RESET(); int value = table[index_once()](arg(5)); return value == 10 && factory_calls == 0 && invoke_calls == 1 && index_calls == 1 && arg_calls == 1; }\n"
+            "int shared_designator(void) { RESET(); int value = ((twice))(arg(6)); return value == 12 && factory_calls == 0 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int shared_sequence(void) { RESET(); int value = (get_holder()->callback(arg(3)), tget()(arg(4))); return value == 8 && factory_calls == 2 && invoke_calls == 2 && arg_calls == 2 && trace == 34; }\n"
+            "int shared_lazy(int enabled) { RESET(); int value = enabled ? get_holder()->callback(arg(7)) : table[index_once()](arg(8)); return value == (enabled ? 14 : 16) && factory_calls == enabled && invoke_calls == 1 && arg_calls == 1 && index_calls == !enabled; }\n"
+            "int shared_unevaluated(void) { RESET(); (void)sizeof(tget()(arg(9))); (void)sizeof(get_holder()->callback(arg(9))); (void)sizeof(get_table()[index_once()](arg(9))); int value = _Generic(tget()(arg(9)), int: 7, default: 0); return value == 7 && factory_calls == 0 && invoke_calls == 0 && index_calls == 0 && arg_calls == 0; }\n"
+            "int shared_type_replay(void) { RESET(); __typeof__(tget()(arg(9))) value = tget()(arg(2)); return value == 4 && factory_calls == 1 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int shared_parameter_vla(int values[tget()(3)]) { return values[0]; }\n"
+            "int main(void) {\n"
+            " int failed = 0; int values[6] = { 17 };\n"
+            " failed |= !shared_member(); failed |= !shared_index(); failed |= !shared_designator(); failed |= !shared_sequence();\n"
+            " failed |= !shared_lazy(0); failed |= !shared_lazy(1); failed |= !shared_unevaluated(); failed |= !shared_type_replay();\n"
+            " RESET(); int value = shared_parameter_vla(values); failed |= value != 17 || factory_calls != 1 || invoke_calls != 1;\n"
+            " return failed;\n"
+            "}\n"),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
@@ -44418,6 +44535,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {4, S8("indexed_group"), 5},
         {4, S8("indexed_lazy"), 6},
         {4, S8("indexed_updates"), 1},
+        {5, S8("shared_member"), 3},
+        {5, S8("shared_index"), 3},
+        {5, S8("shared_designator"), 2},
+        {5, S8("shared_sequence"), 6},
+        {5, S8("shared_lazy"), 6},
+        {5, S8("shared_unevaluated"), 0},
+        {5, S8("shared_type_replay"), 3},
+        {5, S8("shared_parameter_vla"), 2},
     };
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -68700,6 +68825,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
     C_TEST_FIXTURE(arguments, c_test_tree_hoisting);
+    C_TEST_FIXTURE(arguments, c_test_tree_hoisting_node_identity);
     C_TEST_FIXTURE(arguments, c_test_tree_hoisting_skew);
     C_TEST_FIXTURE(arguments, c_test_tree_evaluator_skew);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);

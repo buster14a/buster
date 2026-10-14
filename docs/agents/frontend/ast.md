@@ -1485,8 +1485,9 @@ failed `-fc-ast-pilot` and are closed with it:
   tree's specifier readers leave it to the type machine, as they leave
   `__float128`. The unit's
 body index (`c_ir_body_nodes_build`) maps the `{` of every function
-definition, and of every statement expression, to its COMPOUND_STATEMENT
-node. It lives in the tree arena next to the
+definition to its COMPOUND_STATEMENT node. A statement-expression frame
+takes its STATEMENT_EXPRESSION node and enters its block child directly;
+it needs no brace index. The function index lives in the tree arena next to the
 [root-conditional records](#lowering-from-the-tree).
 
 **Tasks.** The body is a stack of `CIrBodyTask`s, as before. Each task now
@@ -1535,7 +1536,6 @@ marked for step 5 (#4058) to delete:
 - `c_ir_node_expression_range` gives an expression's first and last token
   from its edge children, widened over the parentheses that wrap exactly it;
 - `c_ir_node_declaration_start` steps over a leading attribute run;
-- the statement-expression frame finds its block by its `{`.
 
 `-v` adds three fields to `C_AST_LOWER`: `statement_bodies`, `statements` and
 `range_adapters`, the token ranges the adapter derived.
@@ -1688,7 +1688,10 @@ verdict), the token scan it fell back to (`c_ir_root_conditional_scan`) and the
 
 ## Expression lowering from the tree
 
-**Status: (a) to (c) are implemented; the owner frames still take their
+**Status: (a) to (c), CALL record identity and control group identity are
+implemented. The statement-expression owner takes
+its node directly, and the `EXPRESSION` owner retains its current subtree
+through root splits and continuations. The remaining owner frames still take their
 subtree's token range, and the step-4 callers read operand extents through
 marked temporary adapters.** This is
 step 3 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
@@ -1705,6 +1708,22 @@ short stack, each part byte-identical on its own:
   their node's root operator, calls split their arguments from the `CALL`
   node, and the root-split, group-fact and operand-end token walkers are
   deleted.
+
+Prepared calls now use their `CALL` or `GENERIC_SELECTION` node as their
+identity. `c_ir_prepared_call_find` reads one zero-initialized row slot per
+node of the function-definition subtree, including parameter VLA bounds
+before the body. Discovery rejects an already prepared node, the evaluator
+consumes that exact node's result, and a `typeof` replay releases its slots
+with its preparation rows. Source tokens still supply names, source ranges
+and the unchanged call emission order. Returned-call chains no longer need
+callee-token chains or a reference scan: their inner and outer calls have
+distinct nodes even when their source starts coincide.
+
+The place and type-query owners that still accept token ranges resolve the
+range's postfix base through retained nodes before asking for a prepared
+CALL. These boundaries remain temporary until the owner frames take nodes;
+there is no token-index or prepared-record scan fallback. The standalone
+argument-separator query adapter is still part of step 4.
 
 The rest of this section is the design that (a) to (c) follow. It describes
 the token path as it was before (a).
@@ -1837,7 +1856,8 @@ frame, or the postorder phase. The walk marks the nodes it hoisted in a bit
 array, private to lowering and offset from the core's first node. A nested
 core consumes a node hoisted by an enclosing core, and does not lower it
 again. Today `c_ir_prepared_control_expression_find` and
-`c_ir_prepared_call_find` record the same fact, keyed by token.
+`c_ir_prepared_call_find` record the same fact: calls key it by their exact
+node, and control records by their node and wrapping level.
 
 **No recursion and no callbacks.** A nested core, a call argument or a lazy
 operand becomes a frame on the existing `CIrLowerMachine` with today's frame
@@ -1932,15 +1952,16 @@ not from a token scan:
   - whether any assignment or control operator appears anywhere in it;
   - whether its subtree holds a call or a hoistable group at all, so the walks
     skip subtrees with neither.
-- **Temporary adapter.** The evaluator still consumes prepared records keyed
-  by token: `CIrPreparedControlExpression.open_index` and
-  `CIrPreparedCall.token_index`, `open_index` and `close_index`. The walks
-  therefore compute those tokens from node spans:
+- **Source provenance.** Prepared control records now carry their structural
+  identity (see [prepared control identities](#prepared-control-identities)).
+  `open_index` and `close_index` supply the temporary expression-frame range
+  and debug locations. Prepared call records still use `token_index`,
+  `open_index` and `close_index`; the walks compute those tokens from spans:
   - the callee's first token (`c_ir_tree_callee_shape`, which follows member
     chains and `[ ]` suffixes to their name);
   - the group's delimiters.
 
-  Part (b) keys the records by node and deletes this adapter.
+  The remaining call-record adapter is retired with prepared call identities.
 - **Work stays linear on skewed expressions** (`c_test_tree_hoisting_skew`
   counts `CAstLowerStatistics.hoist_steps`):
   - A call already emitted is not entered again, so the arguments of
@@ -2010,8 +2031,7 @@ reductions and the postfix probe are deleted.
   member name. A failed operator reports the token the walk visited last, as
   the token path reported the token whose arrival reduced it.
 - **Still token ranges** (the temporary adapter of part (c) and step 4):
-  - the place machine, the statement-expression and compound-literal
-    frames, and the `EXPRESSION` frames the walk pushes;
+  - the place machine and compound-literal frames;
   - the `sizeof` operand's type and value queries;
   - the cast type (`c_ir_group_type_name`);
   - `__builtin_offsetof`'s designator.
@@ -2029,13 +2049,25 @@ byte.
 - **Calls.** A prepared call keeps its `CALL` node
   (`CIrPreparedCall.node`), and `c_ir_call_arguments_counted` splits the
   arguments from the node's children. A sole argument does not widen over
-  the call's own parentheses. `c_ir_call_argument_separator` is deleted.
+  the call's own parentheses. The preparation table and evaluator consume
+  that same node, with one dense per-function node index; the callee-token
+  lookup, chained-call table and Debug reference scan are deleted.
+  `c_ir_call_argument_separator` is deleted. `c_test_call_result_callees`
+  checks call-result member/index callbacks, grouped designators, sequencing,
+  lazy branches, unevaluated chains, `typeof` and parameter VLA bounds with
+  exact call counts and native effects.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment
   or `&&`/`||`. A hoisted argument list has no node of its own: its group
   carries the call node (`C_IR_TREE_GROUP_STRIDE`), and the frame splits the
   arguments as a comma expression would (`argument_starts`).
+  Its root is retained in `node_plus_one`: comma and assignment continuations
+  carry their exact children, and an argument-list continuation takes its
+  next argument from the CALL's children. The assignment's place route reads
+  the operand's node kinds and wrapper facts. Declaration, query and assembly
+  boundaries still hand over token ranges; the marked entry adapter resolves
+  each once, before the expression frame runs.
 - **Conditions.** `c_ir_lower_condition_step` strips parentheses, takes a
   `!` over a chain, reads the `__builtin_expect` hint, and splits the
   `&&`/`||` spine from the node. A spine is split once, into an array of its
@@ -2069,9 +2101,11 @@ byte.
   agreed, so `sizeof(sizeof(int) + 1.0f)` folded `size_t`'s 8. The
   classifier now splits at the tier of the binary operator the tree has at
   the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
-- **Still token ranges.** The place machine, the `sizeof`, compound-literal
-  and statement-expression frames take their subtree's token range, and the
-  prepared control and call records are keyed by their opening token.
+- **Still token ranges.** The place machine and the `sizeof` and
+  compound-literal frames take their subtree's token range. Prepared calls
+  use CALL node identity; prepared control records use node and wrapping
+  level. Statement-expression frames enter their compound child directly,
+  and `EXPRESSION` continuations retain their subtree identity.
 - **A unit the builder rejects.** The tree is mandatory: such a unit fails
   with the builder's diagnostics (`tree_rejections`), and lowering does not
   run. These are inputs the parser accepts: invalid `__builtin_offsetof`
@@ -2083,6 +2117,44 @@ byte.
   (`expected ']' after the array range designator`, `expected ')' after the
   assembler text`). `c_test_tree_rejection` checks each. No corpus input is
   rejected.
+
+### Prepared control identities
+
+`CIrPreparedControlExpression` keeps an owner node and a wrapping level.
+Level 1 names the innermost parenthesis around that node, with larger levels
+naming successive outer parentheses. Level 0 names the owner node's bracket
+or whole call argument list. A call argument list has no AST node of its own,
+so its identity is the `CALL` node with level 0. This distinguishes an owned
+delimiter group from parentheses around that same owner.
+
+The control walk records these identities directly. The evaluator and the
+condition and expression frames already hold the node they visit and pass
+its wrapping level to `c_ir_prepared_control_expression_find`; lookup never
+resolves a token to choose a record. Opening and closing tokens remain source
+provenance and the temporary expression-frame range.
+
+Containment reads postorder node intervals. A parenthesis covers its whole
+subtree, a bracket covers only the last child's subtree, and an argument list
+covers the sibling interval after the callee. Consequently emitting arguments
+does not suppress the call itself or its callee. Active-group containment also
+orders redundant parentheses on a shared node by their wrapping levels.
+
+Per-node heads and emitted marks are sized to the function definition's
+subtree, including parameter declarators. A `typeof` replay restores heads in
+reverse creation order before records can be reused; stale emitted marks are
+verified against current node intervals and fall back to the kept records.
+An emitted group marks its new nodes and skips live covered intervals. Its
+own recycled row cannot certify an already marked interval while the fill
+runs. Its first mark then names the enclosing interval, allowing the next
+parent to skip it without rewriting a skewed nest's descendants.
+
+The runtime cases in `c_test_tree_hoisting_node_identity` exercise redundant
+parentheses,
+subscripts, synthetic argument groups and VLA `typeof` replay through both
+frontend SSA forms at `-g0` and `-g`. Its token-free private replay probe
+widens a recycled record's interval, checks all newly covered nodes, restores
+per-node heads and verifies that bracket and argument groups exclude their
+base and callee. The existing skew fixture keeps the navigation bound.
 
 ## Initializers, declarations and type queries from the tree
 
