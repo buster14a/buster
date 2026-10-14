@@ -2514,7 +2514,14 @@ names. `pdb_test_gsi_sorting` checks comparison bounds and stable ties;
 `pdb_test_gsi_colliding_indexes` checks both emitted indexes. The existing
 mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs the
 large-bucket merge order is deterministic but may differ from insertion order.
-No comparator or on-disk format change is made.
+No comparator or on-disk format change is made. The diagnostic
+`pdb_test_gsi_mixed_reader` covers all six cyclic-triple permutations below and
+above the insertion threshold, case ties, and isolated ASCII/UTF-8 controls.
+On Windows it uses the installed SDK's `SymFromNameW` for separate global and
+public lookups, reporting every exact spelling/address or miss. A missing
+cyclic lookup remains a #3752 finding; the test's positive-control assertions
+and `diagnostic=1` summary do not establish that mixed-name lookup is fixed.
+Non-Windows runs report the external reader unavailable.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
