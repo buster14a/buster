@@ -20166,7 +20166,57 @@ BUSTER_C_INTERNAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder*
                                           });
 }
 
-BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count);
+// Key lists at or below this length sort by insertion; longer ones take four
+// stable radix passes over the key's high 32 bits.
+#define C_IR_TREE_SORT_INSERTION_LIMIT 32u
+
+// Sorts keys ascending by their high 32 bits, keeping the order of equal ones.
+// `scratch` holds `count` keys.
+BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
+{
+    if (count <= C_IR_TREE_SORT_INSERTION_LIMIT)
+    {
+        for (u32 index = 1; index < count; index += 1)
+        {
+            u64 key = keys[index];
+            u32 slot = index;
+            while (slot && (keys[slot - 1] >> 32) > (key >> 32))
+            {
+                keys[slot] = keys[slot - 1];
+                slot -= 1;
+            }
+            keys[slot] = key;
+        }
+    }
+    else
+    {
+        u64* source = keys;
+        u64* destination = scratch;
+        for (u32 shift = 32; shift < 64; shift += 8)
+        {
+            u32 offsets[256] = {0};
+            for (u32 index = 0; index < count; index += 1)
+            {
+                offsets[(source[index] >> shift) & 0xff] += 1;
+            }
+            u32 total = 0;
+            for (u32 digit = 0; digit < 256; digit += 1)
+            {
+                u32 digit_count = offsets[digit];
+                offsets[digit] = total;
+                total += digit_count;
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(source[index] >> shift) & 0xff]++] = source[index];
+            }
+            u64* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        // Four passes leave the result where it began, in `keys`.
+    }
+}
 
 // ---- statement nodes (GitHub #4060, #3102 step 2) ------------------------------
 //
