@@ -451,6 +451,16 @@ BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch
                                                                 CScopeId scope, u32 start, u32 end);
 // Runs the same protected reader without full-capacity snapshots. The caller
 // can supply large legitimate buffers and check its published rows/sentinels.
+typedef struct CTestSizeofArrayWork CTestSizeofArrayWork;
+struct CTestSizeofArrayWork
+{
+    u64 dependency_tasks;
+    u64 bound_requests;
+    u64 numeric_receipts;
+    u64 certified_reads;
+};
+BUSTER_F_DECL CTestSizeofArrayWork c_test_sizeof_array_work_take(void);
+
 BUSTER_F_DECL CIntegerConstant c_test_type_integer_constant_read(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,

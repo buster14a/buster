@@ -143,6 +143,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShap
 #endif
 
 typedef struct CTypeParseMachine CTypeParseMachine;
+typedef struct CParseSizeofArrayAnswers CParseSizeofArrayAnswers;
 typedef struct CIrDecodedString CIrDecodedString;
 typedef struct CParseInitializerLog CParseInitializerLog;
 typedef struct CParseInitializerReplays CParseInitializerReplays;
@@ -1709,6 +1710,7 @@ struct CTypeParseMachine
     u32 identifier_list_close;
     u32 expression_task_count;
     u32 expression_task_capacity;
+    CParseSizeofArrayAnswers* sizeof_array_answers;
     CConstantEvaluationMode constant_evaluation_mode;
     // Constexpr initializers keep NORMAL's type-name grammar, but reject
     // signed arithmetic overflow before a cast can hide its wrapped bits.

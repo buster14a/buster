@@ -2500,6 +2500,20 @@ F1 is the token-to-node map's design C, about 34 MB on the unity self-host
 accepts that size in principle. Its bytes are still reported with the
 tree's retained bytes.
 
+Semantic `sizeof` array dependencies use the existing typed-constant task
+stack in protected TYPE queries. A failed NORMAL array-layout leaf keeps its
+already parsed source-point type and asks that numeric query; only source
+start/end and the computed size return before the private model is released.
+After full success, the NORMAL scalar publisher certifies those descendants.
+Speculative TYPE projections can then read their exact certified size_t fact,
+while lowering still schedules source constructor tasks explicitly. No
+speculative CType or binding escapes. Array suffixes reuse the existing
+indexed delimiter and interned qualifier reader with the same model flags.
+The regression checks 64/128/256/1024 nesting, retention on/off tables at the
+same interning policy, scoped enum bounds, width/sign controls and unevaluated
+calls. Its counters measure dependency tasks, bound requests, numeric receipts
+and certified reads; dependency/receipt work is bounded linearly in depth.
+
 ### Type queries
 
 The node task scheduler checkpoint uses exact `(kind, node, view)` keys for

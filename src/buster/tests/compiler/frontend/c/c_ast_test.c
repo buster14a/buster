@@ -7429,6 +7429,125 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_declaration_point(UnitTes
     return result;
 }
 
+// A protected numeric dependency returns no model rows. Its NORMAL owner
+// certifies descendants, so speculative recipes reuse the same source answer.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 previous_work = 0;
+    u32 const depths[] = {64, 128, 256, 1024};
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(depths); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = depths[sample];
+        String8 prefix = S8("int values[");
+        String8 open = S8("sizeof(char[");
+        String8 close = S8("])");
+        String8 suffix = S8("]; int main(void) { return values[0]; }");
+        u64 length = prefix.length + (u64)depth * (open.length + close.length) + 1 + suffix.length;
+        char8* source = arena_allocate(temporary.arena, char8, length);
+        u64 at = 0;
+        memcpy(source + at, prefix.pointer, prefix.length); at += prefix.length;
+        for (u32 index = 0; index < depth; index += 1) { memcpy(source + at, open.pointer, open.length); at += open.length; }
+        source[at++] = '1';
+        for (u32 index = 0; index < depth; index += 1) { memcpy(source + at, close.pointer, close.length); at += close.length; }
+        memcpy(source + at, suffix.pointer, suffix.length); at += suffix.length;
+        BUSTER_TEST(arguments, at == length);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){source, length}, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            syntax.ast_facts = &facts;
+            c_test_sizeof_array_work_take();
+            CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            CTestSizeofArrayWork work = c_test_sizeof_array_work_take();
+            BUSTER_TEST_RAW(arguments, retained.analysis_complete && !retained.diagnostic_count,
+                retained.diagnostic_count ? retained.diagnostics[0].message : S8("nested array analysis incomplete"));
+            u64 total_work = work.dependency_tasks + work.bound_requests + work.numeric_receipts;
+            string_print(S8("SIZEOF_ARRAY_WORK depth={u32} tasks={u64} requests={u64} receipts={u64} reads={u64}\n"),
+                         depth, work.dependency_tasks, work.bound_requests, work.numeric_receipts, work.certified_reads);
+            BUSTER_TEST(arguments, work.dependency_tasks && work.dependency_tasks <= (u64)depth * 4 &&
+                                  work.bound_requests == work.dependency_tasks && work.numeric_receipts == depth && work.certified_reads >= depth - 1);
+            BUSTER_TEST(arguments, total_work <= (u64)depth * 9 && (!previous_work || total_work <= previous_work * (sample == 3 ? 4 : 2) + 32));
+            previous_work = total_work;
+            syntax.ast_facts = 0;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 rows = 0;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
+            if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
+            BUSTER_TEST_RAW(arguments, plain.analysis_complete && !plain.diagnostic_count && !difference.length, difference);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("nested-sizeof-array.c"), preprocess, retained, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("nested array canonical validation"));
+            if (lowered.program)
+            {
+                u32 arrays = 0;
+                for (u32 symbol = 0; symbol < lowered.program->symbols.count; symbol += 1)
+                {
+                    IrSymbol const* entry = ir_symbol_from_id(&lowered.program->symbols, (IrSymbolId){symbol});
+                    if (string_equal(entry->name, S8("values")))
+                    {
+                        IrType const* type = ir_type_from_id(&lowered.program->types, entry->type);
+                        arrays += type && type->kind == IR_TYPE_ARRAY && type->element_count == 1;
+                    }
+                }
+                BUSTER_TEST(arguments, arrays == 1);
+            }
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    struct { String8 source; bool accepted; } const controls[] = {
+        {S8("enum {N=2}; int values[sizeof(char[sizeof(char[N])])]; "
+            "int f(void){enum {N=3}; int scoped[sizeof(char[sizeof(char[N])])]; "
+            "{enum {N=5}; int later[sizeof(char[sizeof(char[N])])]; if(sizeof(later)!=20)return 1;} "
+            "return sizeof(values)!=8 || sizeof(scoped)!=12;}"), true},
+        {S8("int bump(void); int values[sizeof(char[sizeof(bump())])]; int f(void){return sizeof(values)!=16;}"), true},
+        {S8("int values[sizeof(char[sizeof(char[(unsigned __int128)2])])]; int f(void){return sizeof(values)!=8;}"), true},
+        {S8("int values[sizeof(char[sizeof(char[-1])])];"), false},
+        {S8("int runtime(void); int values[sizeof(char[sizeof(char[runtime()])])];"), false},
+    };
+    for (u32 policy = 0; policy < 2; policy += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(controls); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, controls[index].source, C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+            CAstFacts facts = {0};
+            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &built.ast;
+                syntax.type_interning = policy != 0;
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                syntax.ast_facts = &facts;
+                CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                u64 rows = 0;
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
+                if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
+                BUSTER_TEST_RAW(arguments, !difference.length, difference);
+                BUSTER_TEST_RAW(arguments, controls[index].accepted ? !retained.diagnostic_count : retained.diagnostic_count != 0, controls[index].source);
+                if (controls[index].accepted)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("sizeof-array-control.c"), preprocess, retained, target_native);
+                    BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : controls[index].source);
+                }
+            }
+            c_ast_facts_release(&facts);
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_enum_scope(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9453,6 +9572,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_lowering_prefix_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_pointer_probe);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_array_dependencies);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_enum_scope);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_declaration_point);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
