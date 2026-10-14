@@ -2676,9 +2676,12 @@ Incomplete-array materialization reads the declaration/entity initializer
 root and `plan.inferred_count`. It completes a private bound-table copy so
 repeated lowering leaves semantic output unchanged. Flexible-tail synthesis
 reads the retained tail count and preserves the existing array-then-record
-constructor order. Remaining token byte/compound-address adapters belong to
-the retiring legacy constant-range engine; global static routing does not
-call them, and they must be deleted with that engine.
+constructor order. The old token byte folders, compound-address adapters,
+designator/brace-elision cursors, slot projection tables and scalar literal
+classifiers are deleted. Static and runtime initializer consumers require
+the semantic plan; no token grammar fallback remains. Their shared by-value
+record-depth memo, union replacement state, relocation index and checked
+private context arenas remain canonical projection machinery.
 
 ### Unit capacity facts
 
