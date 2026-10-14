@@ -8446,6 +8446,110 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_recipes(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_copy_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("int f(int a) { return ((a + 1)); }"), C_PREPROCESS_DIALECT_GNU17);
+    for (u32 layout = C_AST_LAYOUT_IMPLICIT; layout <= C_AST_LAYOUT_EXPLICIT; layout += 1)
+    {
+        CAstResult tree = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = (CAstLayout)layout});
+        if (BUSTER_REQUIRE(arguments, tree.complete))
+        {
+            CAst original = tree.ast;
+            u64 position = temporary.arena->position;
+            u64 bytes = c_test_ast_retention_bytes(temporary.arena, &tree.ast);
+            BUSTER_TEST(arguments, bytes != 0 && bytes != C_AST_RETAIN_FAILED);
+            c_test_retained_publication_limit(bytes - 1);
+            BUSTER_TEST(arguments, c_ast_retain_in_arena(temporary.arena, &tree.ast) == C_AST_RETAIN_FAILED);
+            c_test_retained_publication_limit(UINT64_MAX);
+            BUSTER_TEST(arguments, temporary.arena->position == position && tree.ast.storage == original.storage &&
+                                   tree.ast.kinds == original.kinds && tree.ast.parentheses == original.parentheses);
+            BUSTER_TEST(arguments, c_ast_validate(&tree.ast) == C_AST_NODE_INVALID);
+            c_test_retained_publication_limit(bytes);
+            BUSTER_TEST(arguments, c_ast_retain_in_arena(temporary.arena, &tree.ast) == bytes);
+            c_test_retained_publication_limit(UINT64_MAX);
+            BUSTER_TEST(arguments, temporary.arena->position == position + bytes && tree.ast.kinds != original.kinds &&
+                                   tree.ast.parenthesis_count == original.parenthesis_count && c_ast_validate(&tree.ast) == C_AST_NODE_INVALID);
+        }
+        c_ast_release(&tree.ast);
+    }
+    CPreprocessResult sidecars = c_ast_test_preprocess(temporary.arena,
+        S8("struct S { char c; unsigned bits : 3; int x; }; _Alignas(16) int aligned; "
+           "long double wide = 1.25L; unsigned long offset = __builtin_offsetof(struct S, x); "
+           "int f(int a) { return a + (int)sizeof(int (*)(int, double)); }"), C_PREPROCESS_DIALECT_GNU17);
+    CAstResult tree = c_ast_build(temporary.arena, sidecars, (CAstOptions){0});
+    CAstFacts facts = {0};
+    if (BUSTER_REQUIRE(arguments, tree.complete && c_ast_facts_create(&facts, &tree.ast)))
+    {
+        CParserResult syntax = c_parse_ast_from_tree(temporary.arena, sidecars, &tree.ast, 0);
+        syntax.ast = &tree.ast;
+        syntax.ast_facts = &facts;
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, sidecars, syntax);
+        if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count))
+        {
+            CAstFacts original = facts;
+            u64 position = temporary.arena->position;
+            u64 bytes = c_test_ast_facts_retention_bytes(temporary.arena, &facts);
+            BUSTER_TEST(arguments, bytes != 0 && bytes != C_AST_RETAIN_FAILED && facts.recipe_count && facts.constant_count &&
+                                   facts.bound_arena && facts.offsetof_plan_count && facts.ext80_initializer_count);
+            c_test_retained_publication_limit(bytes - 1);
+            BUSTER_TEST(arguments, c_ast_facts_retain_in_arena(temporary.arena, &facts) == C_AST_RETAIN_FAILED);
+            c_test_retained_publication_limit(UINT64_MAX);
+            BUSTER_TEST(arguments, temporary.arena->position == position && facts.arena == original.arena &&
+                                   facts.index_arena == original.index_arena && facts.recipe_arena == original.recipe_arena &&
+                                   facts.constants_arena == original.constants_arena && facts.bound_arena == original.bound_arena &&
+                                   facts.recipes == original.recipes && facts.constants == original.constants);
+            c_test_retained_publication_limit(bytes);
+            BUSTER_TEST(arguments, c_ast_facts_retain_in_arena(temporary.arena, &facts) == bytes);
+            c_test_retained_publication_limit(UINT64_MAX);
+            BUSTER_TEST(arguments, temporary.arena->position == position + bytes && !facts.arena && !facts.index_arena &&
+                                   !facts.recipe_arena && !facts.constants_arena && !facts.bound_arena &&
+                                   facts.recipe_count == original.recipe_count && facts.constant_count == original.constant_count);
+        }
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&tree.ast);
+    u64 position = temporary.arena->position;
+    BUSTER_TEST(arguments, !c_ast_retention_advance(temporary.arena, &position, UINT64_MAX, 2, 1) && position == temporary.arena->position);
+    for (u32 kind = 0; kind < 3; kind += 1)
+    {
+        CPreprocessResult tokens = c_ast_test_preprocess(temporary.arena,
+            kind == 2 ? S8("int f(void) { _Static_assert(0, \"refuse\"); return 0; }")
+                      : S8("int f(void) { return 1; }"), C_PREPROCESS_DIALECT_GNU17);
+        CParserResult syntax = {0};
+        if (kind)
+        {
+            syntax = c_parse_ast(temporary.arena, tokens);
+        }
+        c_test_retained_publication_limit(0);
+        if (!kind)
+        {
+            syntax = c_parse_ast(temporary.arena, tokens);
+            BUSTER_TEST(arguments, !syntax.ast && syntax.diagnostic_count == 1 && syntax.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE);
+        }
+        CAnalysisResult failed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        c_test_retained_publication_limit(UINT64_MAX);
+        BUSTER_TEST(arguments, !failed.analysis_complete && !failed.lowering_validated && !failed.ast_facts && failed.diagnostic_count == 1);
+        if (failed.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, failed.diagnostics[0].kind == (kind == 2 ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_SOURCE_TOO_LARGE));
+            if (kind != 2)
+            {
+                BUSTER_TEST(arguments, failed.diagnostics[0].location.line == 1 && failed.diagnostics[0].location.column == 1);
+                BUSTER_STRING_TEST(arguments, failed.diagnostics[0].message,
+                    kind ? S8("could not retain the complete C semantic node facts in the unit arena")
+                         : S8("could not retain the complete C syntax tree in the unit arena"));
+            }
+        }
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("retention refusal"), tokens, failed, target_native);
+        BUSTER_TEST(arguments, !lower.program && !lower.canonical_ir_certified && lower.diagnostic_count == failed.diagnostic_count);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_entrypoints(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9115,6 +9219,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_declaration_point);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_copy_capacity);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);

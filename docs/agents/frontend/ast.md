@@ -453,6 +453,15 @@ key. Their child tasks follow AST topology and the finished facts; sparse type
 recipes are materialized without appending a semantic model row. Private graph
 and projection state survives a child yield and is rewound only after its root
 finishes. Canonical IR stores the resulting IR types, never the node or state.
+Compact direct-call publication preflights the exact aligned AST and fact
+arrays, including sparse recipes, constants and source-owner sidecars. It
+returns `C_AST_RETAIN_FAILED` before copying or retiring an owner when the
+unit arena cannot hold the whole output. Entrypoints reserve a refusal row
+before publication, return `SOURCE_TOO_LARGE`, and retire their private owners
+once; an earlier semantic diagnostic retains its precedence. The ordinary
+borrowed driver takes no copies or refusal-row reservation. Successful compact
+outputs retain their existing layout and measured copy bytes.
+
 The remaining range boundaries locate one retained node before querying it.
 Operand, prediction, conditional-type and null-constant range frame families
 and the operand precedence/postfix walkers have been removed. Conditional

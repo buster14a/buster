@@ -6529,10 +6529,73 @@ CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level
     return level && level <= slice.count ? ast->parentheses + slice.first + level - 1 : 0;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ast_retention_limit = UINT64_MAX;
+
+void c_test_retained_publication_limit(u64 bytes)
+{
+    c_ast_retention_limit = bytes;
+}
+#endif
+
+bool c_ast_retention_advance(Arena const* arena, u64* position, u64 count, u64 stride, u64 alignment)
+{
+    u64 aligned = 0;
+    bool valid = arena && position && stride && *position >= arena_minimum_position && *position <= arena->reserved_size &&
+                 arena_align_position_checked(arena, *position, alignment, &aligned) && aligned <= arena->reserved_size &&
+                 count <= (arena->reserved_size - aligned) / stride;
+    if (valid)
+    {
+        *position = aligned + count * stride;
+    }
+    return valid;
+}
+
+bool c_ast_retention_permitted(u64 bytes)
+{
+    bool permitted;
+#if BUSTER_INCLUDE_TESTS
+    permitted = bytes <= c_ast_retention_limit;
+#else
+    BUSTER_UNUSED(bytes);
+    permitted = true;
+#endif
+    return permitted;
+}
+
+BUSTER_GLOBAL_LOCAL u64 c_ast_retention_bytes(Arena const* arena, CAst const* ast)
+{
+    u64 bytes = 0;
+    if (arena && ast && ast->storage && ast->storage->columns[0])
+    {
+        u64 position = arena->position;
+        bool fits = c_ast_retention_advance(arena, &position, 1, sizeof(CAstStorage), BUSTER_ALIGN_OF(CAstStorage)) &&
+                    c_ast_retention_advance(arena, &position, ast->node_count, sizeof(u8), BUSTER_ALIGN_OF(u8)) &&
+                    c_ast_retention_advance(arena, &position, ast->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                    c_ast_retention_advance(arena, &position, ast->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                    c_ast_retention_advance(arena, &position, ast->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                    (!ast->children || c_ast_retention_advance(arena, &position, ast->children_count, sizeof(u32), BUSTER_ALIGN_OF(u32))) &&
+                    (!ast->slices || c_ast_retention_advance(arena, &position, ast->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32))) &&
+                    (!ast->parenthesis_count || c_ast_retention_advance(arena, &position, ast->parenthesis_count,
+                                                                       sizeof(CAstParenthesis), BUSTER_ALIGN_OF(CAstParenthesis)));
+        bytes = fits ? position - arena->position : C_AST_RETAIN_FAILED;
+    }
+    return bytes;
+}
+
+#if BUSTER_INCLUDE_TESTS
+u64 c_test_ast_retention_bytes(Arena const* arena, CAst const* ast)
+{
+    return c_ast_retention_bytes(arena, ast);
+}
+#endif
+
 u64 c_ast_retain_in_arena(Arena* arena, CAst* ast)
 {
-    u64 copied = 0;
-    if (arena && ast && ast->storage && ast->storage->columns[0])
+    u64 bytes = c_ast_retention_bytes(arena, ast);
+    bool fits = bytes != C_AST_RETAIN_FAILED && c_ast_retention_permitted(bytes);
+    u64 copied = fits ? 0 : C_AST_RETAIN_FAILED;
+    if (fits && arena && ast && ast->storage && ast->storage->columns[0])
     {
         u64 start = arena->position;
         CAst retained = *ast;

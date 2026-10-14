@@ -102,6 +102,7 @@
 #define C_AST_LOOKAHEAD 3
 
 #define C_AST_NODE_INVALID UINT32_MAX
+#define C_AST_RETAIN_FAILED UINT64_MAX
 
 // Nodes a column reservation holds before the columns move to reservations of
 // twice the capacity. It is address space, not memory: 13 bytes per node across
@@ -490,8 +491,19 @@ BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess,
 BUSTER_F_DECL void c_ast_release(CAst* ast);
 // Copies the complete published tree into `arena`, then retires its private
 // storage once. The retained tree belongs to the caller's unit arena; release
-// only clears that view. Returns the exact bytes allocated for publication.
+// only clears that view. Returns the exact bytes allocated for publication,
+// or C_AST_RETAIN_FAILED without allocation or owner mutation when it cannot fit.
 BUSTER_F_DECL u64 c_ast_retain_in_arena(Arena* arena, CAst* ast);
+// Simulate one aligned publication allocation without changing the arena.
+BUSTER_F_DECL bool c_ast_retention_advance(Arena const* arena, u64* position, u64 count, u64 stride, u64 alignment);
+BUSTER_F_DECL bool c_ast_retention_permitted(u64 bytes);
+#if BUSTER_INCLUDE_TESTS
+// Limit only compact publication, leaving parser/query allocations unchanged.
+// UINT64_MAX restores the ordinary limit.
+BUSTER_F_DECL void c_test_retained_publication_limit(u64 bytes);
+BUSTER_F_DECL u64 c_test_ast_retention_bytes(Arena const* arena, CAst const* ast);
+BUSTER_F_DECL u64 c_test_ast_facts_retention_bytes(Arena const* arena, CAstFacts const* facts);
+#endif
 
 // The sparse slice belonging to a node, and a level in that slice (1 is the
 // innermost group). An absent level returns null. No tokens are inspected.

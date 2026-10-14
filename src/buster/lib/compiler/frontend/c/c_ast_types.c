@@ -3015,10 +3015,54 @@ void c_ast_facts_release(CAstFacts* facts)
     facts->node_count = 0;
 }
 
+BUSTER_GLOBAL_LOCAL u64 c_ast_facts_retention_bytes(Arena const* arena, CAstFacts const* facts)
+{
+    u64 bytes = 0;
+    if (arena && facts && facts->flags && facts->arena)
+    {
+        u64 position = arena->position;
+        bool fits = c_ast_retention_advance(arena, &position, facts->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                    c_ast_retention_advance(arena, &position, facts->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                    c_ast_retention_advance(arena, &position, facts->node_count, sizeof(u8), BUSTER_ALIGN_OF(u8));
+        if (fits && facts->spans)
+        {
+            CAstSpans const* spans = facts->spans;
+            fits = c_ast_retention_advance(arena, &position, 1, sizeof(CAstSpans), BUSTER_ALIGN_OF(CAstSpans)) &&
+                   c_ast_retention_advance(arena, &position, spans->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                   c_ast_retention_advance(arena, &position, spans->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                   c_ast_retention_advance(arena, &position, spans->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                   c_ast_retention_advance(arena, &position, (u64)spans->token_total + 1, sizeof(u32), BUSTER_ALIGN_OF(u32));
+        }
+        u64 alignment_bits = ((u64)facts->alignment_count + 7) / 8;
+        fits = fits &&
+               (!facts->recipe_count || c_ast_retention_advance(arena, &position, facts->recipe_count, sizeof(CAstTypeRecipe), BUSTER_ALIGN_OF(CAstTypeRecipe))) &&
+               (!facts->constant_slots || c_ast_retention_advance(arena, &position, facts->node_count, sizeof(u32), BUSTER_ALIGN_OF(u32))) &&
+               (!facts->constant_count || c_ast_retention_advance(arena, &position, facts->constant_count, sizeof(CAstConstantFact), BUSTER_ALIGN_OF(CAstConstantFact))) &&
+               (!facts->bound_count || c_ast_retention_advance(arena, &position, facts->bound_count, sizeof(u32), BUSTER_ALIGN_OF(u32))) &&
+               (!facts->alignment_count || c_ast_retention_advance(arena, &position, facts->alignment_count, sizeof(u32), BUSTER_ALIGN_OF(u32))) &&
+               (!alignment_bits || c_ast_retention_advance(arena, &position, alignment_bits, sizeof(u8), BUSTER_ALIGN_OF(u8))) &&
+               (!facts->member_width_count || c_ast_retention_advance(arena, &position, facts->member_width_count, sizeof(CAstMemberWidthOwner), BUSTER_ALIGN_OF(CAstMemberWidthOwner))) &&
+               (!facts->offsetof_plan_count || c_ast_retention_advance(arena, &position, facts->offsetof_plan_count, sizeof(CAstOffsetofPlan), BUSTER_ALIGN_OF(CAstOffsetofPlan))) &&
+               (!facts->offsetof_step_count || c_ast_retention_advance(arena, &position, facts->offsetof_step_count, sizeof(CAstOffsetofStep), BUSTER_ALIGN_OF(CAstOffsetofStep))) &&
+               (!facts->ext80_initializer_count || c_ast_retention_advance(arena, &position, facts->ext80_initializer_count, sizeof(CAstExt80InitializerFact), BUSTER_ALIGN_OF(CAstExt80InitializerFact)));
+        bytes = fits ? position - arena->position : C_AST_RETAIN_FAILED;
+    }
+    return bytes;
+}
+
+#if BUSTER_INCLUDE_TESTS
+u64 c_test_ast_facts_retention_bytes(Arena const* arena, CAstFacts const* facts)
+{
+    return c_ast_facts_retention_bytes(arena, facts);
+}
+#endif
+
 u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
 {
-    u64 copied = 0;
-    if (arena && facts && facts->flags && facts->arena)
+    u64 bytes = c_ast_facts_retention_bytes(arena, facts);
+    bool fits = bytes != C_AST_RETAIN_FAILED && c_ast_retention_permitted(bytes);
+    u64 copied = fits ? 0 : C_AST_RETAIN_FAILED;
+    if (fits && arena && facts && facts->flags && facts->arena)
     {
         u64 start = arena->position;
         CAstFacts retained = *facts;

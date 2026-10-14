@@ -2943,7 +2943,8 @@ BUSTER_F_DECL bool c_ast_facts_create(CAstFacts* facts, CAst const* ast);
 BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
 // Publishes complete facts into the unit arena and retires private arenas
 // once. The delimiter rows are borrowed from the same unit's semantic model.
-// Returns the exact bytes allocated for this publication.
+// Returns the exact bytes allocated for this publication, or UINT64_MAX
+// without allocation or owner mutation when the complete copy cannot fit.
 BUSTER_F_DECL u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts);
 // Prepare the unit's exact range-to-node index once, before semantic fact
 // producers run. The parse result's delimiter rows outlive the facts. False

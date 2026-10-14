@@ -38171,16 +38171,38 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
     }
     else
     {
+        // Reserve the refusal row before any compact publication can fill
+        // the unit arena. Ordinary driver-owned trees bypass this endpoint.
+        CDiagnostic* retention_diagnostic = arena_allocate(arena, CDiagnostic, 1);
         CAstResult tree = c_ast_build(arena, preprocess, (CAstOptions){0});
         if (tree.complete)
         {
             result = c_parse_ast_from_tree(arena, preprocess, &tree.ast, 0);
             if (!result.diagnostic_count)
             {
-                result.ast_retained_copy_bytes = c_ast_retain_in_arena(arena, &tree.ast);
-                CAst* retained = arena_allocate(arena, CAst, 1);
-                *retained = tree.ast;
-                result.ast = retained;
+                u64 position = arena->position;
+                bool header_fits = c_ast_retention_advance(arena, &position, 1, sizeof(CAst), BUSTER_ALIGN_OF(CAst));
+                CAst* retained = header_fits ? arena_allocate(arena, CAst, 1) : 0;
+                u64 copied = retained ? c_ast_retain_in_arena(arena, &tree.ast) : C_AST_RETAIN_FAILED;
+                if (copied != C_AST_RETAIN_FAILED)
+                {
+                    *retained = tree.ast;
+                    result.ast = retained;
+                    result.ast_retained_copy_bytes = copied;
+                }
+                else
+                {
+                    c_ast_release(&tree.ast);
+                    result.ast = 0;
+                    *retention_diagnostic = (CDiagnostic){
+                        .message = S8("could not retain the complete C syntax tree in the unit arena"),
+                        .location = {.line = 1, .column = 1},
+                        .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                    };
+                    result.diagnostics = retention_diagnostic;
+                    result.diagnostic_count = 1;
+                    result.diagnostic_capacity = 1;
+                }
             }
             else
             {
@@ -51408,6 +51430,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
 BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
     bool owned_facts = false;
+    CDiagnostic* retention_diagnostic = 0;
     bool setup_failed = syntax.diagnostics && syntax.diagnostic_count && syntax.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
     if (arena && !syntax.diagnostic_count && !syntax.reference_tokens && !syntax.ast && !syntax.ast_diagnostic_count)
     {
@@ -51430,12 +51453,13 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, C
     }
     if (arena && !syntax.diagnostic_count && !syntax.reference_tokens && syntax.ast && !syntax.ast_facts && !syntax.string_literal_lengths_only)
     {
+        retention_diagnostic = arena_allocate(arena, CDiagnostic, 1);
         syntax.ast_facts = arena_allocate(arena, CAstFacts, 1);
         owned_facts = c_ast_facts_create(syntax.ast_facts, syntax.ast);
         if (!owned_facts)
         {
             setup_failed = true;
-            syntax.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+            syntax.diagnostics = retention_diagnostic;
             *syntax.diagnostics = (CDiagnostic){
                 .message = S8("could not reserve the retained C semantic analysis node facts"),
                 .location = {.line = 1, .column = 1},
@@ -51444,11 +51468,12 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, C
             syntax.diagnostic_count = 1;
         }
     }
-    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, true);
-    if (setup_failed)
-    {
-        result.analysis_complete = false;
-    }
+    // A failed required reservation has no semantic/lowering authority.
+    // Preserve its existing refusal without starting more arena allocations.
+    CAnalysisResult result = setup_failed
+                                 ? (CAnalysisResult){.arena = arena, .ast = syntax.ast, .diagnostics = syntax.diagnostics,
+                                                     .diagnostic_count = syntax.diagnostic_count}
+                                 : c_analyze_semantics_core(arena, preprocess, syntax, true);
     if (!result.diagnostic_count && syntax.ast_diagnostic_count)
     {
         result.diagnostics = syntax.ast_diagnostics;
@@ -51457,7 +51482,28 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, C
     if (owned_facts)
     {
         result.analysis_complete = result.analysis_complete && syntax.ast_facts->spans != 0;
-        result.frontend_retained_copy_bytes += c_ast_facts_retain_in_arena(arena, syntax.ast_facts);
+        u64 copied = c_ast_facts_retain_in_arena(arena, syntax.ast_facts);
+        if (copied != C_AST_RETAIN_FAILED)
+        {
+            result.frontend_retained_copy_bytes += copied;
+        }
+        else
+        {
+            if (!result.diagnostic_count)
+            {
+                *retention_diagnostic = (CDiagnostic){
+                    .message = S8("could not retain the complete C semantic node facts in the unit arena"),
+                    .location = {.line = 1, .column = 1},
+                    .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                };
+                result.diagnostics = retention_diagnostic;
+                result.diagnostic_count = 1;
+            }
+            result.analysis_complete = false;
+            result.lowering_validated = false;
+            c_ast_facts_release(syntax.ast_facts);
+            result.ast_facts = 0;
+        }
     }
     return result;
 }
