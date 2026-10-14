@@ -4296,7 +4296,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_retained_typeof_array(CIntegerIrBuilder* builder
         result = ir_program_add_type(builder->program, *ir_type_from_id(&builder->program->types, type));
         CIrVlaArrayType* copy = arena_allocate(builder->arena, CIrVlaArrayType, 1);
         CAstSpans const* spans = builder->syntax_facts->spans;
-        *copy = (CIrVlaArrayType){.next = builder->vla_array_types, .type = result, .bound = array->bound,
+        *copy = (CIrVlaArrayType){.next = builder->vla_array_types, .type = result, .bound = array->bound, .bound_node_plus_one = array->bound_node_plus_one,
             .typeof_start = spans->first[operand], .typeof_end = spans->end[operand], .typeof_node_plus_one = operand + 1};
         builder->vla_array_types = copy;
     }
@@ -54819,10 +54819,16 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             bool alignment = kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE;
             u32 operand = c_ast_child_at(ast, node, 0);
             IrType const* projected_operand = 0;
-            if (expression && ast->kinds[operand] == C_AST_CALL && fact.status == C_AST_CONSTANT_INTEGER)
+            CAstFacts const* facts = builder->syntax_facts;
+            u32 operand_flags = facts && operand < facts->node_count ? facts->flags[operand] : 0;
+            CType const* semantic_operand = (operand_flags & C_AST_FACT_TYPED) ? c_ir_retained_type(builder,
+                (CIrRetainedTypeReference){.index = facts->types[operand], .recipe = (operand_flags & C_AST_FACT_RECIPE) != 0}) : 0;
+            bool storage_half = semantic_operand && semantic_operand->kind == C_TYPE_FP16_STORAGE;
+            if (expression && (ast->kinds[operand] == C_AST_CALL || storage_half) && fact.status == C_AST_CONSTANT_INTEGER)
             {
                 // Sizing a call reads its finished result layout without
-                // constructing or evaluating its callee and arguments.
+                // constructing or evaluating its callee and arguments. A
+                // storage-only half operand has no canonical type to emit.
                 admitted = c_ir_constant_node_fact(builder, fact, &value.real);
                 value.type = value.real.type;
             }
