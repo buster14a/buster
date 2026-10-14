@@ -285,6 +285,11 @@ initializer subtree, excluding member and designator names by node kind.
 Prepared capacities count call/index/array nodes and sparse expression groups;
 assembly and label-address nodes control SSA barriers. Statement-expression
 jump enclosures are subtree intervals around known label and goto nodes.
+Intrinsic expansion budgets walk the known definition interval and consume
+finished builtin identities, result types and storage-half admission facts.
+Unevaluated operands are skipped by node kind and retained variable-bound
+answers; vector lane counts use finished type/recipe references and scalar
+layout. Budgeting performs no syntax scan or semantic type query.
 
 Finished symbol properties are sparse `CDeclarationBinding` rows in the
 result's arena. `CDeclaration.binding_plus_one` and a static or extern local's

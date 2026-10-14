@@ -220,6 +220,8 @@
 //   c_ir_call_arguments_counted,                  call arguments from the
 //                                                 CALL node
 //   c_ir_cleanup_*                                __attribute__((cleanup))
+//   c_ir_vendor_function_budget                   evaluated intrinsic nodes,
+//                                                 finished type/admission facts
 //   c_ir_inline_assembly_*                        GNU inline assembly
 //   c_ir_lower_switch_cases                       a switch's case labels from
 //                                                 its body's nodes
@@ -59406,196 +59408,154 @@ struct CIrVendorFunctionBudget
     bool valid;
 };
 
-BUSTER_C_INTERNAL bool c_ir_vendor_budget_type_is_variably_modified(CIntegerIrBuilder* builder, IrTypeId type)
+BUSTER_C_INTERNAL CType const* c_ir_vendor_budget_fact_type(CIntegerIrBuilder* builder, u32 node, CIrRetainedTypeReference* reference)
 {
-    bool variable = false;
-    u32 remaining = builder->program->types.count;
-    while (!variable && remaining && type.value < builder->program->types.count)
+    CAstFacts const* facts = builder->syntax_facts;
+    CType const* type = 0;
+    if (node < facts->node_count && (facts->flags[node] & C_AST_FACT_TYPED) && !(facts->flags[node] & C_AST_FACT_STRING))
     {
-        variable = c_ir_vla_array_type(builder, type) != 0;
-        if (!variable)
+        *reference = (CIrRetainedTypeReference){.index = facts->types[node], .recipe = (facts->flags[node] & C_AST_FACT_RECIPE) != 0};
+        type = c_ir_retained_type(builder, *reference);
+    }
+    return type;
+}
+
+// TYPE_NAME owns its finished variable-modification answer. Expression facts
+// may instead name a published or row-free pointer/array chain; bounds and
+// their constant answers are retained, so no source query is needed here.
+BUSTER_C_INTERNAL bool c_ir_vendor_budget_operand_is_variable(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    bool variable = node < ast->node_count && ast->kinds[node] == C_AST_TYPE_NAME && node < facts->node_count &&
+                    (facts->flags[node] & C_AST_FACT_TYPED) && (facts->payloads[node] & C_AST_TYPE_NAME_VARIABLY_MODIFIED);
+    CIrRetainedTypeReference reference = {0};
+    CType const* type = c_ir_vendor_budget_fact_type(builder, node, &reference);
+    u64 remaining = (u64)builder->parse.type_count + facts->recipe_count;
+    while (!variable && type && remaining && (type->kind == C_TYPE_ARRAY || type->kind == C_TYPE_POINTER))
+    {
+        if (type->kind == C_TYPE_ARRAY)
         {
-            IrType* value = ir_type_from_id(&builder->program->types, type);
-            if (!value || (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER)) break;
-            type = value->element_type;
+            CAstTypeRecipe const* recipe = reference.recipe ? facts->recipes + reference.index : 0;
+            CArrayBound bound = recipe ? recipe->bound : type->array_bound < builder->parse.array_bound_count
+                                                    ? builder->parse.array_bounds[type->array_bound] : (CArrayBound){0};
+            u32 bound_node = recipe ? recipe->bound_node : c_ast_facts_bound_node(facts, type->array_bound);
+            CAstConstantFact constant = c_ast_facts_constant(facts, bound_node);
+            bool fixed = recipe ? recipe->count_is_constant : bound.has_inferred_count || constant.status == C_AST_CONSTANT_INTEGER;
+            variable = bound.is_star || (bound.token_count && !fixed);
         }
+        reference = c_ir_retained_nested(builder, reference, type->element_type);
+        type = c_ir_retained_type(builder, reference);
         remaining -= 1;
     }
     return variable;
 }
 
-BUSTER_C_INTERNAL bool c_ir_vendor_budget_operand_requires_evaluation(CIntegerIrBuilder* builder, u32 operator_index, u32 operand_end,
-                                                                       bool typeof_operand)
+BUSTER_C_INTERNAL bool c_ir_vendor_budget_storage_half_bit(CIntegerIrBuilder* builder, u8 const* bits, u32 token)
 {
-    bool requires_evaluation = false;
-    u32 operand_start = operator_index + 1;
-    bool has_array_suffix = false;
-    bool has_call = false;
-    for (u32 index = operand_start; index < operand_end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        has_array_suffix |= c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
-        has_call |= token.kind == C_TOKEN_IDENTIFIER && index + 1 < operand_end &&
-                    c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-    }
-    if (has_array_suffix)
-    {
-        for (u32 bound_index = 0; !requires_evaluation && bound_index < builder->parse.array_bound_count; bound_index += 1)
-        {
-            CArrayBound bound = builder->parse.array_bounds[bound_index];
-            bool variable_bound = bound.is_star || (bound.token_count && !bound.has_inferred_count);
-            u64 bound_end = (u64)bound.token_start + bound.token_count;
-            bool inside_operand = bound.token_start >= operand_start && bound_end <= operand_end;
-            requires_evaluation = variable_bound && inside_operand;
-        }
-    }
-    if (!requires_evaluation && (has_array_suffix || has_call))
-    {
-        IrTypeId type = IR_TYPE_ID_INVALID;
-        bool type_resolved = false;
-        if (typeof_operand)
-        {
-            type = c_ir_type_name(builder, operator_index, operand_end);
-            type_resolved = type.value != IR_ID_UNDERLYING_INVALID;
-        }
-        else if (operand_start < operand_end && c_token_is_punctuator(&builder->preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, operand_start, operand_end,
-                C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (close + 1 == operand_end)
-            {
-                type = c_ir_type_name(builder, operand_start + 1, close);
-                type_resolved = type.value != IR_ID_UNDERLYING_INVALID;
-            }
-        }
-        if (!type_resolved)
-        {
-            u32 expression_start = operand_start;
-            u32 expression_end = operand_end;
-            if (expression_start < expression_end &&
-                c_token_is_punctuator(&builder->preprocess.tokens[expression_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                u32 close = c_ir_matching_delimiter_cached(builder, expression_start, expression_end,
-                    C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (close + 1 == expression_end)
-                {
-                    expression_start += 1;
-                    expression_end = close;
-                }
-            }
-            CIrQueryFrame operand_type = {0};
-            bool queried = c_ir_query_execute(builder,
-                (CIrQueryFrame){.start = expression_start, .end = expression_end, .kind = C_IR_QUERY_FRAME_OPERAND_TYPE},
-                &operand_type);
-            type_resolved = queried && operand_type.success;
-            if (type_resolved) type = operand_type.result_type;
-            requires_evaluation = !type_resolved && has_array_suffix && has_call;
-        }
-        requires_evaluation |= type_resolved && c_ir_vendor_budget_type_is_variably_modified(builder, type);
-    }
-    return requires_evaluation;
+    return bits && token < builder->preprocess.token_count && (bits[token / 8] & (u8)(1u << (token & 7)));
 }
 
-// Source tokens size the ordinary body. Implemented intrinsic expansions add
-// their own proven rows/blocks. Extra joins may ask SSA to create an incomplete
-// parameter for every ambient named local, including function parameters.
+BUSTER_C_INTERNAL bool c_ir_vendor_budget_bare_storage_half(CAst const* ast, u32 node)
+{
+    bool bare = node < ast->node_count && ast->kinds[node] == C_AST_TYPE_NAME && ast->extents[node] == 3;
+    if (bare)
+    {
+        u32 specifiers = c_ast_child_at(ast, node, 0);
+        u32 word = c_ast_child_at(ast, specifiers, 0);
+        bare = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && ast->kinds[word] == C_AST_SPECIFIER_WORD &&
+               ast->data[word] == C_AST_WORD_FP16;
+    }
+    return bare;
+}
+
+// The ordinary body reservation uses retained census sizes. Intrinsic nodes
+// add their proven expansion rows; join blocks reserve one incomplete SSA
+// parameter for each ambient named local, including function parameters.
 BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIrBuilder* builder, CDeclaration declaration,
                                                                      u32 parameter_count, u32 named_local_count)
 {
     CIrVendorFunctionBudget total = {.valid = true};
-    u32 end = declaration.body_start + declaration.body_token_count;
-    for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
+    CAst const* ast = builder->syntax_tree;
+    u32 root = declaration.declaration_node_plus_one - 1;
+    total.valid = root < ast->node_count && ast->kinds[root] == C_AST_FUNCTION_DEFINITION;
+    u32 begin = total.valid ? c_ast_subtree_begin(ast, root) : 0;
+    for (u32 cursor = total.valid ? root + 1 : 0; total.valid && cursor > begin;)
     {
-        CToken token = builder->preprocess.tokens[index];
-        if (builder->parse.storage_half_spelling_present && token.kind == C_TOKEN_IDENTIFIER)
+        u32 node = --cursor;
+        u8 kind = ast->kinds[node];
+        bool unevaluated = kind == C_AST_ALIGNOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION;
+        if (kind == C_AST_SIZEOF_TYPE || kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL)
         {
-            String8 word = c_token_spelling(builder->preprocess.spelling_base, token);
-            bool typeof_operand = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof")) ||
-                                 string_equal(word, S8("__typeof__")) || string_equal(word, S8("typeof_unqual"));
-            bool sizeof_operand = c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(SIZEOF));
-            bool alignof_operand = c_token_in_well_known_set(builder->preprocess.spelling_base, token,
-                C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT));
-            if (typeof_operand || sizeof_operand || alignof_operand)
-            {
-                // typeof is a specifier, which has no span; its operand is
-                // always parenthesized.
-                u32 typeof_close = typeof_operand && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-                                       ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                                        C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                                       : end;
-                u32 operand_end = typeof_operand ? (typeof_close < end ? typeof_close + 1 : index)
-                                                 : c_ir_tree_unevaluated_operand_end(builder, index, end);
-                bool evaluated_vla = operand_end > index &&
-                    (typeof_operand || sizeof_operand) &&
-                    c_ir_vendor_budget_operand_requires_evaluation(builder, index, operand_end, typeof_operand);
-                if (operand_end > index && !evaluated_vla)
-                {
-                    index = operand_end - 1;
-                    continue;
-                }
-            }
+            unevaluated = !c_ir_vendor_budget_operand_is_variable(builder, c_ast_child_at(ast, node, 0));
         }
-        if (builder->parse.storage_half_cast_calls &&
-            (builder->parse.storage_half_cast_calls[index / 8] & (u8)(1u << (index & 7))))
+        if (unevaluated)
+        {
+            cursor = c_ast_subtree_begin(ast, node);
+        }
+        else if (kind == C_AST_CAST && c_ir_vendor_budget_storage_half_bit(builder, builder->parse.storage_half_cast_calls, ast->tokens[node]))
         {
             total.valid = false;
             total.failure_message = S8("__fp16 cast expression has no canonical implementation");
-            total.failure_token_index = index;
-            continue;
+            total.failure_token_index = ast->tokens[node];
         }
-        if (token.kind != C_TOKEN_IDENTIFIER ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
-        String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
-        CVendorBuiltinBudget budget = c_ir_vendor_builtin_budget(name);
-        CVendorBuiltinBudget shift_budget = c_ir_sse2_runtime_shift_budget(name);
-        budget.instructions += shift_budget.instructions;
-        budget.values += shift_budget.values;
-        budget.blocks += shift_budget.blocks;
-        CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
-        if (generic.operation && c_semantic_vendor_builtin_supported(builder->target, name))
+        else if (kind == C_AST_CALL)
         {
-            u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
-                C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            IrTypeId type = IR_TYPE_ID_INVALID;
-            bool bare_storage_half_bitcast = close < end && generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
-                c_semantic_vendor_storage_half_argument(builder->preprocess, index + 2,
-                    c_parse_constraint_expression_end(&builder->parse, builder->preprocess, index + 2, close));
-            bool storage_half_bitcast = generic.operation == C_VENDOR_GENERIC_BIT_CAST && close < end &&
-                ((builder->parse.storage_half_bitcast_calls &&
-                  (builder->parse.storage_half_bitcast_calls[index / 8] & (u8)(1u << (index & 7)))) ||
-                 bare_storage_half_bitcast);
-            bool storage_half_convertvector = generic.operation == C_VENDOR_GENERIC_CONVERT_VECTOR && close < end &&
-                builder->parse.storage_half_convertvector_calls &&
-                (builder->parse.storage_half_convertvector_calls[index / 8] & (u8)(1u << (index & 7)));
-            if (storage_half_bitcast)
+            u32 builtin = c_ast_facts_call_builtin(ast, builder->syntax_facts, node);
+            if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
+                builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
             {
-                total.valid = false;
-                total.failure_message = bare_storage_half_bitcast ?
-                    S8("__builtin_bit_cast destination __fp16 has no canonical implementation") :
-                    S8("storage-half value bitcast has no canonical implementation");
-                total.failure_token_index = index + 2;
+                u32 callee = c_ast_child_at(ast, node, 0);
+                u32 anchor = ast->tokens[callee];
+                String8 name = c_ir_source_spelling(&builder->preprocess, anchor);
+                CVendorBuiltinBudget budget = c_ir_vendor_builtin_budget(name);
+                CVendorBuiltinBudget shift_budget = c_ir_sse2_runtime_shift_budget(name);
+                budget.instructions += shift_budget.instructions;
+                budget.values += shift_budget.values;
+                budget.blocks += shift_budget.blocks;
+                CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
+                if (generic.operation && c_semantic_vendor_builtin_supported(builder->target, name))
+                {
+                    u32 argument = c_ast_child_at(ast, node, 1);
+                    bool bare_storage_half = generic.operation == C_VENDOR_GENERIC_BIT_CAST && c_ir_vendor_budget_bare_storage_half(ast, argument);
+                    bool half_bitcast = generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                        (bare_storage_half || c_ir_vendor_budget_storage_half_bit(builder, builder->parse.storage_half_bitcast_calls, anchor));
+                    bool half_vector = generic.operation == C_VENDOR_GENERIC_CONVERT_VECTOR &&
+                        c_ir_vendor_budget_storage_half_bit(builder, builder->parse.storage_half_convertvector_calls, anchor);
+                    if (half_bitcast)
+                    {
+                        total.valid = false;
+                        total.failure_message = bare_storage_half ? S8("__builtin_bit_cast destination __fp16 has no canonical implementation")
+                                                                 : S8("storage-half value bitcast has no canonical implementation");
+                        total.failure_token_index = ast->tokens[argument];
+                    }
+                    else if (half_vector)
+                    {
+                        total.valid = false;
+                        total.failure_message = S8("__fp16 vector conversion has no canonical implementation");
+                        total.failure_token_index = anchor;
+                    }
+                    else
+                    {
+                        CIrRetainedTypeReference reference = {0};
+                        CType const* type = c_ir_vendor_budget_fact_type(builder, node, &reference);
+                        CType const* element = type && type->kind == C_TYPE_VECTOR
+                            ? c_ir_retained_type(builder, c_ir_retained_nested(builder, reference, type->element_type)) : 0;
+                        TargetTypeLayout layout = element ? c_parse_builtin_layout(builder->target, element->kind) : (TargetTypeLayout){0};
+                        total.valid = type && (!element || layout.size);
+                        u64 lanes = total.valid && element ? type->vector_byte_size / layout.size : 1;
+                        u64 rows = generic.operation == C_VENDOR_GENERIC_BIT_CAST ? 16 :
+                            generic.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE ? 16 : 64 + 16 * lanes;
+                        total.valid = total.valid && rows <= UINT32_MAX;
+                        budget.instructions = budget.values = total.valid ? (u32)rows : 0;
+                    }
+                }
+                total.instructions += budget.instructions;
+                total.values += budget.values;
+                total.blocks += budget.blocks;
+                total.valid = total.valid && total.instructions <= UINT32_MAX && total.values <= UINT32_MAX && total.blocks <= UINT32_MAX;
             }
-            else if (storage_half_convertvector)
-            {
-                total.valid = false;
-                total.failure_message = S8("__fp16 vector conversion has no canonical implementation");
-                total.failure_token_index = index;
-            }
-            else
-            {
-                total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
-            }
-            IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;
-            u64 lanes = result && result->kind == IR_TYPE_VECTOR ? result->element_count : 1;
-            u64 rows = generic.operation == C_VENDOR_GENERIC_BIT_CAST ? 16 :
-                generic.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE ? 16 : 64 + 16 * lanes;
-            total.valid &= rows <= UINT32_MAX;
-            budget.instructions = budget.values = total.valid ? (u32)rows : 0;
         }
-        total.instructions += budget.instructions;
-        total.values += budget.values;
-        total.blocks += budget.blocks;
-        total.valid &= total.instructions <= UINT32_MAX && total.values <= UINT32_MAX && total.blocks <= UINT32_MAX;
     }
     u64 ambient = (u64)parameter_count + named_local_count;
     if (total.valid)

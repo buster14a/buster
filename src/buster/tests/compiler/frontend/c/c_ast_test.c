@@ -7237,6 +7237,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments
     return result;
 }
 
+// Intrinsic reservation walks evaluated nodes: storage-half values are
+// rejected only when used, and vector expansions keep sufficient capacity.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_budget_nodes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CAstVendorBudgetCase CAstVendorBudgetCase;
+    struct CAstVendorBudgetCase
+    {
+        String8 source;
+        String8 refusal;
+    };
+    CAstVendorBudgetCase const cases[] = {
+        {S8("int live(unsigned short n) { return sizeof(__builtin_bit_cast(__fp16, n)); }\n"), {0}},
+        {S8("int live(int n) { return sizeof((__fp16)n); }\n"), {0}},
+        {S8("int live(int n) { return (int)(__fp16)n; }\n"), S8("__fp16 cast expression has no canonical implementation")},
+        {S8("int live(unsigned short n) { return (int)__builtin_bit_cast(__fp16,n); }\n"),
+         S8("__builtin_bit_cast destination __fp16 has no canonical implementation")},
+        {S8("int live(int n) { return sizeof(int[n + (int)__builtin_bit_cast(__fp16,(unsigned short)0)]); }\n"),
+         S8("__builtin_bit_cast destination __fp16 has no canonical implementation")},
+        {S8("static int unused(int n) { return (int)(__fp16)n; } int live(void) { return 0; }\n"), {0}},
+        {S8("typedef int V4i __attribute__((vector_size(16))); typedef float V4f __attribute__((vector_size(16))); "
+            "V4f live(V4i a) { return __builtin_convertvector(a,V4f); }\n"), {0}},
+        {S8("typedef int V4i __attribute__((vector_size(16))); "
+            "V4i live(V4i a,V4i b) { return __builtin_shufflevector(a,b,0,3,4,7); }\n"), {0}},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, cases[index].source, C_PREPROCESS_DIALECT_GNU17);
+            CParseResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !analysis.diagnostic_count,
+                analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("unfinished intrinsic analysis"));
+            if (!analysis.diagnostic_count)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vendor-budget-nodes.c"), preprocess,
+                    analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                bool refused = cases[index].refusal.length != 0;
+                BUSTER_TEST_RAW(arguments, refused ? lowered.diagnostic_count == 1 &&
+                    string_equal(lowered.diagnostics[0].message, cases[index].refusal) :
+                    lowered.diagnostic_count == 0 && lowered.program && lowered.canonical_ir_certified,
+                    string_format(temporary.arena, S8("intrinsic budget case={u32} form={u32}: {S8}"), index, form,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical program")));
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8335,6 +8386,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
