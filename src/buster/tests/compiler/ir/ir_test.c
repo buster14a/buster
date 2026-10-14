@@ -3437,6 +3437,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_table_budget(UnitTest
     invalid = ir_test_inline_table_charge(&impossible, (IrInlineTableCounts){1, 0, 0, 0},
                                           (IrInlineTableCounts){(u64)UINT32_MAX + 1u, 0, 0, 0});
     BUSTER_TEST(arguments, invalid.required_bytes == UINT64_MAX && invalid.required_work == UINT64_MAX);
+
+    // The corrected required charge must not give the optional phase a new
+    // allowance. This caller's two geometric reservations exceed its cap,
+    // while an exact required reservation plus the optional one would fit.
+    String8 pieces[] = {
+        S8("static inline __attribute__((always_inline)) int mixed_required(int value) { return value + 1; }\n"
+           "static int mixed_tiny(int value) { return value + 2; }\n"
+           "int mixed_storage(int value)\n{\n"),
+        S8("    value = value * 3 + 1;\n"),
+        S8("    value = mixed_required(value);\n    return mixed_tiny(value);\n}\n"),
+    };
+    u32 repeats[] = {1, 12000, 1};
+    String8 source = ir_test_inline_repeat_source(arena, pieces, repeats, BUSTER_ARRAY_LENGTH(pieces));
+    CPreprocessResult tokens = c_preprocess(arena, source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult analysis = c_parse(arena, tokens);
+    CIRLowerResult lowered = {0};
+    if (!tokens.error_count && !analysis.diagnostic_count)
+    {
+        lowered = c_lower_to_ir_with_options(arena, S8("canonical-inline-mixed-storage.c"),
+            tokens, analysis, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
+    }
+    BUSTER_TEST(arguments, tokens.error_count == 0 && analysis.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+    {
+        IrProgram* program = lowered.program;
+        IrModule* module = program->modules;
+        IrFunction* caller = ir_test_inline_find_function(module, S8("mixed_storage"));
+        IrFunction* required = ir_test_inline_find_function(module, S8("mixed_required"));
+        IrFunction* tiny = ir_test_inline_find_function(module, S8("mixed_tiny"));
+        if (BUSTER_REQUIRE(arguments, caller && required && tiny))
+        {
+            u32 arguments_in_required = ir_test_opcode_count(required, IR_OPCODE_ARGUMENT);
+            u32 arguments_in_tiny = ir_test_opcode_count(tiny, IR_OPCODE_ARGUMENT);
+            BUSTER_TEST(arguments, caller->block_capacity == caller->block_count &&
+                                   caller->instruction_capacity == caller->instruction_count &&
+                                   caller->value_capacity == caller->value_count);
+            IrInlineTableCounts before = {caller->block_count, caller->instruction_count, caller->value_count, caller->extra_count};
+            IrInlineTableCounts required_after = {
+                before.blocks + required->block_count + 1u,
+                before.instructions + required->instruction_count - arguments_in_required,
+                before.values + required->value_count,
+                before.extras + required->extra_count,
+            };
+            IrInlineTableCharge required_charge = ir_test_inline_table_charge(caller, before, required_after);
+            IrFunction optional_caller = *caller;
+            optional_caller.block_count = optional_caller.block_capacity = (u32)required_after.blocks;
+            optional_caller.instruction_count = optional_caller.instruction_capacity = (u32)required_after.instructions;
+            optional_caller.value_capacity = (u32)required_after.values;
+            optional_caller.value_count = optional_caller.value_capacity - arguments_in_required;
+            optional_caller.extra_count = (u32)required_after.extras;
+            optional_caller.extra_capacity = BUSTER_MAX(caller->extra_capacity, optional_caller.extra_count);
+            IrInlineTableCounts optional_before = {optional_caller.block_count, optional_caller.instruction_count,
+                                                  optional_caller.value_count, optional_caller.extra_count};
+            IrInlineTableCounts optional_after = {
+                optional_before.blocks + tiny->block_count + 1u,
+                optional_before.instructions + tiny->instruction_count - arguments_in_tiny,
+                optional_before.values + tiny->value_count,
+                optional_before.extras + tiny->extra_count,
+            };
+            IrInlineTableCharge optional_charge = ir_test_inline_table_charge(&optional_caller, optional_before, optional_after);
+            BUSTER_TEST(arguments, required_charge.optional_bytes + optional_charge.optional_bytes > IR_FAST_SCRATCH_BUDGET);
+            // Leave ample room for the fixed clone/maps/reservation payload.
+            BUSTER_TEST(arguments, required_charge.required_bytes + optional_charge.optional_bytes + 65536u < IR_FAST_SCRATCH_BUDGET);
+            program->fast_passes = 0;
+            program->inline_options = (IrInlineOptions){.tiny = true, .caller_growth_shift = 32u};
+            IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->inline_complete);
+            BUSTER_TEST(arguments, module->inlining.always_inlined == 1 && module->inlining.inlined == 1);
+            BUSTER_TEST(arguments, module->inlining.budget_skips == 1);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("mixed_required")) == 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("mixed_tiny")) == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        }
+    }
     c_test_scratch_end(temporary);
     return result;
 }

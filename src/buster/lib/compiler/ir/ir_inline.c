@@ -845,6 +845,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 u64 total_work = module->inlining.visits;
                 u64 total_copies = 0;
                 u32* function_growth_used = arena_allocate(arena, u32, count ? count : 1u);
+                // Persist the historical storage view consumed by optional
+                // selection; required admission uses its local exact total.
                 u64* function_storage_used = arena_allocate(arena, u64, count ? count : 1u);
                 u32* function_sites_used = arena_allocate(arena, u32, count ? count : 1u);
                 u8* strict = arena_allocate_zeroed(arena, u8, count ? count : 1u);
@@ -1102,6 +1104,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     u32 function_growth = function_growth_used[caller_index];
                     u64 function_storage = function_storage_used[caller_index];
+                    u64 optional_storage = function_storage;
                     u64 module_growth_before = module_growth;
                     u64 total_copies_before = total_copies;
                     u64 function_projected_units = 0;
@@ -1691,6 +1694,17 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             function_sites += 1;
                             function_growth += growth;
                             function_storage += storage;
+                            if (phase == 0 && options.tiny)
+                            {
+                                // Keep the optional phase's historical budget
+                                // view of required table growth. The required
+                                // guard above uses the actual reservation.
+                                u64 optional_tables = ir_inline_cfg_table_growth_bytes(caller,
+                                    table_blocks_before, table_blocks_after, table_instructions_before, table_instructions_after,
+                                    table_values_before, table_values_after, table_extras_before, table_extras_after, false);
+                                u64 optional_site = ir_inline_storage_add(storage - table_growth, optional_tables);
+                                optional_storage = ir_inline_storage_add(optional_storage, optional_site);
+                            }
                             function_projected_units = ir_inline_storage_add(function_projected_units, projected_units);
                             function_projected_blocks = ir_inline_storage_add(function_projected_blocks, (u64)callee->block_count + 1u);
                             function_projected_locals = ir_inline_storage_add(function_projected_locals,
@@ -1826,7 +1840,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         module->fast = (IrFastStatistics){0};
                     }
                     function_growth_used[caller_index] = function_growth;
-                    function_storage_used[caller_index] = function_storage;
+                    function_storage_used[caller_index] = phase == 0 && options.tiny ? optional_storage : function_storage;
                     function_sites_used[caller_index] = function_sites;
                     scratch_end(function_scratch);
                     }

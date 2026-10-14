@@ -809,9 +809,13 @@ reserved row bytes plus one maximum alignment padding per allocated array;
 successive sites pay only the increase in that one reservation. Its table work
 counts existing rows copied once and the final source-range rows cleared.
 Optional admission retains its geometric-growth upper bound and original work
-charge, preserving tiny-inline decisions. `ir_test_inline_required_table_budget`
+charge. Required batches also retain their historical geometric contribution
+in the storage ledger consumed by optional selection; correcting required
+admission therefore does not enlarge the optional phase's allowance. `ir_test_inline_required_table_budget`
 checks telescoping charges, actual arena bytes, copied rows, empty/non-power-of-two
-tables, spare capacity, and allocation-free appends through every reserved slot. Relocating a
+tables, spare capacity, and allocation-free appends through every reserved slot.
+A mixed required/tiny caller straddles the storage cap and keeps its optional
+call, proving the two phases preserve that historical accounting boundary. Relocating a
 touched caller's exactly sized frontend tables still retains the old copy in the
 arena: on the unity self-host source, tiny inlining touches 809 callers whose
 tables total 65.5 MB, which is most of its peak-RSS cost (#48). At the default
