@@ -11752,6 +11752,116 @@ BUSTER_C_INTERNAL void c_parse_ast_object_alignment_publish(CTypeParseMachine* m
     }
 }
 
+typedef struct CAstStorageHalfLayoutRow CAstStorageHalfLayoutRow;
+struct CAstStorageHalfLayoutRow
+{
+    u32 index;
+    bool recipe;
+};
+
+// Only pointer, array and vector edges can authorize a storage-half layout.
+// Fold their completed row-free descriptions outward; an outer pointer owns
+// its fixed layout even when its pointed-to array has a runtime bound.
+BUSTER_C_INTERNAL bool c_parse_ast_storage_half_layout(CTypeParseMachine* machine, CParseResult* result, Target target,
+                                                       u32 index, bool recipe, u64* size_out, u32* alignment_out)
+{
+    CAstFacts const* facts = machine->ast_facts;
+    CAstStorageHalfLayoutRow local[32];
+    CAstStorageHalfLayoutRow* rows = local;
+    u32 capacity = BUSTER_ARRAY_LENGTH(local);
+    u32 count = 0;
+    u64 remaining = (u64)result->type_count + facts->recipe_count;
+    u64 mark = machine->scratch_arena->position;
+    bool half = false;
+    bool valid = true;
+    while (valid && !half && remaining)
+    {
+        CAstTypeRecipe const* derivation = recipe && index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
+                                             ? facts->recipes + index : 0;
+        CType const* type = recipe ? derivation ? &derivation->type : 0 : index < result->type_count ? result->types + index : 0;
+        valid = type && (type->kind == C_TYPE_FP16_STORAGE || type->kind == C_TYPE_POINTER || type->kind == C_TYPE_ARRAY || type->kind == C_TYPE_VECTOR);
+        if (valid && count == capacity)
+        {
+            u32 grown = capacity <= UINT32_MAX / 2 ? capacity * 2 : 0;
+            CAstStorageHalfLayoutRow* moved = grown ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CAstStorageHalfLayoutRow, grown) : 0;
+            valid = moved != 0;
+            if (valid)
+            {
+                memcpy(moved, rows, sizeof(*rows) * count);
+                rows = moved;
+                capacity = grown;
+            }
+        }
+        if (valid)
+        {
+            rows[count++] = (CAstStorageHalfLayoutRow){.index = index, .recipe = recipe};
+            half = type->kind == C_TYPE_FP16_STORAGE;
+            if (!half)
+            {
+                u32 child = type->element_type.value;
+                bool temporary = derivation && child != C_ID_UNDERLYING_INVALID && child >= derivation->row_begin;
+                u64 nested = temporary ? (u64)derivation->recipe_begin + child - derivation->row_begin : child;
+                valid = nested <= UINT32_MAX && (!temporary || nested < derivation->recipe_end);
+                index = valid ? (u32)nested : C_AST_FACT_NONE;
+                recipe = temporary;
+            }
+        }
+        remaining -= 1;
+    }
+    valid = valid && half;
+    bool laid_out = false;
+    u64 size = 0;
+    u32 alignment = 0;
+    while (valid && count)
+    {
+        CAstStorageHalfLayoutRow row = rows[--count];
+        CAstTypeRecipe const* derivation = row.recipe ? facts->recipes + row.index : 0;
+        CType const* type = derivation ? &derivation->type : result->types + row.index;
+        bool alias = derivation ? derivation->has_alignment : c_parse_type_alignment(result, (CTypeId){.value = row.index}) != 0;
+        CTypeLayoutCache const* cache = &machine->layout_cache;
+        bool cached = !row.recipe && row.index < cache->capacity && cache->states[row.index] != 0;
+        if (cached)
+        {
+            size = cache->sizes[row.index];
+            alignment = cache->alignments[row.index];
+            laid_out = true;
+        }
+        else if (alias)
+        {
+            // An aligned temporary alias has no certified cache answer.
+            laid_out = false;
+        }
+        else
+        {
+            if (type->kind == C_TYPE_FP16_STORAGE || type->kind == C_TYPE_POINTER)
+                laid_out = c_parse_builtin_type_layout(target, type->kind, &size, &alignment);
+            else if (type->kind == C_TYPE_VECTOR)
+                laid_out = laid_out && c_vector_type_layout(target, size, type->vector_byte_size, 0, &size, &alignment);
+            else
+            {
+                CArrayBound bound = derivation ? derivation->bound : type->array_bound < result->array_bound_count
+                                                                      ? result->array_bounds[type->array_bound] : (CArrayBound){0};
+                CAstConstantFact constant = c_ast_facts_constant(facts, c_ast_facts_bound_node(facts, type->array_bound));
+                bool fixed = derivation ? derivation->count_is_constant : bound.has_inferred_count ||
+                    (constant.status == C_AST_CONSTANT_INTEGER && !constant.high && constant.low <= c_array_object_size_limit(target_data_layout(target).pointer.bit_width));
+                u64 elements = derivation ? derivation->resolved_count : bound.has_inferred_count ? bound.inferred_count : constant.low;
+                laid_out = laid_out && fixed && !bound.is_star && c_array_object_size_valid(target_data_layout(target).pointer.bit_width, size, elements);
+                if (laid_out) size *= elements;
+            }
+            if (laid_out && type->is_atomic && type->kind != C_TYPE_ARRAY)
+                c_atomic_promoted_layout(target_data_layout(target).atomic_max_width, &size, &alignment);
+        }
+    }
+    valid = valid && laid_out;
+    if (valid)
+    {
+        *size_out = size;
+        *alignment_out = alignment;
+    }
+    arena_set_position(machine->scratch_arena, mark);
+    return valid;
+}
+
 // Storage half has a semantic object layout but no runtime scalar IR
 // representation. Retain that numeric answer from completed type authority,
 // without constructing a C row or running another semantic query.
@@ -11766,27 +11876,11 @@ BUSTER_C_INTERNAL void c_parse_ast_storage_half_layout_publish(CTypeParseMachine
     u32 flags = valid ? facts->flags[operand] : 0;
     bool recipe = (flags & C_AST_FACT_RECIPE) != 0;
     u32 index = valid ? facts->types[operand] : C_AST_FACT_NONE;
-    CAstTypeRecipe const* derivation = recipe && index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
-                                         ? facts->recipes + index : 0;
-    CType const* type = (flags & C_AST_FACT_TYPED) ? recipe ? derivation ? &derivation->type : 0
-                                                      : index < result->type_count ? result->types + index : 0 : 0;
-    valid = valid && type && type->kind == C_TYPE_FP16_STORAGE && c_ast_facts_constant(facts, parent).status != C_AST_CONSTANT_INVALID;
+    valid = valid && (flags & C_AST_FACT_TYPED) && c_ast_facts_constant(facts, parent).status != C_AST_CONSTANT_INVALID;
     bool alignment = valid && (ast->kinds[parent] == C_AST_ALIGNOF_EXPRESSION || ast->kinds[parent] == C_AST_ALIGNOF_TYPE);
     u64 size = 0;
     u32 natural = 0;
-    if (valid) valid = c_parse_builtin_type_layout(target, C_TYPE_FP16_STORAGE, &size, &natural);
-    bool alias = valid && (derivation ? derivation->has_alignment : c_parse_type_alignment(result, (CTypeId){.value = index}) != 0);
-    if (valid && alias)
-    {
-        CTypeLayoutCache const* cache = &machine->layout_cache;
-        valid = !recipe && index < cache->capacity && cache->states[index] != 0;
-        if (valid)
-        {
-            size = cache->sizes[index];
-            natural = cache->alignments[index];
-        }
-    }
-    else if (valid && type->is_atomic) c_atomic_promoted_layout(target_data_layout(target).atomic_max_width, &size, &natural);
+    if (valid) valid = c_parse_ast_storage_half_layout(machine, result, target, index, recipe, &size, &natural);
     // GNU object alignment can differ from the type's alignment. Its existing
     // certified answer owns that case; this descriptor covers type operands.
     valid = valid && (!alignment || ast->kinds[operand] == C_AST_TYPE_NAME || ast->kinds[operand] == C_AST_CAST || ast->kinds[operand] == C_AST_CALL);

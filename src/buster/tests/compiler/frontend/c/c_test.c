@@ -47809,6 +47809,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // Function-body queries need a retained numeric answer even when their
+    // complete semantic operand has no runtime canonical representation.
+    Target layout_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_WASM32, .os = OPERATING_SYSTEM_WASI},
+    };
+    String8 layout_source = S8(
+        "typedef __fp16 H4 __attribute__((vector_size(8)));\n"
+        "typedef H4 Raised __attribute__((aligned(32)));\n"
+        "unsigned long layouts(unsigned short bits) { return sizeof(__fp16) + sizeof(__fp16*) + sizeof(__fp16[5]) + "
+        "sizeof(__fp16 (*)[5]) + _Alignof(__fp16*) + sizeof(__fp16 * const[3]) + _Alignof(__fp16 * const[3]) + "
+        "sizeof(const volatile __fp16[2][5]) + sizeof(H4) + _Alignof(H4) + sizeof(H4[2]) + "
+        "sizeof(__typeof__((__fp16)1)) + sizeof(__builtin_bit_cast(__fp16, bits)) + "
+        "__alignof__(__builtin_bit_cast(__fp16, bits)) + sizeof(Raised) + _Alignof(Raised); }\n"
+        "unsigned long runtime_pointee(int n) { return sizeof(__fp16 (*)[n]); }\n");
+    String8 deep_pointer = S8("\nunsigned long deep_half(void) { return sizeof(__fp16 ");
+    for (u32 level = 0; level < 80; level += 1) deep_pointer = string_format(arguments->arena, S8("{S8}*"), deep_pointer);
+    layout_source = string_format(arguments->arena, S8("{S8}{S8}); }}\n"), layout_source, deep_pointer);
+    for (u32 layout_target = 0; layout_target < BUSTER_ARRAY_LENGTH(layout_targets); layout_target += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = layout_targets[layout_target];
+        TargetTypeLayout pointer = target_data_layout(target).pointer;
+        u64 expected[] = {2, pointer.size, 10, pointer.size, pointer.alignment, 3 * pointer.size, pointer.alignment,
+                          20, 8, 8, 16, 2, 2, 2, 8, 32, pointer.size, pointer.size};
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, layout_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult model = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !syntax.diagnostic_count && model.analysis_complete &&
+                                      !model.diagnostic_count && model.ast && model.ast_facts))
+        {
+            u32 queries = 0;
+            for (u32 node = 0; node < model.ast->node_count; node += 1)
+            {
+                u32 kind = model.ast->kinds[node];
+                if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE)
+                {
+                    CAstConstantFact fact = c_ast_facts_constant(model.ast_facts, node);
+                    BUSTER_TEST_RAW(arguments, queries < BUSTER_ARRAY_LENGTH(expected) && fact.status == C_AST_CONSTANT_INTEGER &&
+                        !fact.high && fact.low == expected[queries], string_format(temporary.arena,
+                            S8("storage-half layout target={u32} query={u32} status={u32} size={u64}"),
+                            layout_target, queries, (u32)fact.status, fact.low));
+                    queries += 1;
+                }
+            }
+            BUSTER_TEST(arguments, queries == BUSTER_ARRAY_LENGTH(expected));
+        }
+        c_preprocess_release(&preprocess);
+        c_test_scratch_end(temporary);
+    }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source = S8(
         "typedef unsigned long long U64;\n"
