@@ -889,13 +889,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 caller->block_count, (u64)caller->block_count + 1u,
                                 caller->instruction_count, (u64)caller->instruction_count + 1u,
                                 caller->value_count, (u64)caller->value_count + 1u,
-                                caller->extra_count, (u64)caller->extra_count + 1u));
+                                caller->extra_count, (u64)caller->extra_count + 1u, true));
                         relocation_bytes = ir_inline_storage_add(relocation_bytes,
                             ir_inline_cfg_table_growth_bytes(caller,
                                 caller->block_count, (u64)caller->block_count + 1u,
                                 caller->instruction_count, (u64)caller->instruction_count + 1u,
                                 caller->value_count, (u64)caller->value_count + 1u,
-                                caller->extra_count, (u64)caller->extra_count + 1u));
+                                caller->extra_count, (u64)caller->extra_count + 1u, true));
                         caller_work_limit = ir_inline_storage_add(caller_work_limit, relocation_work);
                         caller_storage_limit = ir_inline_storage_add(caller_storage_limit, relocation_bytes);
                     }
@@ -1507,7 +1507,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                  table_blocks_before, table_blocks_after,
                                                                                  table_instructions_before, table_instructions_after,
                                                                                  table_values_before, table_values_after,
-                                                                                 table_extras_before, table_extras_after);
+                                                                                 table_extras_before, table_extras_after, phase == 0);
                             u64 table_work_with_caller_rows = ir_inline_storage_add(total_work, caller_rows_remaining);
                             if (table_work > caller_work_limit -
                                                  BUSTER_MIN(table_work_with_caller_rows, (u64)caller_work_limit))
@@ -1527,7 +1527,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                 table_blocks_before, table_blocks_after,
                                                                                 table_instructions_before, table_instructions_after,
                                                                                 table_values_before, table_values_after,
-                                                                                table_extras_before, table_extras_after);
+                                                                                table_extras_before, table_extras_after, phase == 0);
                             storage = ir_inline_storage_add(storage, table_growth);
                             u64 reserve_bytes_before = ir_inline_reserve_bytes(caller, caller_snapshot_blocks, function_projected_blocks,
                                                                                function_projected_snapshots, function_projected_locals,
@@ -1749,10 +1749,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     if (function_sites != function_sites_used[caller_index])
                     {
                         if (proof_base) region = ir_inline_splice_region(function_arena, caller, planned_heads, original_blocks);
-                        // One growth per table, to exactly the counts admission
-                        // charged (as geometric growth from the current capacity),
-                        // so no table is reallocated when its final count still
-                        // fits. A splice adds exactly its planned rows.
+                        // Required admission charges this exact one-shot
+                        // reservation; optional admission retains its geometric
+                        // upper bound. Planned counts cover every splice append,
+                        // including values that formal arguments reuse.
                         ir_inline_cfg_reserve_tables(program->arena, caller,
                             ir_inline_storage_add(caller->block_count, function_projected_blocks),
                             ir_inline_storage_add(caller->instruction_count, function_projected_instructions),
@@ -1862,5 +1862,26 @@ IrValidationResult ir_test_inline_module(IrProgram* program, IrModule* module, I
 {
     IrValidationResult result = ir_inline_module(program, module, fault);
     return result;
+}
+
+IrInlineTableCharge ir_test_inline_table_charge(IrFunction const* caller, IrInlineTableCounts before,
+                                                IrInlineTableCounts after)
+{
+    IrInlineTableCharge result = {
+        .required_bytes = ir_inline_cfg_table_growth_bytes(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, true),
+        .required_work = ir_inline_cfg_table_growth_work(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, true),
+        .optional_bytes = ir_inline_cfg_table_growth_bytes(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, false),
+        .optional_work = ir_inline_cfg_table_growth_work(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, false),
+    };
+    return result;
+}
+
+void ir_test_inline_reserve_tables(Arena* arena, IrFunction* caller, IrInlineTableCounts counts)
+{
+    ir_inline_cfg_reserve_tables(arena, caller, counts.blocks, counts.instructions, counts.values, counts.extras, 0);
 }
 #endif

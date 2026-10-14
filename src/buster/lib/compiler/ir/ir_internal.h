@@ -35,4 +35,24 @@ BUSTER_F_DECL IrValidationError ir_test_validate_va_instruction_operation(IrProg
 BUSTER_F_DECL IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* program, IrModule* module);
 // ir_inline_module with `fault` planted in every spliced caller.
 BUSTER_F_DECL IrValidationResult ir_test_inline_module(IrProgram* program, IrModule* module, IrInlineSpliceFault fault);
+// One-shot required pricing and unchanged optional pricing for planned counts.
+typedef struct IrInlineTableCounts IrInlineTableCounts;
+struct IrInlineTableCounts
+{
+    u64 blocks;
+    u64 instructions;
+    u64 values;
+    u64 extras;
+};
+typedef struct IrInlineTableCharge IrInlineTableCharge;
+struct IrInlineTableCharge
+{
+    u64 required_bytes;
+    u64 required_work;
+    u64 optional_bytes;
+    u64 optional_work;
+};
+BUSTER_F_DECL IrInlineTableCharge ir_test_inline_table_charge(IrFunction const* caller, IrInlineTableCounts before,
+                                                            IrInlineTableCounts after);
+BUSTER_F_DECL void ir_test_inline_reserve_tables(Arena* arena, IrFunction* caller, IrInlineTableCounts counts);
 #endif

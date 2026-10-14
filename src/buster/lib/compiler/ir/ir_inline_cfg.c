@@ -256,12 +256,20 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* calle
 BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_cost(u32 initial_count, u32 initial_capacity,
                                                         u64 final_count, u32 initial_slots,
                                                         u64 element_size, u32 allocation_count,
-                                                        u64 alignment_padding)
+                                                        u64 alignment_padding, bool exact_reserve)
 {
     u64 cost = 0;
     u64 capacity = initial_capacity;
     bool valid = final_count <= UINT32_MAX && capacity >= initial_count;
-    while (valid && capacity < final_count)
+    if (exact_reserve)
+    {
+        if (valid && capacity < final_count)
+        {
+            valid = !element_size || final_count <= (UINT64_MAX - alignment_padding) / element_size;
+            if (valid) cost = final_count * element_size + alignment_padding;
+        }
+    }
+    while (!exact_reserve && valid && capacity < final_count)
     {
         u64 next = capacity ? capacity * 2u : initial_slots;
         if (next <= capacity || next > UINT32_MAX || (element_size && next > UINT64_MAX / element_size))
@@ -306,11 +314,21 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_steps(u32 initial_count, u32 
     return valid ? steps : UINT64_MAX;
 }
 
+// Required batches reserve once. Count the existing rows each table copies and
+// the complete source-range array it clears, without geometric append growth.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_reserve_work(u32 initial_count, u32 initial_capacity,
+                                                         u64 final_count, u32 copied_tables, bool clear_rows)
+{
+    bool valid = final_count <= UINT32_MAX && initial_capacity >= initial_count;
+    u64 work = final_count > initial_capacity ? (u64)initial_count * copied_tables + (clear_rows ? final_count : 0u) : 0u;
+    return valid ? work : UINT64_MAX;
+}
+
 BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_work(IrFunction const* caller,
                                                         u64 blocks_before, u64 blocks_after,
                                                         u64 instructions_before, u64 instructions_after,
                                                         u64 values_before, u64 values_after,
-                                                        u64 extras_before, u64 extras_after)
+                                                        u64 extras_before, u64 extras_after, bool exact_reserve)
 {
     u64 work = 0;
     bool valid = caller && blocks_before <= blocks_after && instructions_before <= instructions_after &&
@@ -324,7 +342,24 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_work(IrFunction const* caller
             before_steps_ + after_steps_ > (UINT64_MAX - work) / 2u) valid = false; \
         else work += (before_steps_ + after_steps_) * 2u; \
     } while (0)
-    if (valid)
+    if (valid && exact_reserve)
+    {
+#define IR_INLINE_CFG_RESERVE_WORK(initial_count, initial_capacity, before_count, after_count, copied_tables, clear_rows) \
+    do \
+    { \
+        u64 before_ = ir_inline_cfg_table_reserve_work((initial_count), (initial_capacity), (before_count), (copied_tables), (clear_rows)); \
+        u64 after_ = ir_inline_cfg_table_reserve_work((initial_count), (initial_capacity), (after_count), (copied_tables), (clear_rows)); \
+        if (before_ == UINT64_MAX || after_ == UINT64_MAX || after_ < before_ || after_ - before_ > UINT64_MAX - work) valid = false; \
+        else work += after_ - before_; \
+    } while (0)
+        IR_INLINE_CFG_RESERVE_WORK(caller->block_count, caller->block_capacity, blocks_before, blocks_after, 1u, false);
+        IR_INLINE_CFG_RESERVE_WORK(caller->instruction_count, caller->instruction_capacity,
+                                  instructions_before, instructions_after, caller->instruction_canonical_sources ? 2u : 1u, true);
+        IR_INLINE_CFG_RESERVE_WORK(caller->value_count, caller->value_capacity, values_before, values_after, 1u, false);
+        IR_INLINE_CFG_RESERVE_WORK(caller->extra_count, caller->extra_capacity, extras_before, extras_after, 2u, false);
+#undef IR_INLINE_CFG_RESERVE_WORK
+    }
+    else if (valid)
     {
         IR_INLINE_CFG_GROWTH_WORK(caller->block_count, caller->block_capacity, blocks_before, blocks_after, 8u);
         IR_INLINE_CFG_GROWTH_WORK(caller->instruction_count, caller->instruction_capacity,
@@ -340,7 +375,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
                                                          u64 blocks_before, u64 blocks_after,
                                                          u64 instructions_before, u64 instructions_after,
                                                          u64 values_before, u64 values_after,
-                                                         u64 extras_before, u64 extras_after)
+                                                         u64 extras_before, u64 extras_after, bool exact_reserve)
 {
     u64 cost = 0;
     bool valid = caller && blocks_before <= blocks_after && instructions_before <= instructions_after &&
@@ -349,10 +384,10 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
     {
         u64 before = ir_inline_cfg_table_growth_cost(caller->block_count, caller->block_capacity, blocks_before,
                                                      8u, sizeof(IrBlock), 1u,
-                                                     BUSTER_ALIGN_OF(IrBlock) - 1u);
+                                                     BUSTER_ALIGN_OF(IrBlock) - 1u, exact_reserve);
         u64 after = ir_inline_cfg_table_growth_cost(caller->block_count, caller->block_capacity, blocks_after,
                                                     8u, sizeof(IrBlock), 1u,
-                                                    BUSTER_ALIGN_OF(IrBlock) - 1u);
+                                                    BUSTER_ALIGN_OF(IrBlock) - 1u, exact_reserve);
         valid = before != UINT64_MAX && after >= before;
         if (valid) cost = after - before;
     }
@@ -362,12 +397,12 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
                                                      instructions_before, 16u,
                                                      sizeof(IrInstruction) + sizeof(IrSourceRange), 2u,
                                                      (BUSTER_ALIGN_OF(IrInstruction) - 1u) +
-                                                         (BUSTER_ALIGN_OF(IrSourceRange) - 1u));
+                                                         (BUSTER_ALIGN_OF(IrSourceRange) - 1u), exact_reserve);
         u64 after = ir_inline_cfg_table_growth_cost(caller->instruction_count, caller->instruction_capacity,
                                                     instructions_after, 16u,
                                                     sizeof(IrInstruction) + sizeof(IrSourceRange), 2u,
                                                     (BUSTER_ALIGN_OF(IrInstruction) - 1u) +
-                                                        (BUSTER_ALIGN_OF(IrSourceRange) - 1u));
+                                                        (BUSTER_ALIGN_OF(IrSourceRange) - 1u), exact_reserve);
         valid = before != UINT64_MAX && after >= before &&
                 after - before <= UINT64_MAX - cost;
         if (valid) cost += after - before;
@@ -376,10 +411,10 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
     {
         u64 before = ir_inline_cfg_table_growth_cost(caller->value_count, caller->value_capacity, values_before,
                                                      16u, sizeof(IrValue), 1u,
-                                                     BUSTER_ALIGN_OF(IrValue) - 1u);
+                                                     BUSTER_ALIGN_OF(IrValue) - 1u, exact_reserve);
         u64 after = ir_inline_cfg_table_growth_cost(caller->value_count, caller->value_capacity, values_after,
                                                     16u, sizeof(IrValue), 1u,
-                                                    BUSTER_ALIGN_OF(IrValue) - 1u);
+                                                    BUSTER_ALIGN_OF(IrValue) - 1u, exact_reserve);
         valid = before != UINT64_MAX && after >= before &&
                 after - before <= UINT64_MAX - cost;
         if (valid) cost += after - before;
@@ -389,11 +424,11 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
         u64 before = ir_inline_cfg_table_growth_cost(caller->extra_count, caller->extra_capacity, extras_before,
                                                      8u, sizeof(IrInstructionId) + sizeof(IrInstructionExtra), 2u,
                                                      (BUSTER_ALIGN_OF(IrInstructionId) - 1u) +
-                                                         (BUSTER_ALIGN_OF(IrInstructionExtra) - 1u));
+                                                         (BUSTER_ALIGN_OF(IrInstructionExtra) - 1u), exact_reserve);
         u64 after = ir_inline_cfg_table_growth_cost(caller->extra_count, caller->extra_capacity, extras_after,
                                                     8u, sizeof(IrInstructionId) + sizeof(IrInstructionExtra), 2u,
                                                     (BUSTER_ALIGN_OF(IrInstructionId) - 1u) +
-                                                        (BUSTER_ALIGN_OF(IrInstructionExtra) - 1u));
+                                                        (BUSTER_ALIGN_OF(IrInstructionExtra) - 1u), exact_reserve);
         valid = before != UINT64_MAX && after >= before &&
                 after - before <= UINT64_MAX - cost;
         if (valid) cost += after - before;
