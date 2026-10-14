@@ -7,21 +7,21 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 46 | 46 | [series](series-20369cc20c6b6e85.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 5 | 26 | [series](series-11db6938aa621425.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 6 | 27 | [series](series-11db6938aa621425.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 2 | 6 | [series](series-3849565cbf5b0152.md) |
 | Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 11 | [series](series-b56548f49e022eb1.md) |
 | Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 8 | 8 | [series](series-dfba54a0e1caaff7.md) |
-| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 18 | [series](series-e460ad260f8a45e8.md) |
-| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 18 | [series](series-f666f9001ca74394.md) |
-| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 12 | 12 | [series](series-95301a08b54ea662.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 19 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 19 | [series](series-f666f9001ca74394.md) |
+| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 13 | 13 | [series](series-95301a08b54ea662.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 11 | 11 | [series](series-0571bc9f9540bac0.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 8 | 8 | [series](series-f4bbd04e90bff00b.md) |
 | Reconcile the exact completed benchmark attempt / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 8 | 8 | [series](series-eef247785785a0f6.md) |
-| report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 12 | [series](series-b8f3ac1473919e5b.md) |
+| report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 13 | [series](series-b8f3ac1473919e5b.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 2 | 2 | [series](series-03d5f14517fcd2f6.md) |
-| recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 18 | [series](series-e37dd0b70ac27893.md) |
+| recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 19 | [series](series-e37dd0b70ac27893.md) |
 | Reconcile the exact completed benchmark attempt / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; Platinum 8370C CPU @ 2.80GHz | workflow&#95;run / main | 1 | 1 | [series](series-93d20f3014e4e3e0.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 1 | 5 | [series](series-b69d34171ad241e3.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 2 | 6 | [series](series-b69d34171ad241e3.md) |
 | Authorize the main commit comparison / non-matrix | Ubuntu 24.04.5 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 1 | 1 | [series](series-11621c3eec22ad27.md) |
 | authorize /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-c156c9f00b20eb15.md) |
 | bench /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 7 | [series](series-7ab221e1da782c9b.md) |
