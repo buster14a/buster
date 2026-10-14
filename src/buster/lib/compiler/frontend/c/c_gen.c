@@ -30584,6 +30584,26 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_offsetof(CIntegerIrBuilder* builder, C
     return status;
 }
 
+// Preserve the unevaluated operand admission of the original layout query.
+// The retained outer group after the keyword belongs to its operand syntax;
+// an additional source group remains a distinct admitted legacy context.
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_admit_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    bool valid = ast && node < ast->node_count;
+    CAstParentheses groups = valid ? c_ast_parentheses(ast, node) : (CAstParentheses){0};
+    u32 extra_groups = groups.count;
+    if (extra_groups && (ast->parentheses[groups.first + extra_groups - 1].flags & C_AST_PARENTHESIS_AFTER_IDENTIFIER)) extra_groups -= 1;
+    bool refused = valid && ast->kinds[node] == C_AST_ADDRESS && !extra_groups &&
+                   ast->kinds[c_ast_child_at(ast, node, 0)] == C_AST_COMMA;
+    if (refused && !builder->failure_message.length)
+    {
+        builder->failure_message = S8("cannot take the address of a comma expression");
+        builder->failure_token_index = ast->tokens[node];
+    }
+    return !refused;
+}
+
 // A bare VLA array parameter denotes its adjusted pointer object for
 // sizeof. Its strict source query still runs first, preserving any constructor
 // effects before an absent outer bound declines that source projection.
@@ -30610,8 +30630,9 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_sizeof(CIntegerIrBuilder* builder, CIr
     CToken token = builder->preprocess.tokens[index];
     bool is_sizeof = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE;
     bool type_name = ast->kinds[operand] == C_AST_TYPE_NAME;
-    CIrCoreStatus status = C_IR_CORE_NEXT;
-    bool decided = false;
+    bool admitted = type_name || c_ir_sizeof_operand_admit_node(builder, operand);
+    CIrCoreStatus status = admitted ? C_IR_CORE_NEXT : C_IR_CORE_FAILED;
+    bool decided = !admitted;
     u32 local_node = operand;
     u32 suffixes = 0;
     bool walking = is_sizeof && !type_name;
@@ -30625,7 +30646,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_sizeof(CIntegerIrBuilder* builder, CIr
         }
         else walking = false;
     }
-    if (is_sizeof && !type_name && ast->kinds[local_node] == C_AST_IDENTIFIER && (facts->flags[local_node] & C_AST_FACT_BOUND))
+    if (!decided && is_sizeof && !type_name && ast->kinds[local_node] == C_AST_IDENTIFIER && (facts->flags[local_node] & C_AST_FACT_BOUND))
     {
         CEntityId entity = {.value = facts->payloads[local_node]};
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
@@ -47517,7 +47538,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             CType const* semantic_operand = (operand_flags & C_AST_FACT_TYPED) ? c_ir_retained_type(builder,
                 (CIrRetainedTypeReference){.index = facts->types[operand], .recipe = (operand_flags & C_AST_FACT_RECIPE) != 0}) : 0;
             bool storage_half = semantic_operand && semantic_operand->kind == C_TYPE_FP16_STORAGE;
-            if (expression && (ast->kinds[operand] == C_AST_CALL || storage_half) && fact.status == C_AST_CONSTANT_INTEGER)
+            if (expression && !c_ir_sizeof_operand_admit_node(builder, operand))
+            {
+                admitted = false;
+            }
+            else if (expression && (ast->kinds[operand] == C_AST_CALL || storage_half) && fact.status == C_AST_CONSTANT_INTEGER)
             {
                 // Sizing a call reads its finished result layout without
                 // constructing or evaluating its callee and arguments. A

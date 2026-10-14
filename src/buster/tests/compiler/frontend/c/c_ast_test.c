@@ -7722,6 +7722,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_budget_nodes(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_operand_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool refused;
+    } const cases[] = {
+        {S8("int test(void) { int a[3]; return sizeof &(0,a); }"), true},
+        {S8("int test(void) { int a[3]; return sizeof (&(0,a)); }"), true},
+        {S8("int test(void) { int a[3]; return sizeof ((&(0,a))); }"), false},
+        {S8("int test(void) { int a[3]; return sizeof((__extension__ &(0,a))); }"), false},
+        {S8("int test(void) { int a[3]; return sizeof((int*)&(0,a)); }"), false},
+        {S8("int test(void) { int a[3]; return sizeof(sizeof &(0,a)); }"), false},
+        {S8("int test(void) { int a[3]; return sizeof &(__extension__ (0,a)); }"), false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, cases[index].source, C_PREPROCESS_DIALECT_GNU17);
+            CParseResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-admission.c"), preprocess,
+                analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool admitted = lowered.diagnostic_count == 0 && lowered.program && lowered.canonical_ir_certified;
+            bool refused = lowered.diagnostic_count == 1 &&
+                string_first_sequence(lowered.diagnostics[0].message, S8("cannot take the address of a comma expression")) != BUSTER_STRING_NO_MATCH;
+            BUSTER_TEST_RAW(arguments, cases[index].refused ? refused : admitted,
+                string_format(temporary.arena, S8("sizeof admission case={u32} form={u32}: {S8}"), index, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical program")));
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9059,6 +9097,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_operand_admission);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_plan_object_contract);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
