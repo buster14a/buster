@@ -438,7 +438,7 @@ class CompilerSamplingInventoryTests(unittest.TestCase):
                 check = self.checks[-1]
                 summary = check["output"]["summary"]
                 if case == "missing": summary = ""
-                elif case == "duplicate": summary *= 2
+                elif case == "duplicate": summary = summary + "\n" + summary
                 elif case == "foreign": summary = summary.replace("buster14a/buster", "foreign/repo")
                 elif case == "disagree": summary = summary.replace("Workflow run 38566978972", "Workflow run 1")
                 else: summary = summary.replace("attempt 1", "attempt 2").replace("/attempts/1", "/attempts/2")
