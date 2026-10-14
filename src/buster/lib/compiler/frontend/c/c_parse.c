@@ -195,6 +195,9 @@
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_assignment_conversion_classify,      assignment-conversion admission and the
 //   c_parse_pointer_sign_warning                 -Wpointer-sign warning class (#4051)
+//   c_parse_publish_declaration_facts,           finalized declaration owners
+//   c_parse_symbol_bindings_begin                and sparse symbol properties
+//   c_parse_declaration_binding_fact             readonly lowering property rows
 //   c_parse_region_facts,                        the retained facts' completion
 //   c_parse_region_facts_sound                   run at a typed region's end
 //   c_parse_ast, c_parse_ast_reference           ordinary syntax and historical control
@@ -213,6 +216,23 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/arena_internal.h>
 #endif
+
+typedef struct CParseSymbolBindings CParseSymbolBindings;
+struct CParseSymbolBindings
+{
+    Arena* arena;
+    CDeclarationBinding* rows;
+    u32 count;
+    u32 capacity;
+    u64 copy_bytes;
+    u64 retained_start;
+    bool failed;
+};
+
+BUSTER_C_INTERNAL void c_parse_symbol_bindings_begin(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess);
+BUSTER_C_INTERNAL void c_parse_symbol_binding_local(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess,
+                                                     u32 entity, bool first);
+BUSTER_C_INTERNAL void c_parse_symbol_bindings_finish(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_chain_work;
@@ -9909,11 +9929,18 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
 // Bind declaration-name nodes from the semantic entities already published.
 // Compatible declarations can share an entity; later local entities at the
 // same anchor intentionally replace an earlier function-linkage row, as the
-// lowering entity index does. This publishes no type, scope or diagnostic.
+// lowering entity index does. Finished symbol properties are published here
+// before constraints, so alias validation and IR share the same answers.
 BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
 {
     CAstFacts* facts = machine->ast_facts;
     CAst const* ast = machine->syntax_tree;
+    CParseSymbolBindings bindings = {.arena = machine->scratch_arena, .retained_start = result->arena->position};
+    TemporalArena temporary = arena_begin_temporal(machine->scratch_arena);
+    if (ast && !result->declaration_bindings_complete)
+    {
+        c_parse_symbol_bindings_begin(&bindings, result, preprocess);
+    }
     if (facts && ast && facts->node_count == ast->node_count)
     {
         for (u32 entity = 0; entity < result->entity_count; entity += 1)
@@ -9960,6 +9987,7 @@ BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* mach
                         {
                             result->entities[entity].init_declarator_plus_one = init + 1;
                             result->entities[entity].declaration_node_plus_one = node + 1;
+                            c_parse_symbol_binding_local(&bindings, result, preprocess, entity, item + 1 == init_count);
                         }
                     }
                     init -= ast->extents[init];
@@ -10040,6 +10068,11 @@ BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* mach
             external -= ast->extents[external];
         }
     }
+    if (ast && !result->declaration_bindings_complete)
+    {
+        c_parse_symbol_bindings_finish(&bindings, result, preprocess);
+    }
+    scratch_end(temporary);
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_constant_type_name(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
@@ -12486,6 +12519,857 @@ BUSTER_C_INTERNAL bool c_parse_result_reserve_array_bounds(CParseResult* result,
     result->array_bounds = bounds;
     result->array_bound_capacity = capacity;
     return true;
+}
+
+
+// Source readers retained by semantic analysis. Canonical lowering consumes
+// c_parse_declaration_binding_fact instead of reopening these ranges.
+BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
+
+enum
+{
+    C_VISIBILITY_ARGUMENT_CAPACITY = 16,
+};
+
+typedef enum CIrAttributeMarker
+{
+    C_IR_ATTRIBUTE_MARKER_NORETURN,
+    C_IR_ATTRIBUTE_MARKER_GNU_INLINE,
+    // GNU `error("message")`: a direct call to the function that survives to
+    // the canonical IR is diagnosed with the message. See
+    // c_ir_check_error_attribute_calls.
+    C_IR_ATTRIBUTE_MARKER_ERROR,
+    C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE,
+    C_IR_ATTRIBUTE_MARKER_NOINLINE,
+} CIrAttributeMarker;
+
+#define C_PUNCTUATOR_SET_DECLARATOR_END                                                                                                       \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SEMICOLON) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_ASSIGN) |                \
+     C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS))
+
+BUSTER_C_INTERNAL u64 c_declaration_well_known_set(CPreprocessResult preprocess, CDeclaration declaration, u64 interesting)
+{
+    u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
+    u64 result = 0;
+    u32 group_depth = 0;
+    for (u32 index = declaration.token_start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            group_depth += c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN) ? 1 : 0;
+            group_depth -= group_depth && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE) ? 1 : 0;
+        }
+        else if (!group_depth)
+        {
+            if (token.symbol)
+            {
+                result |= token.symbol < 64 ? interesting & (1ull << token.symbol) : 0;
+            }
+            else
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+                for (u64 remaining = interesting; remaining; remaining &= remaining - 1)
+                {
+                    if (string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]))
+                    {
+                        result |= remaining & (0 - remaining);
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL u32 c_declaration_initializer_priority(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    u32 result = IR_INITIALIZER_PRIORITY_NONE;
+    u32 value = 0;
+    if (index + 3 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER && c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+        c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), &value) && value <= UINT16_MAX)
+    {
+        result = value;
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL u8 c_declaration_visibility_argument(Arena* arena, CPreprocessResult preprocess, u32 item, u32 end)
+{
+    u8 result = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    u32 close = item + 2;
+    while (close < end && preprocess.tokens[close].kind == C_TOKEN_STRING_LITERAL)
+    {
+        close += 1;
+    }
+    if (item + 1 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) && close > item + 2 && close < end &&
+        c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u64 length = 0;
+        u8* bytes = arena_allocate(arena, u8, C_VISIBILITY_ARGUMENT_CAPACITY);
+        bool decodable = true;
+        for (u32 literal = item + 2; literal < close && decodable; literal += 1)
+        {
+            ByteSlice decoded = {0};
+            decodable = c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[literal]), '"', &decoded) &&
+                        length + decoded.length <= C_VISIBILITY_ARGUMENT_CAPACITY;
+            for (u64 byte = 0; decodable && byte < decoded.length; byte += 1)
+            {
+                bytes[length + byte] = decoded.pointer[byte];
+            }
+            length += decodable ? decoded.length : 0;
+        }
+        String8 spelling = {.pointer = (char8*)bytes, .length = length};
+        result = !decodable                                       ? C_SYMBOL_VISIBILITY_UNSPECIFIED
+                 : string_equal(spelling, S8("default"))          ? C_SYMBOL_VISIBILITY_DEFAULT
+                 : string_equal(spelling, S8("hidden"))           ? C_SYMBOL_VISIBILITY_HIDDEN
+                 : string_equal(spelling, S8("internal"))         ? C_SYMBOL_VISIBILITY_INTERNAL
+                 : string_equal(spelling, S8("protected"))        ? C_SYMBOL_VISIBILITY_PROTECTED
+                                                                  : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, CDeclarationBinding* binding)
+{
+    u32 group_depth = 0;
+    // Whether the previous token is the `}` that closed a struct, union or
+    // enum body, possibly followed by attribute lists since: such an attribute
+    // belongs to the type, as GCC and Clang read it, not to the declarators.
+    bool after_tag_body = false;
+    for (u32 index = start; index + 2 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            // An attribute cannot appear after the `=` that opens an
+            // initializer, and an initializer is where nearly all of a
+            // file-scope declaration's tokens are -- one generated table is
+            // thousands of them. Stopping there keeps this pass proportional
+            // to declarators rather than to static data. The depth is what
+            // separates that `=` from an enumerator's inside a braced
+            // specifier, which attributes may still follow.
+            group_depth += c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN) ? 1 : 0;
+            group_depth -= group_depth && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE) ? 1 : 0;
+            if (!group_depth && token.punctuator == C_PUNCTUATOR_ASSIGN)
+            {
+                break;
+            }
+            after_tag_body = !group_depth && token.punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+            continue;
+        }
+        if (!c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            after_tag_body = false;
+            continue;
+        }
+        // Depth two is the attribute list itself; anything deeper belongs to
+        // one attribute's arguments and holds no attribute names.
+        u32 depth = 2;
+        u32 item = index + 3;
+        while (item < end && depth)
+        {
+            CToken inner = preprocess.tokens[item];
+            if (c_token_is_punctuator(&inner, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&inner, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                depth -= 1;
+            }
+            else if (depth == 2 && inner.kind == C_TOKEN_IDENTIFIER)
+            {
+                binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                                              C_ATTRIBUTE_WORDS_WEAK);
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner, C_ATTRIBUTE_WORDS_VISIBILITY) && !group_depth && !after_tag_body &&
+                    !(index > start && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                                                                 C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))))
+                {
+                    u8 requested = c_declaration_visibility_argument(arena, preprocess, item, end);
+                    binding->visibility_invalid |= requested == C_SYMBOL_VISIBILITY_UNSPECIFIED;
+                    binding->visibility = binding->visibility ? binding->visibility : requested;
+                }
+                binding->is_returns_twice |= c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                                                       C_ATTRIBUTE_WORDS_RETURNS_TWICE);
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                              C_ATTRIBUTE_WORDS_CONSTRUCTOR))
+                {
+                    binding->is_constructor = true;
+                    binding->constructor_priority = c_declaration_initializer_priority(preprocess, item, end);
+                }
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                              C_ATTRIBUTE_WORDS_DESTRUCTOR))
+                {
+                    binding->is_destructor = true;
+                    binding->destructor_priority = c_declaration_initializer_priority(preprocess, item, end);
+                }
+                ByteSlice decoded = {0};
+                String8 attribute_name = c_token_spelling(preprocess.spelling_base, inner);
+                bool is_weakref_word = string_equal(attribute_name, S8("weakref")) || string_equal(attribute_name, S8("__weakref__"));
+                bool is_ifunc_word = string_equal(attribute_name, S8("ifunc")) || string_equal(attribute_name, S8("__ifunc__"));
+                binding->is_ifunc |= is_ifunc_word;
+                if (is_ifunc_word && item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                    c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                    c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                {
+                    binding->ifunc_resolver = (String8){
+                        .pointer = (char8*)decoded.pointer,
+                        .length = decoded.length,
+                    };
+                }
+                if (is_weakref_word)
+                {
+                    binding->is_weakref = true;
+                    if (item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                        preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                        c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                        c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                    {
+                        binding->weakref_target = (String8){
+                            .pointer = (char8*)decoded.pointer,
+                            .length = decoded.length,
+                        };
+                    }
+                }
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                              C_ATTRIBUTE_WORDS_ALIAS) &&
+                    item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                    c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                    c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                {
+                    binding->alias_target = (String8){
+                        .pointer = (char8*)decoded.pointer,
+                        .length = decoded.length,
+                    };
+                }
+            }
+            item += 1;
+        }
+        index = item - 1;
+    }
+}
+
+BUSTER_C_SHARED CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
+{
+    CDeclarationBinding result = {0};
+    u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
+    end = end < preprocess.token_count ? end : (u32)preprocess.token_count;
+    if (declaration.declarator_count)
+    {
+        end = c_ir_declarator_list_specifier_end(preprocess, declaration.token_start, end);
+    }
+    c_declaration_binding_scan(arena, preprocess, declaration.token_start, end, &result);
+    if (declaration.declarator_count)
+    {
+        u32 declarator_end = declaration.declarator_start + declaration.declarator_count;
+        declarator_end = declarator_end < preprocess.token_count ? declarator_end : (u32)preprocess.token_count;
+        c_declaration_binding_scan(arena, preprocess, declaration.declarator_start, declarator_end, &result);
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL String8 c_declaration_section_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
+{
+    String8 result = {0};
+    u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
+    for (u32 index = declaration.token_start; !result.length && index + 3 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER ||
+            !c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(SECTION) | C_SYMBOL_WELL_KNOWN_BIT(SECTION_GNU)) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            continue;
+        }
+        ByteSlice decoded = {0};
+        if (c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), '"', &decoded) && decoded.length)
+        {
+            result = (String8){
+                .pointer = (char8*)decoded.pointer,
+                .length = decoded.length,
+            };
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL String8 c_declaration_link_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
+{
+    String8 result = declaration.name;
+    bool found = false;
+    u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
+    for (u32 index = declaration.token_start; !found && index + 3 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER ||
+            !c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            continue;
+        }
+        ByteSlice decoded = {0};
+        if (c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), '"', &decoded) && decoded.length)
+        {
+            result = (String8){
+                .pointer = (char8*)decoded.pointer,
+                .length = decoded.length,
+            };
+            found = true;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_noreturn_spelling(String8 spelling)
+{
+    return c_attribute_noreturn_word(spelling) || string_equal(spelling, S8("_Noreturn"));
+}
+
+BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttributeMarker marker)
+{
+    bool result = false;
+    switch (marker)
+    {
+        case C_IR_ATTRIBUTE_MARKER_NORETURN: result = c_ir_noreturn_spelling(spelling); break;
+        case C_IR_ATTRIBUTE_MARKER_GNU_INLINE: result = string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__")); break;
+        case C_IR_ATTRIBUTE_MARKER_ERROR: result = string_equal(spelling, S8("error")) || string_equal(spelling, S8("__error__")); break;
+        case C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE:
+            result = string_equal(spelling, S8("always_inline")) || string_equal(spelling, S8("__always_inline__"));
+            break;
+        case C_IR_ATTRIBUTE_MARKER_NOINLINE:
+            result = string_equal(spelling, S8("noinline")) || string_equal(spelling, S8("__noinline__"));
+            break;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_attribute_gnu_namespace_at(CPreprocessResult preprocess, u32 index)
+{
+    CToken const* tokens = preprocess.tokens;
+    String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER
+                        ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                        : (String8){0};
+    return index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+           c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+           (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+}
+
+BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end, bool bracketed)
+{
+    CToken const* tokens = preprocess.tokens;
+    bool named = false;
+    if (bracketed)
+    {
+        String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                                                                                    : (String8){0};
+        named = index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+                c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+                (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+    }
+    else
+    {
+        named = index > 0 && (c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                              c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COMMA));
+    }
+    return named && index + 2 < end && c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           tokens[index + 2].kind == C_TOKEN_STRING_LITERAL;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u32 start, u32 end, CIrAttributeMarker marker)
+{
+    u32 result = UINT32_MAX;
+    u32 index = start;
+    while (index < end && result == UINT32_MAX)
+    {
+        CToken token = preprocess.tokens[index];
+        u32 list_start = UINT32_MAX;
+        u32 list_end = UINT32_MAX;
+        bool bracketed = false;
+        // How many groups deep the list's own entries stand: one inside the
+        // inner '(' of `__attribute__((...))`, none for `__declspec(...)`
+        // and `[[...]]`. A token deeper than that is in an entry's
+        // balanced argument payload -- `tag(error("m"))` -- not an entry.
+        u32 entry_depth = 0;
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            if (marker == C_IR_ATTRIBUTE_MARKER_NORETURN && (string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__noreturn__"))))
+            {
+                result = index;
+            }
+            else if (index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                     (string_equal(spelling, S8("__attribute__")) || string_equal(spelling, S8("__attribute")) ||
+                      string_equal(spelling, S8("__declspec"))))
+            {
+                u32 depth = 0;
+                u32 scan = index + 1;
+                while (scan < end)
+                {
+                    if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        depth += 1;
+                    }
+                    else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                    {
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            break;
+                        }
+                    }
+                    scan += 1;
+                }
+                list_start = index + 2;
+                list_end = scan < end ? scan : end;
+                entry_depth = list_start < list_end && c_token_is_punctuator(&preprocess.tokens[list_start], C_PUNCTUATOR_LEFT_PARENTHESIS) ? 1 : 0;
+                index = list_end;
+            }
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) && index + 1 < end &&
+                 c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            // The list closes on the `]]` at bracket depth zero, the boundary
+            // the parser itself uses: `[[vendor::tag(a[b[c]]), gnu::error("m")]]`
+            // holds an earlier adjacent `]]` inside the tag's payload.
+            u32 after = end;
+            c_parse_c23_attribute_at(preprocess, index, end, &after);
+            bool closed = after >= index + 4 && after <= end && c_token_is_punctuator(&preprocess.tokens[after - 1], C_PUNCTUATOR_RIGHT_BRACKET) &&
+                          c_token_is_punctuator(&preprocess.tokens[after - 2], C_PUNCTUATOR_RIGHT_BRACKET);
+            list_start = index + 2;
+            list_end = closed ? after - 2 : end;
+            bracketed = true;
+            index = list_end;
+        }
+        u32 nesting = 0;
+        for (u32 marker_index = list_start; marker_index < list_end && result == UINT32_MAX; marker_index += 1)
+        {
+            CToken const* candidate = &preprocess.tokens[marker_index];
+            bool matches = candidate->kind == C_TOKEN_IDENTIFIER &&
+                           c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, *candidate), marker) &&
+                           nesting == entry_depth &&
+                           (!bracketed ||
+                            (marker == C_IR_ATTRIBUTE_MARKER_NORETURN
+                                 ? (marker_index < 3 ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 1], C_PUNCTUATOR_COLON) ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 2], C_PUNCTUATOR_COLON) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index))
+                                 : ((marker != C_IR_ATTRIBUTE_MARKER_ERROR && marker != C_IR_ATTRIBUTE_MARKER_GNU_INLINE &&
+                                     marker != C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE && marker != C_IR_ATTRIBUTE_MARKER_NOINLINE) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index)))) &&
+                           (marker != C_IR_ATTRIBUTE_MARKER_ERROR ||
+                            c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed));
+            result = matches ? marker_index : UINT32_MAX;
+            bool opens = c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACKET) ||
+                         c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACE);
+            bool closes = c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                          c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_BRACE);
+            nesting += opens ? 1 : 0;
+            nesting -= closes && nesting ? 1 : 0;
+        }
+        index += 1;
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_attribute_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end, CIrAttributeMarker marker)
+{
+    return c_ir_attribute_marker_find(preprocess, start, end, marker) != UINT32_MAX;
+}
+
+BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    return c_ir_attribute_marker_in_range(preprocess, start, end, C_IR_ATTRIBUTE_MARKER_NORETURN);
+}
+
+BUSTER_C_SHARED bool c_ir_declaration_has_gnu_inline_semantics(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
+    u32 end = declaration.body_token_count ? declaration.body_start : declaration.token_start + declaration.token_count;
+    end = end < limit ? end : limit;
+
+    return preprocess.dialect == C_PREPROCESS_DIALECT_GNU89 || preprocess.dialect == C_PREPROCESS_DIALECT_C89 ||
+           c_ir_attribute_marker_in_range(preprocess, declaration.token_start, end, C_IR_ATTRIBUTE_MARKER_GNU_INLINE);
+}
+
+BUSTER_C_SHARED bool c_ir_declaration_is_gnu_inline_only(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    u64 inline_words = C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT);
+    u64 specifiers = declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition
+                         ? c_declaration_well_known_set(preprocess, declaration, inline_words | C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC))
+                         : 0;
+
+    return (specifiers & inline_words) && (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) && !(specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) &&
+           c_ir_declaration_has_gnu_inline_semantics(preprocess, declaration);
+}
+
+BUSTER_C_INTERNAL u32 c_ir_skip_balanced_group(CPreprocessResult preprocess, u32 index, u32 end, CPunctuator open, CPunctuator close)
+{
+    if (index < end && c_token_is_punctuator(&preprocess.tokens[index], open))
+    {
+        u32 depth = 0;
+        do
+        {
+            depth += c_token_is_punctuator(&preprocess.tokens[index], open) ? 1 : 0;
+            depth -= c_token_is_punctuator(&preprocess.tokens[index], close) ? 1 : 0;
+            index += 1;
+        } while (index < end && depth);
+    }
+
+    return index;
+}
+
+BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 index = start;
+    bool declarator_reached = false;
+    while (index < end && !declarator_reached)
+    {
+        u32 after_attributes = c_parse_skip_attributes(preprocess, index, end);
+        if (after_attributes != index)
+        {
+            index = after_attributes;
+        }
+        else if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+        {
+            u32 after_name = c_ir_skip_balanced_group(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            after_name = c_parse_skip_attributes(preprocess, after_name, end);
+            declarator_reached = after_name < end && c_punctuator_in_set(preprocess.tokens[after_name].punctuator, C_PUNCTUATOR_SET_DECLARATOR_END);
+            index = declarator_reached ? index : after_name;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            index = c_ir_skip_balanced_group(preprocess, index, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        }
+        else
+        {
+            declarator_reached = true;
+        }
+    }
+
+    return index;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_attribute_marker_outside_parameters(CPreprocessResult preprocess, u32 start, u32 end,
+                                                                u32 parameter_open, u32 parameter_after, CIrAttributeMarker marker)
+{
+    u32 result = c_ir_attribute_marker_find(preprocess, start, BUSTER_MIN(end, parameter_open), marker);
+    if (result == UINT32_MAX && parameter_after < end)
+    {
+        result = c_ir_attribute_marker_find(preprocess, BUSTER_MAX(start, parameter_after), end, marker);
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult preprocess, CDeclaration declaration, CIrAttributeMarker marker)
+{
+    u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
+    u32 body = declaration.body_token_count ? declaration.body_start : UINT32_MAX;
+    u32 specifier_end = declaration.token_start + declaration.token_count;
+    u32 declarator_start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+    u32 declarator_end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count : specifier_end;
+    specifier_end = specifier_end < limit ? specifier_end : limit;
+    declarator_end = declarator_end < limit ? declarator_end : limit;
+    specifier_end = body < specifier_end ? body : specifier_end;
+    declarator_end = body < declarator_end ? body : declarator_end;
+    if (declaration.declarator_count)
+    {
+        specifier_end = c_ir_declarator_list_specifier_end(preprocess, declaration.token_start, specifier_end);
+    }
+
+    u32 result = c_ir_attribute_marker_find(preprocess, declaration.token_start, specifier_end, marker);
+    if (result == UINT32_MAX && declaration.declarator_count != 0)
+    {
+        result = c_ir_attribute_marker_find(preprocess, declaration.declarator_start, declarator_end, marker);
+    }
+    // The usual negative answer needs no parameter walk. Only a retained
+    // marker can belong to a callback rather than the enclosing declaration.
+    if (result != UINT32_MAX && declaration.kind == C_DECLARATION_FUNCTION && declaration.name.length)
+    {
+        u32 parameter_open = limit;
+        u32 parameter_after = limit;
+        u32 name_token = UINT32_MAX;
+        CParserDeclaration* syntax = declaration.syntax_declaration;
+        if (syntax)
+        {
+            name_token = syntax->function_name_token < limit ? syntax->function_name_token : syntax->name_token;
+        }
+        if (name_token < declarator_start || name_token >= declarator_end ||
+            !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_token]), declaration.name))
+        {
+            name_token = UINT32_MAX;
+        }
+        if (name_token == UINT32_MAX)
+        {
+            for (u32 index = declarator_start; index < declarator_end && name_token == UINT32_MAX; index += 1)
+            {
+                CToken token = preprocess.tokens[index];
+                if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), declaration.name))
+                {
+                    name_token = index;
+                }
+            }
+        }
+        u32 after_name = name_token < limit ? c_parse_skip_attributes(preprocess, name_token + 1, declarator_end) : declarator_end;
+        while (after_name < declarator_end && c_token_is_punctuator(&preprocess.tokens[after_name], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            after_name = c_parse_skip_attributes(preprocess, after_name + 1, declarator_end);
+        }
+        if (after_name < declarator_end && c_token_is_punctuator(&preprocess.tokens[after_name], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parameter_open = after_name;
+            parameter_after = c_ir_skip_balanced_group(preprocess, after_name, declarator_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
+        if (result >= parameter_open && result < parameter_after)
+        {
+            // Parameter declarations own their callbacks' attributes. A
+            // noreturn callback does not terminate its returning setter.
+            result = c_ir_attribute_marker_outside_parameters(preprocess, declaration.token_start, specifier_end, parameter_open, parameter_after, marker);
+            if (result == UINT32_MAX && declaration.declarator_count != 0)
+            {
+                result = c_ir_attribute_marker_outside_parameters(preprocess, declaration.declarator_start, declarator_end, parameter_open, parameter_after, marker);
+            }
+        }
+    }
+
+    return result;
+}
+
+BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NORETURN) != UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_always_inline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE)
+               : UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_noinline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NOINLINE)
+               : UINT32_MAX;
+}
+
+BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out)
+{
+    // A declarator split out of a comma-separated list owns only its own
+    // segment; scanning the whole declaration would hand it the initializer of
+    // an earlier declarator.
+    u32 start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+    u32 end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count
+                                           : declaration.token_start + declaration.token_count;
+    bool result = false;
+    u32 depth = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            depth += 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            if (depth)
+            {
+                depth -= 1;
+            }
+            continue;
+        }
+        if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+        {
+            u32 initializer_start = index + 1;
+            u32 initializer_end = end;
+            if (initializer_end > initializer_start && c_token_is_punctuator(&preprocess.tokens[initializer_end - 1], C_PUNCTUATOR_SEMICOLON))
+            {
+                initializer_end -= 1;
+            }
+            result = initializer_start < initializer_end;
+            if (result)
+            {
+                *start_out = initializer_start;
+                *end_out = initializer_end;
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CDeclarationBinding const c_parse_empty_binding;
+
+CDeclarationBinding const* c_parse_declaration_binding_fact(CParseResult const* result, u32 row_plus_one)
+{
+    return row_plus_one && row_plus_one <= result->declaration_binding_count
+               ? result->declaration_bindings + row_plus_one - 1 : &c_parse_empty_binding;
+}
+
+BUSTER_C_INTERNAL CDeclarationBinding c_parse_binding_for_declaration(Arena* arena, CParseResult const* result,
+                                                                       CPreprocessResult preprocess, CDeclaration declaration)
+{
+    // The explicit token-reference model retains its independent source read.
+    return result->declaration_bindings_complete ? *c_parse_declaration_binding_fact(result, declaration.binding_plus_one)
+                                                 : c_declaration_binding(arena, preprocess, declaration);
+}
+
+BUSTER_C_INTERNAL String8 c_parse_error_attribute_message(Arena* arena, CPreprocessResult preprocess, u32 marker)
+{
+    u64 length = 0;
+    u32 end = marker + 2;
+    while (end < preprocess.token_count && preprocess.tokens[end].kind == C_TOKEN_STRING_LITERAL)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[end]);
+        u64 open = 0;
+        while (open < spelling.length && spelling.pointer[open] != '"') open += 1;
+        u64 close = spelling.length && spelling.pointer[spelling.length - 1] == '"' ? spelling.length - 1 : spelling.length;
+        length += open < close ? close - open - 1 : 0;
+        end += 1;
+    }
+    String8 message = {.pointer = arena_allocate(arena, char8, length), .length = length};
+    u64 position = 0;
+    for (u32 index = marker + 2; index < end; index += 1)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+        u64 open = 0;
+        while (open < spelling.length && spelling.pointer[open] != '"') open += 1;
+        u64 close = spelling.length && spelling.pointer[spelling.length - 1] == '"' ? spelling.length - 1 : spelling.length;
+        u64 count = open < close ? close - open - 1 : 0;
+        if (count) memcpy(message.pointer + position, spelling.pointer + open + 1, count);
+        position += count;
+    }
+    return message;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_symbol_binding_append(CParseSymbolBindings* bindings, CDeclarationBinding value)
+{
+    u32 row_plus_one = 0;
+    bool present = value.alias_target.length || value.is_weak || value.is_constructor || value.is_destructor || value.visibility ||
+                   value.visibility_invalid || value.is_returns_twice || value.is_weakref || value.is_ifunc || value.weakref_target.length ||
+                   value.ifunc_resolver.length || value.section_name.length || value.link_name.length || value.error_attribute_token_plus_one ||
+                   value.is_noreturn || value.has_gnu_inline_attribute;
+    if (present && !bindings->failed)
+    {
+        if (bindings->count == bindings->capacity)
+        {
+            bool fits = bindings->capacity <= UINT32_MAX / 2;
+            u32 capacity = bindings->capacity ? bindings->capacity * 2 : 64;
+            fits = fits && c_parse_body_scratch_fits(bindings->arena, (u64)capacity * sizeof(CDeclarationBinding), BUSTER_ALIGN_OF(CDeclarationBinding));
+            if (fits)
+            {
+                CDeclarationBinding* rows = arena_allocate(bindings->arena, CDeclarationBinding, capacity);
+                if (bindings->count)
+                {
+                    u64 bytes = (u64)bindings->count * sizeof(*rows);
+                    memcpy(rows, bindings->rows, bytes);
+                    bindings->copy_bytes += bytes;
+                }
+                bindings->rows = rows;
+                bindings->capacity = capacity;
+            }
+            bindings->failed = !fits;
+        }
+        if (!bindings->failed)
+        {
+            bindings->rows[bindings->count] = value;
+            bindings->count += 1;
+            row_plus_one = bindings->count;
+        }
+    }
+    return row_plus_one;
+}
+
+BUSTER_C_INTERNAL void c_parse_symbol_bindings_begin(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess)
+{
+    for (u32 index = 0; index < result->declaration_count; index += 1)
+    {
+        CDeclaration* declaration = result->declarations + index;
+        if (declaration->entity.value < result->entity_count &&
+            (declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_FUNCTION))
+        {
+            CDeclarationBinding value = c_declaration_binding(result->arena, preprocess, *declaration);
+            value.section_name = c_declaration_section_name(result->arena, preprocess, *declaration);
+            String8 link_name = c_declaration_link_name(result->arena, preprocess, *declaration);
+            value.link_name = string_equal(link_name, declaration->name) ? (String8){0} : link_name;
+            if (declaration->kind == C_DECLARATION_FUNCTION)
+            {
+                value.is_noreturn = c_ir_declaration_is_noreturn(preprocess, *declaration);
+                value.has_gnu_inline_attribute = preprocess.dialect != C_PREPROCESS_DIALECT_GNU89 && preprocess.dialect != C_PREPROCESS_DIALECT_C89 &&
+                                                c_ir_declaration_has_gnu_inline_semantics(preprocess, *declaration);
+                u32 marker = c_ir_declaration_attribute_marker(preprocess, *declaration, C_IR_ATTRIBUTE_MARKER_ERROR);
+                value.error_attribute_token_plus_one = marker + 1;
+                if (marker != UINT32_MAX) value.error_message = c_parse_error_attribute_message(result->arena, preprocess, marker);
+            }
+            declaration->binding_plus_one = c_parse_symbol_binding_append(bindings, value);
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_symbol_binding_local(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess,
+                                                     u32 entity, bool first)
+{
+    CEntity* owner = result->entities + entity;
+    if (owner->kind == C_ENTITY_LOCAL && (owner->is_static_storage || owner->is_extern))
+    {
+        u32 end = owner->declaration_token_start + owner->declaration_token_count;
+        CDeclaration declaration = {
+            .name = owner->name,
+            .token_start = owner->declaration_statement_start,
+            .token_count = end - owner->declaration_statement_start,
+            .declarator_start = owner->declaration_token_start,
+            .declarator_count = owner->declaration_token_count,
+        };
+        CDeclarationBinding value = c_declaration_binding(result->arena, preprocess, declaration);
+        // The existing local section path owns the shared tokens for the first
+        // declarator and only the own segment for later declarators of a list.
+        declaration.token_start = first ? owner->declaration_statement_start : owner->declaration_token_start;
+        declaration.token_count = end - declaration.token_start;
+        value.section_name = c_declaration_section_name(result->arena, preprocess, declaration);
+        owner->binding_plus_one = c_parse_symbol_binding_append(bindings, value);
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_symbol_bindings_finish(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess)
+{
+    u64 bytes = (u64)bindings->count * sizeof(CDeclarationBinding);
+    bool fits = !bindings->failed && c_parse_body_scratch_fits(result->arena, bytes, BUSTER_ALIGN_OF(CDeclarationBinding));
+    if (fits)
+    {
+        result->declaration_bindings = bindings->count ? arena_allocate(result->arena, CDeclarationBinding, bindings->count) : 0;
+        if (bytes) memcpy(result->declaration_bindings, bindings->rows, bytes);
+        result->declaration_binding_count = bindings->count;
+        result->declaration_binding_retained_bytes = result->arena->position - bindings->retained_start;
+        result->declaration_binding_copy_bytes = bindings->copy_bytes + bytes;
+        result->declaration_bindings_complete = true;
+    }
+    else
+    {
+        for (u32 index = 0; index < result->declaration_count; index += 1) result->declarations[index].binding_plus_one = 0;
+        for (u32 index = 0; index < result->entity_count; index += 1) result->entities[index].binding_plus_one = 0;
+        CSourceLocation location = preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[0]) : (CSourceLocation){0};
+        c_parse_diagnostic(result, location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("compiler resource limit while publishing declaration symbol properties"));
+    }
 }
 
 /* Whether a call through this function type ends control flow because the
@@ -42524,7 +43408,7 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
         if (declaration.entity.value < result->entity_count &&
             (declaration.kind == C_DECLARATION_OBJECT || declaration.kind == C_DECLARATION_FUNCTION))
         {
-            CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
+            CDeclarationBinding binding = c_parse_binding_for_declaration(arena, result, preprocess, declaration);
             // Protected visibility has no object-model representation, so it is
             // refused rather than taken for default (issue 1291); a visibility
             // that names none of the four values is a malformed attribute.
@@ -42560,7 +43444,7 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
                 }
                 else if (!other_resolver[entity].length && binding.ifunc_resolver.length &&
                          !string_equal(binding.ifunc_resolver,
-                                       c_declaration_binding(arena, preprocess, result->declarations[first_ifunc[entity]]).ifunc_resolver))
+                                       c_parse_binding_for_declaration(arena, result, preprocess, result->declarations[first_ifunc[entity]]).ifunc_resolver))
                 {
                     other_resolver[entity] = binding.ifunc_resolver;
                 }
@@ -42610,7 +43494,7 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
         if (entity_attributes[entity] & C_PARSE_ENTITY_ATTRIBUTE_IFUNC)
         {
             CDeclaration declaration = result->declarations[first_ifunc[entity]];
-            CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
+            CDeclarationBinding binding = c_parse_binding_for_declaration(arena, result, preprocess, declaration);
             String8 message =
                 c_parse_ifunc_resolver_message(arena, result, preprocess, declaration, binding, entity_attributes[entity], other_resolver[entity]);
             if (message.length)
@@ -47768,6 +48652,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     c_parse_validate_bfloat16_builtin_calls(&machine, arena, &result, preprocess);
+    c_parse_publish_declaration_facts(&machine, &result, preprocess);
     bool object_sizes_validated = false;
     if (validate_lowering_constraints)
     {
@@ -47804,7 +48689,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     {
         c_parse_type_name_facts(&machine, preprocess, &result, (CScopeId){0}, 0, syntax.ast->node_count, false);
     }
-    c_parse_publish_declaration_facts(&machine, &result, preprocess);
     c_parse_ast_identity_publish(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).
     c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result, &preprocess);
@@ -47940,6 +48824,11 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
     }
     result.warnings = analysis.warnings;
     result.warning_count = analysis.warning_count;
+    result.declaration_bindings = (CDeclarationBindingStatistics){
+        .rows = analysis.declaration_binding_count,
+        .retained_bytes = analysis.declaration_binding_retained_bytes,
+        .copy_bytes = analysis.declaration_binding_copy_bytes,
+    };
     if (analysis.type_layout_statistics)
     {
         result.type_layout = *analysis.type_layout_statistics;

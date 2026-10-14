@@ -2164,6 +2164,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
                      layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
                      layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
+        CDeclarationBindingStatistics bindings = compile.declaration_bindings;
+        string_print(S8("C_SYMBOL_BINDINGS rows={u64} retained_bytes={u64} copy_bytes={u64}\n"),
+                     bindings.rows, bindings.retained_bytes, bindings.copy_bytes);
         // Units the tree builder refused, which compiled without a tree.
         if (compile.c_ast.rejections)
         {

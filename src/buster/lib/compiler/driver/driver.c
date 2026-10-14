@@ -9319,6 +9319,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
+        result.declaration_bindings = (CDeclarationBindingStatistics){
+            .rows = semantic.declaration_binding_count,
+            .retained_bytes = semantic.declaration_binding_retained_bytes,
+            .copy_bytes = semantic.declaration_binding_copy_bytes,
+        };
         result.analysis_diagnostic_count = semantic.diagnostic_count;
         u64 promoted_analysis_warnings = 0;
         String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.warnings,
@@ -9379,6 +9384,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.constant_interning = lowered.constant_interning;
     result.construction_folds = lowered.construction_folds;
     result.type_layout = lowered.type_layout;
+    result.declaration_bindings = lowered.declaration_bindings;
     if (!lowered.program || lowered.diagnostic_count || !lowered.program->modules || lowered.program->module_count != 1)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
@@ -11775,6 +11781,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
         result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
+        result.declaration_bindings.rows += unit.declaration_bindings.rows;
+        result.declaration_bindings.retained_bytes += unit.declaration_bindings.retained_bytes;
+        result.declaration_bindings.copy_bytes += unit.declaration_bindings.copy_bytes;
         compiler_driver_c_ast_facts_add(&result.c_ast.facts, unit.c_ast.facts);
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;

@@ -639,6 +639,7 @@ struct CompilerDriverResult
     CIRConstantInternStatistics constant_interning;
     CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
+    CDeclarationBindingStatistics declaration_bindings;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
     String8 warning;

@@ -6937,6 +6937,151 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8("int plain = 0;\n"
+                        "int hidden __attribute__((visibility(\"hid\" \"den\")));\n"
+                        "int weakened __attribute__((weak));\n"
+                        "int aliased_object __attribute__((alias(\"plain\")));\n"
+                        "void ctor(void) __attribute__((constructor(101)));\n"
+                        "void doomed(void) __attribute__((error(\"bad\\n\" \"call\")));\n"
+                        "int renamed asm(\"link_name\");\n"
+                        "int sectioned __attribute__((section(\".payload\")));\n"
+                        "_Noreturn void stopped(void);\n"
+                        "inline __attribute__((gnu_inline)) int inlined(void) { return 1; }\n"
+                        "void locals(void) {\n"
+                        " static int one __attribute__((section(\".local\"))) = 1;\n"
+                        " static int first __attribute__((section(\".first\"))) = 2, next = 3;\n"
+                        " extern int imported __attribute__((visibility(\"hidden\")));\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CParseResult analysis = c_parse_for_lowering(arena, preprocess);
+    BUSTER_TEST_RAW(arguments, analysis.analysis_complete && analysis.lowering_validated && analysis.diagnostic_count == 0 &&
+                                   analysis.declaration_bindings_complete,
+                    string_format(arena, S8("bindings complete={u32} validated={u32} rows={u32} diagnostic={S8}"),
+                                  (u32)analysis.declaration_bindings_complete, (u32)analysis.lowering_validated,
+                                  analysis.declaration_binding_count, analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("none")));
+    CParseResult missing = analysis;
+    missing.declaration_bindings_complete = false;
+    CIRLowerResult refused = c_lower_to_ir(arena, S8("missing-symbol-properties.c"), preprocess, missing, target_native);
+    BUSTER_TEST(arguments, refused.program == 0 && refused.diagnostic_count == 1 &&
+                               refused.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+    u32 checked = 0;
+    for (u32 index = 0; index < analysis.declaration_count; index += 1)
+    {
+        CDeclaration const* declaration = analysis.declarations + index;
+        u32 row = declaration->binding_plus_one - 1;
+        if (string_equal(declaration->name, S8("plain")))
+        {
+            BUSTER_TEST(arguments, row == C_AST_NODE_INVALID);
+            checked += 1;
+        }
+        if (row < analysis.declaration_binding_count)
+        {
+            CDeclarationBinding const* binding = analysis.declaration_bindings + row;
+            if (string_equal(declaration->name, S8("hidden")))
+            {
+                BUSTER_TEST(arguments, binding->visibility == C_SYMBOL_VISIBILITY_HIDDEN && !binding->visibility_invalid);
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("weakened")))
+            {
+                BUSTER_TEST(arguments, binding->is_weak);
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("aliased_object")))
+            {
+                BUSTER_TEST(arguments, string_equal(binding->alias_target, S8("plain")));
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("ctor")))
+            {
+                BUSTER_TEST(arguments, binding->is_constructor && binding->constructor_priority == 101);
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("doomed")))
+            {
+                BUSTER_TEST(arguments, binding->error_attribute_token_plus_one && string_equal(binding->error_message, S8("bad\\ncall")));
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("renamed")))
+            {
+                BUSTER_TEST(arguments, string_equal(binding->link_name, S8("link_name")));
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("sectioned")))
+            {
+                BUSTER_TEST(arguments, string_equal(binding->section_name, S8(".payload")));
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("stopped")))
+            {
+                BUSTER_TEST(arguments, binding->is_noreturn);
+                checked += 1;
+            }
+            if (string_equal(declaration->name, S8("inlined")))
+            {
+                BUSTER_TEST(arguments, binding->has_gnu_inline_attribute);
+                checked += 1;
+            }
+        }
+    }
+    for (u32 index = 0; index < analysis.entity_count; index += 1)
+    {
+        CEntity const* entity = analysis.entities + index;
+        u32 row = entity->binding_plus_one - 1;
+        if (entity->kind == C_ENTITY_LOCAL && string_equal(entity->name, S8("next")))
+        {
+            BUSTER_TEST(arguments, row == C_AST_NODE_INVALID);
+            checked += 1;
+        }
+        if (row < analysis.declaration_binding_count)
+        {
+            CDeclarationBinding const* binding = analysis.declaration_bindings + row;
+            if (string_equal(entity->name, S8("one")))
+            {
+                BUSTER_TEST(arguments, string_equal(binding->section_name, S8(".local")));
+                checked += 1;
+            }
+            if (string_equal(entity->name, S8("first")))
+            {
+                BUSTER_TEST(arguments, string_equal(binding->section_name, S8(".first")));
+                checked += 1;
+            }
+            if (string_equal(entity->name, S8("imported")) && entity->kind == C_ENTITY_LOCAL)
+            {
+                BUSTER_TEST(arguments, binding->visibility == C_SYMBOL_VISIBILITY_HIDDEN);
+                checked += 1;
+            }
+        }
+    }
+    BUSTER_TEST_RAW(arguments, checked == 14, string_format(arena, S8("symbol binding checked={u32} rows={u32}"), checked, analysis.declaration_binding_count));
+    BUSTER_TEST(arguments, analysis.declaration_binding_count == 12 &&
+                               analysis.declaration_binding_copy_bytes >= (u64)analysis.declaration_binding_count * sizeof(CDeclarationBinding) &&
+                               analysis.declaration_binding_retained_bytes >= (u64)analysis.declaration_binding_count * sizeof(CDeclarationBinding));
+    String8 growth = {0};
+    for (u32 index = 0; index < 70; index += 1)
+    {
+        growth = string_format(arena, S8("{S8}void grow_{u32}(void) __attribute__((returns_twice));\n"), growth, index);
+    }
+    CPreprocessResult growth_preprocess = c_ast_test_preprocess(arena, growth, C_PREPROCESS_DIALECT_GNU17);
+    CParseResult grown = c_parse_for_lowering(arena, growth_preprocess);
+    BUSTER_TEST(arguments, grown.diagnostic_count == 0 && grown.declaration_binding_count == 70 &&
+                               grown.declaration_binding_copy_bytes > (u64)grown.declaration_binding_count * sizeof(CDeclarationBinding));
+    for (u32 index = 0; index < grown.declaration_count; index += 1)
+    {
+        u32 row = grown.declarations[index].binding_plus_one - 1;
+        BUSTER_TEST(arguments, row < grown.declaration_binding_count && grown.declaration_bindings[row].is_returns_twice);
+    }
+    c_preprocess_release(&growth_preprocess);
+    c_preprocess_release(&preprocess);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Explicit owner expectations stay separate from the token-reference model,
 // whose declarations have source anchors but no syntax-node identities.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_owners(UnitTestArguments* arguments)
@@ -7824,6 +7969,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_call_builtin_facts);

@@ -1284,6 +1284,8 @@ struct CEntity
     // The containing declaration supplies shared specifiers to local symbol
     // attributes; no parent table or source lookup is needed by lowering.
     u32 declaration_node_plus_one;
+    // Sparse finished symbol properties of this local declaration.
+    u32 binding_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
@@ -1357,6 +1359,59 @@ struct CIdentifierUse
     CScopeId scope;
 };
 
+typedef struct CDeclarationBinding CDeclarationBinding;
+struct CDeclarationBinding
+{
+    String8 alias_target;
+    // IR_INITIALIZER_PRIORITY_NONE when the attribute named no priority; the
+    // written value otherwise. Meaningful only while the matching flag is set,
+    // because zero is a priority a program may write.
+    u32 constructor_priority;
+    u32 destructor_priority;
+    bool is_weak;
+    bool is_constructor;
+    bool is_destructor;
+    // The first __attribute__((visibility("..."))) written on the declaration,
+    // a CSymbolVisibility; UNSPECIFIED when there is none. Only an attribute at
+    // the declaration's own level counts: one inside a parameter list, a
+    // struct body or on a struct tag does not name the declared symbol.
+    u8 visibility;
+    // A visibility attribute whose argument is not one of the four string
+    // literals; c_parse_validate_alias_targets refuses it.
+    bool visibility_invalid;
+    // __attribute__((returns_twice)): a call to the function may return a
+    // second time, as setjmp does (issue 1431).
+    bool is_returns_twice;
+    // __attribute__((weakref("target"))), or the GCC form `weakref, alias("target")`:
+    // the declaration is a local name for a weak reference to `weakref_target`
+    // rather than a definition or an alias of one.
+    bool is_weakref;
+    // __attribute__((ifunc("resolver"))): the declaration defines the name as
+    // a GNU indirect function whose value is `ifunc_resolver`, a function this
+    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
+    // missing resolver string leaves `ifunc_resolver` empty for
+    // c_parse_validate_alias_targets to refuse.
+    bool is_ifunc;
+    String8 weakref_target;
+    String8 ifunc_resolver;
+    // Finished symbol properties. Strings either borrow immutable spelling or
+    // own decoded bytes in result.arena; source tokens are only provenance.
+    String8 section_name;
+    String8 link_name;
+    String8 error_message;
+    u32 error_attribute_token_plus_one;
+    bool is_noreturn;
+    bool has_gnu_inline_attribute;
+};
+
+typedef struct CDeclarationBindingStatistics CDeclarationBindingStatistics;
+struct CDeclarationBindingStatistics
+{
+    u64 rows;
+    u64 retained_bytes;
+    u64 copy_bytes;
+};
+
 typedef enum CDeclarationKind
 {
     C_DECLARATION_OBJECT,
@@ -1406,6 +1461,7 @@ struct CDeclaration
     u32 declaration_node_plus_one;
     u32 init_declarator_plus_one;
     u32 initializer_node_plus_one;
+    u32 binding_plus_one;
     CDeclarationKind kind;
     bool is_definition;
     bool is_variadic;
@@ -2362,6 +2418,13 @@ struct CParseResult
     // the parse intern names on demand so entity lookups key on symbol ids.
     CSymbolTable* symbols;
     CDeclaration* declarations;
+    // Exact-size sparse symbol properties, published once after binding. Zero
+    // owner row ids mean the empty property set; no source fallback in IR.
+    CDeclarationBinding* declaration_bindings;
+    u32 declaration_binding_count;
+    u64 declaration_binding_retained_bytes;
+    u64 declaration_binding_copy_bytes;
+    bool declaration_bindings_complete;
     // Published by the initializer validator; never rewound with body scratch.
     CInitializerPlan* initializer_plans;
     CInitializerPlan** initializer_plan_buckets;
@@ -2649,6 +2712,7 @@ struct CIRLowerResult
     CIRConstantInternStatistics constant_interning;
     CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
+    CDeclarationBindingStatistics declaration_bindings;
     // Attempts the lowering's type-mapping passes made, retries included, so
     // a test can pin them to the unit's size (#3312).
     u64 type_mapping_attempts;

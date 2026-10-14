@@ -272,6 +272,21 @@ so function parameter names cannot substitute for a declaration's owner.
 The token-reference semantic model has no node provenance; independent owner
 fixtures check these links while model comparisons check the existing fields.
 
+Finished symbol properties are sparse `CDeclarationBinding` rows in the
+result's arena. `CDeclaration.binding_plus_one` and a static or extern local's
+`CEntity.binding_plus_one` select them; zero means the empty property set.
+The producer preserves declaration-level visibility, alias and weakref names,
+constructor/destructor priorities, section and assembler link names, noreturn
+and GNU inline requests, and GNU error text with its recorded attribute site.
+All decoded strings live in the result arena; the growth vector is scratch,
+compacted once and rewound. `C_SYMBOL_BINDINGS` reports the exact retained
+arena bytes and growth/final-copy bytes. Alias validation reads the finished
+rows before lowering, while the explicit token model keeps its source reader.
+Those source readers live in `c_parse.c`; `c_gen.c` consumes the finished
+properties and reads source tokens only at recorded spelling/location sites.
+Global initializer callers likewise pass the retained initializer root, with
+zero owner ids denoting implicit zero initialization.
+
 **Candidates.** A fact candidate is an expression node (`IDENTIFIER` through
 `COMMA`, without braced lists and `_Generic` associations) of a *typed
 region*: a function body or a file-scope object's initializer that the

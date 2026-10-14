@@ -299,48 +299,12 @@ BUSTER_C_EXTERN CIrWideInteger c_ir_wide_subtract(CIrWideInteger left, CIrWideIn
 BUSTER_C_EXTERN CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideInteger right);
 BUSTER_C_EXTERN void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger divisor, CIrWideInteger* quotient_out, CIrWideInteger* remainder_out);
 
-typedef struct CDeclarationBinding CDeclarationBinding;
-struct CDeclarationBinding
-{
-    String8 alias_target;
-    // IR_INITIALIZER_PRIORITY_NONE when the attribute named no priority; the
-    // written value otherwise. Meaningful only while the matching flag is set,
-    // because zero is a priority a program may write.
-    u32 constructor_priority;
-    u32 destructor_priority;
-    bool is_weak;
-    bool is_constructor;
-    bool is_destructor;
-    // The first __attribute__((visibility("..."))) written on the declaration,
-    // a CSymbolVisibility; UNSPECIFIED when there is none. Only an attribute at
-    // the declaration's own level counts: one inside a parameter list, a
-    // struct body or on a struct tag does not name the declared symbol.
-    u8 visibility;
-    // A visibility attribute whose argument is not one of the four string
-    // literals; c_parse_validate_alias_targets refuses it.
-    bool visibility_invalid;
-    // __attribute__((returns_twice)): a call to the function may return a
-    // second time, as setjmp does (issue 1431).
-    bool is_returns_twice;
-    // __attribute__((weakref("target"))), or the GCC form `weakref, alias("target")`:
-    // the declaration is a local name for a weak reference to `weakref_target`
-    // rather than a definition or an alias of one.
-    bool is_weakref;
-    // __attribute__((ifunc("resolver"))): the declaration defines the name as
-    // a GNU indirect function whose value is `ifunc_resolver`, a function this
-    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
-    // missing resolver string leaves `ifunc_resolver` empty for
-    // c_parse_validate_alias_targets to refuse.
-    bool is_ifunc;
-    String8 weakref_target;
-    String8 ifunc_resolver;
-};
-
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
 
 BUSTER_C_EXTERN bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
 
-BUSTER_C_EXTERN CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_EXTERN CDeclarationBinding const* c_parse_declaration_binding_fact(CParseResult const* result, u32 row_plus_one);
+BUSTER_C_EXTERN bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 
 BUSTER_C_EXTERN void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena,
                                                   CPreprocessResult preprocess, CParseResult* result,
