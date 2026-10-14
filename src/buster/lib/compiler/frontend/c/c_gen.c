@@ -33285,6 +33285,19 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_offsetof(CIntegerIrBuilder* builder, C
     return status;
 }
 
+// A bare VLA array parameter denotes its adjusted pointer object for
+// sizeof. Its strict source query still runs first, preserving any constructor
+// effects before an absent outer bound declines that source projection.
+BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_parameter_type_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    while (ast && node < ast->node_count && ast->kinds[node] == C_AST_EXTENSION) node = c_ast_child_at(ast, node, 0);
+    bool named = ast && facts && node < facts->node_count && ast->kinds[node] == C_AST_IDENTIFIER && (facts->flags[node] & C_AST_FACT_BOUND);
+    CIntegerIrLocal* local = named ? c_ir_find_local_by_entity(builder, (CEntityId){.value = facts->payloads[node]}) : 0;
+    return local && local->is_vla_parameter ? local->type : IR_TYPE_ID_INVALID;
+}
+
 // sizeof/_Alignof own an exact type-name or expression operand. Saved VLA
 // shapes supply runtime sizes; fixed layouts go through the same node constant
 // task as initializers, including strings and GNU object alignment facts.
@@ -54949,8 +54962,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             else
             {
                 CIrNodeQueryFrame type = {0};
-                admitted = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = operand,
-                    .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME, .view = C_IR_AST_TYPE_STRICT}, &type) && type.success;
+                bool settled = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = operand,
+                    .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME, .view = C_IR_AST_TYPE_STRICT}, &type);
+                admitted = settled && type.success;
+                if (settled && !admitted && expression && !alignment)
+                {
+                    type.result_type = c_ir_sizeof_parameter_type_node(builder, operand);
+                    admitted = type.result_type.value != IR_ID_UNDERLYING_INVALID;
+                }
                 IrType* row = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
                 projected_operand = row;
                 admitted = admitted && row && (row->layout.resolved || row->kind == IR_TYPE_VOID || row->kind == IR_TYPE_FUNCTION);
