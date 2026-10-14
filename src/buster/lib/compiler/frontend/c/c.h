@@ -2308,6 +2308,9 @@ typedef enum CInitializerPlanFlag
 {
     // `{0}` retains the original zero-constructor emission. `{0,}` does not.
     C_INITIALIZER_PLAN_SINGLE_ZERO = 1,
+    // GNU implementations disagree on a bare aggregate range's continuation;
+    // preserve this compiler's existing lowering refusal during migration.
+    C_INITIALIZER_PLAN_BARE_AGGREGATE_RANGE = 2,
 } CInitializerPlanFlag;
 
 typedef struct CInitializerPlan CInitializerPlan;
@@ -2323,6 +2326,7 @@ struct CInitializerPlan
     // shared omitted C array bound remains unchanged.
     u64 flexible_count;
     u32 flexible_member_plus_one;
+    u32 unsupported_range_token_plus_one;
     u32 node;
     u32 path_count;
     u32 item_count;

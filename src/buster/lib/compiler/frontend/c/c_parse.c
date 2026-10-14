@@ -14609,6 +14609,15 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             (string_value || !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end,
                                                                                 designator.value_type)))
         {
+            bool new_range = false;
+            for (u32 path = designator.path_plus_one; plan && path && path != frame->path_plus_one;
+                 path = plan->paths[path - 1].parent_plus_one)
+                new_range |= plan->paths[path - 1].first != plan->paths[path - 1].last;
+            if (new_range && plan && !plan->unsupported_range_token_plus_one)
+            {
+                plan->flags |= C_INITIALIZER_PLAN_BARE_AGGREGATE_RANGE;
+                plan->unsupported_range_token_plus_one = designator.value_start + 1;
+            }
             if (log) log->replayable = false;
             if (frame_count + designator.continuation_count >= capacity)
             {

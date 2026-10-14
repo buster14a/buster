@@ -6495,6 +6495,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "double _Complex complex_value = { 1.0, 2.0 };\n"
                         "struct F { int head; char tail[]; }; struct F flex = { 9, { -1, -1, -1 } };\n"
                         "struct F text_flex = { 7, \"abc\" };\n"
+                        "struct P { int x, y; }; struct P bare_range[4] = { [1 ... 3] = 1, 2 };\n"
+                        "struct P braced_range[4] = { [1 ... 3] = { 1 }, [3].y = 2 };\n"
                         "typedef unsigned int V __attribute__((vector_size(32))); union U { V v; unsigned int lanes[8]; };\n"
                         "unsigned int g(unsigned int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
                         "union U u = { .v = __builtin_va_arg(ap, V) }; __builtin_va_end(ap); return u.lanes[0]; }\n"
@@ -6521,10 +6523,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         u32 flexible = 0;
         u32 explicit_paths = 0;
         u32 implicit_paths = 0;
+        u32 refused_ranges = 0;
         for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
         {
             BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
             plans += plan->complete;
+            if (plan->flags & C_INITIALIZER_PLAN_BARE_AGGREGATE_RANGE)
+            {
+                refused_ranges += 1;
+                BUSTER_TEST(arguments, plan->unsupported_range_token_plus_one &&
+                    preprocess.tokens[plan->unsupported_range_token_plus_one - 1].kind == C_TOKEN_PREPROCESSING_NUMBER);
+            }
             if (plan->flexible_count)
             {
                 flexible += 1;
@@ -6574,6 +6583,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         BUSTER_TEST(arguments, plans >= 5 && values >= 14 && ranged > 0 && promoted > 0 && nested > 0);
         BUSTER_TEST(arguments, flexible == 2);
         BUSTER_TEST(arguments, explicit_paths && implicit_paths);
+        BUSTER_TEST(arguments, refused_ranges == 1);
     }
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);
