@@ -11,7 +11,8 @@ queue-collect/queue-summarize measure runner scheduling across every workflow
 (#1805): queue_collect, queue_summarize, _queue_job_record, _occupancy.
 require-jobs is CI complete's inventory gate (require_jobs, validate_required_jobs);
 separate_reconciled_jobs proves and retains admission/benchmark metadata separately
-(#2388, #3030); compiler_benchmark_provenance verifies its request and trusted writer;
+(#2388, #3030, #4209); compiler_benchmark_provenance verifies benchmark and
+sampling requests and their trusted writers;
 transient API reads retry inside its metadata budget (_transient_api_failure,
 _gate_get, _read_timed_out) and an unsuccessful verdict is printed (report_gate_failure);
 stale step metadata on a green job may be waived only with a warning
@@ -129,6 +130,15 @@ COMPILER_BENCHMARK_CHECKS = {
     "9700X compiler benchmark": ("buster-9700x-compiler-main-v1", "9700x-compiler-request.yml", "push"),
     "9700X compiler benchmark (pull request)": ("buster-9700x-compiler-pr-v1", "9700x-direct-request.yml", "pull_request"),
 }
+COMPILER_SAMPLING_CHECK = "9700X compiler sampling research"
+PUBLISHED_COMPILER_CHECKS = COMPILER_BENCHMARK_CHECKS.keys() | {COMPILER_SAMPLING_CHECK}
+COMPILER_SAMPLING_WRITERS = {
+    "queued": ("sampling-queue", "Queue sampling qualification packet",
+               "Queue the exact unqualified research attempt"),
+    "completed": ("sampling-publish", "Validate sampling packet evidence",
+                  "Publish only independently validated research evidence"),
+}
+COMPILER_SAMPLING_CHECKOUT = "Check out the frozen qualification implementation"
 COMPILER_BENCHMARK_DISPLAY_JOBS = {
     "main": ("start-compiler", "Show the main commit comparison check"),
     "pull": ("start-pull", "Show the pull request comparison check"),
@@ -729,7 +739,7 @@ def reconciled_job_candidates(jobs):
     if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
         raise ValueError("Malformed job inventory")
     return [job for job in jobs if isinstance(job.get("name"), str) and
-            job["name"] in (RECONCILED_CHECK_MARKERS.keys() | COMPILER_BENCHMARK_CHECKS.keys())]
+            job["name"] in (RECONCILED_CHECK_MARKERS.keys() | PUBLISHED_COMPILER_CHECKS)]
 
 
 def compiler_benchmark_current_summary(summary):
@@ -911,12 +921,24 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
         raise ValueError("Compiler benchmark requires independent publisher provenance")
     if check.get("status") not in ("queued", "in_progress", "completed"):
         raise ValueError("Compiler benchmark check has an invalid lifecycle state")
-    prefix, workflow, event = COMPILER_BENCHMARK_CHECKS[check["name"]]
-    marker = re.fullmatch(re.escape(prefix + ":" + head_sha) + r":([1-9][0-9]*)\.([1-9][0-9]*):([1-9][0-9]*)",
-                          check.get("external_id") if isinstance(check.get("external_id"), str) else "")
-    if marker is None:
-        raise ValueError("Compiler benchmark attempt marker is invalid")
-    request_id, request_attempt, bench_attempt = map(int, marker.groups())
+    sampling = check["name"] == COMPILER_SAMPLING_CHECK
+    external_id = check.get("external_id") if isinstance(check.get("external_id"), str) else ""
+    if sampling:
+        # The publisher's sampling namespace binds a freeze, packet, request and
+        # executor at attempt 1. Exact-head binding comes from the request below.
+        marker = re.fullmatch(r"buster-main-sampling-v1:([0-9a-f]{64}):(acquire|pilot|confirm):"
+                              r"(0|[1-9][0-9]?):([1-9][0-9]*):([1-9][0-9]*):1", external_id)
+        if marker is None or int(marker[3]) >= {"acquire": 1, "pilot": 3, "confirm": 40}[marker[2]]:
+            raise ValueError("Compiler sampling attempt marker is invalid")
+        request_id, request_attempt, bench_attempt = int(marker[4]), 1, 1
+        workflow, event = "9700x-direct-request.yml", "pull_request"
+    else:
+        prefix, workflow, event = COMPILER_BENCHMARK_CHECKS[check["name"]]
+        marker = re.fullmatch(re.escape(prefix + ":" + head_sha) + r":([1-9][0-9]*)\.([1-9][0-9]*):([1-9][0-9]*)",
+                              external_id)
+        if marker is None:
+            raise ValueError("Compiler benchmark attempt marker is invalid")
+        request_id, request_attempt, bench_attempt = map(int, marker.groups())
     request_path = f"actions/runs/{request_id}/attempts/{request_attempt}"
     request = read_metadata(request_path)
 
@@ -994,13 +1016,23 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
         if not exact_run(publisher, publisher_id, bench_attempt, COMPILER_BENCHMARK_WORKFLOW, "workflow_run") or \
                 publisher.get("head_branch") != "main" or publisher["repository"]["id"] != request["repository"]["id"]:
             raise ValueError("Compiler benchmark publisher is not a same-repository trusted main run")
-        pull = event == "pull_request"
-        writer_name = COMPILER_BENCHMARK_DISPLAY_JOBS["pull" if pull else "main"][1]
-        writer_specs = [(writer_name, "Check out the trusted check writer", COMPILER_BENCHMARK_DISPLAY_STEPS)]
-        if check.get("status") == "completed":
-            writer_specs.append(("Publish the pull request compiler benchmark check" if pull else
-                                 "Publish the compiler benchmark check", "Check out the trusted publisher",
-                                 ("Validate the evidence and publish the check",)))
+        if sampling:
+            if publisher_id != int(marker[5]) or \
+                    publisher.get("display_title") != f"9700X request {request_id}.1 head {head_sha}" or any(
+                        not isinstance(publisher.get(key), dict) or any(publisher[key].get(field) != value
+                            for field, value in BENCHMARK_MAINTAINER.items()) for key in ("actor", "triggering_actor")):
+                raise ValueError("Compiler sampling publisher does not bind the exact request/head/attempt")
+            state = "completed" if check.get("status") == "completed" else "queued"
+            _, writer_name, write_step = COMPILER_SAMPLING_WRITERS[state]
+            writer_specs = [(writer_name, COMPILER_SAMPLING_CHECKOUT, (write_step,))]
+        else:
+            pull = event == "pull_request"
+            writer_name = COMPILER_BENCHMARK_DISPLAY_JOBS["pull" if pull else "main"][1]
+            writer_specs = [(writer_name, "Check out the trusted check writer", COMPILER_BENCHMARK_DISPLAY_STEPS)]
+            if check.get("status") == "completed":
+                writer_specs.append(("Publish the pull request compiler benchmark check" if pull else
+                                     "Publish the compiler benchmark check", "Check out the trusted publisher",
+                                     ("Validate the evidence and publish the check",)))
     batch = read_metadata(publisher_path + "/jobs?per_page=100")
     rows = batch.get("jobs") if isinstance(batch, dict) else None
     if not isinstance(rows, list) or type(batch.get("total_count")) is not int or \
@@ -1038,7 +1070,9 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
     if not proved:
         raise ValueError("Compiler benchmark trusted writer execution is unproved")
     return {"request": request, "publisher": publisher, "writers": proved,
-            **({"terminal_recovery": terminal_provenance} if terminal_provenance is not None else {})}
+            **({"terminal_recovery": terminal_provenance} if terminal_provenance is not None else {}),
+            **({"sampling": {"freeze_sha256": marker[1], "phase": marker[2], "packet": int(marker[3])}}
+               if sampling else {})}
 
 
 def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks, *, repository=None, read_metadata=None):
@@ -1058,7 +1092,7 @@ def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks, *, rep
                 len(set(check_ids)) != len(check_ids)):
             raise ValueError("Reconciler check snapshot IDs are malformed or duplicated")
         identities = [job.get("id") for job in jobs]
-        names = Counter((job["name"], job.get("run_attempt") if job["name"] in COMPILER_BENCHMARK_CHECKS and
+        names = Counter((job["name"], job.get("run_attempt") if job["name"] in PUBLISHED_COMPILER_CHECKS and
                          type(job.get("run_attempt")) is int else None)
                         for job in candidates)
         cached = {}
@@ -1070,7 +1104,7 @@ def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks, *, rep
             return cached[path]
         for job in candidates:
             identity, name = job.get("id"), job["name"]
-            benchmark = name in COMPILER_BENCHMARK_CHECKS
+            benchmark = name in PUBLISHED_COMPILER_CHECKS
             name_key = (name, job.get("run_attempt") if benchmark and type(job.get("run_attempt")) is int else None)
             if (type(identity) is not int or identity <= 0 or identities.count(identity) != 1 or
                     names[name_key] != 1 or job.get("run_id") != run_id or
