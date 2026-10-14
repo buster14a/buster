@@ -16049,11 +16049,12 @@ BUSTER_C_INTERNAL void c_parse_symbol_binding_local(CParseSymbolBindings* bindin
 BUSTER_C_INTERNAL void c_parse_symbol_bindings_finish(CParseSymbolBindings* bindings, CParseResult* result, CPreprocessResult preprocess)
 {
     u64 bytes = (u64)bindings->count * sizeof(CDeclarationBinding);
-    bool fits = !bindings->failed && c_parse_body_scratch_fits(result->arena, bytes, BUSTER_ALIGN_OF(CDeclarationBinding));
+    bool fits = !bindings->failed && (!bindings->count || bindings->rows) &&
+                c_parse_body_scratch_fits(result->arena, bytes, BUSTER_ALIGN_OF(CDeclarationBinding));
     if (fits)
     {
         result->declaration_bindings = bindings->count ? arena_allocate(result->arena, CDeclarationBinding, bindings->count) : 0;
-        if (bytes) memcpy(result->declaration_bindings, bindings->rows, bytes);
+        if (bindings->count) memcpy(result->declaration_bindings, bindings->rows, bytes);
         result->declaration_binding_count = bindings->count;
         result->declaration_binding_retained_bytes = result->arena->position - bindings->retained_start;
         result->declaration_binding_copy_bytes = bindings->copy_bytes + bytes;
@@ -38449,36 +38450,47 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         CAstResult tree = c_ast_build(arena, preprocess, (CAstOptions){0});
         if (tree.complete)
         {
-            result = c_parse_ast_from_tree(arena, preprocess, &tree.ast, 0);
-            if (!result.diagnostic_count)
+            // Allocate the one durable header before the split can publish
+            // references to it. Its columns are still builder-owned until
+            // complete compact retention succeeds below.
+            u64 position = arena->position;
+            bool header_fits = c_ast_retention_advance(arena, &position, 1, sizeof(CAst), BUSTER_ALIGN_OF(CAst));
+            CAst* retained = header_fits ? arena_allocate(arena, CAst, 1) : 0;
+            u64 copied = C_AST_RETAIN_FAILED;
+            if (retained)
             {
-                u64 position = arena->position;
-                bool header_fits = c_ast_retention_advance(arena, &position, 1, sizeof(CAst), BUSTER_ALIGN_OF(CAst));
-                CAst* retained = header_fits ? arena_allocate(arena, CAst, 1) : 0;
-                u64 copied = retained ? c_ast_retain_in_arena(arena, &tree.ast) : C_AST_RETAIN_FAILED;
-                if (copied != C_AST_RETAIN_FAILED)
+                *retained = tree.ast;
+                result = c_parse_ast_from_tree(arena, preprocess, retained, 0);
+                if (!result.diagnostic_count)
                 {
-                    *retained = tree.ast;
-                    result.ast = retained;
-                    result.ast_retained_copy_bytes = copied;
+                    copied = c_ast_retain_in_arena(arena, retained);
+                    if (copied != C_AST_RETAIN_FAILED)
+                    {
+                        result.ast = retained;
+                        result.ast_retained_copy_bytes = copied;
+                    }
                 }
-                else
+                if (result.diagnostic_count || copied == C_AST_RETAIN_FAILED)
                 {
-                    c_ast_release(&tree.ast);
+                    c_ast_release(retained);
                     result.ast = 0;
-                    *retention_diagnostic = (CDiagnostic){
-                        .message = S8("could not retain the complete C syntax tree in the unit arena"),
-                        .location = {.line = 1, .column = 1},
-                        .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
-                    };
-                    result.diagnostics = retention_diagnostic;
-                    result.diagnostic_count = 1;
-                    result.diagnostic_capacity = 1;
                 }
             }
             else
             {
                 c_ast_release(&tree.ast);
+                result = (CParserResult){0};
+            }
+            if (!result.diagnostic_count && copied == C_AST_RETAIN_FAILED)
+            {
+                *retention_diagnostic = (CDiagnostic){
+                    .message = S8("could not retain the complete C syntax tree in the unit arena"),
+                    .location = {.line = 1, .column = 1},
+                    .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                };
+                result.diagnostics = retention_diagnostic;
+                result.diagnostic_count = 1;
+                result.diagnostic_capacity = 1;
             }
         }
         else
@@ -52220,9 +52232,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     c_parse_publish_deferred_bit_field_width_diagnostics(arena, &result, preprocess);
     // Type names outside typed bodies/initializers keep the same producer
     // contract, including sizeof/typeof operands and file-scope casts.
-    if (machine.ast_facts && !result.diagnostic_count)
+    if (machine.ast_facts && machine.syntax_tree && !result.diagnostic_count)
     {
-        c_parse_type_name_facts(&machine, preprocess, &result, (CScopeId){0}, 0, syntax.ast->node_count, false);
+        c_parse_type_name_facts(&machine, preprocess, &result, (CScopeId){0}, 0, machine.syntax_tree->node_count, false);
     }
     c_parse_ast_identity_publish(&machine, preprocess, &result);
     c_parse_ast_bound_owners_publish(&machine, preprocess, &result);

@@ -3708,15 +3708,17 @@ struct CIrRetainedTypeState
 BUSTER_C_INTERNAL CType const* c_ir_retained_type(CIntegerIrBuilder* builder, CIrRetainedTypeReference reference)
 {
     CAstFacts const* facts = builder->syntax_facts;
-    return reference.recipe ? facts && reference.index < facts->recipe_count &&
+    return reference.recipe ? facts && facts->recipes && reference.index < facts->recipe_count &&
                                     facts->recipes[reference.index].form == C_AST_TYPE_RECIPE_DERIVATION
                                   ? &facts->recipes[reference.index].type : 0
-                            : reference.index < builder->parse.type_count ? builder->parse.types + reference.index : 0;
+                            : builder->parse.types && reference.index < builder->parse.type_count ? builder->parse.types + reference.index : 0;
 }
 
 BUSTER_C_INTERNAL CIrRetainedTypeReference c_ir_retained_nested(CIntegerIrBuilder* builder, CIrRetainedTypeReference parent, CTypeId child)
 {
-    CAstTypeRecipe const* recipe = parent.recipe ? builder->syntax_facts->recipes + parent.index : 0;
+    CAstFacts const* facts = builder->syntax_facts;
+    CAstTypeRecipe const* recipe = parent.recipe && facts && facts->recipes && parent.index < facts->recipe_count
+                                      ? facts->recipes + parent.index : 0;
     bool temporary = recipe && child.value != C_ID_UNDERLYING_INVALID && child.value >= recipe->row_begin;
     u32 index = temporary ? recipe->recipe_begin + child.value - recipe->row_begin : child.value;
     return (CIrRetainedTypeReference){.index = index, .recipe = temporary};
@@ -28167,8 +28169,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, I
 // node scheduler; the storage map remains the existing scalar pointer view.
 BUSTER_C_INTERNAL IrTypeId c_ir_retained_vla_type(CIntegerIrBuilder* builder, CTypeId type)
 {
-    IrTypeId result = type.value < builder->parse.type_count ? builder->c_type_ir_map[type.value] : IR_TYPE_ID_INVALID;
-    if (result.value == IR_ID_UNDERLYING_INVALID && type.value < builder->parse.type_count)
+    IrTypeId result = builder->parse.types && builder->c_type_ir_map && type.value < builder->parse.type_count
+                          ? builder->c_type_ir_map[type.value] : IR_TYPE_ID_INVALID;
+    if (result.value == IR_ID_UNDERLYING_INVALID && builder->parse.types && builder->c_type_ir_map && type.value < builder->parse.type_count)
     {
         if (!builder->vla_c_types)
         {
@@ -28223,7 +28226,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_retained_vla_type(CIntegerIrBuilder* builder, CT
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_local_query_type(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
     IrTypeId result = local->is_variable_length_array ? c_ir_retained_vla_type(builder, local->c_type) : local->type;
-    if (local->is_vla_parameter && local->c_type.value < builder->parse.type_count &&
+    if (local->is_vla_parameter && builder->parse.types && local->c_type.value < builder->parse.type_count &&
         builder->parse.types[local->c_type.value].kind == C_TYPE_ARRAY)
     {
         IrType* array = ir_type_from_id(&builder->program->types, result);
@@ -29135,7 +29138,8 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         u32 node = frame->as.compound_literal_machine.node_plus_one - 1;
         CInitializerPlan const* plan = c_initializer_plan_find(&builder->parse, node);
         frame->as.compound_literal_machine.plan = plan;
-        valid = valid && plan && !plan->failed && plan->complete && plan->item_count;
+        valid = valid && plan && !plan->failed && plan->complete && plan->item_count && plan->items &&
+                (!plan->path_count || plan->paths) && (!(plan->flags & C_INITIALIZER_PLAN_SINGLE_ZERO) || plan->item_count > 1);
         if (!valid) builder->failure_message = S8("semantic initializer plan is unavailable");
         valid = valid && c_ir_initializer_plan_runtime_ranges(builder, plan);
         u32 open = frame->as.compound_literal_machine.open;
@@ -29193,6 +29197,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
     }
     CInitializerPlan const* plan = frame->as.compound_literal_machine.plan;
+    valid = valid && plan && plan->items && (!plan->path_count || plan->paths);
     while (valid && !finished && !suspended && frame->as.compound_literal_machine.index < plan->item_count)
     {
         CInitializerItem const* item = plan->items + frame->as.compound_literal_machine.index;
@@ -29205,7 +29210,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             valid = item->path_plus_one && item->path_plus_one <= plan->path_count;
             CInitializerPath const* edge = valid ? plan->paths + item->path_plus_one - 1 : 0;
             u64 selected = edge ? (edge->member == UINT32_MAX ? edge->first : edge->member) : UINT64_MAX;
-            valid = valid && !edge->parent_plus_one && selected < frame->as.compound_literal_machine.slot_count;
+            valid = valid && edge && !edge->parent_plus_one && selected < frame->as.compound_literal_machine.slot_count;
             if (valid)
             {
                 u32 field = (u32)selected;
@@ -34046,7 +34051,7 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
             builder->failure_kind_plus_one = C_DIAGNOSTIC_SOURCE_TOO_LARGE + 1;
         }
     }
-    if (admitted && !state->failed)
+    if (admitted && state && !state->failed)
     {
         u32 kind = ast->kinds[frame->node];
         u32 first_node = c_ast_child_count(ast, frame->node) ? c_ast_child_at(ast, frame->node, 0) : C_AST_NODE_INVALID;
@@ -47243,6 +47248,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                                      .kind = kind == C_AST_CAST ? C_IR_NODE_QUERY_TYPE_NAME : C_IR_NODE_QUERY_COMPOUND_TYPE};
             admitted = c_ir_node_query_request(builder, key, &type) && type.success;
             IrType* target = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
+            admitted = admitted && target;
             bool object = target && kind == C_AST_COMPOUND_LITERAL &&
                           ((frame->view == C_IR_AST_CONSTANT_LVALUE || frame->view == C_IR_AST_CONSTANT_WHOLE_ADDRESS) || target->kind == IR_TYPE_ARRAY ||
                            ((target->kind == IR_TYPE_STRUCT || target->kind == IR_TYPE_UNION) && !target->is_complex));
@@ -48638,7 +48644,8 @@ BUSTER_C_INTERNAL bool c_ir_vendor_budget_operand_is_variable(CIntegerIrBuilder*
     {
         if (type->kind == C_TYPE_ARRAY)
         {
-            CAstTypeRecipe const* recipe = reference.recipe ? facts->recipes + reference.index : 0;
+            CAstTypeRecipe const* recipe = reference.recipe && facts->recipes && reference.index < facts->recipe_count
+                                              ? facts->recipes + reference.index : 0;
             CArrayBound bound = recipe ? recipe->bound : type->array_bound < builder->parse.array_bound_count
                                                     ? builder->parse.array_bounds[type->array_bound] : (CArrayBound){0};
             u32 bound_node = recipe ? recipe->bound_node : c_ast_facts_bound_node(facts, type->array_bound);

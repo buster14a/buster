@@ -3444,9 +3444,9 @@ struct CAstFactTypeReference
 
 BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_reference(CAstFacts const* facts, CParseResult const* result, u32 index, bool recipe)
 {
-    CType const* type = recipe ? index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
+    CType const* type = recipe ? facts->recipes && index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
                                     ? &facts->recipes[index].type : 0
-                              : index < result->type_count ? result->types + index : 0;
+                              : result->types && index < result->type_count ? result->types + index : 0;
     return (CAstFactTypeReference){.type = type, .index = index, .recipe = recipe};
 }
 
