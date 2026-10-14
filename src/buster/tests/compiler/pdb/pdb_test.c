@@ -1236,7 +1236,91 @@ union PdbTestDbghelpProcedure
 };
 #endif
 
+enum
+{
+    PDB_TEST_READER_FILE_ALIGNMENT = 512,
+    PDB_TEST_READER_DATA_RVA = 0x1000,
+    PDB_TEST_READER_DEBUG_RVA = 0x2000,
+    PDB_TEST_READER_IMAGE_SIZE = 0x3000,
+    PDB_TEST_READER_IMAGE_BASE = 0x10000000,
+};
+
 #if BUSTER_WINDOWS
+// A data-only PE DLL supplies the real RSDS identity for the synthetic PDB.
+// The image is read by the SDK, never executed; every data address is known
+// independently from its section RVA and the input ordinal.
+BUSTER_GLOBAL_LOCAL ByteSlice pdb_test_reader_image(Arena* arena, String8 pdb_path, PdbInput const* input, u32 count)
+{
+    u64 name_start = 0;
+    for (u64 index = 0; index < pdb_path.length; index += 1)
+    {
+        if (pdb_path.pointer[index] == '/' || pdb_path.pointer[index] == '\\')
+        {
+            name_start = index + 1;
+        }
+    }
+    String8 pdb_name = {.pointer = pdb_path.pointer + name_start, .length = pdb_path.length - name_start};
+    u32 data_raw = PDB_TEST_READER_FILE_ALIGNMENT;
+    u32 debug_raw = data_raw + PDB_TEST_READER_FILE_ALIGNMENT;
+    u32 rsds_size = 24 + (u32)pdb_name.length + 1;
+    u32 debug_size = (u32)align_forward(sizeof(IMAGE_DEBUG_DIRECTORY) + rsds_size, PDB_TEST_READER_FILE_ALIGNMENT);
+    u32 file_size = debug_raw + debug_size;
+    u8* bytes = arena_allocate_zeroed(arena, u8, file_size);
+    IMAGE_DOS_HEADER dos = {.e_magic = IMAGE_DOS_SIGNATURE, .e_lfanew = 0x80};
+    IMAGE_NT_HEADERS64 nt = {.Signature = IMAGE_NT_SIGNATURE};
+    nt.FileHeader.Machine = input->machine;
+    nt.FileHeader.NumberOfSections = 2;
+    nt.FileHeader.SizeOfOptionalHeader = (WORD)sizeof(IMAGE_OPTIONAL_HEADER64);
+    nt.FileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LARGE_ADDRESS_AWARE | IMAGE_FILE_DLL | IMAGE_FILE_RELOCS_STRIPPED;
+    nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    nt.OptionalHeader.MajorLinkerVersion = 14;
+    nt.OptionalHeader.SizeOfInitializedData = PDB_TEST_READER_FILE_ALIGNMENT + debug_size;
+    nt.OptionalHeader.ImageBase = PDB_TEST_READER_IMAGE_BASE;
+    nt.OptionalHeader.SectionAlignment = 0x1000;
+    nt.OptionalHeader.FileAlignment = PDB_TEST_READER_FILE_ALIGNMENT;
+    nt.OptionalHeader.MajorOperatingSystemVersion = 6;
+    nt.OptionalHeader.MajorSubsystemVersion = 6;
+    nt.OptionalHeader.SizeOfImage = PDB_TEST_READER_IMAGE_SIZE;
+    nt.OptionalHeader.SizeOfHeaders = PDB_TEST_READER_FILE_ALIGNMENT;
+    nt.OptionalHeader.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    nt.OptionalHeader.SizeOfStackReserve = 0x100000;
+    nt.OptionalHeader.SizeOfStackCommit = 0x1000;
+    nt.OptionalHeader.SizeOfHeapReserve = 0x100000;
+    nt.OptionalHeader.SizeOfHeapCommit = 0x1000;
+    nt.OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG] =
+        (IMAGE_DATA_DIRECTORY){.VirtualAddress = PDB_TEST_READER_DEBUG_RVA, .Size = (DWORD)sizeof(IMAGE_DEBUG_DIRECTORY)};
+    IMAGE_SECTION_HEADER sections[2] = {0};
+    memcpy(sections[0].Name, ".data", 5);
+    sections[0].Misc.VirtualSize = count * 4;
+    sections[0].VirtualAddress = PDB_TEST_READER_DATA_RVA;
+    sections[0].SizeOfRawData = PDB_TEST_READER_FILE_ALIGNMENT;
+    sections[0].PointerToRawData = data_raw;
+    sections[0].Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    memcpy(sections[1].Name, ".debug", 6);
+    sections[1].Misc.VirtualSize = (DWORD)sizeof(IMAGE_DEBUG_DIRECTORY) + rsds_size;
+    sections[1].VirtualAddress = PDB_TEST_READER_DEBUG_RVA;
+    sections[1].SizeOfRawData = debug_size;
+    sections[1].PointerToRawData = debug_raw;
+    sections[1].Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+    IMAGE_DEBUG_DIRECTORY debug = {.Type = IMAGE_DEBUG_TYPE_CODEVIEW, .SizeOfData = rsds_size,
+        .AddressOfRawData = PDB_TEST_READER_DEBUG_RVA + (DWORD)sizeof(IMAGE_DEBUG_DIRECTORY),
+        .PointerToRawData = debug_raw + (DWORD)sizeof(IMAGE_DEBUG_DIRECTORY)};
+    BUSTER_CT_CHECK(0x80 + sizeof(IMAGE_NT_HEADERS64) + 2 * sizeof(IMAGE_SECTION_HEADER) <= PDB_TEST_READER_FILE_ALIGNMENT);
+    memcpy(bytes, &dos, sizeof(dos));
+    memcpy(bytes + dos.e_lfanew, &nt, sizeof(nt));
+    memcpy(bytes + dos.e_lfanew + sizeof(nt), sections, sizeof(sections));
+    memcpy(bytes + debug_raw, &debug, sizeof(debug));
+    ByteWriter rsds = byte_writer_make(bytes + debug.PointerToRawData, debug_size - sizeof(IMAGE_DEBUG_DIRECTORY));
+    byte_writer_emit_bytes(&rsds, "RSDS", 4);
+    byte_writer_emit_bytes(&rsds, input->guid, sizeof(input->guid));
+    byte_writer_emit_u32_le(&rsds, input->age);
+    byte_writer_emit_bytes(&rsds, pdb_name.pointer, pdb_name.length);
+    byte_writer_emit_zero(&rsds, 1);
+    BUSTER_VALIDATE(!rsds.overflow && rsds.count == rsds_size);
+    return (ByteSlice){.pointer = bytes, .length = file_size};
+}
+
 BUSTER_GLOBAL_LOCAL String8 pdb_test_reader_wide_text(Arena* arena, WCHAR const* text, u32 capacity)
 {
     u32 length = 0;
@@ -1251,7 +1335,7 @@ BUSTER_GLOBAL_LOCAL String8 pdb_test_reader_wide_text(Arena* arena, WCHAR const*
 // This diagnostic reports every collision lookup, including misses. Positive
 // controls and any returned spelling/address are assertions, but a missing
 // cyclic name is the unresolved #3752 observation, not a passing lookup.
-BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArguments* arguments, ByteSlice pdb, SliceString8 names, u32 permutation)
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArguments* arguments, ByteSlice pdb, SliceString8 names, u32 permutation, PdbInput const* input)
 {
     UnitTestResult result = {0};
 #if BUSTER_WINDOWS
@@ -1278,25 +1362,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
         if (BUSTER_REQUIRE(arguments, exports))
         {
             String8 path = buster_test_temporary_unique_path(arguments->arena, S8("buster-mixed-gsi"), S8(".pdb"));
-            if (BUSTER_REQUIRE(arguments, file_write(path, pdb)))
+            String8 image_path = string_format(arguments->arena, S8("{S8}.dll"), path);
+            ByteSlice image = pdb_test_reader_image(arguments->arena, path, input, (u32)names.length);
+            if (BUSTER_REQUIRE(arguments, file_write(path, pdb) && file_write(image_path, image)))
             {
-                String16 path_wide = string16_from_string8(arguments->arena, path, true);
+                String16 path_wide = string16_from_string8(arguments->arena, image_path, true);
                 DWORD previous_options = get_options.get_options();
                 for (u32 publics_only = 0; publics_only < 2; publics_only += 1)
                 {
                     // SymInitialize accepts a unique nonzero session token
                     // when invade-process is false; it need not be an OS handle.
                     HANDLE session = (HANDLE)pdb.pointer;
-                    set_options.set_options(publics_only ? SYMOPT_PUBLICS_ONLY : SYMOPT_NO_PUBLICS);
+                    set_options.set_options(SYMOPT_EXACT_SYMBOLS | (publics_only ? SYMOPT_PUBLICS_ONLY : SYMOPT_NO_PUBLICS));
                     BOOL initialized = initialize.initialize(session, 0, FALSE);
                     DWORD initialize_error = initialized ? 0 : GetLastError();
                     arguments->show(arguments, S8("PDB_GSI_LOOKUP initialized={u32} index={S8} error={u32}\n"),
                                     (u32)(initialized != 0), publics_only ? S8("publics") : S8("globals"), (u32)initialize_error);
                     if (BUSTER_REQUIRE(arguments, initialized != 0))
                     {
-                        DWORD64 requested_base = UINT64_C(0x10000000);
+                        DWORD64 requested_base = PDB_TEST_READER_IMAGE_BASE;
                         String16 module_name = string16_from_string8(arguments->arena, S8("mixed"), true);
-                        DWORD64 base = load_module.load_module(session, 0, path_wide.pointer, module_name.pointer, requested_base, 0x2000, 0, 0);
+                        DWORD64 base = load_module.load_module(session, 0, path_wide.pointer, module_name.pointer, requested_base, PDB_TEST_READER_IMAGE_SIZE, 0, 0);
                         DWORD load_error = base ? 0 : GetLastError();
                         arguments->show(arguments, S8("PDB_GSI_LOOKUP registered={u32} base={u64} error={u32}\n"),
                                         (u32)(base != 0), (u64)base, (u32)load_error);
@@ -1312,7 +1398,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                 S8("PDB_GSI_MODULE info={u32} sym_type={u32} symbols={u32} module={S8} image={S8} pdb={S8} pdb_unmatched={u32} dbg_unmatched={u32} error={u32}\n"),
                                 (u32)(info_ok != 0), (u32)info.SymType, (u32)info.NumSyms, info_name, image_name, pdb_name,
                                 (u32)(info.PdbUnmatched != 0), (u32)(info.DbgUnmatched != 0), (u32)info_error);
-                            BUSTER_TEST(arguments, info_ok && info.SymType == SymPdb);
+                            BUSTER_TEST(arguments, info_ok && info.SymType == SymPdb && !info.PdbUnmatched && !info.DbgUnmatched);
                             u32 missing = 0;
                             for (u32 index = 0; index < names.length; index += 1)
                             {
@@ -1330,7 +1416,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                 symbol->MaxNameLen = 64;
                                 BOOL found = from_name.from_name(session, qualified_query.pointer, symbol);
                                 DWORD lookup_error = found ? 0 : GetLastError();
-                                u64 expected_address = (u64)base + 0x1000 + (u64)index * 4;
+                                u64 expected_address = (u64)base + PDB_TEST_READER_DATA_RVA + (u64)index * 4;
                                 bool exact = found && symbol->NameLen == query.length &&
                                              memcmp(symbol->Name, query.pointer, query.length * sizeof(WCHAR)) == 0 &&
                                              symbol->Address == expected_address;
@@ -1355,6 +1441,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                     }
                 }
                 set_options.set_options(previous_options);
+                os_file_delete(image_path);
                 os_file_delete(path);
             }
         }
@@ -1364,6 +1451,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
     (void)pdb;
     (void)names;
     (void)permutation;
+    (void)input;
     arguments->show(arguments, S8("PDB_GSI_LOOKUP status=unavailable reason=non-windows-host\n"));
 #endif
     return result;
@@ -1419,7 +1507,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_mixed_reader(UnitTestArguments* 
                 u32 collision_bucket = pdb_test_hash_v1(names[0]) % 4096;
                 BUSTER_TEST(arguments, index + 2 < count ? bucket == collision_bucket : controls_only || bucket != collision_bucket);
             }
-            PdbSection section = {.name = S8(".data"), .virtual_address = 0x1000, .virtual_size = count * 4, .raw_size = count * 4};
+            PdbSection section = {.name = S8(".data"), .virtual_address = PDB_TEST_READER_DATA_RVA, .virtual_size = count * 4,
+                .raw_size = PDB_TEST_READER_FILE_ALIGNMENT, .raw_offset = PDB_TEST_READER_FILE_ALIGNMENT,
+                .characteristics = 0xc0000040u};
             String8 path = S8("mixed.c");
             DebugType types[] = {
                 {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
@@ -1432,7 +1522,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_mixed_reader(UnitTestArguments* 
                                 .codeview_types = codeview.types, .code_section = 1};
             PdbInput input = {.module_name = S8("mixed.obj"), .codeview_symbols = {.pointer = symbols.bytes, .length = symbols.count},
                               .sections = &section, .section_count = 1, .age = 1, .machine = 0x8664, .code_section = 1,
+                              .guid = {0x37, 0x52, 0x20, 0x26, 0x10, 0x14, 0x40, 0x22, 0xa5, 0x5a, 0x47, 0x53, 0x49, 0x00, 0x00, 0x00},
                               .modules = &module, .module_count = 1};
+            input.guid[15] = (u8)(shape * 6 + permutation + 1);
             BUSTER_TEST(arguments, !symbols.overflow && codeview.valid);
             PdbResult built = pdb_build(arguments->arena, input);
             if (BUSTER_REQUIRE(arguments, built.valid))
@@ -1449,7 +1541,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_mixed_reader(UnitTestArguments* 
                     BUSTER_TEST(arguments, pdb_test_check_gsi(hash, records, &record_count) && record_count == count);
                 }
                 UnitTestResult reader = pdb_test_mixed_dbghelp_lookup(arguments, built.bytes,
-                    (SliceString8){.pointer = names, .length = count}, permutation);
+                    (SliceString8){.pointer = names, .length = count}, permutation, &input);
                 result.test_count += reader.test_count;
                 result.succeeded_test_count += reader.succeeded_test_count;
             }
