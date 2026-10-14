@@ -10214,7 +10214,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_storage_growth(UnitTestArguments
                                                        .data_layout = target_data_layout(target_native),
                                                    });
     CParseResult growth_parse = c_parse(parse_growth_temporary.arena, growth_tokens);
-    CIRLowerResult growth_ir = c_lower_to_ir(parse_growth_temporary.arena, S8("parse-storage-growth.c"), growth_tokens, c_parse_for_lowering(parse_growth_temporary.arena, growth_tokens), target_native);
+    CParserResult growth_reference_syntax = c_parse_ast_reference(parse_growth_temporary.arena, growth_tokens);
+    growth_reference_syntax.type_interning = true;
+    CAnalysisResult growth_reference = c_analyze_semantics_only(parse_growth_temporary.arena, growth_tokens, growth_reference_syntax);
+    CAnalysisResult growth_analysis = c_parse_for_lowering(parse_growth_temporary.arena, growth_tokens);
+    CIRLowerResult growth_ir = c_lower_to_ir(parse_growth_temporary.arena, S8("parse-storage-growth.c"), growth_tokens, growth_analysis, target_native);
     u32 open_bracket_count = 0;
     for (u32 token_index = 0; token_index < growth_tokens.token_count; token_index += 1)
     {
@@ -10227,10 +10231,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_storage_growth(UnitTestArguments
     BUSTER_TEST(arguments, growth_parse.diagnostic_count == 0);
     // Chained unsized arrays intentionally grow the partial model; a complete
     // source authority rejects their incomplete array element type.
-    BUSTER_TEST(arguments, !growth_ir.program && growth_ir.diagnostic_count == 1);
-    if (growth_ir.diagnostic_count == 1)
+    BUSTER_TEST(arguments, !growth_ir.program && !growth_ir.canonical_ir_certified && growth_ir.diagnostic_count == typedef_depth - 1);
+    BUSTER_TEST(arguments, growth_analysis.diagnostic_count == growth_ir.diagnostic_count &&
+                           growth_reference.diagnostic_count == growth_ir.diagnostic_count);
+    for (u32 index = 0; index < growth_ir.diagnostic_count; index += 1)
     {
-        BUSTER_STRING_TEST(arguments, growth_ir.diagnostics[0].message, S8("array element type must be a complete object type"));
+        CDiagnostic diagnostic = growth_ir.diagnostics[index];
+        String8 previous = string_format(parse_growth_temporary.arena, S8("A{u32}"), index);
+        String8 alias = string_format(parse_growth_temporary.arena, S8("A{u32}"), index + 1);
+        u64 column = S8("typedef ").length + previous.length + 1 + alias.length + 1;
+        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                               diagnostic.location.line == index + 2 && diagnostic.location.column == column);
+        BUSTER_STRING_TEST(arguments, diagnostic.message, S8("array element type must be a complete object type"));
+        if (index < growth_reference.diagnostic_count)
+        {
+            CDiagnostic reference = growth_reference.diagnostics[index];
+            BUSTER_TEST(arguments, reference.kind == diagnostic.kind && reference.severity == diagnostic.severity &&
+                                   reference.location.line == diagnostic.location.line && reference.location.column == diagnostic.location.column);
+            BUSTER_STRING_TEST(arguments, reference.message, diagnostic.message);
+        }
     }
     BUSTER_TEST(arguments, growth_parse.arena == parse_growth_temporary.arena);
     BUSTER_TEST(arguments, growth_parse.type_count > old_type_capacity);
@@ -57286,29 +57305,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         String8 path;
         u32 line;
         u32 column;
+        u32 diagnostics;
     } over_aligned_elements[] = {
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "typedef cache_line cache_array[2];\n"),
-         S8("over-aligned-typedef.c"), 2, 31},
+         S8("over-aligned-typedef.c"), 2, 31, 1},
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "cache_line object[2];\n"),
-         S8("over-aligned-object.c"), 2, 18},
+         S8("over-aligned-object.c"), 2, 18, 1},
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "struct holder { cache_line field[2]; };\n"
             "struct holder holder_object;\n"),
-         S8("over-aligned-member.c"), 2, 33},
+         S8("over-aligned-member.c"), 2, 33, 1},
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "cache_line single[1];\n"),
-         S8("over-aligned-single.c"), 2, 18},
+         S8("over-aligned-single.c"), 2, 18, 1},
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "cache_line (*pointer)[2];\n"),
-         S8("over-aligned-parenthesized.c"), 2, 22},
+         S8("over-aligned-parenthesized.c"), 2, 22, 1},
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "int measure(void) { return (int)sizeof(cache_line[2]); }\n"),
-         S8("over-aligned-type-name.c"), 2, 50},
+         S8("over-aligned-type-name.c"), 2, 50, 1},
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "int* literal(void) { return (cache_line[2]){1, 2}; }\n"),
-         S8("over-aligned-compound-literal.c"), 2, 40},
+         S8("over-aligned-compound-literal.c"), 2, 40, 2},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(over_aligned_elements); index += 1)
     {
@@ -57319,14 +57339,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                                                           target_native, &over_aligned_preprocess, &over_aligned_parse);
         BUSTER_TEST(arguments, over_aligned_preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, over_aligned_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, over_aligned.diagnostic_count == 1);
-        if (over_aligned.diagnostic_count == 1)
+        CParserResult reference_syntax = c_parse_ast_reference(over_aligned_temporary.arena, over_aligned_preprocess);
+        reference_syntax.type_interning = true;
+        CAnalysisResult reference = c_analyze_semantics_only(over_aligned_temporary.arena, over_aligned_preprocess, reference_syntax);
+        BUSTER_TEST(arguments, over_aligned.diagnostic_count == over_aligned_elements[index].diagnostics &&
+                               reference.diagnostic_count == over_aligned.diagnostic_count && !over_aligned.program && !over_aligned.canonical_ir_certified);
+        for (u32 row = 0; row < over_aligned.diagnostic_count; row += 1)
         {
-            BUSTER_TEST(arguments, over_aligned.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
-            BUSTER_STRING_TEST(arguments, over_aligned.diagnostics[0].message,
-                               S8("size of array element (4 bytes) is not a multiple of the alignment of 64 that __attribute__((aligned)) gave its type"));
-            BUSTER_TEST(arguments, over_aligned.diagnostics[0].location.line == over_aligned_elements[index].line &&
-                                       over_aligned.diagnostics[0].location.column == over_aligned_elements[index].column);
+            CDiagnostic diagnostic = over_aligned.diagnostics[row];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+            BUSTER_STRING_TEST(arguments, diagnostic.message,
+                S8("size of array element (4 bytes) is not a multiple of the alignment of 64 that __attribute__((aligned)) gave its type"));
+            BUSTER_TEST(arguments, diagnostic.location.line == over_aligned_elements[index].line &&
+                                   diagnostic.location.column == over_aligned_elements[index].column);
+            if (row < reference.diagnostic_count)
+            {
+                CDiagnostic old = reference.diagnostics[row];
+                BUSTER_TEST(arguments, old.kind == diagnostic.kind && old.severity == diagnostic.severity &&
+                                       old.location.line == diagnostic.location.line && old.location.column == diagnostic.location.column);
+                BUSTER_STRING_TEST(arguments, old.message, diagnostic.message);
+            }
         }
         c_test_scratch_end(over_aligned_temporary);
     }
