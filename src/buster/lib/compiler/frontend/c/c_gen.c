@@ -29139,7 +29139,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         CInitializerPlan const* plan = c_initializer_plan_find(&builder->parse, node);
         frame->as.compound_literal_machine.plan = plan;
         valid = valid && plan && !plan->failed && plan->complete && plan->item_count && plan->items &&
-                (!plan->path_count || plan->paths) && (!(plan->flags & C_INITIALIZER_PLAN_SINGLE_ZERO) || plan->item_count > 1);
+                (!plan->path_count || plan->paths);
         if (!valid) builder->failure_message = S8("semantic initializer plan is unavailable");
         valid = valid && c_ir_initializer_plan_runtime_ranges(builder, plan);
         u32 open = frame->as.compound_literal_machine.open;
@@ -29173,9 +29173,13 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
         else if (valid && (plan->flags & C_INITIALIZER_PLAN_SINGLE_ZERO))
         {
-            IrValueId value = c_ir_emit_zero_value(builder, type_id, c_source_anchor_at(&builder->preprocess, plan->items[1].source_token));
-            c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
-            finished = true;
+            valid = plan->item_count > 1;
+            if (valid)
+            {
+                IrValueId value = c_ir_emit_zero_value(builder, type_id, c_source_anchor_at(&builder->preprocess, plan->items[1].source_token));
+                c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+                finished = true;
+            }
         }
         else if (valid)
         {

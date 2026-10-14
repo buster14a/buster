@@ -26898,6 +26898,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_array_element_initializers(U
     return result;
 }
 
+// The native self-host uses the same scalar typedef in a conditional arm.
+// Scalar {0} plans contain one value; list markers belong to aggregates.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scalar_zero_compound_literal(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("scalar-zero-compound-literal"), S8(
+        "typedef unsigned __int128 TimeDataType; typedef unsigned long long Narrow;"
+        "static TimeDataType choose(int measured) { return measured ? (TimeDataType)17 : (TimeDataType){0}; }"
+        "int main(void) { volatile int no = 0, yes = 1;"
+        " TimeDataType a = no ? (TimeDataType)17 : (TimeDataType){0};"
+        " TimeDataType b = yes ? (TimeDataType)17 : (TimeDataType){0};"
+        " Narrow c = no ? (Narrow)17 : (Narrow){0}; double d = no ? 2.0 : (double){0};"
+        " return a != 0 || b != 17 || choose(no) != 0 || choose(yes) != 17 || c != 0 || d != 0; }"));
+}
+
 // Runtime compound literals keep the last initializer for each subobject.
 // Earlier overridden effects are intentionally unconstrained (C17 6.7.9p19).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_compound_literal_overrides(UnitTestArguments* arguments)
@@ -70037,6 +70051,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_nested_tag_scan_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
     C_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
+    C_TEST_FIXTURE(arguments, c_test_scalar_zero_compound_literal);
     C_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
     C_TEST_FIXTURE(arguments, c_test_braceless_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
