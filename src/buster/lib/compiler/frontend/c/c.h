@@ -1276,6 +1276,8 @@ struct CEntity
     u32 declaration_statement_start;
     u32 declaration_token_start;
     u32 declaration_token_count;
+    // The initializer assignment anchor, published by the declarator binder.
+    u32 initializer_token_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
@@ -1715,7 +1717,7 @@ typedef enum CAstFactFlag
     // The machine's nonplace-projection fact (`__real__`/`__imag__` of a real
     // operand).
     C_AST_FACT_NONPLACE = 1u << 3,
-    // An IDENTIFIER: `payloads` holds the entity it names.
+    // An IDENTIFIER or DECLARATOR_NAME: `payloads` holds its entity.
     C_AST_FACT_BOUND = 1u << 4,
     // A MEMBER or MEMBER_ARROW of a bit-field: `payloads` holds its width.
     C_AST_FACT_BIT_FIELD = 1u << 5,

@@ -6359,14 +6359,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
                 BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && !(flags & C_AST_FACT_TYPED));
                 checked += 1;
             }
+            if (kind == C_AST_DECLARATOR_NAME && string_equal(spelling, S8("x")))
+            {
+                u32 entity = facts.payloads[node];
+                bool bound = (flags & C_AST_FACT_BOUND) && entity < analysis.entity_count;
+                BUSTER_TEST(arguments, bound && analysis.entities[entity].kind == C_ENTITY_LOCAL &&
+                                           analysis.entities[entity].declaration_token_plus_one == ast->tokens[node] + 1);
+                u32 assignment = bound ? analysis.entities[entity].initializer_token_plus_one : 0;
+                BUSTER_TEST(arguments, assignment && assignment <= preprocess.token_count &&
+                                           preprocess.tokens[assignment - 1].kind == C_TOKEN_PUNCTUATOR &&
+                                           preprocess.tokens[assignment - 1].punctuator == C_PUNCTUATOR_ASSIGN);
+                checked += 1;
+            }
             if (kind == C_AST_NUMBER && string_equal(spelling, S8("2")))
             {
                 BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && type_kind == C_TYPE_INT && !(flags & C_AST_FACT_MACHINE));
                 checked += 1;
             }
         }
-        // "abc", its `[]`, s->a, the two uses of `s`, __func__ and the 2 of `table`.
-        BUSTER_TEST(arguments, checked == 7);
+        // "abc", its `[]`, s->a, the two uses of `s`, __func__, x and table's 2.
+        BUSTER_TEST(arguments, checked == 8);
         c_ast_facts_release(&facts);
         c_ast_facts_release(&facts);
         BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.index_arena == 0 && facts.spans == 0 && facts.statistics.stale == 0);
