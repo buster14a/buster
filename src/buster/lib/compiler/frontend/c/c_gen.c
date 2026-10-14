@@ -48,8 +48,10 @@
 // arguments from their CALL node (c_ir_call_arguments_counted). Prepared
 // calls are indexed by that node (c_ir_prepared_call_find); distinct calls
 // sharing a callee's first token keep distinct rows. Prepared control groups
-// use their node and wrapping level. The owner frames (places,
-// sizeof, compound literals) still take their subtree's token range. The step-4
+// use their node and wrapping level. Place owners read their exact subtree,
+// collecting member/index suffixes into a source-order node path; their VLA
+// child consumes consecutive INDEX nodes from that path. The sizeof and
+// compound-literal owners still take their subtree's token range. The step-4
 // callers that take token ranges (the query machine, the constant evaluator,
 // static initializers, array bounds) read operand extents from the spans
 // through the marked temporary adapters c_ir_tree_unevaluated_operand_end,
@@ -180,6 +182,8 @@
 //   c_ir_decode_string_literal_range_for_target   analysis and read by lowering
 //   c_ir_build_function_name_index                call-target resolution
 //   CIrLowerFrameKind                             lowering-machine frame kinds
+//   c_ir_place_node_begin, c_ir_place_path,        place topology and ordered
+//   c_ir_lower_vla_index_place_step               member/index and VLA emission
 //   c_ir_body_nodes_build, c_ir_node_*,           statement nodes (#4060):
 //   CIrNodeList, c_ir_node_expression_range       the body index, block items
 //                                                 and extents, and the marked
@@ -18183,7 +18187,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_group_is_statement_expression(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
@@ -18854,6 +18857,7 @@ struct CIrLowerFrame
         struct
         {
             CIntegerIrLocal* local;
+            u32* suffixes;
             IrValueId place;
             IrSourceRange source;
             u32 start;
@@ -18861,18 +18865,24 @@ struct CIrLowerFrame
             u32 index;
             u32 close;
             u32 dereference_count;
+            u32 node_plus_one;
+            u32 suffix_count;
+            u32 suffix_cursor;
             u8 continuation;
             u8 reserved[3];
         } place;
         struct
         {
             CIntegerIrLocal* local;
+            u32* suffixes;
             IrValueId linear_index;
             IrSourceRange source;
             u32 index;
             u32 end;
             u32 close;
             u32 dimension;
+            u32 suffix_count;
+            u32 suffix_cursor;
         } vla_index_place;
         struct
         {
@@ -19029,6 +19039,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowe
     {
         frame.as.expression.node_plus_one = c_ir_tree_range_node(builder, frame.as.expression.start, frame.as.expression.end) + 1;
     }
+    if (frame.kind == C_IR_LOWER_FRAME_PLACE && !frame.as.place.node_plus_one)
+    {
+        frame.as.place.node_plus_one = c_ir_tree_range_node(builder, frame.as.place.start, frame.as.place.end) + 1;
+    }
     frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
     machine->frames[machine->frame_count++] = frame;
     return true;
@@ -19121,14 +19135,19 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
                                        frame->as.vla_index_place.source);
         }
         frame->as.vla_index_place.dimension += 1;
-        frame->as.vla_index_place.index = frame->as.vla_index_place.close + 1;
+        frame->as.vla_index_place.suffix_cursor += 1;
+        frame->as.vla_index_place.index = frame->as.vla_index_place.suffix_cursor < frame->as.vla_index_place.suffix_count
+                                             ? builder->syntax_tree->tokens[frame->as.vla_index_place.suffixes[frame->as.vla_index_place.suffix_cursor]]
+                                             : frame->as.vla_index_place.end;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
-    while (frame->as.vla_index_place.dimension < local->vla_dimension_count && frame->as.vla_index_place.index < frame->as.vla_index_place.end &&
-           c_token_is_punctuator(&builder->preprocess.tokens[frame->as.vla_index_place.index], C_PUNCTUATOR_LEFT_BRACKET))
+    while (frame->as.vla_index_place.dimension < local->vla_dimension_count &&
+           frame->as.vla_index_place.suffix_cursor < frame->as.vla_index_place.suffix_count &&
+           builder->syntax_tree->kinds[frame->as.vla_index_place.suffixes[frame->as.vla_index_place.suffix_cursor]] == C_AST_INDEX)
     {
-        u32 index = frame->as.vla_index_place.index;
-        u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.vla_index_place.end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+        u32 node = frame->as.vla_index_place.suffixes[frame->as.vla_index_place.suffix_cursor];
+        u32 index = builder->syntax_tree->tokens[node];
+        u32 close = builder->syntax_spans->end[node] - 1;
         if (close >= frame->as.vla_index_place.end || close == index + 1)
         {
             c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, index);
@@ -19142,6 +19161,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
                                                     {
                                                         .start = index + 1,
                                                         .end = close,
+                                                        .node_plus_one = c_ast_child_at(builder->syntax_tree, node, 1) + 1,
                                                     },
                                             }))
         {
@@ -19191,7 +19211,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
             .array_lvalue = true,
         });
     }
-    c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.index);
+    c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.suffix_cursor);
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
@@ -19199,41 +19219,351 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_base(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
-// Whether [start, end) is a bare member chain: an identifier followed only by
-// `.name`, `->name`, `[...]` and call `(...)` suffixes. Such a group is lowered as a place
-// child; any other group (`p + 1`, `p++`, `q = p + 1`) is an expression whose
-// value must be computed exactly once and cannot be re-walked as a place.
-BUSTER_C_INTERNAL bool c_ir_place_group_is_member_chain(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL u32 c_ir_core_wraps(CIntegerIrBuilder* builder, u32 node, u32 limit);
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_core_wrapped(CIntegerIrBuilder* builder, u32 node);
+
+BUSTER_C_INTERNAL bool c_ir_place_postfix_kind(u32 kind)
 {
-    bool result = start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
-    u32 index = start + 1;
-    while (result && index < end)
+    return kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX;
+}
+
+// The path from a postfix base to its suffixes, in source order. A group
+// around the base is a separate owner, as it was in the place machine.
+BUSTER_C_INTERNAL bool c_ir_place_path(CIntegerIrBuilder* builder, u32 root, u32 first, u32** nodes_out, u32* count_out, u32* base_out)
+{
+    CAst const* ast = builder->syntax_tree;
+    u32 base = root;
+    u32 count = 0;
+    bool wrapped = c_ir_core_wraps(builder, root, first) != 0;
+    while (!wrapped && c_ir_place_postfix_kind(ast->kinds[base]))
     {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        count += 1;
+        base = c_ast_child_at(ast, base, 0);
+        wrapped = c_ir_core_wrapped(builder, base);
+    }
+    u64 position = builder->scratch_arena->position;
+    bool fits = c_ir_arena_reservation_advance(builder->scratch_arena->reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32));
+    if (fits)
+    {
+        u32* nodes = arena_allocate(builder->scratch_arena, u32, count);
+        u32 cursor = root;
+        for (u32 index = count; index > 0; index -= 1)
         {
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            result = close < end;
-            index = close + 1;
+            nodes[index - 1] = cursor;
+            cursor = c_ast_child_at(ast, cursor, 0);
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        *nodes_out = nodes;
+        *count_out = count;
+        *base_out = base;
+    }
+    else
+    {
+        builder->failure_message = S8("C place lowering scratch reservation exceeded");
+        builder->failure_token_index = first;
+    }
+    return fits;
+}
+
+// A parenthesized bare name chain, including a prepared call at its base.
+// A parenthesis inside the chain is a separate owner and does not qualify.
+BUSTER_C_INTERNAL bool c_ir_place_bare_chain(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    bool result = true;
+    bool descending = true;
+    while (descending)
+    {
+        u32 kind = ast->kinds[node];
+        descending = c_ir_place_postfix_kind(kind) || kind == C_AST_CALL;
+        if (descending)
         {
-            // A call is prepared before place lowering; its value is a chain base.
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            result = close < end;
-            index = close + 1;
+            node = c_ast_child_at(ast, node, 0);
+            result = !c_ir_core_wrapped(builder, node);
+            descending = result;
         }
-        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW)) && index + 1 < end &&
-                 builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+    }
+    result = result && ast->kinds[node] == C_AST_IDENTIFIER;
+    return result;
+}
+
+// Request a computed base once; the existing expression continuation
+// recovers its final place and applies only the outer pending dereferences.
+BUSTER_C_INTERNAL bool c_ir_place_expression_child(CIntegerIrBuilder* builder, CIrLowerFrame* frame, u32 node, u32 first, u32 end,
+                                                   u32 dereferences)
+{
+    frame->as.place.local = 0;
+    frame->as.place.place = IR_VALUE_ID_INVALID;
+    frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[first]);
+    frame->as.place.start = first;
+    frame->as.place.end = end;
+    frame->as.place.index = end;
+    frame->as.place.close = end;
+    frame->as.place.suffix_cursor = frame->as.place.suffix_count;
+    frame->as.place.dereference_count = dereferences;
+    frame->as.place.continuation = C_IR_PLACE_CONTINUATION_EXPRESSION;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+        .kind = C_IR_LOWER_FRAME_EXPRESSION,
+        .as.expression = {.node_plus_one = node + 1, .start = first, .end = end},
+    });
+}
+
+// Set up one place from topology. The type-name calls retain their previous
+// emission order until #4061 replaces that query boundary with retained facts.
+BUSTER_C_INTERNAL bool c_ir_place_node_begin(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstSpans const* spans = builder->syntax_spans;
+    u32 root = frame->as.place.node_plus_one - 1;
+    bool valid = root != C_AST_NODE_INVALID && root < ast->node_count;
+    bool pending = false;
+    u32 start = valid ? spans->first[root] : frame->as.place.start;
+    u32 end = valid ? spans->end[root] : frame->as.place.end;
+    u32 pointer = root;
+    u32 dereferences = 0;
+    bool leading = false;
+    if (valid && (ast->kinds[root] == C_AST_REAL || ast->kinds[root] == C_AST_IMAG))
+    {
+        u32 operand = c_ast_child_at(ast, root, 0);
+        frame->as.place.local = 0;
+        frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
+        frame->as.place.start = start;
+        frame->as.place.end = end;
+        frame->as.place.index = end;
+        frame->as.place.suffix_count = 0;
+        frame->as.place.continuation = ast->kinds[root] == C_AST_REAL ? C_IR_PLACE_CONTINUATION_REAL_PART
+                                                                   : C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
+        frame->stage = C_IR_LOWER_STAGE_CHILD;
+        valid = c_ir_lower_frame_push(builder, (CIrLowerFrame){
+            .kind = C_IR_LOWER_FRAME_PLACE,
+            .as.place = {.node_plus_one = operand + 1, .start = start + 1, .end = end},
+        });
+        pending = true;
+    }
+    while (valid && !pending && ast->kinds[pointer] == C_AST_DEREFERENCE)
+    {
+        dereferences += 1;
+        leading = true;
+        start = ast->tokens[pointer] + 1;
+        pointer = c_ast_child_at(ast, pointer, 0);
+        if (c_ir_core_wraps(builder, pointer, start))
         {
-            index += 2;
+            break;
+        }
+    }
+    u32 base = pointer;
+    u32 outer_dereferences = dereferences;
+    if (valid && !pending)
+    {
+        valid = c_ir_place_path(builder, pointer, start, &frame->as.place.suffixes, &frame->as.place.suffix_count, &base);
+        frame->as.place.suffix_cursor = 0;
+    }
+    u32 wraps = valid && !pending ? c_ir_core_wraps(builder, base, start) : 0;
+    u32 kind = valid && !pending ? ast->kinds[base] : C_AST_KIND_COUNT;
+    // A group is queried first even when topology proves it is not a type
+    // name: the old query creates canonical type rows in this order.
+    if (valid && !pending && wraps)
+    {
+        u32 open = spans->first[base] - wraps;
+        u32 close = spans->end[base] - 1 + wraps;
+        c_ir_group_type_name(builder, open, close);
+    }
+    IrTypeId cast_type = IR_TYPE_ID_INVALID;
+    bool computed = valid && !pending && leading &&
+                    (kind == C_AST_POST_INCREMENT || kind == C_AST_POST_DECREMENT);
+    if (valid && !pending && !computed && kind == C_AST_CAST)
+    {
+        u32 operand = c_ast_child_at(ast, base, 1);
+        u32 operand_kind = ast->kinds[operand];
+        u32 open = ast->tokens[base];
+        IrTypeId parsed_cast = wraps <= 1 ? c_ir_group_type_name(builder, open, builder->syntax_matches[open] - 1) : IR_TYPE_ID_INVALID;
+        bool direct = !c_ir_core_wrapped(builder, operand) &&
+                      parsed_cast.value != IR_ID_UNDERLYING_INVALID && c_ir_place_bare_chain(builder, operand) &&
+                      (!wraps || (wraps == 1 && (operand_kind == C_AST_IDENTIFIER || operand_kind == C_AST_CALL)));
+        // An unwrapped cast follows an identifier and its postfix suffixes
+        // through the old direct-base path. Its computed operand is a child
+        // expression when a dereference needs the pointer value.
+        if (direct)
+        {
+            u32* inner_nodes = 0;
+            u32 inner_count = 0;
+            u32 inner_base = operand;
+            valid = c_ir_place_path(builder, operand, spans->first[operand], &inner_nodes, &inner_count, &inner_base);
+            bool named = valid && (ast->kinds[inner_base] == C_AST_IDENTIFIER || ast->kinds[inner_base] == C_AST_CALL);
+            direct = named;
+            if (direct && inner_count)
+            {
+                u64 position = builder->scratch_arena->position;
+                u32 count = inner_count + frame->as.place.suffix_count;
+                valid = c_ir_arena_reservation_advance(builder->scratch_arena->reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32));
+                if (valid)
+                {
+                    u32* nodes = arena_allocate(builder->scratch_arena, u32, count);
+                    memcpy(nodes, inner_nodes, sizeof(u32) * inner_count);
+                    memcpy(nodes + inner_count, frame->as.place.suffixes, sizeof(u32) * frame->as.place.suffix_count);
+                    frame->as.place.suffixes = nodes;
+                    frame->as.place.suffix_count = count;
+                }
+            }
+            if (valid && direct)
+            {
+                cast_type = parsed_cast;
+                base = inner_base;
+                kind = ast->kinds[base];
+            }
+        }
+        computed = !direct && (leading || wraps);
+        valid = valid && (direct || computed);
+    }
+    if (valid && !pending && !computed && wraps == 1 && c_ir_place_postfix_kind(kind))
+    {
+        if (c_ir_place_bare_chain(builder, base))
+        {
+            frame->as.place.local = 0;
+            frame->as.place.place = IR_VALUE_ID_INVALID;
+            frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[spans->first[base]]);
+            frame->as.place.start = start;
+            frame->as.place.end = end;
+            frame->as.place.close = spans->end[base] + wraps;
+            frame->as.place.dereference_count = dereferences;
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_GROUP;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            valid = c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                .kind = C_IR_LOWER_FRAME_PLACE,
+                .as.place = {.node_plus_one = base + 1, .start = spans->first[base], .end = spans->end[base]},
+            });
+            pending = true;
         }
         else
         {
-            result = false;
+            computed = true;
         }
     }
-    return result;
+    if (valid && !pending && !computed && wraps == 1 && kind == C_AST_ADDRESS)
+    {
+        u32 operand = c_ast_child_at(ast, base, 0);
+        if (ast->kinds[operand] == C_AST_IDENTIFIER && !c_ir_core_wrapped(builder, operand))
+        {
+            u32 token_index = ast->tokens[operand];
+            CToken token = builder->preprocess.tokens[token_index];
+            CEntityId entity = c_ir_identifier_entity(builder, token_index);
+            CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+            if (!local && entity.value == C_ID_UNDERLYING_INVALID) local = c_ir_find_local_by_name(builder, token);
+            IrSourceRange source = c_ir_token_source_range(builder, token);
+            frame->as.place.place = local ? c_ir_emit_address_of_place(builder, local->place, local->type, source) : IR_VALUE_ID_INVALID;
+            frame->as.place.local = 0;
+            frame->as.place.source = source;
+            frame->as.place.start = start;
+            frame->as.place.end = end;
+            frame->as.place.index = spans->end[base] + wraps;
+            frame->as.place.dereference_count = 0;
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+            frame->stage = C_IR_LOWER_STAGE_FINISH;
+            valid = frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
+            pending = true;
+        }
+        else
+        {
+            computed = true;
+        }
+    }
+    if (valid && !pending && !computed && wraps && kind == C_AST_DEREFERENCE)
+    {
+        u32 cursor = base;
+        bool direct = true;
+        while (direct && ast->kinds[cursor] == C_AST_DEREFERENCE)
+        {
+            dereferences += 1;
+            cursor = c_ast_child_at(ast, cursor, 0);
+            direct = !c_ir_core_wrapped(builder, cursor);
+        }
+        direct = direct && ast->kinds[cursor] == C_AST_IDENTIFIER;
+        if (direct)
+        {
+            base = cursor;
+            kind = C_AST_IDENTIFIER;
+        }
+        else
+        {
+            // Stars inside a computed group are evaluated by its child.
+            dereferences = outer_dereferences;
+            computed = true;
+        }
+    }
+    if (valid && !pending && !computed && kind == C_AST_COMPOUND_LITERAL)
+    {
+        u32 open = ast->tokens[base];
+        c_ir_group_type_name(builder, open, builder->syntax_matches[open] - 1);
+        computed = true;
+    }
+    computed = computed || (valid && !pending && ((kind == C_AST_CALL && wraps > 1) ||
+                                                (kind != C_AST_IDENTIFIER && kind != C_AST_CALL && kind != C_AST_GENERIC_SELECTION)));
+    if (valid && !pending && computed)
+    {
+        valid = c_ir_place_expression_child(builder, frame, pointer, start, end, dereferences);
+        pending = true;
+    }
+    if (valid && !pending)
+    {
+        u32 token_index = spans->first[base];
+        CToken token = builder->preprocess.tokens[token_index];
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        CIrPreparedCall* call = kind == C_AST_CALL || kind == C_AST_GENERIC_SELECTION ? c_ir_prepared_call_find(builder, base) : 0;
+        bool called = call != 0;
+        CIntegerIrLocal* local = 0;
+        IrValueId place = IR_VALUE_ID_INVALID;
+        if (called)
+        {
+            place = call->emitted ? call->result : IR_VALUE_ID_INVALID;
+            if (place.value != IR_ID_UNDERLYING_INVALID && cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                place = c_ir_emit_cast(builder, place, cast_type, source);
+            }
+        }
+        else if (kind == C_AST_IDENTIFIER)
+        {
+            CEntityId entity = c_ir_identifier_entity(builder, token_index);
+            local = c_ir_find_local_by_entity(builder, entity);
+            if (!local && entity.value == C_ID_UNDERLYING_INVALID) local = c_ir_find_local_by_name(builder, token);
+            place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
+            if (place.value != IR_ID_UNDERLYING_INVALID && cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrTypeId type = builder->function->values[place.value].canonical_type;
+                place = c_ir_emit_load_place(builder, place, type, source);
+                place = place.value == IR_ID_UNDERLYING_INVALID ? place : c_ir_emit_cast(builder, place, cast_type, source);
+                if (place.value != IR_ID_UNDERLYING_INVALID && dereferences && !(leading && frame->as.place.suffix_count))
+                {
+                    place = c_ir_emit_dereference_place(builder, place, source);
+                    dereferences -= 1;
+                }
+            }
+        }
+        if (!leading || !frame->as.place.suffix_count)
+        {
+            while (place.value != IR_ID_UNDERLYING_INVALID && dereferences)
+            {
+                if (!called)
+                {
+                    IrTypeId type = builder->function->values[place.value].canonical_type;
+                    place = c_ir_emit_load_place(builder, place, type, source);
+                }
+                place = c_ir_emit_dereference_place(builder, place, source);
+                dereferences -= 1;
+            }
+        }
+        frame->as.place.local = local;
+        frame->as.place.place = place;
+        frame->as.place.source = source;
+        frame->as.place.start = start;
+        frame->as.place.end = end;
+        frame->as.place.index = frame->as.place.suffix_count ? ast->tokens[frame->as.place.suffixes[0]] : end;
+        frame->as.place.dereference_count = dereferences;
+        frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+        frame->stage = C_IR_LOWER_STAGE_FINISH;
+        valid = place.value != IR_ID_UNDERLYING_INVALID;
+        if (!valid) builder->failure_token_index = token_index;
+    }
+    return valid;
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
@@ -19241,425 +19571,15 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
     CIrLowerMachine* machine = &builder->lower_machine;
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        u32 start = frame->as.place.start;
-        u32 end = frame->as.place.end;
-        while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-               !c_ir_group_is_statement_expression(builder, start, end))
-        {
-            u32 depth = 0;
-            u32 close = start;
-            for (; close < end; close += 1)
-            {
-                CToken token = builder->preprocess.tokens[close];
-                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    if (!depth)
-                    {
-                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                        return;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        break;
-                    }
-                }
-            }
-            if (close != end - 1)
-            {
-                break;
-            }
-            start += 1;
-            end -= 1;
-        }
-        CConditionalOperator part = C_CONDITIONAL_OPERATOR_COUNT;
-        if (start < end && c_ir_complex_part_operator(builder, builder->preprocess.tokens[start], &part))
-        {
-            // The part of an object remains a place. Lower the operand as a
-            // place child so a constructor or arithmetic value cannot acquire
-            // modifiable storage through the ordinary value projection.
-            frame->as.place.local = 0;
-            frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
-            frame->as.place.start = start;
-            frame->as.place.end = end;
-            frame->as.place.index = end;
-            frame->as.place.continuation = part == C_CONDITIONAL_REAL_PART ? C_IR_PLACE_CONTINUATION_REAL_PART
-                                                                         : C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
-            frame->stage = C_IR_LOWER_STAGE_CHILD;
-            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                    .kind = C_IR_LOWER_FRAME_PLACE,
-                                                    .as.place = {.start = start + 1, .end = end},
-                                                }))
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            }
-            return;
-        }
-        u32 dereference_count = 0;
-        // A unary `*` before the base identifier applies to the complete
-        // postfix expression (`*p->field` means `*(p->field)`).  Keep that
-        // provenance separate from stars inside a parenthesized group such
-        // as `(*p).field`, whose dereference must happen before the suffix.
-        bool leading_dereference = false;
-        while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
-        {
-            dereference_count += 1;
-            leading_dereference = true;
-            start += 1;
-        }
-        if (leading_dereference && start + 1 < end &&
-            (c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
-             c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_MINUS_MINUS)))
-        {
-            // `*p++` is `*(p++)`: the postfix update is part of the pointer
-            // operand, so evaluate that operand once as an expression.
-            goto c_ir_place_expression_base;
-        }
-        u32 index = start;
-        u32 base_index = index;
-        IrTypeId cast_type = IR_TYPE_ID_INVALID;
-        if (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            u32 depth = 1;
-            u32 close = index + 1;
-            while (close < end && depth)
-            {
-                if (c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    depth -= 1;
-                }
-                close += 1;
-            }
-            u32 nested_start = index + 1;
-            u32 nested_end = depth ? nested_start : close - 1;
-            IrTypeId grouped_cast_type = depth ? IR_TYPE_ID_INVALID : c_ir_group_type_name(builder, index, close - 1);
-            if (grouped_cast_type.value != IR_ID_UNDERLYING_INVALID)
-            {
-                if (close < end && c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    // Expression lowering already materializes a compound
-                    // literal and its suffixes. Recover that object's place,
-                    // without interpreting its type name as a cast operand.
-                    goto c_ir_place_expression_base;
-                }
-                // `*(int*)ud` is a place whose pointer operand is a cast,
-                // rather than a parenthesized single identifier.  Preserve
-                // the cast type so the base value can be converted before
-                // the outer dereference is formed below.
-                if (dereference_count && close < end && builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
-                {
-                    // A computed cast operand, such as `*(int *)(bytes + i)`,
-                    // supplies its pointer value through the expression child.
-                    // The continuation dereferences that value exactly once.
-                    goto c_ir_place_expression_base;
-                }
-                if (close >= end || builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    return;
-                }
-                cast_type = grouped_cast_type;
-                base_index = close;
-                index = base_index + 1;
-                goto c_ir_place_base_resolved;
-            }
-            // A cast expression is sometimes wrapped in an additional pair
-            // of parentheses, as in `*((int *)ud)`.  The outer group is not a
-            // type name itself; inspect its single inner `(type) identifier`
-            // expression before falling back to the ordinary parenthesized
-            // place form below.
-            if (!depth && nested_start < nested_end &&
-                c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                u32 inner_open = nested_start;
-                u32 inner_depth = 1;
-                u32 inner_close = inner_open + 1;
-                while (inner_close < nested_end && inner_depth)
-                {
-                    if (c_token_is_punctuator(&builder->preprocess.tokens[inner_close], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        inner_depth += 1;
-                    }
-                    else if (c_token_is_punctuator(&builder->preprocess.tokens[inner_close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                    {
-                        inner_depth -= 1;
-                    }
-                    inner_close += 1;
-                }
-                if (!inner_depth && inner_close < nested_end)
-                {
-                    IrTypeId inner_cast_type = c_ir_group_type_name(builder, inner_open, inner_close - 1);
-                    if (inner_cast_type.value != IR_ID_UNDERLYING_INVALID && builder->preprocess.tokens[inner_close].kind == C_TOKEN_IDENTIFIER &&
-                        inner_close + 1 == nested_end)
-                    {
-                        cast_type = inner_cast_type;
-                        base_index = inner_close;
-                        index = close;
-                        goto c_ir_place_base_resolved;
-                    }
-                    // The cast operand may itself be a call, as in
-                    // `*((Extra *)get_extra())->plock`.  The outer group
-                    // remains part of the base expression; retain `close`
-                    // as the suffix start while the prepared-call branch
-                    // below supplies and casts the call value.
-                    if (inner_cast_type.value != IR_ID_UNDERLYING_INVALID && inner_close + 1 < nested_end &&
-                        builder->preprocess.tokens[inner_close].kind == C_TOKEN_IDENTIFIER &&
-                        c_token_is_punctuator(&builder->preprocess.tokens[inner_close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        u32 call_close = c_ir_matching_delimiter_cached(builder, inner_close + 1, nested_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                                          C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                        if (call_close < nested_end && call_close + 1 == nested_end)
-                        {
-                            cast_type = inner_cast_type;
-                            base_index = inner_close;
-                            index = close;
-                            goto c_ir_place_base_resolved;
-                        }
-                    }
-                }
-            }
-            // A parenthesized member/subscript chain is itself a place, for
-            // example `(state->stream)->p++`.  Lower that inner place as a
-            // child, then resume this frame at the outer suffix; treating the
-            // group as a single identifier would otherwise reject valid
-            // postfix updates in Lua's buffered-reader macro.
-            if (!depth && nested_end > nested_start + 1 && c_ir_place_group_is_member_chain(builder, nested_start, nested_end))
-            {
-                IrSourceRange group_source = c_ir_token_source_range(builder, builder->preprocess.tokens[nested_start]);
-                frame->as.place.local = 0;
-                frame->as.place.place = IR_VALUE_ID_INVALID;
-                frame->as.place.source = group_source;
-                frame->as.place.start = start;
-                frame->as.place.end = end;
-                frame->as.place.index = close;
-                frame->as.place.close = close;
-                frame->as.place.dereference_count = dereference_count;
-                frame->as.place.continuation = C_IR_PLACE_CONTINUATION_GROUP;
-                frame->stage = C_IR_LOWER_STAGE_CHILD;
-                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                        .kind = C_IR_LOWER_FRAME_PLACE,
-                                                        .as.place =
-                                                            {
-                                                                .start = nested_start,
-                                                                .end = nested_end,
-                                                            },
-                                                    }))
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                }
-                return;
-            }
-            // An address-of expression may be parenthesized before its
-            // member suffix, as in `(&buffer)->count`.  Unlike a grouped
-            // place this inner expression produces a pointer value, so form
-            // that value directly and let the common suffix walk create the
-            // resulting field place.  This shape occurs in Lua's
-            // `luaL_addchar` macro (`(&B)->b[(&B)->n++]`).
-            if (!depth && nested_end == nested_start + 2 &&
-                c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_AMPERSAND) &&
-                builder->preprocess.tokens[nested_start + 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                CToken base_token = builder->preprocess.tokens[nested_start + 1];
-                CEntityId entity = c_ir_identifier_entity(builder, nested_start + 1);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                if (!local && entity.value == C_ID_UNDERLYING_INVALID)
-                {
-                    local = c_ir_find_local_by_name(builder, base_token);
-                }
-                IrSourceRange source = c_ir_token_source_range(builder, base_token);
-                IrValueId place = local ? c_ir_emit_address_of_place(builder, local->place, local->type, source) : IR_VALUE_ID_INVALID;
-                if (place.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    return;
-                }
-                frame->as.place.local = 0;
-                frame->as.place.place = place;
-                frame->as.place.source = source;
-                frame->as.place.start = start;
-                frame->as.place.end = end;
-                frame->as.place.index = close;
-                frame->as.place.dereference_count = 0;
-                frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
-                frame->stage = C_IR_LOWER_STAGE_FINISH;
-                goto c_ir_place_suffix_walk;
-            }
-            while (nested_start < nested_end && c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                   c_token_is_punctuator(&builder->preprocess.tokens[nested_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                nested_start += 1;
-                nested_end -= 1;
-            }
-            u32 grouped_dereference_count = 0;
-            while (nested_start < nested_end && c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_STAR))
-            {
-                grouped_dereference_count += 1;
-                nested_start += 1;
-            }
-            if (depth || nested_end != nested_start + 1)
-            {
-                // A parenthesized arithmetic/cast base can still form a
-                // perfectly valid postfix place, for example
-                // `((int *)data - 2)[1]++`.  Lower the complete operand as a
-                // value and recover its final load's source place when the
-                // child returns.  The same path handles the older
-                // dereference-over-complex-base shape used by Lua.
-c_ir_place_expression_base:
-                frame->as.place.local = 0;
-                frame->as.place.place = IR_VALUE_ID_INVALID;
-                frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
-                frame->as.place.start = start;
-                frame->as.place.end = end;
-                frame->as.place.index = end;
-                frame->as.place.close = end;
-                frame->as.place.dereference_count = dereference_count;
-                frame->as.place.continuation = C_IR_PLACE_CONTINUATION_EXPRESSION;
-                frame->stage = C_IR_LOWER_STAGE_CHILD;
-                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                        .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                        .as.expression =
-                                                            {
-                                                                .start = start,
-                                                                .end = end,
-                                                            },
-                                                    }))
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                }
-                return;
-            }
-            // The complete-expression fallback above already evaluates
-            // stars inside the group. Only the direct identifier path still
-            // needs them; stripped outer stars remain pending on both paths.
-            dereference_count += grouped_dereference_count;
-            base_index = nested_start;
-            index = close;
-        }
-        else
-        {
-            index += 1;
-        }
-c_ir_place_base_resolved:
-        if (base_index >= end || builder->preprocess.tokens[base_index].kind != C_TOKEN_IDENTIFIER)
+        if (!c_ir_place_node_begin(builder, frame))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        // Calls are prepared and emitted before place lowering.  A call that
-        // returns a pointer can therefore be the base of an addressable
-        // arrow/subscript chain (`*getlock(l)->plock`), even though it is not
-        // itself a local/global place.  Keep the call value as the suffix
-        // operand and defer a leading dereference until that chain is walked.
-        CIrPreparedCall* prepared_call = c_ir_prepared_call_base(builder, base_index, end);
-        if (prepared_call && prepared_call->close_index < end)
+        if (frame->stage == C_IR_LOWER_STAGE_CHILD)
         {
-            IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[base_index]);
-            IrValueId place = prepared_call->emitted ? prepared_call->result : IR_VALUE_ID_INVALID;
-            if (place.value == IR_ID_UNDERLYING_INVALID)
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
-            }
-            if (cast_type.value != IR_ID_UNDERLYING_INVALID)
-            {
-                place = c_ir_emit_cast(builder, place, cast_type, source);
-                if (place.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    return;
-                }
-            }
-            u32 suffix_index = prepared_call->close_index + 1;
-            if (index > suffix_index)
-            {
-                // A parenthesized cast-call (`((T)f())->field`) consumes an
-                // outer group beyond the call's own close delimiter.
-                suffix_index = index;
-            }
-            if (!leading_dereference || suffix_index >= end)
-            {
-                while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
-                {
-                    place = c_ir_emit_dereference_place(builder, place, source);
-                    dereference_count -= 1;
-                }
-            }
-            frame->as.place.local = 0;
-            frame->as.place.place = place;
-            frame->as.place.source = source;
-            frame->as.place.start = start;
-            frame->as.place.end = end;
-            frame->as.place.index = suffix_index;
-            frame->as.place.dereference_count = dereference_count;
-            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
-            frame->stage = C_IR_LOWER_STAGE_FINISH;
-            goto c_ir_place_suffix_walk;
+            return;
         }
-        CEntityId entity = c_ir_identifier_entity(builder, base_index);
-        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-        if (!local && entity.value == C_ID_UNDERLYING_INVALID)
-        {
-            local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[base_index]);
-        }
-        IrSourceRange source =
-            c_ir_token_source_range(builder, builder->preprocess.tokens[base_index]);
-        IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
-        if (place.value == IR_ID_UNDERLYING_INVALID)
-        {
-            builder->failure_token_index = base_index;
-        }
-        if (place.value != IR_ID_UNDERLYING_INVALID && cast_type.value != IR_ID_UNDERLYING_INVALID)
-        {
-            IrTypeId base_type = builder->function->values[place.value].canonical_type;
-            IrValueId base_value = c_ir_emit_load_place(builder, place, base_type, source);
-            base_value = base_value.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, base_value, cast_type, source);
-            if (base_value.value == IR_ID_UNDERLYING_INVALID)
-            {
-                place = IR_VALUE_ID_INVALID;
-            }
-            else if (dereference_count && !(leading_dereference && index < end))
-            {
-                place = c_ir_emit_dereference_place(builder, base_value, source);
-                dereference_count -= 1;
-            }
-            else
-            {
-                // A casted pointer can feed a subscript/member suffix without
-                // an outer `*`; retain the converted value for that suffix.
-                place = base_value;
-            }
-        }
-        if (leading_dereference && index < end)
-        {
-            // Delay prefix stars until after postfix member/subscript suffixes
-            // have produced their final place.  This is the C precedence of
-            // `*p->field`; stars introduced by a parenthesized group are not
-            // marked leading and retain the existing early-dereference path.
-        }
-        else while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
-        {
-            IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
-            IrValueId pointer = c_ir_emit_load_place(builder, place, pointer_type, source);
-            place = c_ir_emit_dereference_place(builder, pointer, source);
-            dereference_count -= 1;
-        }
-        frame->as.place.local = local;
-        frame->as.place.place = place;
-        frame->as.place.source = source;
-        frame->as.place.start = start;
-        frame->as.place.end = end;
-        frame->as.place.index = index;
-        frame->as.place.dereference_count = dereference_count;
-        frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
-        frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
@@ -19693,7 +19613,10 @@ c_ir_place_base_resolved:
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_VLA)
         {
             frame->as.place.place = machine->child_result.value;
-            frame->as.place.index = machine->child_result.index;
+            frame->as.place.suffix_cursor = machine->child_result.index;
+            frame->as.place.index = frame->as.place.suffix_cursor < frame->as.place.suffix_count
+                                       ? builder->syntax_tree->tokens[frame->as.place.suffixes[frame->as.place.suffix_cursor]]
+                                       : frame->as.place.end;
         }
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_SUBSCRIPT)
         {
@@ -19707,6 +19630,7 @@ c_ir_place_base_resolved:
             }
             frame->as.place.place = c_ir_emit_index_place(builder, base, machine->child_result.value, frame->as.place.source);
             frame->as.place.index = frame->as.place.close;
+            frame->as.place.suffix_cursor += 1;
         }
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_GROUP)
         {
@@ -19775,9 +19699,9 @@ c_ir_place_base_resolved:
         frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
- c_ir_place_suffix_walk:
     if (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.local && frame->as.place.local->is_variable_length_array &&
-        frame->as.place.index < frame->as.place.end && c_token_is_punctuator(&builder->preprocess.tokens[frame->as.place.index], C_PUNCTUATOR_LEFT_BRACKET))
+        frame->as.place.suffix_cursor < frame->as.place.suffix_count &&
+        builder->syntax_tree->kinds[frame->as.place.suffixes[frame->as.place.suffix_cursor]] == C_AST_INDEX)
     {
         frame->as.place.continuation = C_IR_PLACE_CONTINUATION_VLA;
         frame->stage = C_IR_LOWER_STAGE_CHILD;
@@ -19789,6 +19713,9 @@ c_ir_place_base_resolved:
                                                         .source = frame->as.place.source,
                                                         .index = frame->as.place.index,
                                                         .end = frame->as.place.end,
+                                                        .suffixes = frame->as.place.suffixes,
+                                                        .suffix_count = frame->as.place.suffix_count,
+                                                        .suffix_cursor = frame->as.place.suffix_cursor,
                                                     },
                                             }))
         {
@@ -19796,28 +19723,17 @@ c_ir_place_base_resolved:
         }
         return;
     }
-    while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.index < frame->as.place.end)
+    while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.suffix_cursor < frame->as.place.suffix_count)
     {
-        u32 index = frame->as.place.index;
+        u32 node = frame->as.place.suffixes[frame->as.place.suffix_cursor];
+        u32 kind = builder->syntax_tree->kinds[node];
+        // A member node anchors its name; an index node anchors its `[`.
+        u32 index = builder->syntax_tree->tokens[node] - (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW);
         CToken access = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&access, C_PUNCTUATOR_LEFT_BRACKET))
+        if (kind == C_AST_INDEX)
         {
-            u32 depth = 1;
-            u32 close = index + 1;
-            while (close < frame->as.place.end && depth)
-            {
-                CToken token = builder->preprocess.tokens[close];
-                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    depth -= 1;
-                }
-                close += 1;
-            }
-            if (depth || close == index + 2)
+            u32 close = builder->syntax_spans->end[node];
+            if (close == index + 2)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
@@ -19831,6 +19747,7 @@ c_ir_place_base_resolved:
                                                         {
                                                             .start = index + 1,
                                                             .end = close - 1,
+                                                            .node_plus_one = c_ast_child_at(builder->syntax_tree, node, 1) + 1,
                                                         },
                                                 }))
             {
@@ -19838,14 +19755,13 @@ c_ir_place_base_resolved:
             }
             return;
         }
-        if (index + 1 >= frame->as.place.end || (!c_token_is_punctuator(&access, C_PUNCTUATOR_DOT) && !c_token_is_punctuator(&access, C_PUNCTUATOR_ARROW)) ||
-            builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+        if (kind != C_AST_MEMBER && kind != C_AST_MEMBER_ARROW)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
         IrValueId operand = frame->as.place.place;
-        if (c_token_is_punctuator(&access, C_PUNCTUATOR_ARROW))
+        if (kind == C_AST_MEMBER_ARROW)
         {
             IrTypeId place_type = builder->function->values[frame->as.place.place.value].canonical_type;
             // A parenthesized address expression such as `(&buffer)->field`
@@ -19862,7 +19778,8 @@ c_ir_place_base_resolved:
         {
             builder->failure_token_index = index + 1;
         }
-        frame->as.place.index += 2;
+        frame->as.place.index = builder->syntax_spans->end[node];
+        frame->as.place.suffix_cursor += 1;
     }
     while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.dereference_count)
     {
@@ -19873,7 +19790,7 @@ c_ir_place_base_resolved:
         frame->as.place.place = c_ir_emit_dereference_place(builder, pointer, frame->as.place.source);
         frame->as.place.dereference_count -= 1;
     }
-    bool success = frame->as.place.index == frame->as.place.end && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
+    bool success = frame->as.place.suffix_cursor == frame->as.place.suffix_count && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
     c_ir_lower_frame_finish(builder, success, success ? frame->as.place.place : IR_VALUE_ID_INVALID);
 }
 
@@ -20062,7 +19979,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder,
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_place_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_lower_place_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_PLACE,
@@ -20070,8 +19987,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_place_frame_push(CIntegerIrBuilder* builder, u
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
+}
+
+BUSTER_C_INTERNAL bool c_ir_lower_place_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_lower_place_node_frame_push(builder, C_AST_NODE_INVALID, start, end);
 }
 
 // Whether a name declared inside a function body is mentioned anywhere else in
@@ -37481,7 +37404,7 @@ BUSTER_C_INTERNAL u32 c_ir_core_chain_unit(CIntegerIrBuilder* builder, CIrExpres
 // the loop at `stage`.
 BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_consume_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state);
 
-BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state, u32 start,
+BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state, u32 node, u32 start,
                                                 u32 end, CIrLowerFrameStage stage, u32 pending_start, u32 pending_end)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -37490,7 +37413,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_place(CIntegerIrBuilder* builder, CIrL
     state->pending_end = pending_end;
     frame->stage = (u8)stage;
     u32 place_mark = machine->frame_count;
-    if (!c_ir_lower_place_frame_push(builder, start, end))
+    if (!c_ir_lower_place_node_frame_push(builder, node, start, end))
     {
         status = C_IR_CORE_FAILED;
     }
@@ -37596,7 +37519,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_prefix_update(CIntegerIrBuilder* build
     }
     if (!inline_update)
     {
-        status = c_ir_core_place(builder, frame, state, index + 1, operand_end, C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE, index, 0);
+        status = c_ir_core_place(builder, frame, state, c_ast_child_at(ast, node, 0), index + 1, operand_end, C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE, index, 0);
     }
     return status;
 }
@@ -38036,7 +37959,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_sizeof(CIntegerIrBuilder* builder, CIr
 // the function-name words; a call no prepass recorded, which is a source
 // location builtin or a diagnostic. [index, end) is the unit's span;
 // `address_operand` says the unit is the operand of a unary `&`.
-BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_identifier(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state, u32 index,
+BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_identifier(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state, u32 node, u32 index,
                                                      u32 end, bool address_operand)
 {
     CToken token = builder->preprocess.tokens[index];
@@ -38082,7 +38005,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_identifier(CIntegerIrBuilder* builder,
         if (end > index + 1)
         {
             placed = true;
-            status = c_ir_core_place(builder, frame, state, index, end, C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE, index, end);
+            status = c_ir_core_place(builder, frame, state, node, index, end, C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE, index, end);
         }
         else if (local)
         {
@@ -38333,7 +38256,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
     case C_AST_POST_DECREMENT:
     {
         state->walk_count -= 1;
-        status = c_ir_core_place(builder, frame, state, first, end - 1, C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE, end - 1, 0);
+        status = c_ir_core_place(builder, frame, state, c_ast_child_at(ast, node, 0), first, end - 1, C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE, end - 1, 0);
     }
     break;
     case C_AST_LABEL_ADDRESS:
@@ -38473,7 +38396,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
             {
                 bool address_operand = entry->parent != C_AST_NODE_INVALID && builder->syntax_tree->kinds[entry->parent] == C_AST_ADDRESS;
                 state->walk_count -= 1;
-                status = c_ir_core_identifier(builder, frame, state, first, kind == C_AST_IDENTIFIER ? first + 1 : end, address_operand);
+                status = c_ir_core_identifier(builder, frame, state, node, first, kind == C_AST_IDENTIFIER ? first + 1 : end, address_operand);
             }
             break;
             case C_AST_CALL:
@@ -38482,7 +38405,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
                 status = C_IR_CORE_FAILED;
                 if (named_callee)
                 {
-                    status = c_ir_core_identifier(builder, frame, state, first, end, false);
+                    status = c_ir_core_identifier(builder, frame, state, node, first, end, false);
                 }
             }
             break;
@@ -38494,7 +38417,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
                 if (unit == node)
                 {
                     state->walk_count -= 1;
-                    status = c_ir_core_identifier(builder, frame, state, first, end, false);
+                    status = c_ir_core_identifier(builder, frame, state, node, first, end, false);
                 }
                 else
                 {
@@ -38789,7 +38712,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_begin(CIntegerIrBuild
             // frame's re-dispatch. A suspension resumes through the loop
             // unchanged.
             u32 place_mark = machine->frame_count;
-            if (!c_ir_lower_place_frame_push(builder, prefix ? start + 1 : start, prefix ? end : end - 1))
+            if (!c_ir_lower_place_node_frame_push(builder, c_ast_child_at(ast, root, 0), prefix ? start + 1 : start, prefix ? end : end - 1))
             {
                 status = C_IR_CORE_FAILED;
             }
@@ -39643,32 +39566,6 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     {
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
     }
-}
-
-// Is `[start, end)` exactly one GNU statement expression, `( { ... } )`?
-//
-// The parentheses there are part of the operator's own spelling, not a
-// redundant grouping, so a walk that peels redundant parentheses off a range
-// has to stop at this pair: peeling it leaves a bare `{`, which is not an
-// expression at all, and the range that survives is a compound statement the
-// expression walkers cannot name. That is what refused a statement expression
-// in every lazily lowered control position -- `if (({ 1; }))`, a `while`
-// condition, either arm of `?:`, an operand of `&&` -- while the eagerly
-// lowered ones, which never peel, took it (#820). The expression core lowers
-// the shape from its `(` and only from there, which is why the guard is a
-// stop rather than a rewrite.
-BUSTER_C_INTERNAL bool c_ir_group_is_statement_expression(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    bool result = false;
-    if (end > start + 3 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-        c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
-        c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
-        c_token_is_punctuator(&builder->preprocess.tokens[end - 2], C_PUNCTUATOR_RIGHT_BRACE))
-    {
-        result = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1 &&
-                 c_ir_matching_delimiter_cached(builder, start + 1, end - 1, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 2;
-    }
-    return result;
 }
 
 // Branch on a finished condition leaf: the CONDITION_CHILD resume and the
@@ -42622,7 +42519,7 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     bool pushed = parenthesized_place
                       ? c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
                                                                      .as.expression = {.start = start, .end = assignment, .node_plus_one = left + 1}})
-                      : c_ir_lower_place_frame_push(builder, start, assignment);
+                      : c_ir_lower_place_node_frame_push(builder, left, start, assignment);
     return pushed;
 }
 

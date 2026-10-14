@@ -2041,7 +2041,7 @@ reductions and the postfix probe are deleted.
   member name. A failed operator reports the token the walk visited last, as
   the token path reported the token whose arrival reduced it.
 - **Still token ranges** (the temporary adapter of part (c) and step 4):
-  - the place machine and compound-literal frames;
+  - compound-literal frames;
   - the `sizeof` operand's type and value queries;
   - the cast type (`c_ir_group_type_name`);
   - `__builtin_offsetof`'s designator.
@@ -2089,6 +2089,17 @@ byte.
   `c_test_condition_assignment_of_logical`).
 - **Logical and conditional values** ask `c_ir_range_has_root_assignment` and
   the node's `ANY_ASSIGNMENT` bit.
+- **Places.** The owner keeps its exact subtree. `c_ir_place_node_begin`
+  reads prefix dereferences, groups, casts and prepared-call bases from the
+  node kinds; `c_ir_place_path` collects member and INDEX suffixes into a
+  source-order path. A grouped place or computed base becomes a child frame,
+  preserving the former base emission and load-recovery order. The VLA child
+  consumes consecutive INDEX nodes from that path. Subscript expressions and
+  prefix/postfix update operands enter their expression/place frames with
+  their exact child node. The member node anchors its name, so the emitter
+  takes the preceding access token as provenance. The member-chain token
+  probe and place/VLA delimiter walks are deleted. Type-name queries retain
+  their marked step-4 boundary and their original row-creation order.
 - **Prepass filters.** `c_ir_range_may_prepare_control` and
   `c_ir_range_may_prepare_calls` read the node's `ANY` and `HOLDS_CALL` bits.
   The per-body token prefix table (`c_ir_token_prefix_build`) is deleted.
@@ -2111,11 +2122,11 @@ byte.
   agreed, so `sizeof(sizeof(int) + 1.0f)` folded `size_t`'s 8. The
   classifier now splits at the tier of the binary operator the tree has at
   the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
-- **Still token ranges.** The place machine and the `sizeof` and
-  compound-literal frames take their subtree's token range. Prepared calls
-  use CALL node identity; prepared control records use node and wrapping
-  level. Statement-expression frames enter their compound child directly,
-  and `EXPRESSION` continuations retain their subtree identity.
+- **Still token ranges.** The `sizeof` and compound-literal frames take
+  their subtree's token range. Prepared calls use CALL node identity;
+  prepared control records use node and wrapping level. Statement-expression
+  frames enter their compound child directly, and `EXPRESSION` continuations
+  retain their subtree identity. Places and VLA indices use exact syntax nodes.
 - **A unit the builder rejects.** The tree is mandatory: such a unit fails
   with the builder's diagnostics (`tree_rejections`), and lowering does not
   run. These are inputs the parser accepts: invalid `__builtin_offsetof`
