@@ -208,6 +208,9 @@ BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
 BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // The first GNU statement-expression candidate in [from, end), or end.
 BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end);
+BUSTER_C_EXTERN bool c_parse_block_static_single_statement_expression_tail(CParseResult* parse, CPreprocessResult preprocess,
+                                                                              u32 start, u32 end, u32* tail_start_out,
+                                                                              u32* tail_end_out);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
@@ -233,6 +236,7 @@ BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN u32 c_symbol_find(const CSymbolTable* table, String8 name);
+BUSTER_C_EXTERN CSymbolTable* c_symbol_table_standalone(Arena* arena);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                 CDeclaration* declaration, CTypeId inherited_base);
@@ -853,6 +857,7 @@ typedef struct CMathLibmShape
 
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
+BUSTER_C_EXTERN bool c_semantic_math_long_double_builtin_supported_on_target(Target target, String8 name);
 
 // The constant-valued special-float math builtins: positive infinity, or the
 // default quiet NaN of a `nan*("")` call, in the floating type `kind` names.

@@ -12,16 +12,18 @@ typedef enum ExternalProject
     EXTERNAL_PROJECT_SQLITE,
     EXTERNAL_PROJECT_GIT,
     EXTERNAL_PROJECT_RAD,
+    EXTERNAL_PROJECT_FFMPEG,
     EXTERNAL_PROJECT_COUNT,
 } ExternalProject;
 
 // The userspace verifier is defined later in build.c's unity include order.
 BUSTER_GLOBAL_LOCAL ProcessResult userspace_input_self_test(Arena* arena);
+BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 arguments, String8 driver_argument);
 
 BUSTER_GLOBAL_LOCAL String8 external_project_names[] = {
     S8_INITIALIZER("cjson"), S8_INITIALIZER("zlib"), S8_INITIALIZER("stb"),
     S8_INITIALIZER("lua"), S8_INITIALIZER("quickjs"), S8_INITIALIZER("sqlite"),
-    S8_INITIALIZER("git"), S8_INITIALIZER("rad"),
+    S8_INITIALIZER("git"), S8_INITIALIZER("rad"), S8_INITIALIZER("ffmpeg"),
 };
 
 BUSTER_GLOBAL_LOCAL bool external_projects_sha_valid(String8 sha)
@@ -63,7 +65,8 @@ BUSTER_GLOBAL_LOCAL bool external_projects_record(Arena* arena, u32 project, Str
            "{S8}\t{S8}\t{u64}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
         external_project_names[project], status, elapsed_us, os_get_environment_variable(S8("GITHUB_SHA")),
         os_get_environment_variable(S8("GITHUB_RUN_ID")), os_get_environment_variable(S8("GITHUB_RUN_ATTEMPT")),
-        project == EXTERNAL_PROJECT_RAD ? S8("Release;allocations-on;debug-info-off") : S8("Release;default-harness"));
+        project == EXTERNAL_PROJECT_RAD ? S8("Release;allocations-on;debug-info-off") :
+        project == EXTERNAL_PROJECT_FFMPEG ? S8("Release;FFmpeg-7.1.3;portable") : S8("Release;default-harness"));
     bool result = file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
     string_print(S8("EXTERNAL_PROJECT_V1 {S8}"), text);
     return result;
@@ -126,6 +129,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult external_projects_execute(Arena* arena, u32 pr
         {
             TestRaddebuggerOptions options = {.build_directory = S8("build/rad-compiler"), .config = S8("Release"), .source_directory = S8("external/raddebugger")};
             result = test_raddebugger_action(arena, &options);
+        }
+        break;
+        case EXTERNAL_PROJECT_FFMPEG:
+        {
+            String8 args[] = {S8("--portable"), S8("external/ffmpeg"), S8("build/ffmpeg-portable"), S8("build/Release/ide")};
+            result = ffmpeg_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(args), build_running_driver(arena));
         }
         break;
         default: break;
@@ -198,7 +207,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult external_projects_main(Arena* arena, SliceStri
     }
     else
     {
-        string_print(S8("usage: build external_projects --self-test|cjson|zlib|stb|lua|quickjs|sqlite|git|rad\n"));
+        string_print(S8("usage: build external_projects --self-test|cjson|zlib|stb|lua|quickjs|sqlite|git|rad|ffmpeg\n"));
     }
     return result;
 }

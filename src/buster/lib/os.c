@@ -5473,6 +5473,100 @@ OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, Process
 }
 #endif
 
+#if BUSTER_WINDOWS && BUSTER_INCLUDE_TESTS
+typedef struct OsProcessWaitWindowsTestState OsProcessWaitWindowsTestState;
+struct OsProcessWaitWindowsTestState
+{
+    OsProcessWaitWindowsTestStats stats;
+    u64 next_clock_microseconds;
+    u64 clock_step_microseconds;
+    u64 scan_limit;
+    bool active;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessWaitWindowsTestState os_process_wait_windows_test_state;
+
+void os_process_wait_windows_test_begin(u64 start_microseconds, u64 step_microseconds, u64 scan_limit)
+{
+    os_process_wait_windows_test_state = (OsProcessWaitWindowsTestState){
+        .next_clock_microseconds = start_microseconds,
+        .clock_step_microseconds = step_microseconds,
+        .scan_limit = scan_limit,
+        .active = true,
+    };
+}
+
+OsProcessWaitWindowsTestStats os_process_wait_windows_test_end(void)
+{
+    OsProcessWaitWindowsTestStats result = os_process_wait_windows_test_state.stats;
+    os_process_wait_windows_test_state.active = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_wait_windows_test_scan_begin(void)
+{
+    bool result = true;
+    if (os_process_wait_windows_test_state.active)
+    {
+        if (os_process_wait_windows_test_state.scan_limit &&
+            os_process_wait_windows_test_state.stats.scans >= os_process_wait_windows_test_state.scan_limit)
+        {
+            os_process_wait_windows_test_state.stats.scan_limit_reached = true;
+            result = false;
+        }
+        else
+        {
+            os_process_wait_windows_test_state.stats.scans += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_wait_windows_test_scan_end(bool made_progress)
+{
+    if (os_process_wait_windows_test_state.active)
+    {
+        if (made_progress) { os_process_wait_windows_test_state.stats.progress_scans += 1; }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_wait_windows_test_child_poll(bool child_exited)
+{
+    if (os_process_wait_windows_test_state.active)
+    {
+        os_process_wait_windows_test_state.stats.child_polls += 1;
+        if (child_exited) { os_process_wait_windows_test_state.stats.leader_exit_observations += 1; }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u64 os_process_deadline_clock_microseconds(void)
+{
+    u64 result;
+#if BUSTER_WINDOWS && BUSTER_INCLUDE_TESTS
+    if (os_process_wait_windows_test_state.active)
+    {
+        result = os_process_wait_windows_test_state.next_clock_microseconds;
+        if (os_process_wait_windows_test_state.clock_step_microseconds <= ~(u64)0 - result)
+        {
+            os_process_wait_windows_test_state.next_clock_microseconds += os_process_wait_windows_test_state.clock_step_microseconds;
+        }
+        else
+        {
+            os_process_wait_windows_test_state.next_clock_microseconds = ~(u64)0;
+        }
+        os_process_wait_windows_test_state.stats.clock_calls += 1;
+    }
+    else
+    {
+        result = os_now_microseconds();
+    }
+#else
+    result = os_now_microseconds();
+#endif
+    return result;
+}
+
 // Milliseconds left until `deadline`, clamped into a poll/wait argument. Zero
 // when the deadline has passed, and `no_deadline` when there is none.
 BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microseconds, u64 no_deadline)
@@ -5484,7 +5578,7 @@ BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microsecon
     }
     else
     {
-        u64 now = os_now_microseconds();
+        u64 now = os_process_deadline_clock_microseconds();
         if (now >= deadline_microseconds)
         {
             result = 0;
@@ -6939,7 +7033,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
     if (spawn.handle)
     {
-        u64 deadline = timeout_microseconds ? os_now_microseconds() + timeout_microseconds : 0;
+        u64 deadline = timeout_microseconds ? os_process_deadline_clock_microseconds() + timeout_microseconds : 0;
         bool timed_out = false;
         // The captured streams must be drained together: reading one pipe to
         // EOF while the child blocks writing a full second pipe deadlocks both
@@ -6966,9 +7060,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         bool child_exit_observed = false;
+        DWORD final_snapshot_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         while (open_pipe_count)
         {
+#if BUSTER_INCLUDE_TESTS
+            if (!os_process_wait_windows_test_scan_begin())
+            {
+                timed_out = true;
+                break;
+            }
+#endif
             bool made_progress = false;
+            bool read_error = false;
 
             for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
             {
@@ -6977,9 +7080,21 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 {
                     continue;
                 }
+                bool draining_final_snapshot = child_exit_observed;
+                DWORD snapshot_remaining = final_snapshot_remaining[stream];
+                if (draining_final_snapshot && !snapshot_remaining)
+                {
+                    CloseHandle(read_pipe);
+                    read_pipes[stream] = 0;
+                    open_pipe_count -= 1;
+                    made_progress = true;
+                    continue;
+                }
 
                 // ReadFile on an anonymous pipe blocks, so only read bytes
-                // PeekNamedPipe reports as available.
+                // PeekNamedPipe reports as available. Once the leader exits,
+                // reads are additionally capped by the one-time per-stream
+                // snapshot so descendant writes cannot extend the drain.
                 DWORD available_byte_count = 0;
                 if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
                 {
@@ -6987,6 +7102,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     if (os_error.v != ERROR_BROKEN_PIPE)
                     {
                         string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                        read_error = true;
                     }
                     CloseHandle(read_pipe);
                     read_pipes[stream] = 0;
@@ -6998,47 +7114,97 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     u8 buffer[16 * 1024];
                     DWORD read_byte_count = 0;
                     DWORD requested_byte_count = available_byte_count < sizeof(buffer) ? available_byte_count : (DWORD)sizeof(buffer);
+                    if (draining_final_snapshot && snapshot_remaining < requested_byte_count)
+                    {
+                        requested_byte_count = snapshot_remaining;
+                    }
                     if (ReadFile(read_pipe, buffer, requested_byte_count, &read_byte_count, 0) && read_byte_count)
                     {
                         pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, read_byte_count);
                         made_progress = true;
-                    }
-                }
-            }
-
-            if (!made_progress)
-            {
-                DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
-                if (process_wait == WAIT_OBJECT_0)
-                {
-                    if (child_exit_observed)
-                    {
-                        // The child was already known to have exited before
-                        // this complete empty scan. A descendant may retain an
-                        // inherited writer, but its lifetime must not turn the
-                        // completed child's wait into a false timeout.
-                        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                        if (draining_final_snapshot)
                         {
-                            if (read_pipes[stream])
+                            final_snapshot_remaining[stream] -= read_byte_count;
+                            if (!final_snapshot_remaining[stream])
                             {
-                                CloseHandle(read_pipes[stream]);
+                                CloseHandle(read_pipe);
                                 read_pipes[stream] = 0;
                                 open_pipe_count -= 1;
                             }
                         }
-                        break;
                     }
-                    // The child may have written between the scan above and
-                    // this observation. Perform one final complete scan before
-                    // closing any writer kept alive outside the child.
-                    child_exit_observed = true;
-                    continue;
+                    else
+                    {
+                        // Leave the snapshot count unchanged on a failed or
+                        // unexpected zero-byte read; it is not terminal EOF.
+                        read_error = true;
+                    }
                 }
-                if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+                else if (draining_final_snapshot)
                 {
-                    timed_out = true;
-                    break;
+                    // The fixed snapshot still has bytes, so an empty peek
+                    // cannot complete it successfully.
+                    read_error = true;
                 }
+            }
+
+            // Every ordinary nonterminal pass observes a finite deadline,
+            // even when output was readable. After the first signaled poll,
+            // freeze the unread bytes once and finish that bounded snapshot.
+            DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
+#if BUSTER_INCLUDE_TESTS
+            os_process_wait_windows_test_scan_end(made_progress);
+            os_process_wait_windows_test_child_poll(process_wait == WAIT_OBJECT_0);
+#endif
+            if (process_wait == WAIT_OBJECT_0 && !child_exit_observed)
+            {
+                child_exit_observed = true;
+                for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                {
+                    HANDLE read_pipe = read_pipes[stream];
+                    if (!read_pipe)
+                    {
+                        continue;
+                    }
+                    DWORD available_byte_count = 0;
+                    if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
+                    {
+                        OsError os_error = os_get_last_error();
+                        if (os_error.v != ERROR_BROKEN_PIPE)
+                        {
+                            string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                            read_error = true;
+                        }
+                        CloseHandle(read_pipe);
+                        read_pipes[stream] = 0;
+                        open_pipe_count -= 1;
+                        made_progress = true;
+                    }
+                    else
+                    {
+                        final_snapshot_remaining[stream] = available_byte_count;
+                        if (!available_byte_count)
+                        {
+                            CloseHandle(read_pipe);
+                            read_pipes[stream] = 0;
+                            open_pipe_count -= 1;
+                            made_progress = true;
+                        }
+                    }
+                }
+            }
+
+            if (child_exit_observed && !open_pipe_count && !read_error)
+            {
+                break;
+            }
+            if (deadline && (!child_exit_observed || read_error) && !os_process_deadline_milliseconds(deadline, 1))
+            {
+                timed_out = true;
+                break;
+            }
+            if (!made_progress && process_wait != WAIT_OBJECT_0)
+            {
                 // Nothing readable right now: sleep briefly instead of
                 // spinning. The pipes report ERROR_BROKEN_PIPE once the child
                 // exits and the buffered data has been drained.

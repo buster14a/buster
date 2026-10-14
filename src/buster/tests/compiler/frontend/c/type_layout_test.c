@@ -981,6 +981,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_validation_scaling(UnitTes
     CTypeLayoutTestScaleRow rows[] = {
         {S8("c_parse_validate_array_object_sizes, c_parse_validate_array_bound_values, variably modified objects"),
          S8("static const char s@[] = \"text @\";\nchar b@[sizeof s@];\nchar (*p@)[sizeof s@];\n")},
+        {S8("c_parse_validate_array_object_sizes, unqueried complete records"),
+         S8("struct S@ { char bytes[$]; };\n")},
         {S8("c_parse_validate_deferred_assertions"), S8("static const char s@[] = \"text @\";\n_Static_assert(sizeof s@ > 6, \"\");\n")},
         {S8("c_parse_validate_static_initializers"),
          S8("static const char s@[] = \"text @\";\nunsigned long n@ = sizeof s@;\nconst char* e@ = s@ + sizeof s@ - 1;\n")},

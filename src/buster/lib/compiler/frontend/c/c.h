@@ -1030,6 +1030,13 @@ struct CType
     // For enums, element_type is the resolved compatible integer type. This
     // flag distinguishes a written fixed base from ordinary range selection.
     bool has_fixed_underlying_type;
+    // Saturated count of names this complete aggregate contributes to the
+    // C flexible-array rule. Anonymous aggregates promote their names;
+    // named aggregate members contribute one without promoting their fields.
+    u8 effective_named_member_count;
+    // Set after every nested definition in this aggregate's source range has
+    // settled, so a zero count distinguishes a finalized empty shape.
+    bool effective_named_member_count_final;
 };
 
 typedef struct CMember CMember;
@@ -1690,6 +1697,13 @@ struct CAstExtentStatistics
 // fallback went to the token scan. Steps are the nodes and parentheses the
 // index build's walks and widening visited, a work count that must stay linear
 // in the input; it leaves out the memo's binary-search comparisons.
+// The retained facts (GitHub #3102 step 1): trees_built counts the units whose
+// tree lowering built itself because the caller passed none, with that tree's
+// nodes and retained bytes (CAstStatistics.retained_bytes); tree_rejections
+// the units whose syntax that build rejected, which lowered without a tree
+// (c_lower_to_ir_tree_run); span_nodes and
+// span_bytes are the nodes c_ast_spans_build gave a span and the bytes of its
+// columns, for every lowered unit with a tree.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
@@ -1699,6 +1713,12 @@ struct CAstLowerStatistics
     u64 answers;
     u64 negatives;
     u64 fallbacks;
+    u64 trees_built;
+    u64 tree_rejections;
+    u64 tree_nodes;
+    u64 tree_bytes;
+    u64 span_nodes;
+    u64 span_bytes;
 };
 
 // The semantic facts semantic analysis retains for lowering (GitHub #4062,
@@ -2336,10 +2356,11 @@ struct CIRLowerOptions
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
     // The unit's syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
-    // from its nodes and runs the token scans for everything else. Null
-    // lowers exactly as before. Read only during the call; the tree and the
-    // preprocessing result must outlive it.
+    // -fc-ast-pilot, GitHub #3102). Lowering always reads a tree: when this is
+    // null it builds one from `preprocess` itself (c_lower_to_ir_tree_run) and
+    // releases it before returning, and a unit whose tree cannot be built
+    // fails with the builder's diagnostic. Read only during the call; a
+    // caller's tree and the preprocessing result must outlive it.
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;

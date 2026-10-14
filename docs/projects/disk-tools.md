@@ -36,6 +36,21 @@ When run from the repository root the standalone tool reads
 reports whether the two match; reproduce that with your own reference image
 before treating the output as usable.
 
+The reference must be a regular file of exactly 64 MiB. The builder opens the
+file, checks its size before allocating or reading, reads exactly the bounded
+extent, and checks that the opened file is still regular and exactly that size
+after the read. Missing, empty, short, non-sector-sized, oversized, failed-read,
+and changed-size references are rejected before image construction or output
+publication. The builder's writer, comparison, and output slice all use the
+same fixed 64 MiB extent.
+
+The registered C tests cover missing, empty, 512-byte, 513-byte, and exact-size
+references, a synthetic oversized pre-read stat, injected read and changed-size
+failures, and preservation of an existing output sentinel on invalid input.
+The oversized case uses the existing OS file fault seam so it proves rejection
+before allocation without materializing another 64 MiB image. These are helper
+regressions; they do not run the standalone executable in CI.
+
 When taking up this project, put the supported invocation, image formats, output
 contract, focused tests and limitations here. Record a demonstrated image build,
 independent image inspection and any boot test separately; they are not equivalent

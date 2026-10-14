@@ -4126,6 +4126,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     os_test_process_child_run(arguments);
+    c_macro_expansion_rlimit_child_run(arguments);
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     if (os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE")).length)
     {

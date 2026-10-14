@@ -536,6 +536,16 @@ without facts for identical bitcode and diagnostics.
   single `#` to precede a parameter, and `defined` cannot be used as a macro
   name in `#define` or `#undef`. Assembly-comment-line mode retains its
   stringification compatibility behavior.
+- Macro expansion may produce `defined NAME` or `defined(NAME)` in a
+  conditional expression. C17 leaves this construct undefined (6.10.1p4), but
+  Buster accepts it as a GCC/Clang compatibility behavior in both C17 and GNU17.
+  Conditional rescanning recognizes the operator before expanding its identifier
+  operand, then tests that name's macro definition status. No
+  `-Wexpansion-to-defined`-equivalent warning is added. The registered
+  `c_macro_produced_defined_tests` covers nested object-like and function-like
+  token-paste producers, both operand spellings, `#if`/`#elif`, defined,
+  empty, undefined and literal-operator controls, plus feature queries whose
+  argument contains the identifier `defined`.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a

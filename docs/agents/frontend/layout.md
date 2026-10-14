@@ -80,6 +80,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
   Windows) name their targets, and the Clang corpus pins both answers byte for
   byte on every native target.
+- **Flexible-array validation counts promoted names** (#3237). A complete
+  aggregate publishes one saturated effective named-member count: a direct
+  named member contributes one, while names nested through anonymous
+  structures and unions are promoted into the containing aggregate. A named
+  structure or union member does not promote its own fields. Parser validation,
+  layout classification and IR flexible-array mapping consume that same count;
+  Microsoft-target declarator-less tags retain their existing direct-member
+  rule. The registered frontend fixture checks a C17 promoted lookup and layout
+  in token and AST paths, both direct-SSA and memory-form lowering, plus
+  anonymous-inner-FAM and all-unnamed negatives.
 - File-scope object redeclarations compare each declaration's effective explicit
   alignment in `c_parse_validate_alignment_redeclarations` before canonical IR
   construction (#1561). The strictest request within one declaration is its
