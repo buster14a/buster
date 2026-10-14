@@ -1,6 +1,14 @@
+// PDB tests own MSF/container checks, emitted-index ordering and independent
+// Windows readback. pdb_tests registers the fixtures; pdb_test_gsi_sorting
+// bounds sorting work, and pdb_test_gsi_mixed_reader diagnoses #3752 through
+// the installed SDK's Unicode DbgHelp lookup APIs without changing the writer.
 #include <buster/tests/compiler/pdb/pdb_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/pdb/pdb_internal.h>
+#if BUSTER_WINDOWS
+#include <buster/lib/system_headers.h>
+#include <dbghelp.h>
+#endif
 
 // Reassemble one stream out of the MSF container the way a reader would, so
 // the checks below see exactly the bytes a debugger would load.
@@ -1197,6 +1205,218 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_dbghelp_consumer(UnitTestArguments* 
     return result;
 }
 
+
+#if BUSTER_WINDOWS
+// Only this fixture calls DbgHelp in-process, serially. Other PDB consumers
+// launch dbh in a separate process. These are external reader APIs, not
+// compiler callbacks; no DbgHelp import library is added to the build.
+typedef BOOL (WINAPI PdbTestSymInitialize)(HANDLE, PCWSTR, BOOL);
+typedef BOOL (WINAPI PdbTestSymCleanup)(HANDLE);
+typedef DWORD (WINAPI PdbTestSymGetOptions)(void);
+typedef DWORD (WINAPI PdbTestSymSetOptions)(DWORD);
+typedef DWORD64 (WINAPI PdbTestSymLoadModule)(HANDLE, HANDLE, PCWSTR, PCWSTR, DWORD64, DWORD, PMODLOAD_DATA, DWORD);
+typedef BOOL (WINAPI PdbTestSymFromName)(HANDLE, PCWSTR, PSYMBOL_INFOW);
+
+typedef union PdbTestDbghelpProcedure PdbTestDbghelpProcedure;
+union PdbTestDbghelpProcedure
+{
+    FARPROC procedure;
+    PdbTestSymInitialize* initialize;
+    PdbTestSymCleanup* cleanup;
+    PdbTestSymGetOptions* get_options;
+    PdbTestSymSetOptions* set_options;
+    PdbTestSymLoadModule* load_module;
+    PdbTestSymFromName* from_name;
+};
+#endif
+
+// This diagnostic reports every collision lookup, including misses. Positive
+// controls and any returned spelling/address are assertions, but a missing
+// cyclic name is the unresolved #3752 observation, not a passing lookup.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArguments* arguments, ByteSlice pdb, SliceString8 names, u32 permutation)
+{
+    UnitTestResult result = {0};
+#if BUSTER_WINDOWS
+    String8 kits = os_get_environment_variable(S8("ProgramFiles(x86)"));
+    String8 debugger_arch = BUSTER_CPU_ARCH_AARCH64 ? S8("arm64") : S8("x64");
+    String8 dll_path = string_format(arguments->arena, S8("{S8}\\Windows Kits\\10\\Debuggers\\{S8}\\dbghelp.dll"), kits, debugger_arch);
+    String16 dll_wide = string16_from_string8(arguments->arena, dll_path, true);
+    HMODULE library = LoadLibraryW(dll_wide.pointer);
+    DWORD provider_error = library ? 0 : GetLastError();
+    arguments->show(arguments, S8("PDB_GSI_LOOKUP provider={S8} available={u32} error={u32}\n"), dll_path, (u32)(library != 0), (u32)provider_error);
+    // The hosted Windows fixture requires the same installed SDK provider
+    // already used by pdb_test_dbghelp_consumer; its absence is a failed gate.
+    if (BUSTER_REQUIRE(arguments, library != 0))
+    {
+        PdbTestDbghelpProcedure initialize = {.procedure = GetProcAddress(library, "SymInitializeW")};
+        PdbTestDbghelpProcedure cleanup = {.procedure = GetProcAddress(library, "SymCleanup")};
+        PdbTestDbghelpProcedure get_options = {.procedure = GetProcAddress(library, "SymGetOptions")};
+        PdbTestDbghelpProcedure set_options = {.procedure = GetProcAddress(library, "SymSetOptions")};
+        PdbTestDbghelpProcedure load_module = {.procedure = GetProcAddress(library, "SymLoadModuleExW")};
+        PdbTestDbghelpProcedure from_name = {.procedure = GetProcAddress(library, "SymFromNameW")};
+        bool exports = initialize.initialize && cleanup.cleanup && get_options.get_options && set_options.set_options &&
+                       load_module.load_module && from_name.from_name;
+        if (BUSTER_REQUIRE(arguments, exports))
+        {
+            String8 path = buster_test_temporary_path(arguments->arena, S8("buster-mixed-gsi"), S8(".pdb"));
+            if (BUSTER_REQUIRE(arguments, file_write(path, pdb)))
+            {
+                String16 path_wide = string16_from_string8(arguments->arena, path, true);
+                DWORD previous_options = get_options.get_options();
+                for (u32 publics_only = 0; publics_only < 2; publics_only += 1)
+                {
+                    // SymInitialize accepts a unique nonzero session token
+                    // when invade-process is false; it need not be an OS handle.
+                    HANDLE session = (HANDLE)pdb.pointer;
+                    set_options.set_options(publics_only ? SYMOPT_PUBLICS_ONLY : SYMOPT_NO_PUBLICS);
+                    BOOL initialized = initialize.initialize(session, 0, FALSE);
+                    DWORD initialize_error = initialized ? 0 : GetLastError();
+                    arguments->show(arguments, S8("PDB_GSI_LOOKUP initialized={u32} index={S8} error={u32}\n"),
+                                    (u32)(initialized != 0), publics_only ? S8("publics") : S8("globals"), (u32)initialize_error);
+                    if (BUSTER_REQUIRE(arguments, initialized != 0))
+                    {
+                        DWORD64 requested_base = UINT64_C(0x10000000);
+                        DWORD64 base = load_module.load_module(session, 0, path_wide.pointer, 0, requested_base, 0x2000, 0, 0);
+                        DWORD load_error = base ? 0 : GetLastError();
+                        arguments->show(arguments, S8("PDB_GSI_LOOKUP loaded={u32} base={u64} error={u32}\n"),
+                                        (u32)(base != 0), (u64)base, (u32)load_error);
+                        if (BUSTER_REQUIRE(arguments, base == requested_base))
+                        {
+                            u32 missing = 0;
+                            for (u32 index = 0; index < names.length; index += 1)
+                            {
+                                String16 query = string16_from_string8(arguments->arena, names.pointer[index], true);
+                                u64 symbol_bytes = sizeof(SYMBOL_INFOW) + 64 * sizeof(WCHAR);
+                                PSYMBOL_INFOW symbol = (PSYMBOL_INFOW)arena_allocate_zeroed(arguments->arena, u8, symbol_bytes);
+                                symbol->SizeOfStruct = (ULONG)sizeof(SYMBOL_INFOW);
+                                symbol->MaxNameLen = 64;
+                                BOOL found = from_name.from_name(session, query.pointer, symbol);
+                                DWORD lookup_error = found ? 0 : GetLastError();
+                                u64 expected_address = (u64)base + 0x1000 + (u64)index * 4;
+                                bool exact = found && symbol->NameLen == query.length &&
+                                             memcmp(symbol->Name, query.pointer, query.length * sizeof(WCHAR)) == 0 &&
+                                             symbol->Address == expected_address;
+                                missing += !found;
+                                arguments->show(arguments,
+                                    S8("PDB_GSI_LOOKUP permutation={u32} count={u64} index={S8} name={S8} found={u32} exact={u32} address={u64} expected={u64} error={u32}\n"),
+                                    permutation, names.length, publics_only ? S8("publics") : S8("globals"), names.pointer[index],
+                                    (u32)(found != 0), (u32)exact, found ? (u64)symbol->Address : 0, expected_address, (u32)lookup_error);
+                                BUSTER_TEST(arguments, !found || exact);
+                                // The final two names are isolated ASCII and
+                                // UTF-8 controls, so a broken provider or name
+                                // encoding cannot masquerade as a GSI miss.
+                                if (index + 2 >= names.length)
+                                {
+                                    BUSTER_TEST(arguments, exact);
+                                }
+                            }
+                            arguments->show(arguments, S8("PDB_GSI_LOOKUP_SUMMARY permutation={u32} count={u64} index={S8} missing={u32} diagnostic=1\n"),
+                                            permutation, names.length, publics_only ? S8("publics") : S8("globals"), missing);
+                        }
+                        BUSTER_TEST(arguments, cleanup.cleanup(session) != 0);
+                    }
+                }
+                set_options.set_options(previous_options);
+                os_file_delete(path);
+            }
+        }
+        BUSTER_TEST(arguments, FreeLibrary(library) != 0);
+    }
+#else
+    (void)pdb;
+    (void)names;
+    (void)permutation;
+    arguments->show(arguments, S8("PDB_GSI_LOOKUP status=unavailable reason=non-windows-host\n"));
+#endif
+    return result;
+}
+
+// Repeating an eight-byte block keeps every cyclic name in the same format
+// bucket. All six permutations exercise both insertion and merge sorting.
+// The last two names are positive controls outside the colliding bucket.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_mixed_reader(UnitTestArguments* arguments)
+{
+    enum { RECORD_SIZE = 32, MAX_NAMES = 22 };
+    UnitTestResult result = {0};
+    u32 permutations[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    String8 blocks[] = {S8("a0000000"), S8("B0000000"), S8("C\xc3\xa9" "00000"), S8("A0000000"), S8("c\xc3\xa9" "00000")};
+    for (u32 large = 0; large < 2; large += 1)
+    {
+        for (u32 permutation = 0; permutation < BUSTER_ARRAY_LENGTH(permutations); permutation += 1)
+        {
+            u32 triples = large ? 6 : 1;
+            u32 count = triples * 3 + 4;
+            String8 names[MAX_NAMES];
+            ByteWriter symbols = byte_writer_make(arena_allocate(arguments->arena, u8, 12 + count * RECORD_SIZE), 12 + count * RECORD_SIZE);
+            byte_writer_emit_u32_le(&symbols, 4);
+            byte_writer_emit_u32_le(&symbols, 0xf1);
+            byte_writer_emit_u32_le(&symbols, count * RECORD_SIZE);
+            for (u32 index = 0; index < count; index += 1)
+            {
+                if (index + 2 < count)
+                {
+                    u32 key = index < triples * 3 ? index / 3 : 0;
+                    u32 group = index < triples * 3 ? permutations[permutation][index % 3] : index - triples * 3 + 3;
+                    char8* bytes = arena_allocate(arguments->arena, char8, 16);
+                    memcpy(bytes, blocks[group].pointer, 8);
+                    bytes[7] = (char8)('0' + key);
+                    memcpy(bytes + 8, bytes, 8);
+                    names[index] = (String8){.pointer = bytes, .length = 16};
+                }
+                else
+                {
+                    names[index] = index + 2 == count ? S8("ascii_control") : S8("\xc3\xa9" "_control");
+                }
+                byte_writer_emit_u16_le(&symbols, RECORD_SIZE - 2);
+                byte_writer_emit_u16_le(&symbols, PDB_TEST_S_GDATA32);
+                byte_writer_emit_u32_le(&symbols, PDB_TEST_T_INT32);
+                byte_writer_emit_u32_le(&symbols, index * 4);
+                byte_writer_emit_u16_le(&symbols, 1);
+                byte_writer_emit_bytes(&symbols, names[index].pointer, names[index].length);
+                byte_writer_emit_zero(&symbols, RECORD_SIZE - 14 - names[index].length);
+                u32 bucket = pdb_test_hash_v1(names[index]) % 4096;
+                u32 collision_bucket = pdb_test_hash_v1(names[0]) % 4096;
+                BUSTER_TEST(arguments, index + 2 < count ? bucket == collision_bucket : bucket != collision_bucket);
+            }
+            PdbSection section = {.name = S8(".data"), .virtual_address = 0x1000, .virtual_size = count * 4, .raw_size = count * 4};
+            String8 path = S8("mixed.c");
+            DebugType types[] = {
+                {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+                {.kind = DEBUG_TYPE_POINTER, .element_type = 0, .size = 8},
+            };
+            DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+            CodeviewResult codeview = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+                .machine = CODEVIEW_MACHINE_X64});
+            PdbModule module = {.name = S8("mixed.obj"), .codeview_symbols = {.pointer = symbols.bytes, .length = symbols.count},
+                                .codeview_types = codeview.types, .code_section = 1};
+            PdbInput input = {.module_name = S8("mixed.obj"), .codeview_symbols = {.pointer = symbols.bytes, .length = symbols.count},
+                              .sections = &section, .section_count = 1, .age = 1, .machine = 0x8664, .code_section = 1,
+                              .modules = &module, .module_count = 1};
+            BUSTER_TEST(arguments, !symbols.overflow && codeview.valid);
+            PdbResult built = pdb_build(arguments->arena, input);
+            if (BUSTER_REQUIRE(arguments, built.valid))
+            {
+                ByteSlice records = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_SYMBOL_RECORDS);
+                for (u32 stream = PDB_TEST_STREAM_GLOBALS; stream <= PDB_TEST_STREAM_PUBLICS; stream += 1)
+                {
+                    ByteSlice hash = pdb_test_stream_bytes(arguments->arena, built.bytes, stream);
+                    if (stream == PDB_TEST_STREAM_PUBLICS && BUSTER_REQUIRE(arguments, hash.length >= 28))
+                    {
+                        hash = (ByteSlice){.pointer = hash.pointer + 28, .length = pdb_read_u32(hash, 0)};
+                    }
+                    u32 record_count = 0;
+                    BUSTER_TEST(arguments, pdb_test_check_gsi(hash, records, &record_count) && record_count == count);
+                }
+                UnitTestResult reader = pdb_test_mixed_dbghelp_lookup(arguments, built.bytes,
+                    (SliceString8){.pointer = names, .length = count}, permutation);
+                result.test_count += reader.test_count;
+                result.succeeded_test_count += reader.succeeded_test_count;
+            }
+        }
+    }
+    return result;
+}
+
 // Exercise both on-disk indexes, including equal ASCII keys separated by
 // other keys in the input. The numeric key and input ordinal are the oracle.
 BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_colliding_indexes(UnitTestArguments* arguments)
@@ -1387,6 +1607,9 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
     UnitTestResult colliding = pdb_test_gsi_colliding_indexes(arguments);
     result.test_count += colliding.test_count;
     result.succeeded_test_count += colliding.succeeded_test_count;
+    UnitTestResult mixed_reader = pdb_test_gsi_mixed_reader(arguments);
+    result.test_count += mixed_reader.test_count;
+    result.succeeded_test_count += mixed_reader.succeeded_test_count;
     UnitTestResult hashes = pdb_test_tpi_hashes(arguments);
     result.test_count += hashes.test_count;
     result.succeeded_test_count += hashes.succeeded_test_count;
