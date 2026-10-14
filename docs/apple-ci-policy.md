@@ -50,7 +50,9 @@ deadline or required result is weakened. Artifact names remain keyed by the
 actual surviving lane; none expects an Intel producer.
 
 The Actions inventory gate requires exactly the current 21 names and actual
-successful steps. Missing, failed, skipped, cancelled, duplicate or foreign
+successful steps; only stale step metadata on a completed green job may pass
+on its job conclusion, with a logged
+[waiver](ci-github-actions.md) (#4102). Missing, failed, skipped, cancelled, duplicate or foreign
 retained work fails. Historical timing inventories remain accepted only by
 the timing reader and stay in separate workflow/runner cohorts; they cannot
 certify a live `CI complete` run.
