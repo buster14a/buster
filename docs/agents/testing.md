@@ -477,6 +477,14 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   hangs and abnormal exits still fail. This control establishes the reachable
   finalization tail, not the cause or acknowledgement timing of a native probe
   failure. Probe failure does not establish an app crash.
+  After GO authorization, the existing caller receipt retains
+  `reason=awaiting-completion` with `admission=0`, so an expired capture can
+  be distinguished from startup that never reached GO (#4158). This records
+  only the caller boundary; it proves neither native launch, readiness, exit,
+  EOF nor snapshot completion. The final closed snapshot still exclusively
+  admits stable receipts. A real native deadline with finite delayed owner
+  publication preserves this phase while remaining unadmitted; no retry or
+  recovery follows from the phase observation.
   `bash ios/launch_diagnostics_mock_test.sh` runs the existing attached-monitor
   controls, `python3 ios/lifecycle_capture_test.py -v` and the caller-clock
   controls in `python3 ios/lifecycle_capture_bridge_test.py -v`. They cover
@@ -1189,6 +1197,14 @@ that check serial initialization. On expiry it terminates the process without
 running exit handlers, because the stuck thread may hold any lock.
 `test_fixture_watchdog_self_test` covers deadline parsing, start records,
 nested transitions, expiry and the record text without a thread or a sleep.
+`test_watch_contention_self_test` checks complete atomic slot snapshots while
+one lane publishes alternating states and another reads them; serial builds
+exercise the same publication path with one lane. Rejected snapshots are never
+used to read string bytes. The slot keeps the single-writer sequence check,
+with atomic pointer, length and scalar fields on every supported compiler (#4175).
+The focused `Watchdog ThreadSanitizer` hosted job requires five consecutive
+`test_tsan` passes. The PIE fixture qualifies child ASLR from the kernel sysctl
+and inherited process personality, which a sanitizer runtime may change (#4179).
 `os_tests` also runs a real `ide test` child through the private
 `BUSTER_TEST_WATCHDOG_CHILD_MODE` payload. That payload spins in one fixture
 under a one-second override. The child must exit with status 124, print the

@@ -1267,6 +1267,19 @@ u64 atomic_u64_load(AtomicU64* address)
     return result;
 }
 
+void atomic_u64_store(AtomicU64* address, u64 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC
+    _InterlockedExchange64((volatile long long*)address, (long long)value);
+#elif defined(__clang__)
+    __c11_atomic_store(address, value, __ATOMIC_SEQ_CST);
+#else
+    __atomic_store_n(address, value, __ATOMIC_SEQ_CST);
+#endif
+}
+
 u64 atomic_u64_add(AtomicU64* address, u64 addend)
 {
     // Builtins rather than <stdatomic.h>: that header lives in the host
