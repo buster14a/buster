@@ -33398,7 +33398,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_plan_runtime_ranges(CIntegerIrBuilder* b
             bool suffix = false;
             for (u32 path = item->path_plus_one; path != range; path = plan->paths[path - 1].parent_plus_one)
             {
-                suffix |= plan->paths[path - 1].source_token != UINT32_MAX;
+                suffix |= (plan->paths[path - 1].flags & C_INITIALIZER_PATH_EXPLICIT) != 0;
             }
             valid = false;
             builder->failure_message = suffix
