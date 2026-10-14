@@ -2600,128 +2600,80 @@ BUSTER_C_SHARED bool c_vector_type_layout(Target target, u64 element_size, u32 l
     return valid;
 }
 
-BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out)
+BUSTER_C_SHARED TargetTypeLayout c_parse_builtin_layout(Target target, CTypeKind kind)
 {
-    TargetDataLayout layout = target_data_layout(target);
-    u64 size = 0;
-    u32 alignment = 0;
+    TargetScalarKind scalar = TARGET_SCALAR_COUNT;
+    bool complex = false;
     switch (kind)
     {
     case C_TYPE_BOOL:
-        size = layout.boolean.size;
-        alignment = layout.boolean.alignment;
+        scalar = TARGET_SCALAR_BOOL;
         break;
+    case C_TYPE_VOID:
     case C_TYPE_CHAR:
-        size = layout.plain_char.size;
-        alignment = layout.plain_char.alignment;
-        break;
     case C_TYPE_SIGNED_CHAR:
-        size = layout.signed_char.size;
-        alignment = layout.signed_char.alignment;
-        break;
     case C_TYPE_UNSIGNED_CHAR:
-        size = layout.unsigned_char.size;
-        alignment = layout.unsigned_char.alignment;
+        scalar = TARGET_SCALAR_CHAR;
         break;
     case C_TYPE_SHORT:
-        size = layout.short_integer.size;
-        alignment = layout.short_integer.alignment;
-        break;
     case C_TYPE_UNSIGNED_SHORT:
-        size = layout.unsigned_short_integer.size;
-        alignment = layout.unsigned_short_integer.alignment;
+        scalar = TARGET_SCALAR_SHORT;
         break;
     case C_TYPE_INT:
-        size = layout.integer.size;
-        alignment = layout.integer.alignment;
-        break;
     case C_TYPE_UNSIGNED_INT:
-        size = layout.unsigned_integer.size;
-        alignment = layout.unsigned_integer.alignment;
+        scalar = TARGET_SCALAR_INT;
+        break;
+    case C_TYPE_LONG:
+    case C_TYPE_UNSIGNED_LONG:
+        scalar = TARGET_SCALAR_LONG;
+        break;
+    case C_TYPE_LONG_LONG:
+    case C_TYPE_UNSIGNED_LONG_LONG:
+        scalar = TARGET_SCALAR_LONG_LONG;
+        break;
+    case C_TYPE_INT128:
+    case C_TYPE_UNSIGNED_INT128:
+        scalar = TARGET_SCALAR_INT128;
         break;
     case C_TYPE_FP16_STORAGE:
     case C_TYPE_FLOAT16:
+        scalar = TARGET_SCALAR_FLOAT16;
+        break;
     case C_TYPE_BFLOAT16:
-    {
-        TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
-        size = narrow.size;
-        alignment = narrow.alignment;
+        scalar = TARGET_SCALAR_BFLOAT16;
         break;
-    }
     case C_TYPE_FLOAT:
-        size = layout.float_type.size;
-        alignment = layout.float_type.alignment;
-        break;
-    case C_TYPE_LONG:
-        size = layout.long_integer.size;
-        alignment = layout.long_integer.alignment;
-        break;
-    case C_TYPE_UNSIGNED_LONG:
-        size = layout.unsigned_long_integer.size;
-        alignment = layout.unsigned_long_integer.alignment;
-        break;
-    case C_TYPE_LONG_LONG:
-        size = layout.long_long_integer.size;
-        alignment = layout.long_long_integer.alignment;
-        break;
-    case C_TYPE_UNSIGNED_LONG_LONG:
-        size = layout.unsigned_long_long_integer.size;
-        alignment = layout.unsigned_long_long_integer.alignment;
+        scalar = TARGET_SCALAR_FLOAT;
         break;
     case C_TYPE_DOUBLE:
-        size = layout.double_type.size;
-        alignment = layout.double_type.alignment;
+        scalar = TARGET_SCALAR_DOUBLE;
+        break;
+    case C_TYPE_LONG_DOUBLE:
+        scalar = TARGET_SCALAR_LONG_DOUBLE;
         break;
     case C_TYPE_NULLPTR:
     case C_TYPE_POINTER:
     case C_TYPE_FUNCTION:
-        size = layout.pointer.size;
-        alignment = layout.pointer.alignment;
-        break;
-    case C_TYPE_LONG_DOUBLE:
-        size = layout.long_double_type.size;
-        alignment = layout.long_double_type.alignment;
-        break;
-    // A complex value is two contiguous elements of its real type, so it is
-    // twice as wide and no more strictly aligned. Clang agrees on all three
-    // for every target here: sizeof/_Alignof are {8,4}, {16,8} and
-    // {2*sizeof(long double), _Alignof(long double)}.
-    case C_TYPE_FLOAT16_COMPLEX:
-        size = layout.float16_type.size * 2;
-        alignment = layout.float16_type.alignment;
-        break;
-    case C_TYPE_FLOAT_COMPLEX:
-        size = layout.float_type.size * 2;
-        alignment = layout.float_type.alignment;
-        break;
-    case C_TYPE_DOUBLE_COMPLEX:
-        size = layout.double_type.size * 2;
-        alignment = layout.double_type.alignment;
-        break;
-    case C_TYPE_LONG_DOUBLE_COMPLEX:
-        size = layout.long_double_type.size * 2;
-        alignment = layout.long_double_type.alignment;
-        break;
-    case C_TYPE_INT128:
-        size = layout.integer128.size;
-        alignment = layout.integer128.alignment;
-        break;
-    case C_TYPE_UNSIGNED_INT128:
-        size = layout.unsigned_integer128.size;
-        alignment = layout.unsigned_integer128.alignment;
+        scalar = TARGET_SCALAR_POINTER;
         break;
     case C_TYPE_VA_LIST:
-        size = layout.va_list.size;
-        alignment = layout.va_list.alignment;
+        scalar = TARGET_SCALAR_VA_LIST;
         break;
-    // GNU gives `void` a size and an alignment of one so that arithmetic on a
-    // `void *` steps by bytes; clang and gcc both fold `sizeof(void)`,
-    // `sizeof(const void)` and `_Alignof(void)` to 1. It is an extension for
-    // that arithmetic and for `sizeof`, never a licence to declare a `void`
-    // object: every refusal of one keys on the *kind*, not on a zero size.
-    case C_TYPE_VOID:
-        size = 1;
-        alignment = 1;
+    case C_TYPE_FLOAT16_COMPLEX:
+        scalar = TARGET_SCALAR_FLOAT16;
+        complex = true;
+        break;
+    case C_TYPE_FLOAT_COMPLEX:
+        scalar = TARGET_SCALAR_FLOAT;
+        complex = true;
+        break;
+    case C_TYPE_DOUBLE_COMPLEX:
+        scalar = TARGET_SCALAR_DOUBLE;
+        complex = true;
+        break;
+    case C_TYPE_LONG_DOUBLE_COMPLEX:
+        scalar = TARGET_SCALAR_LONG_DOUBLE;
+        complex = true;
         break;
     case C_TYPE_ARRAY:
     case C_TYPE_VECTOR:
@@ -2730,11 +2682,25 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
     case C_TYPE_ENUM:
     case C_TYPE_INVALID:
     case C_TYPE_COUNT:
-        return false;
+        break;
     }
-    *size_out = size;
-    *alignment_out = alignment;
-    return true;
+    // GNU sizeof(void) is one byte; complex storage is two real elements
+    // with unchanged alignment. Neither extension admits a void object.
+    TargetTypeLayout layout = target_scalar_type_layout(target, scalar);
+    if (complex) layout.size *= 2;
+    return layout;
+}
+
+BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out)
+{
+    TargetTypeLayout layout = c_parse_builtin_layout(target, kind);
+    bool valid = layout.size != 0;
+    if (valid)
+    {
+        *size_out = layout.size;
+        *alignment_out = layout.alignment;
+    }
+    return valid;
 }
 
 /* The layout `_Atomic T` has, given T's own.  Clang treats `_Atomic T` as

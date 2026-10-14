@@ -861,6 +861,14 @@ incomplete or refused; `preflight` exits 3 when the tool cannot run here.
   `tools/work_ledger/build_subject.sh` (`-march=x86-64-v3`). Keep those
   results separate from native-build identities. Never transfer a
   scalar-fallback result to a production SIMD path.
+  The ISA envelope also includes the loader, libc, and link startup objects.
+  First try `valgrind --tool=none /usr/bin/true`: a loader SIGILL already
+  rules out the application as its cause. On a distribution built for AVX-512,
+  compiling Buster for v2/v3 alone may still link a v4 requirement from
+  `Scrt1.o`. Inspect `readelf -n` on the executable. Use a compatible generic
+  runtime and its startup objects for both profiling arms, retaining their
+  identities separately from native builds; do not patch the ELF ISA
+  declaration to conceal an unsupported requirement.
 - **`time` and `perf-stat` (`native-host`)** default to one warmup and ten
   pairs, with at least six. Each metric uses an exact two-sided sign test over
   paired differences (p ≤ 0.05) plus the minimum effect. A significant change

@@ -135,7 +135,17 @@ module a second time. Any mutation between the two points clears the reuse,
 and the guard still scans whenever nothing has proven the current
 representation. In the default tests-enabled Release `ide`, a translation
 unit in which promotion changes any function therefore pays one strict scan
-before FAST, not two.
+before FAST, not two. The promotion-output check also reuses a strict input
+proof for each body promotion left unchanged; changed bodies still receive
+their independent output check. The allocation diagnostic counter
+`ir_construction.preparation_promotion_input_proofs_reused` counts these
+avoided body traversals. When that scan excludes a legacy-invalid body, its
+successful neighbors retain individual post-promotion proofs in temporary
+preparation storage. FAST reuses those exact-state proofs while still checking
+shared scope and every unproven body. The proofs expire at the end of the
+preparation call, before later caller mutations; transformed FAST output keeps
+its existing independent check. The allocation diagnostic counter
+`ir_construction.preparation_promotion_proofs_reused` counts this work reduction.
 
 ## Purity contract
 

@@ -4,6 +4,14 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+Primitive C queries use `c_parse_builtin_layout` to map a C kind to the narrow
+`target_scalar_type_layout` projection. The complete `target_data_layout` API
+uses the same scalar policy and remains the owner of aggregate ABI settings.
+Both take the explicit `Target`; neither adds a cache, initialization phase,
+or dependence on a caller-supplied layout. Complex storage doubles its real
+element's size without changing alignment, GNU `sizeof(void)` remains one,
+and canonical scalar typing continues to refuse complex and storage-half kinds.
+
 - Type-embedded constant producers use the protected TYPE query contract
   described in [foundations](foundations.md). It reads a declaration-point
   model and returns stable integer facts without entering the live declaration

@@ -1,0 +1,48 @@
+Source size of 5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86
+  base e0d55a13095724aaa7380cf478cbe4b7a6873458
+  baseline 456043427da8a5779fb9d349b5f89e2937108118 (docs/source-size-baseline.txt)
+
+category    ratchet   files       bytes  change vs base  since baseline
+production  yes         234    21099574           +1226         +807762
+build       yes         412    11600560               0        +1195306
+tests       no          990    28900194           +6992        +2008844
+generated   no           48    51982639               0           -1417
+docs        no         3714   212070796           +1341       +92676563
+dormant     no           65       88893               0               0
+total                  5463   325742656           +9559       +96687058
+
+Largest ratcheted files:
+  production     3424795  src/buster/lib/compiler/frontend/c/c_gen.c
+  production     2336526  src/buster/lib/compiler/frontend/c/c_parse.c
+  build          2065370  build.c
+  production     1108749  src/buster/lib/compiler/codegen/machine_x86_64.c
+  production      907959  src/buster/lib/compiler/assembly/x86_64_metadata.c
+  production      848644  src/buster/lib/compiler/link/link.c
+  production      787981  src/buster/lib/compiler/object/object.c
+  production      784923  src/buster/lib/compiler/assembly/assembly.c
+  production      731597  src/buster/lib/compiler/frontend/c/c_source.c
+  production      639580  src/buster/lib/compiler/codegen/machine_aarch64.c
+
+Ratcheted files changed from base: 7
+  production       +3163  src/buster/lib/target.c
+  production       -2642  src/buster/lib/compiler/frontend/c/c_gen.c
+  production       -1880  src/buster/lib/compiler/frontend/c/c_parse.c
+  production       +1563  src/buster/lib/compiler/ir/ir_fast.c
+  production        +758  src/buster/lib/target.h
+  production        +176  src/buster/lib/compiler/ir/ir_construction.h
+  production         +88  src/buster/lib/compiler/frontend/c/c_internal.h
+
+Acknowledgements added from base: 0
+
+production: +1226 bytes from base, within the 32768-byte change limit
+build: 0 bytes from base, within the 32768-byte change limit
+
+SOURCE_SIZE_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 category=production ratcheted=1 files=234 bytes=21099574 base_files=234 base_bytes=21098348 baseline_files=231 baseline_bytes=20291812
+SOURCE_SIZE_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 category=build ratcheted=1 files=412 bytes=11600560 base_files=412 base_bytes=11600560 baseline_files=388 baseline_bytes=10405254
+SOURCE_SIZE_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 category=tests ratcheted=0 files=990 bytes=28900194 base_files=990 base_bytes=28893202 baseline_files=959 baseline_bytes=26891350
+SOURCE_SIZE_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 category=generated ratcheted=0 files=48 bytes=51982639 base_files=48 base_bytes=51982639 baseline_files=48 baseline_bytes=51984056
+SOURCE_SIZE_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 category=docs ratcheted=0 files=3714 bytes=212070796 base_files=3714 base_bytes=212069455 baseline_files=3205 baseline_bytes=119394233
+SOURCE_SIZE_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 category=dormant ratcheted=0 files=65 bytes=88893 base_files=65 base_bytes=88893 baseline_files=65 baseline_bytes=88893
+SOURCE_SIZE_RATCHET_V1 category=production growth=+1226 limit=32768 acknowledged=0 verdict=within-limit
+SOURCE_SIZE_RATCHET_V1 category=build growth=0 limit=32768 acknowledged=0 verdict=within-limit
+SOURCE_SIZE_RESULT_V1 revision=5c6eafbaacb0a4d7cc0ef6a88751ee653d4c3c86 base=e0d55a13095724aaa7380cf478cbe4b7a6873458 baseline_commit=456043427da8a5779fb9d349b5f89e2937108118 status=pass
