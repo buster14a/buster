@@ -1926,6 +1926,11 @@ BUSTER_C_SHARED BUSTER_SHARED_INLINE u32 c_preprocess_token_source(CPreprocessRe
     return recovery ? ir_source_map_source(&recovery->map, token.offset, cursor) : 0;
 }
 
+CSourceIdentity c_source_identity(CPreprocessResult const* preprocess)
+{
+    return (CSourceIdentity){.value = preprocess ? preprocess->tokens : 0};
+}
+
 CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index)
 {
     CSourceAnchor result = {0};

@@ -13,6 +13,15 @@ struct CSourceAnchor
     u32 length;
 };
 
+// A memo can recognize the same immutable source stream without borrowing
+// its token array or gaining a way to inspect grammar fields.
+typedef struct CSourceIdentity CSourceIdentity;
+struct CSourceIdentity
+{
+    void const* value;
+};
+
+BUSTER_F_DECL CSourceIdentity c_source_identity(CPreprocessResult const* preprocess);
 BUSTER_F_DECL CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index);
 BUSTER_F_DECL CSourceAnchor c_source_anchor_from_name(CPreprocessResult const* preprocess, String8 name);
 BUSTER_F_DECL String8 c_source_anchor_spelling(CPreprocessResult const* preprocess, CSourceAnchor anchor);

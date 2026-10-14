@@ -48090,7 +48090,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
-    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens, syntax.string_literal_lengths_only);
+    result.string_literals = c_string_literal_memo_create(arena, c_source_identity(&preprocess), syntax.string_literal_lengths_only);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
     result.object_size_facts = arena_allocate(arena, CObjectSizeFacts, 1);

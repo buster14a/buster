@@ -493,7 +493,7 @@ struct CStringLiteralMemoSlot
 struct CStringLiteralMemo
 {
     Arena* arena;
-    CToken const* tokens;
+    CSourceIdentity source;
     CStringLiteralMemoSlot* slots;
     u32 capacity;
     u32 count;
@@ -501,7 +501,8 @@ struct CStringLiteralMemo
     // lower the unit (CParserResult.string_literal_lengths_only).
     bool lengths_only;
 };
-BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only);
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CSourceIdentity source, bool lengths_only);
+BUSTER_C_EXTERN CStringLiteralMemoSlot const* c_string_literal_memo_find(CStringLiteralMemo const* memo, CSourceIdentity source, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 // Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
