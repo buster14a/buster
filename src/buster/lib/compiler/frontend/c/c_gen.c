@@ -12397,7 +12397,7 @@ BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult prepro
 }
 
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
-                                                u32 declaration_start, u32 declaration_end, CIrVlaLayout* result);
+                                                u32 declaration_node_plus_one, CIrVlaLayout* result);
 BUSTER_C_INTERNAL CIrVlaArrayType* c_ir_vla_array_type(CIntegerIrBuilder* builder, IrTypeId type);
 BUSTER_C_INTERNAL bool c_ir_pointer_to_variable_array(CIntegerIrBuilder* builder, CTypeId type, CTypeId* array_out, IrTypeId* element_out);
 
@@ -18202,8 +18202,7 @@ struct CIrLowerVlaLayoutState
     CArrayBound* bounds;
     CTypeId array_type;
     IrTypeId type_name;
-    u32 declaration_start;
-    u32 declaration_end;
+    u32 declaration_node_plus_one;
     CToken token;
     IrSourceRange source;
     u32 dimension;
@@ -37809,64 +37808,55 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         state->dimension = 0;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
         CIrVlaArrayType* array = state->named_type ? c_ir_vla_array_type(builder, state->type_name) : 0;
-        u32 typeof_start = array ? array->typeof_start : 0;
-        u32 typeof_end = array ? array->typeof_end : 0;
-        for (u32 index = state->declaration_start; index + 1 < state->declaration_end; index += 1)
+        u32 typeof_node = array ? array->typeof_node_plus_one - 1 : C_AST_NODE_INVALID;
+        CAst const* ast = builder->syntax_tree;
+        u32 declaration = state->declaration_node_plus_one - 1;
+        u32 specifiers = declaration < ast->node_count ? c_ast_child_at(ast, declaration, 0) : C_AST_NODE_INVALID;
+        if (specifiers < ast->node_count && ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS)
         {
-            CToken type_token = builder->preprocess.tokens[index];
-            bool is_typeof = type_token.kind == C_TOKEN_IDENTIFIER &&
-                (string_equal(c_token_spelling(builder->preprocess.spelling_base, type_token), S8("typeof")) ||
-                 string_equal(c_token_spelling(builder->preprocess.spelling_base, type_token), S8("__typeof__")) ||
-                 string_equal(c_token_spelling(builder->preprocess.spelling_base, type_token), S8("__typeof")) ||
-                 string_equal(c_token_spelling(builder->preprocess.spelling_base, type_token), S8("typeof_unqual")));
-            if (is_typeof && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            u32 source = C_AST_NODE_INVALID;
+            for (u32 child = c_ast_subtree_begin(ast, specifiers); child < specifiers && source == C_AST_NODE_INVALID; child += 1)
             {
-                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, state->declaration_end,
-                    C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (close < state->declaration_end)
+                if (ast->kinds[child] == C_AST_TYPEOF || ast->kinds[child] == C_AST_TYPEOF_UNQUAL) source = c_ast_child_at(ast, child, 0);
+            }
+            if (source != C_AST_NODE_INVALID)
+            {
+                bool expression = ast->kinds[source] != C_AST_TYPE_NAME;
+                IrTypeId type = expression ? c_ir_expression_type_node(builder, source, C_IR_AST_TYPE_STRICT) : c_ir_type_name_node(builder, source);
+                IrType const* current = ir_type_from_id(&builder->program->types, type);
+                if (!current)
                 {
-                    IrTypeId type = c_ir_type_name(builder, index + 2, close);
-                    bool expression = type.value == IR_ID_UNDERLYING_INVALID;
-                    CIrQueryFrame query = {0};
-                    bool expression_typed = !expression ||
-                        (c_ir_query_execute(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_OPERAND_TYPE,
-                            .start = index + 2, .end = close}, &query) && query.success);
-                    if (!expression_typed)
+                    builder->failure_message = S8("could not determine the runtime type of a typeof operand");
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                while (current && (current->kind == IR_TYPE_POINTER || current->kind == IR_TYPE_ARRAY))
+                {
+                    CIrVlaArrayType* variable = c_ir_vla_array_type(builder, type);
+                    if (variable)
                     {
-                        builder->failure_message = S8("could not determine the runtime type of a typeof operand");
-                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                        return;
+                        typeof_node = expression ? source : variable->typeof_node_plus_one - 1;
+                        current = 0;
                     }
-                    if (expression)
+                    else
                     {
-                        type = query.result_type;
-                    }
-                    IrType* current = ir_type_from_id(&builder->program->types, type);
-                    while (current && (current->kind == IR_TYPE_POINTER || current->kind == IR_TYPE_ARRAY))
-                    {
-                        CIrVlaArrayType* variable = c_ir_vla_array_type(builder, type);
-                        if (variable)
-                        {
-                            typeof_start = expression ? index + 2 : variable->typeof_start;
-                            typeof_end = expression ? close : variable->typeof_end;
-                            break;
-                        }
                         type = current->element_type;
                         current = ir_type_from_id(&builder->program->types, type);
                     }
                 }
-                break;
             }
         }
-        if (typeof_start < typeof_end)
+        if (typeof_node != C_AST_NODE_INVALID)
         {
+            u32 typeof_start = builder->syntax_spans->first[typeof_node];
+            u32 typeof_end = builder->syntax_spans->end[typeof_node];
             state->typeof_previous_preparing_calls = builder->preparing_calls;
             state->typeof_previous_call_count = builder->prepared_call_count;
             state->typeof_previous_control_count = builder->prepared_control_expression_count;
             builder->preparing_calls = false;
             frame->stage = C_IR_LOWER_STAGE_VLA_TYPEOF_OPERAND;
             c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
-                .as.expression = {.start = typeof_start, .end = typeof_end}});
+                .as.expression = {.start = typeof_start, .end = typeof_end, .node_plus_one = typeof_node + 1}});
             return;
         }
     }
@@ -38044,7 +38034,7 @@ BUSTER_C_INTERNAL void c_ir_lower_typedef_step(CIntegerIrBuilder* builder)
                 CIrLowerVlaLayoutState* layout = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
                 *layout = (CIrLowerVlaLayoutState){.result = arena_allocate(builder->scratch_arena, CIrVlaLayout, 1),
                     .array_type = type, .token = builder->preprocess.tokens[index],
-                    .declaration_start = state->start, .declaration_end = index};
+                    .declaration_node_plus_one = value->declaration_node_plus_one};
                 frame->stage = C_IR_LOWER_STAGE_CHILD;
                 c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT, .as.vla_layout = layout});
                 pending = true;
@@ -38604,7 +38594,7 @@ BUSTER_C_INTERNAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* bui
 }
 
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
-                                                u32 declaration_start, u32 declaration_end, CIrVlaLayout* result)
+                                                u32 declaration_node_plus_one, CIrVlaLayout* result)
 {
     CIrLowerVlaLayoutState* state = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
     *state = (CIrLowerVlaLayoutState){
@@ -38613,8 +38603,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CType
         .token = token,
         .parameter = parameter || pointer,
         .pointer = pointer,
-        .declaration_start = declaration_start,
-        .declaration_end = declaration_end,
+        .declaration_node_plus_one = declaration_node_plus_one,
     };
     CIrLowerFrameResult lowered = c_ir_lower_dispatch(builder, (CIrLowerFrame){
                                                                     .kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT,
@@ -38624,10 +38613,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CType
 }
 
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_pointer_local(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CTypeId array_type, CToken name,
-                                                       u32 declaration_start, u32 declaration_end)
+                                                       u32 declaration_node_plus_one)
 {
     CIrVlaLayout layout = {0};
-    bool result = c_ir_prepare_vla_layout(builder, array_type, name, false, true, declaration_start, declaration_end, &layout);
+    bool result = c_ir_prepare_vla_layout(builder, array_type, name, false, true, declaration_node_plus_one, &layout);
     if (result)
     {
         local->vla_element_type = layout.element_type;
@@ -42906,7 +42895,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         // before it hands the list over, because only it holds the task.
         CIrVlaLayout layout = {0};
         if (!c_ir_prepare_vla_layout(builder, local_entity->type, name, false, false,
-                                   state->specifier_start, state->specifier_end, &layout))
+                                   local_entity->declaration_node_plus_one, &layout))
         {
             builder->failure_message = builder->failure_message.length
                 ? string_format(builder->arena, S8("could not lower the bounds of variable-length array '{S8}': {S8}"),
@@ -42932,7 +42921,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         return false;
     }
     if (pointer_to_variable_array && !c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name,
-                                                                   state->specifier_start, state->specifier_end))
+                                                                   local_entity->declaration_node_plus_one))
     {
         builder->failure_message = S8("could not lower the bounds of a pointer-to-VLA local");
         return false;
@@ -46569,8 +46558,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .result = layout,
                         .array_type = local_c_type_id,
                         .token = name,
-                        .declaration_start = start,
-                        .declaration_end = name_index,
+                        .declaration_node_plus_one = builder->parse.entities[entity.value].declaration_node_plus_one,
                     };
                     state->vla_layout = layout;
                     state->vla_pointer_type = local_type;
@@ -46681,7 +46669,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 if (pointer_to_variable_array)
                 {
-                    if (!c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name, start, name_index))
+                    if (!c_ir_prepare_vla_pointer_local(builder, local, variable_array_type, name, builder->parse.entities[entity.value].declaration_node_plus_one))
                     {
                         builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of the array '{S8}' points to"),
                                                                  c_token_spelling(builder->preprocess.spelling_base, name));
@@ -62493,7 +62481,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     CIntegerIrLocal* local = c_ir_find_local_by_entity(&builder, parameter.entity);
                     CIrVlaLayout layout = {0};
                     CToken parameter_token = c_ir_space_name_token(&builder, parameter.name);
-                    if (!local || !c_ir_prepare_vla_layout(&builder, parameter.type, parameter_token, true, false, 0, 0, &layout))
+                    if (!local || !c_ir_prepare_vla_layout(&builder, parameter.type, parameter_token, true, false, 0, &layout))
                     {
                         builder.failure_message = S8("could not lower variable-length array parameter bounds");
                         parameters_lowered = false;
