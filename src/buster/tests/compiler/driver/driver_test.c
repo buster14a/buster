@@ -82,6 +82,7 @@
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/wasm/wasm_internal.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
@@ -7310,12 +7311,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
     return result;
 }
 
-// -fc-ast-pilot (GitHub #3102) is the default hook: valid input compiles to the
-// same object bytes with and without it in every layout (semantic analysis
-// answers expression types from the tree), -v adds the timed diagnostic passes
-// and the counters, an unknown layout is an argument
-// error, and input the tree builder rejects compiles without a tree, failing
-// exactly as under -fno-c-ast-pilot.
+// Every C compile prepares syntax (#3102): the default and each supported
+// layout preserve objects and diagnostics. The historical production opt-out
+// is rejected in either ordering; model/reference parser oracles remain APIs.
+// The completed tree/model remains authoritative after every source token's
+// kind, punctuator and interned symbol have been poisoned. Compare full object
+// bytes with and without debug information, then execute the poisoned image.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lowering_token_poison(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-lowering-token-poison"), S8(".c"));
+    String8 source = S8(
+        "struct R { volatile int value; unsigned bits : 5; _Atomic int count; };\n"
+        "static int combine(struct R *r, int *p) {\n"
+        "    *p += 1; (*p)++; ++(*p); r->bits += 2; r->count++; r->value += *p;\n"
+        "    return r->value + r->bits + r->count + __builtin_types_compatible_p(int, int)\n"
+        "        + (__builtin_classify_type(*p) == 1) + __builtin_strlen(\"a\" \"bc\") + __builtin_object_size(\"hi\", 0);\n"
+        "}\n"
+        "int main(void) { struct R r = {1, 2, 0}; int p = 3; char local[] = \"ab\" \"c\";\n"
+        "    return sizeof(local) != 4 || combine(&r, &p) != 20 || p != 6 || r.value != 7 || r.bits != 4 || r.count != 1; }\n");
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 debug[] = {S8("-g0"), S8("-g")};
+        String8 layouts[] = {S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+            {
+                for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
+                {
+                    TemporalArena row = scratch_begin(&arena, 1);
+                    String8 object = buster_test_temporary_unique_path(row.arena, S8("lowering-token-poison"), S8(".o"));
+                    ByteSlice reference = {0};
+                    for (u32 poison = 0; poison < 2; poison += 1)
+                    {
+                        String8 command[] = {S8("-nostdinc"), S8("-fcompile-jobs=1"), S8("-target"), S8("x86_64-unknown-linux"),
+                                             layouts[layout], allocators[mode], debug[level], S8("-c"), S8("-o"), object, input};
+                        c_test_lowering_token_poison(poison != 0);
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(row.arena,
+                            compiler_driver_parse_arguments(row.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        u64 poisoned = c_test_lowering_token_poison(false);
+                        String8 context = string_format(row.arena, S8("layout={u32} mode={u32} debug={u32} poison={u32}: {S8}"),
+                                                        layout, mode, level, poison, compiled.diagnostic);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, context);
+                        BUSTER_TEST_RAW(arguments, poison ? poisoned != 0 : poisoned == 0, context);
+                        ByteSlice bytes = file_read(row.arena, object, (FileReadOptions){0});
+                        if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
+                        {
+                            if (!poison) reference = bytes;
+                            else BUSTER_TEST_RAW(arguments, reference.pointer && bytes.length == reference.length &&
+                                                 memory_compare(bytes.pointer, reference.pointer, bytes.length), context);
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(object));
+                    c_test_scratch_end(row);
+                }
+            }
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            TemporalArena row = scratch_begin(&arena, 1);
+            String8 image = buster_test_temporary_unique_path(row.arena, S8("lowering-token-poison"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-fcompile-jobs=1"), S8("-fverify-codegen"), allocators[mode], S8("-o"), image, input};
+            c_test_lowering_token_poison(true);
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(row.arena,
+                compiler_driver_parse_arguments(row.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            u64 poisoned = c_test_lowering_token_poison(false);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, poisoned != 0 && compiler_driver_test_process_success(row.arena, image));
+                BUSTER_TEST(arguments, os_file_delete(image));
+            }
+            c_test_scratch_end(row);
+        }
+#endif
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+    c_test_lowering_token_poison(false);
+    c_test_scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -37598,6 +37682,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_ifunc_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_alias_direct_emitters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lowering_token_poison);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_name_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);

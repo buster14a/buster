@@ -51528,6 +51528,19 @@ CAnalysisResult c_parse_for_lowering(Arena* arena, CPreprocessResult preprocess)
     return c_analyze_semantics_only(arena, preprocess, syntax);
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_lowering_token_poison_armed;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_lowering_token_poison_count;
+
+u64 c_test_lowering_token_poison(bool armed)
+{
+    u64 count = c_lowering_token_poison_count;
+    c_lowering_token_poison_armed = armed;
+    c_lowering_token_poison_count = 0;
+    return count;
+}
+#endif
+
 CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
                                      CIRLowerOptions options)
 {
@@ -51543,7 +51556,25 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
         options.syntax_tree = options.syntax_tree ? options.syntax_tree : analysis.ast;
         options.syntax_facts = options.syntax_facts ? options.syntax_facts : analysis.ast_facts;
         WORK_LEDGER_PHASE(LOWER);
+#if BUSTER_INCLUDE_TESTS
+        CToken* saved_tokens = c_lowering_token_poison_armed && preprocess.token_count
+                                   ? arena_allocate(arena, CToken, preprocess.token_count) : 0;
+        if (saved_tokens)
+        {
+            memcpy(saved_tokens, preprocess.tokens, preprocess.token_count * sizeof(*saved_tokens));
+            for (u64 index = 0; index < preprocess.token_count; index += 1)
+            {
+                preprocess.tokens[index].kind = C_TOKEN_INVALID;
+                preprocess.tokens[index].punctuator = C_PUNCTUATOR_ELLIPSIS;
+                preprocess.tokens[index].symbol = UINT32_MAX;
+            }
+            c_lowering_token_poison_count += preprocess.token_count;
+        }
+#endif
         result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
+#if BUSTER_INCLUDE_TESTS
+        if (saved_tokens) memcpy(preprocess.tokens, saved_tokens, preprocess.token_count * sizeof(*saved_tokens));
+#endif
     }
     result.warnings = analysis.warnings;
     result.warning_count = analysis.warning_count;

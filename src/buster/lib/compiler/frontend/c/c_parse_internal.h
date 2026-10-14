@@ -238,6 +238,11 @@ BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, C
 // Cast-proof token visits and logical-position probes on the calling thread.
 BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
 
+// Poison classification fields only after completed analysis, preserving
+// source bytes and the original stream identity. Disarming returns how many
+// source records were poisoned, so object controls prove the seam ran.
+BUSTER_F_DECL u64 c_test_lowering_token_poison(bool armed);
+
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
 typedef struct CTestMemberAlignmentQuery CTestMemberAlignmentQuery;
