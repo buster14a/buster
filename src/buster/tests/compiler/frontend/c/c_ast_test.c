@@ -7112,6 +7112,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments
         {S8("int live(int n) { if (n) goto in; return ({ in: 3; }); }\n"), 0, true},
         {S8("int live(int n) { int a = ({ if (n) goto in; 1; }); int b = ({ in: 2; }); return a + b; }\n"), 0, true},
         {S8("int live(int n) { void *target = &&out; if (n) goto *target; out: return 3; }\n"), 4, false},
+        {S8("int live(int n) { return _Generic(n, int: 1, default: 0) + _Generic(n, int: 2, default: 0) + "
+            "_Generic(n, int: 3, default: 0) + _Generic(n, int: 4, default: 0); }\n"), 4, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {

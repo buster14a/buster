@@ -62142,8 +62142,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         for (u32 node = prepared_node_start; node < prepared_node_start + prepared_node_count; node += 1)
         {
             u8 kind = options.syntax_tree->kinds[node];
-            prepared_call_capacity += kind == C_AST_CALL;
-            prepared_control_expression_capacity += kind == C_AST_CALL || kind == C_AST_INDEX || kind == C_AST_DECLARATOR_ARRAY;
+            prepared_call_capacity += kind == C_AST_CALL || kind == C_AST_GENERIC_SELECTION;
+            prepared_control_expression_capacity += kind == C_AST_CALL || kind == C_AST_GENERIC_SELECTION ||
+                                                    kind == C_AST_INDEX || kind == C_AST_DECLARATOR_ARRAY;
             direct_ssa_enabled &= kind != C_AST_LABEL_ADDRESS && kind != C_AST_ASM;
         }
         // Sparse groups are sorted by owner. Select the definition's interval
