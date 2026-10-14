@@ -1819,7 +1819,6 @@ struct CIrNodeQueryFrame
 
 typedef enum CIrQueryFrameKind
 {
-    C_IR_QUERY_FRAME_VLA_C_TYPE,
     C_IR_QUERY_FRAME_NODE_TASK,
 } CIrQueryFrameKind;
 
@@ -3479,7 +3478,6 @@ BUSTER_C_INTERNAL CScopeId c_ir_current_scope(CIntegerIrBuilder* builder)
 #endif
 
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
-BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, CTypeId type);
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
@@ -3500,7 +3498,6 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
     {
         switch (left.kind)
         {
-        case C_IR_QUERY_FRAME_VLA_C_TYPE: return left.start == right.start && left.end == right.end && left.flag == right.flag;
         case C_IR_QUERY_FRAME_NODE_TASK:
             return left.node_task.node == right.node_task.node && left.node_task.kind == right.node_task.kind &&
                    left.node_task.view == right.node_task.view && left.node_task.probe_context == right.node_task.probe_context &&
@@ -3596,10 +3593,6 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             case C_IR_QUERY_FRAME_NODE_TASK:
                 frame->success = c_ir_node_query_attempt(builder, &frame->node_task);
                 frame->node_task.success = frame->success;
-                break;
-            case C_IR_QUERY_FRAME_VLA_C_TYPE:
-                frame->result_type = c_ir_vla_c_type_attempt(builder, (CTypeId){.value = frame->start});
-                frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
                 break;
             }
             if (machine->has_request)
@@ -28476,9 +28469,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, I
     return result;
 }
 
-// Recover the original array/pointer structure for unevaluated type queries.
-// Do not replace the shared C-to-IR map: storage remains a scalar pointer.
-BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, CTypeId type)
+// Project the retained C model's original VLA array/pointer structure inside
+// its expression-type node task. Bound children yield to the same explicit
+// node scheduler; the storage map remains the existing scalar pointer view.
+BUSTER_C_INTERNAL IrTypeId c_ir_retained_vla_type(CIntegerIrBuilder* builder, CTypeId type)
 {
     IrTypeId result = type.value < builder->parse.type_count ? builder->c_type_ir_map[type.value] : IR_TYPE_ID_INVALID;
     if (result.value == IR_ID_UNDERLYING_INVALID && type.value < builder->parse.type_count)
@@ -28533,25 +28527,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, C
     return result;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type(CIntegerIrBuilder* builder, CTypeId type)
-{
-    IrTypeId result;
-    if (builder->queries->frame_count)
-    {
-        result = c_ir_vla_c_type_attempt(builder, type);
-    }
-    else
-    {
-        CIrQueryFrame query = {0};
-        bool valid = c_ir_query_execute(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_VLA_C_TYPE, .start = type.value}, &query);
-        result = valid && query.success ? query.result_type : IR_TYPE_ID_INVALID;
-    }
-    return result;
-}
-
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_local_query_type(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
-    IrTypeId result = local->is_variable_length_array ? c_ir_vla_c_type(builder, local->c_type) : local->type;
+    IrTypeId result = local->is_variable_length_array ? c_ir_retained_vla_type(builder, local->c_type) : local->type;
     if (local->is_vla_parameter && local->c_type.value < builder->parse.type_count &&
         builder->parse.types[local->c_type.value].kind == C_TYPE_ARRAY)
     {
