@@ -2451,6 +2451,37 @@ token of each store is the anchor of the item's value node. The
 byte-for-byte comparison of `-g` objects must confirm this for every item
 kind. Any kind where it differs is listed here when it is implemented.
 
+### Runtime initializer values from retained selections
+
+The runtime compound-literal frames consume `CInitializerPlan` by initializer
+node. Semantic analysis retains each value node, its destination path,
+explicit-list begin/end markers, and source provenance. Path edges name the
+canonical member index or array range selected by analysis; lowering does no
+designator lookup, separator scan, brace-elision search or constant-index fold.
+
+The flat owner preserves ordered captures, later replacements, final zero
+values and `c_ir_emit_initializer_capture`. The storage owner projects each
+unique path once over an explicit pending stack. Brace-elided continuations
+reuse their projected prefix, while a fresh designation has fresh path ids.
+An explicit nested list zeroes its subobject before its values, and its end
+copies a GNU range after the first element is initialized. Scalar ranges
+copy immediately after the single evaluated value is stored.
+
+Each expression child carries its value node directly. The retained value
+and path tokens supply the original debug anchors for casts, stores,
+`FIELD`, `INDEX`, zero fills and range copies. The semantic `SINGLE_ZERO`
+flag keeps the original bare `{0}` constructor choice, including vector
+objects; `{0,}` retains the ordinary item route. A string fills a whole array
+only when its element type is compatible with that string representation.
+
+`c_test_initializer_plan_runtime` runs nested, promoted, overridden,
+ranged, bit-field, union, string and compound-literal cases in both SSA forms,
+at `-g0` and `-g`, under FAST and QUALITY. Missing semantic plans are a
+structured lowering failure; every direct API and opt-out caller must retain
+the producer's tree and plans before this consumer migration is complete.
+The declaration-to-compound-literal frame boundary still has one marked
+range adapter until those callers pass the initializer node.
+
 ### Declarations
 
 Local statement dispatch takes its `DECLARATION` node. A list visits its

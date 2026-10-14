@@ -17261,6 +17261,105 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_overrides(UnitTestArgument
     return result;
 }
 
+// The semantic initializer plan drives both flat value captures and nested
+// storage. Verify effects, overrides, promoted continuations, strings and
+// ranged aggregate copies through the real driver and both SSA forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_plan_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = S8(
+        "static int trace;\n"
+        "static int t(int x) { trace = trace * 10 + x; return x; }\n"
+        "struct Pair { int x, y; };\n"
+        "struct Outer { struct Pair pairs[2]; char text[4]; int after; };\n"
+        "struct Promoted { struct { int x, y; }; int z; };\n"
+        "struct Bits { unsigned a:3, b:5; };\n"
+        "union U { int x; long y; };\n"
+        "int main(void)\n"
+        "{\n"
+        "    trace = 0;\n"
+        "    int flat[3] = {t(1), t(2)};\n"
+        "    if (trace != 12 || flat[0] != 1 || flat[1] != 2 || flat[2] != 0) return 1;\n"
+        "    trace = 0;\n"
+        "    int replace[4] = {[2] = t(3), [1] = t(4), t(5)};\n"
+        "    if (trace != 345 || replace[0] || replace[1] != 4 || replace[2] != 5 || replace[3]) return 2;\n"
+        "    trace = 0;\n"
+        "    struct Outer outer = {.pairs = {{t(1), t(2)}, {t(3), t(4)}}, .text = {\"xy\"}, .after = t(5)};\n"
+        "    if (trace != 12345 || outer.pairs[1].y != 4 || outer.text[0] != 'x' || outer.text[2] || outer.after != 5) return 3;\n"
+        "    trace = 0;\n"
+        "    struct Promoted promoted = {.y = t(2), t(3), .x = t(1)};\n"
+        "    if (trace != 231 || promoted.x != 1 || promoted.y != 2 || promoted.z != 3) return 4;\n"
+        "    trace = 0;\n"
+        "    struct Pair ranged[3] = {[0 ... 2] = {t(1), t(2)}, [1].x = t(3)};\n"
+        "    if (trace != 123 || ranged[0].x != 1 || ranged[1].x != 3 || ranged[2].x != 1 || ranged[2].y != 2) return 5;\n"
+        "    char labels[2][4] = {\"aa\", {\"bb\"}};\n"
+        "    if (labels[0][1] != 'a' || labels[1][1] != 'b' || labels[0][2] || labels[1][2]) return 6;\n"
+        "    trace = 0;\n"
+        "    struct Bits bits = {.b = t(4), .a = t(2)};\n"
+        "    if (trace != 42 || bits.a != 2 || bits.b != 4) return 7;\n"
+        "    trace = 0;\n"
+        "    union U value = {.y = t(6), .x = t(7)};\n"
+        "    if (trace != 67 || value.x != 7) return 8;\n"
+        "    trace = 0;\n"
+        "    struct Pair literal = (struct Pair){t(1), t(2)};\n"
+        "    if (trace != 12 || literal.x != 1 || literal.y != 2) return 9;\n"
+        "    int zeros[3] = {0};\n"
+        "    int zeros_comma[3] = {0,};\n"
+        "    if (zeros[0] || zeros[1] || zeros[2] || zeros_comma[0] || zeros_comma[1] || zeros_comma[2]) return 10;\n"
+        "    char* words[] = {\"hi\"};\n"
+        "    char text[] = {\"hi\"};\n"
+        "    if (words[0][1] != 'i' || text[1] != 'i' || sizeof text != 3) return 11;\n"
+        "    typedef unsigned int Vec __attribute__((vector_size(16)));\n"
+        "    union { Vec vector; unsigned lanes[4]; } vector = {0};\n"
+        "    Vec vectors[2] = {0};\n"
+        "    if (vector.lanes[3] || vectors[0][1] || vectors[1][2]) return 12;\n"
+        "    return 0;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("initializer-plan-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("initializer-plan-runtime-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                        form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), debug ? S8("-g") : S8("-g0"),
+                        S8("-fverify-codegen"), S8("-o"), output, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("initializer plan {S8} form={u32} debug={u32}: case={u32} timeout={u32}"),
+                                    modes[mode], form, debug, execution.platform_status, (u32)execution.timed_out));
+                        }
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
+                    }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_union_initializer(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -68853,6 +68952,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_initializer_enum_scope);
     C_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
     C_TEST_FIXTURE(arguments, c_test_initializer_overrides);
+    C_TEST_FIXTURE(arguments, c_test_initializer_plan_runtime);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);

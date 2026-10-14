@@ -11,7 +11,7 @@
 // the thread scratch. Per-initializer scratch is sized by the work and
 // released by its user: c_ir_emit_zero_value grows its task stack on demand,
 // c_ir_zero_storage_compatible rewinds its type marks, and the nested
-// compound-literal cursors follow c_ir_initializer_nesting_depth, never the
+// runtime initializer projections follow CInitializerPlan paths, never the
 // unit's type count. c_ir_scratch_reservation_size and
 // c_ir_function_scratch_tail_reservation size large lowering workspaces before
 // their first allocation; c_ir_ssa_grow_slots, c_ir_ssa_parameter and the
@@ -193,8 +193,8 @@
 //   c_ir_node_owned_close                         retained source provenance
 //   c_ir_emit_initializer_capture                 exact constructor types and
 //                                                 qualified subobject stores
-//   c_ir_lower_compound_literal_step              ordered evaluation and final
-//                                                 per-subobject initializer values
+//   c_ir_lower_compound_literal_step,             runtime values and stores from
+//   c_ir_initializer_plan_place                   retained semantic selections
 //   c_ir_tree_control_groups,                     control groups and calls
 //   c_ir_tree_calls_discover                      hoisted from the tree
 //   c_ir_lower_expression_core_step,              the expression evaluator:
@@ -18327,39 +18327,12 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX,
 } CIrLowerFrameStage;
 
-typedef struct CIrNestedInitializerCursor CIrNestedInitializerCursor;
-struct CIrNestedInitializerCursor
-{
-    IrValueId place;
-    IrTypeId type;
-    u32 next_index;
-};
-
-typedef struct CIrNestedInitializerTask CIrNestedInitializerTask;
-struct CIrNestedInitializerTask
-{
-    IrValueId place;
-    IrTypeId type;
-    CIrNestedInitializerCursor* cursors;
-    u32 open;
-    u32 close;
-    u32 item_start;
-    u32 index;
-    u32 next_index;
-    u32 cursor_count;
-    u32 range_first;
-    u32 range_last;
-    bool resume;
-    bool zero_subobject;
-    bool range_copy;
-};
-
 typedef struct CIrNestedCompoundLiteralState CIrNestedCompoundLiteralState;
 struct CIrNestedCompoundLiteralState
 {
-    CIrNestedInitializerTask* tasks;
-    CIrNestedInitializerCursor* cursors;
-    CIrNestedInitializerTask task;
+    CInitializerPlan const* plan;
+    IrValueId* places;
+    u32* pending;
     IrValueId root_place;
     IrValueId child_place;
     IrTypeId root_type;
@@ -18367,19 +18340,7 @@ struct CIrNestedCompoundLiteralState
     IrSourceRange source;
     u32 root_open;
     u32 root_close;
-    u32 capacity;
-    u32 cursor_capacity;
-    u32 cursor_count;
-    u32 task_count;
-    u32 item_start;
     u32 index;
-    u32 next_index;
-    u32 selected_index;
-    u32 range_last;
-    bool task_active;
-    bool cursor_item;
-    bool promoted_designator;
-    u8 reserved[1];
 };
 
 typedef enum CIrPreparedCallContinuation
@@ -18889,20 +18850,20 @@ struct CIrLowerFrame
         } va_list_expression;
         struct
         {
+            CInitializerPlan const* plan;
             IrValueId* operands;
             u64* fields;
             bool* initialized;
             IrTypeId type;
             IrTypeId child_type;
             IrSourceRange source;
+            u32 node_plus_one;
             u32 open;
             u32 close;
             u32 index;
-            u32 item_end;
             u32 field_index;
             u32 slot_count;
             u32 operand_count;
-            u32 next_field;
             u8 continuation;
             u8 reserved[3];
         } compound_literal_machine;
@@ -19087,6 +19048,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowe
     if (node_plus_one && !*node_plus_one)
     {
         *node_plus_one = c_ir_tree_range_node(builder, first, end) + 1;
+    }
+    // TEMPORARY ADAPTER (#4061): declaration owners still pass initializer
+    // provenance ranges. Resolve the root once here; plan consumers use only
+    // its node. Tree-owned compound literals supply their last child directly.
+    if (frame.kind == C_IR_LOWER_FRAME_COMPOUND_LITERAL && !frame.as.compound_literal_machine.node_plus_one)
+    {
+        frame.as.compound_literal_machine.node_plus_one =
+            c_ir_tree_range_node(builder, frame.as.compound_literal_machine.open, frame.as.compound_literal_machine.close + 1) + 1;
     }
     frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
     machine->frames[machine->frame_count++] = frame;
@@ -20092,13 +20061,14 @@ BUSTER_C_INTERNAL bool c_ir_body_mentions_name_outside(CIntegerIrBuilder* builde
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder* builder, IrTypeId type, u32 open, u32 close)
+BUSTER_C_INTERNAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder* builder, IrTypeId type, u32 node, u32 open, u32 close)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL,
                                               .as.compound_literal_machine =
                                                   {
                                                       .type = type,
+                                                      .node_plus_one = node + 1,
                                                       .open = open,
                                                       .close = close,
                                                   },
@@ -33125,133 +33095,63 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
-// A designator is a chain, not one step: C11 6.7.9p6 lets `.member`, `[index]`
-// and any mix of them follow one another before the `=`. musl's mutex,
-// barrier and rlimit initializers all write one -- `._m_type` is
-// `__u.__i[0]` after the header's macros -- so the walk below accepts both
-// step kinds and stops at the first token that is neither. It returns the
-// index of the token after the last step, which the caller checks is the `=`.
-BUSTER_C_INTERNAL u32 c_ir_designator_chain_end(CIntegerIrBuilder* builder, u32 start, u32 end)
+// Initializer topology and selections are retained by semantic analysis in
+// CInitializerPlan (#4061). The value node, destination path and list markers
+// decide each operation; tokens supply only the retained source provenance.
+BUSTER_C_INTERNAL u32 c_ir_initializer_value_node(CIntegerIrBuilder* builder, u32 node)
 {
-    u32 index = start;
-    while (index < end)
+    CAst const* ast = builder->syntax_tree;
+    while (node < ast->node_count && ast->kinds[node] == C_AST_INITIALIZER_LIST && node > c_ast_subtree_begin(ast, node) &&
+           c_ir_tree_first_child(ast, node) == node - 1)
     {
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT) && index + 1 < end &&
-            builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
-        {
-            index += 2;
-            continue;
-        }
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            if (close >= end || close == index + 1)
-            {
-                break;
-            }
-            index = close + 1;
-            continue;
-        }
-        break;
+        node -= 1;
     }
-
-    return index;
+    return node;
 }
 
-BUSTER_C_INTERNAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builder, u32 start, u32 close)
+BUSTER_C_INTERNAL bool c_ir_initializer_value_frame_push(CIntegerIrBuilder* builder, CInitializerItem const* item)
 {
-    for (u32 index = start + 1; index < close; index += 1)
+    u32 node = c_ir_initializer_value_node(builder, item->node);
+    u32 first = item->value_start;
+    u32 end = item->value_end;
+    if (node != item->node)
     {
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_ELLIPSIS))
-        {
-            return true;
-        }
+        // Scalar braces disappear from expression topology; keep only the
+        // parentheses within the item's retained provenance boundary.
+        u32 wraps = c_ir_core_wraps(builder, node, first);
+        first = builder->syntax_spans->first[node] - wraps;
+        end = builder->syntax_spans->end[node] + wraps;
     }
-    return false;
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
+        .as.expression = {.node_plus_one = node + 1, .start = first, .end = end}});
 }
 
-// Unnamed bit-fields are padding, while anonymous structs/unions still consume
-// an initializer. Keep the cursor in field indices so each padding field is
-// skipped once as a positional initializer advances.
-BUSTER_C_INTERNAL u32 c_ir_initializer_next_field_index(IrType* type, u32 index)
+BUSTER_C_INTERNAL bool c_ir_initializer_item_string(CIntegerIrBuilder* builder, CInitializerItem const* item, IrTypeId type)
 {
-    while (index < type->field_count && type->fields[index].is_bit_field && !type->fields[index].name.length)
+    u32 node = c_ir_initializer_value_node(builder, item->node);
+    IrType* destination = ir_type_from_id(&builder->program->types, type);
+    bool string = node < builder->syntax_tree->node_count && builder->syntax_tree->kinds[node] == C_AST_STRING &&
+                  destination && destination->kind == IR_TYPE_ARRAY;
+    if (string)
     {
-        index += 1;
+        u32 first = builder->syntax_tree->tokens[node];
+        CIrDecodedString decoded = {0};
+        string = c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, first,
+                                                             first + builder->syntax_tree->data[node], builder->parse.string_literals, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, destination->element_type, decoded);
     }
-    return index;
+    return string;
 }
 
-// A named designator can cross anonymous struct/union members. Recover every
-// FIELD edge emitted for that member so positional items resume at the deepest
-// selected container before moving to its enclosing siblings.
-BUSTER_C_INTERNAL bool c_ir_nested_initializer_field_cursors(CIntegerIrBuilder* builder, CIrNestedCompoundLiteralState* state,
-                                                              IrValueId parent, IrValueId child)
+BUSTER_C_INTERNAL IrValueId c_ir_initializer_item_string_value(CIntegerIrBuilder* builder, CInitializerItem const* item, IrTypeId type)
 {
-    u32 first = state->cursor_count;
-    bool result = true;
-    while (result && child.value != parent.value)
-    {
-        if (child.value >= builder->function->value_count || state->cursor_count >= state->cursor_capacity)
-        {
-            result = false;
-        }
-        else
-        {
-            IrInstructionId definition = builder->function->values[child.value].definition;
-            if (definition.value >= builder->function->instruction_count)
-            {
-                result = false;
-            }
-            else
-            {
-                IrInstruction* field = builder->function->instructions + definition.value;
-                if (field->opcode != IR_OPCODE_FIELD || field->operand_count != 1 || field->immediate_count != 1)
-                {
-                    result = false;
-                }
-                else
-                {
-                    IrValueId container_place = field->operands[0];
-                    IrTypeId container_type = container_place.value < builder->function->value_count
-                                                  ? builder->function->values[container_place.value].canonical_type
-                                                  : IR_TYPE_ID_INVALID;
-                    IrType* container = ir_type_from_id(&builder->program->types, container_type);
-                    u64 selected = field->immediates[0];
-                    if (!container || (container->kind != IR_TYPE_STRUCT && container->kind != IR_TYPE_UNION) || selected >= container->field_count)
-                    {
-                        result = false;
-                    }
-                    else
-                    {
-                        state->cursors[state->cursor_count++] = (CIrNestedInitializerCursor){
-                            .place = container_place,
-                            .type = container_type,
-                            .next_index = (u32)selected + 1,
-                        };
-                        child = container_place;
-                    }
-                }
-            }
-        }
-    }
-    for (u32 left = first, right = state->cursor_count; result && left < right; left += 1)
-    {
-        right -= 1;
-        CIrNestedInitializerCursor swap = state->cursors[left];
-        state->cursors[left] = state->cursors[right];
-        state->cursors[right] = swap;
-    }
-    return result;
+    u32 node = c_ir_initializer_value_node(builder, item->node);
+    u32 first = builder->syntax_tree->tokens[node];
+    return c_ir_emit_string_range_typed(builder, first, first + builder->syntax_tree->data[node], type);
 }
 
-BUSTER_C_INTERNAL bool c_ir_initializer_inference_index_range(CIntegerIrBuilder* builder, u32 start, u32 end, u64* first_out, u64* last_out,
-                                                                bool* range_out, String8* message_out, u32* token_out);
-
-// A GNU range designator (`[first ... last] = value`) evaluates its value once
-// and gives it to every element of the range (GCC manual, "Designated
-// Initializers"). The item has already initialized element `first`; copy it
-// over the rest of the range before a later item can override part of one.
+// A GNU range's value is evaluated once, then the initialized first element
+// is copied before a subsequent item can override part of the range.
 BUSTER_C_INTERNAL bool c_ir_nested_initializer_copy_range(CIntegerIrBuilder* builder, IrValueId array_place, IrTypeId element_type, u32 first,
                                                            u32 last, CToken token)
 {
@@ -33268,713 +33168,303 @@ BUSTER_C_INTERNAL bool c_ir_nested_initializer_copy_range(CIntegerIrBuilder* bui
     return result;
 }
 
+// Each semantic path edge is projected once. Brace-elided continuations share
+// their already projected prefix; a fresh designation has fresh edge ids and
+// retains the original FIELD/INDEX order. The explicit pending stack also
+// handles a deeply nested anonymous-member path without recursion.
+BUSTER_C_INTERNAL IrValueId c_ir_initializer_plan_place(CIntegerIrBuilder* builder, CIrNestedCompoundLiteralState* state,
+                                                        CInitializerItem const* item)
+{
+    CInitializerPlan const* plan = state->plan;
+    u32 path = item->path_plus_one;
+    u32 count = 0;
+    bool valid = path <= plan->path_count;
+    while (valid && path && state->places[path - 1].value == IR_ID_UNDERLYING_INVALID)
+    {
+        valid = count < plan->path_count;
+        if (valid)
+        {
+            state->pending[count++] = path;
+            path = plan->paths[path - 1].parent_plus_one;
+            valid = path <= plan->path_count;
+        }
+    }
+    IrValueId place = valid ? (path ? state->places[path - 1] : state->root_place) : IR_VALUE_ID_INVALID;
+    IrSourceRange value_source = c_ir_token_source_range(builder, builder->preprocess.tokens[item->source_token]);
+    while (valid && count)
+    {
+        u32 edge_index = state->pending[--count] - 1;
+        CInitializerPath const* edge = plan->paths + edge_index;
+        IrTypeId owner_type = builder->function->values[place.value].canonical_type;
+        IrType* owner = ir_type_from_id(&builder->program->types, owner_type);
+        u32 anchor = edge->source_token != UINT32_MAX ? edge->source_token : item->source_token;
+        CToken token = builder->preprocess.tokens[anchor];
+        if (edge->member == UINT32_MAX)
+        {
+            valid = owner && (owner->kind == IR_TYPE_ARRAY || owner->kind == IR_TYPE_VECTOR) &&
+                    edge->first <= UINT32_MAX && edge->last < owner->element_count;
+            if (valid)
+            {
+                IrValueId index = c_ir_emit_integer_value(builder, edge->first, false, token);
+                place = index.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, place, index, value_source) : IR_VALUE_ID_INVALID;
+            }
+        }
+        else
+        {
+            valid = owner && (owner->kind == IR_TYPE_STRUCT || owner->kind == IR_TYPE_UNION) && edge->member < owner->field_count;
+            if (valid)
+            {
+                place = c_ir_emit_field_index_place(builder, place, edge->member, c_ir_token_source_range(builder, token));
+            }
+        }
+        valid = valid && place.value != IR_ID_UNDERLYING_INVALID;
+        if (valid) state->places[edge_index] = place;
+    }
+    return valid ? place : IR_VALUE_ID_INVALID;
+}
+
+BUSTER_C_INTERNAL bool c_ir_initializer_plan_copy_item_range(CIntegerIrBuilder* builder, CIrNestedCompoundLiteralState* state,
+                                                             CInitializerItem const* item, u32 anchor)
+{
+    CInitializerPath const* edge = item->path_plus_one ? state->plan->paths + item->path_plus_one - 1 : 0;
+    bool valid = true;
+    if (edge && edge->first < edge->last)
+    {
+        IrValueId parent = edge->parent_plus_one ? state->places[edge->parent_plus_one - 1] : state->root_place;
+        IrValueId child = state->places[item->path_plus_one - 1];
+        IrTypeId type = builder->function->values[child.value].canonical_type;
+        valid = edge->last <= UINT32_MAX && c_ir_nested_initializer_copy_range(builder, parent, type, (u32)edge->first, (u32)edge->last,
+                                                                              builder->preprocess.tokens[anchor]);
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_initializer_plan_zero_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, u32 anchor)
+{
+    CToken token = builder->preprocess.tokens[anchor];
+    bool valid;
+    if (c_ir_zero_storage_compatible(builder, type))
+    {
+        IrType* object = ir_type_from_id(&builder->program->types, type);
+        valid = c_ir_emit_zero_storage(builder, place, type, object->layout.size, token);
+    }
+    else
+    {
+        IrValueId zero = c_ir_emit_zero_value(builder, type, token);
+        valid = zero.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, place, type, zero, c_ir_token_source_range(builder, token));
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
+    CIrNestedCompoundLiteralState* state = frame->as.nested_compound_literal.state;
     CIrLowerMachine* machine = &builder->lower_machine;
+    bool valid = true;
+    bool suspended = false;
     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
-        bool stored = machine->child_result.success &&
-                      c_ir_emit_store_place(builder, frame->as.nested_compound_literal.state->child_place,
-                                            frame->as.nested_compound_literal.state->child_type, machine->child_result.value,
-                                            frame->as.nested_compound_literal.state->source);
-        u32 range_first = frame->as.nested_compound_literal.state->selected_index;
-        u32 range_last = frame->as.nested_compound_literal.state->range_last;
-        if (stored && range_last > range_first)
-        {
-            stored = c_ir_nested_initializer_copy_range(builder, frame->as.nested_compound_literal.state->task.place,
-                                                        frame->as.nested_compound_literal.state->child_type, range_first, range_last,
-                                                        builder->preprocess.tokens[frame->as.nested_compound_literal.state->item_start]);
-        }
-        if (!stored)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        if (!frame->as.nested_compound_literal.state->cursor_item &&
-            !frame->as.nested_compound_literal.state->promoted_designator)
-        {
-            frame->as.nested_compound_literal.state->next_index = range_last + 1;
-        }
-        frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->index + 1;
-        frame->as.nested_compound_literal.state->index += 1;
+        CInitializerItem const* item = state->plan->items + state->index;
+        valid = machine->child_result.success && c_ir_emit_store_place(builder, state->child_place, state->child_type,
+                                                                      machine->child_result.value, state->source) &&
+                c_ir_initializer_plan_copy_item_range(builder, state, item, item->range_source_token);
+        state->index += 1;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        u32 root_open = frame->as.nested_compound_literal.state->root_open;
-        u32 root_close = frame->as.nested_compound_literal.state->root_close;
-        IrTypeId root_type = frame->as.nested_compound_literal.state->root_type;
-        CToken root_token = builder->preprocess.tokens[root_open];
-        IrSourceRange root_source = c_ir_token_source_range(builder, root_token);
-        IrValueId root_place = c_ir_emit_temporary(builder, root_type, root_source);
-        IrValueId initial = IR_VALUE_ID_INVALID;
-        bool zeroed;
-        if (root_place.value != IR_ID_UNDERLYING_INVALID && c_ir_zero_storage_compatible(builder, root_type))
+        CToken token = builder->preprocess.tokens[state->root_open];
+        state->root_place = c_ir_emit_temporary(builder, state->root_type, c_ir_token_source_range(builder, token));
+        valid = state->root_place.value != IR_ID_UNDERLYING_INVALID &&
+                c_ir_initializer_plan_zero_place(builder, state->root_place, state->root_type, state->root_open);
+        u64 capacity = state->plan->path_count ? state->plan->path_count : 1;
+        u64 position = builder->temporary_arena->position;
+        valid = valid && c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(IrValueId), capacity, BUSTER_ALIGN_OF(IrValueId)) &&
+                c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), capacity, BUSTER_ALIGN_OF(u32));
+        if (valid)
         {
-            IrType* root = ir_type_from_id(&builder->program->types, root_type);
-            zeroed = c_ir_emit_zero_storage(builder, root_place, root_type, root->layout.size, root_token);
+            state->places = arena_allocate(builder->temporary_arena, IrValueId, capacity);
+            state->pending = arena_allocate(builder->temporary_arena, u32, capacity);
+            memset(state->places, 0xff, sizeof(IrValueId) * capacity);
+            state->index = 0;
+            frame->stage = C_IR_LOWER_STAGE_FINISH;
+        }
+    }
+    while (valid && !suspended && state->index < state->plan->item_count)
+    {
+        CInitializerItem const* item = state->plan->items + state->index;
+        if (!item->path_plus_one && (item->flags & (C_INITIALIZER_ITEM_LIST_BEGIN | C_INITIALIZER_ITEM_LIST_END)))
+        {
+            state->index += 1;
+        }
+        else if (item->flags & C_INITIALIZER_ITEM_LIST_END)
+        {
+            valid = c_ir_initializer_plan_copy_item_range(builder, state, item, item->value_start);
+            state->index += 1;
         }
         else
         {
-            initial = c_ir_emit_zero_value(builder, root_type, root_token);
-            zeroed = initial.value != IR_ID_UNDERLYING_INVALID && root_place.value != IR_ID_UNDERLYING_INVALID &&
-                     c_ir_emit_store_place(builder, root_place, root_type, initial, root_source);
-        }
-        if (!zeroed)
-        {
-            if (!builder->failure_message.length)
+            IrValueId place = c_ir_initializer_plan_place(builder, state, item);
+            valid = place.value != IR_ID_UNDERLYING_INVALID;
+            IrTypeId type = valid ? builder->function->values[place.value].canonical_type : IR_TYPE_ID_INVALID;
+            if (valid && (item->flags & C_INITIALIZER_ITEM_LIST_BEGIN))
             {
-                builder->failure_message = initial.value == IR_ID_UNDERLYING_INVALID      ? S8("could not construct zero aggregate initializer")
-                                           : root_place.value == IR_ID_UNDERLYING_INVALID ? S8("could not allocate aggregate initializer storage")
-                                                                                          : S8("could not store the zero aggregate initializer");
+                valid = c_ir_initializer_plan_zero_place(builder, place, type, item->value_start);
+                state->index += 1;
             }
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 capacity = root_close - root_open + 1;
-        frame->as.nested_compound_literal.state->tasks = arena_allocate(builder->temporary_arena, CIrNestedInitializerTask, capacity);
-        // The cursors are one path of by-value containers below a brace
-        // group, including anonymous members a designator crosses, so the
-        // root type's nesting depth bounds them. Sizing them from the unit's
-        // type count instead cost every nested literal megabytes of scratch
-        // in a large unit, which the function only released at its end. The
-        // capacity checks at each push stay the guard.
-        u64 cursor_depth = 0;
-        if (!c_ir_initializer_nesting_depth(builder, builder->temporary_arena, root_type, &cursor_depth) || cursor_depth > UINT32_MAX - 2)
-        {
-            builder->failure_message = S8("initializer working storage exceeds the scratch reservation");
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 cursor_capacity = (u32)cursor_depth + 2;
-        frame->as.nested_compound_literal.state->cursors =
-            arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, cursor_capacity);
-        frame->as.nested_compound_literal.state->tasks[0] = (CIrNestedInitializerTask){
-            .place = root_place,
-            .type = root_type,
-            .open = root_open,
-            .close = root_close,
-        };
-        frame->as.nested_compound_literal.state->root_place = root_place;
-        frame->as.nested_compound_literal.state->capacity = capacity;
-        frame->as.nested_compound_literal.state->cursor_capacity = cursor_capacity;
-        frame->as.nested_compound_literal.state->cursor_count = 0;
-        frame->as.nested_compound_literal.state->task_count = 1;
-        frame->as.nested_compound_literal.state->task_active = false;
-        frame->stage = C_IR_LOWER_STAGE_FINISH;
-    }
-    while (frame->as.nested_compound_literal.state->task_active || frame->as.nested_compound_literal.state->task_count)
-    {
-        if (!frame->as.nested_compound_literal.state->task_active)
-        {
-            frame->as.nested_compound_literal.state->task =
-                frame->as.nested_compound_literal.state->tasks[--frame->as.nested_compound_literal.state->task_count];
-            CIrNestedInitializerTask* active = &frame->as.nested_compound_literal.state->task;
-            if (active->range_copy)
+            else if (valid && c_ir_initializer_item_string(builder, item, type))
             {
-                if (!c_ir_nested_initializer_copy_range(builder, active->place, active->type, active->range_first, active->range_last,
-                                                        builder->preprocess.tokens[active->open]))
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                continue;
+                IrValueId value = c_ir_initializer_item_string_value(builder, item, type);
+                IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[item->source_token]);
+                valid = value.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, place, type, value, source) &&
+                        c_ir_initializer_plan_copy_item_range(builder, state, item, item->source_token);
+                state->index += 1;
             }
-            if (active->resume)
+            else if (valid)
             {
-                frame->as.nested_compound_literal.state->next_index = active->next_index;
-                frame->as.nested_compound_literal.state->item_start = active->item_start;
-                frame->as.nested_compound_literal.state->index = active->index;
-                memcpy(frame->as.nested_compound_literal.state->cursors, active->cursors,
-                       active->cursor_count * sizeof(*active->cursors));
-                frame->as.nested_compound_literal.state->cursor_count = active->cursor_count;
-            }
-            else
-            {
-                if (active->zero_subobject)
-                {
-                    CToken token = builder->preprocess.tokens[active->open];
-                    bool zeroed;
-                    if (c_ir_zero_storage_compatible(builder, active->type))
-                    {
-                        IrType* subobject = ir_type_from_id(&builder->program->types, active->type);
-                        zeroed = c_ir_emit_zero_storage(builder, active->place, active->type, subobject->layout.size, token);
-                    }
-                    else
-                    {
-                        IrValueId zero = c_ir_emit_zero_value(builder, active->type, token);
-                        zeroed = zero.value != IR_ID_UNDERLYING_INVALID &&
-                                 c_ir_emit_store_place(builder, active->place, active->type, zero, c_ir_token_source_range(builder, token));
-                    }
-                    if (!zeroed)
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                }
-                frame->as.nested_compound_literal.state->next_index = 0;
-                frame->as.nested_compound_literal.state->item_start = active->open + 1;
-                frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
-                frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
-                    .place = active->place,
-                    .type = active->type,
-                };
-                frame->as.nested_compound_literal.state->cursor_count = 1;
-            }
-            frame->as.nested_compound_literal.state->task_active = true;
-        }
-        CIrNestedInitializerTask task = frame->as.nested_compound_literal.state->task;
-        IrType* type = ir_type_from_id(&builder->program->types, task.type);
-        if (!type || (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION) ||
-            task.open >= task.close)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 next_index = frame->as.nested_compound_literal.state->next_index;
-        u32 item_start = frame->as.nested_compound_literal.state->item_start;
-        u32 index = frame->as.nested_compound_literal.state->index;
-        // A brace-wrapped string initializer fills the whole character array
-        // subobject -- `struct { char n[4]; int v; } t = { {"zw"}, 9 }`.  The
-        // item walk below would otherwise take the literal as element zero
-        // and store the decayed pointer's first byte there.  Only a task that
-        // has not consumed an item yet can be the whole-string form.
-        if (type->kind == IR_TYPE_ARRAY && index == task.open + 1)
-        {
-            u32 string_end = task.close;
-            if (string_end > index && c_token_is_punctuator(&builder->preprocess.tokens[string_end - 1], C_PUNCTUATOR_COMMA))
-            {
-                string_end -= 1;
-            }
-            CIrDecodedString decoded = {0};
-            IrType* string_element = ir_type_from_id(&builder->program->types, type->element_type);
-            if (index < string_end && c_ir_tokens_are_string_literals(builder->preprocess, index, string_end) && string_element &&
-                string_element->layout.resolved &&
-                c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, string_end, builder->parse.string_literals, &decoded) &&
-                c_ir_string_array_element_compatible(builder, type->element_type, decoded))
-            {
-                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, string_end, task.type);
-                if (string_value.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_emit_store_place(builder, task.place, task.type, string_value,
-                                           c_ir_token_source_range(builder, builder->preprocess.tokens[index])))
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                frame->as.nested_compound_literal.state->task_active = false;
-                continue;
-            }
-        }
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        bool descended = false;
-        while (index <= task.close)
-        {
-            bool at_end = index == task.close;
-            CToken token = builder->preprocess.tokens[index];
-            if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            bool separator = at_end || (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
-            if (!separator)
-            {
-                index += 1;
-                continue;
-            }
-            if (item_start == index)
-            {
-                if (at_end)
-                {
-                    break;
-                }
-                goto c_ir_nested_compound_failed;
-            }
-            u32 selected_index = next_index;
-            u32 range_last = 0;
-            bool ranged = false;
-            u32 value_start = item_start;
-            u32 nested_designator_start = UINT32_MAX;
-            u32 designator_equals = UINT32_MAX;
-            CToken promoted_member = {0};
-            IrType* owner_type = type;
-            IrValueId owner_place = task.place;
-            bool cursor_item = false;
-            bool promoted_designator = false;
-            bool array_designator = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) &&
-                                    c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_LEFT_BRACKET);
-            bool member_designator = type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR &&
-                                     c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT);
-            if (array_designator)
-            {
-                u32 close = c_ir_matching_delimiter_cached(builder, item_start, index, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                u64 designated = UINT64_MAX;
-                ranged = close < index && close + 1 < index && c_ir_array_designator_has_range(builder, item_start, close);
-                if (ranged)
-                {
-                    u64 designated_last = UINT64_MAX;
-                    String8 range_message = {0};
-                    u32 range_token = 0;
-                    if (!c_ir_initializer_inference_index_range(builder, item_start + 1, close, &designated, &designated_last, &ranged, &range_message,
-                                                                &range_token) ||
-                        designated_last >= type->element_count || designated_last > UINT32_MAX)
-                    {
-                        builder->failure_message = range_message.length ? range_message : S8("array designator range exceeds the array bound");
-                        goto c_ir_nested_compound_failed;
-                    }
-                    range_last = (u32)designated_last;
-                }
-                else if (close >= index || close + 1 >= index || close != item_start + 2)
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                CToken designator = builder->preprocess.tokens[item_start + 1];
-                if (!ranged && designator.kind == C_TOKEN_PREPROCESSING_NUMBER)
-                {
-                    if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, designator), &designated))
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                }
-                else if (!ranged && designator.kind == C_TOKEN_IDENTIFIER)
-                {
-                    CEntityId entity = c_ir_identifier_entity(builder, item_start + 1);
-                    if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_ENUMERATOR ||
-                        builder->parse.entities[entity.value].constant_is_negative)
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                    designated = builder->parse.entities[entity.value].constant_value;
-                }
-                if (designated > UINT32_MAX)
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                selected_index = (u32)designated;
-                nested_designator_start = close + 1;
-                designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
-                if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                // Copying the first element over the range is only exact when
-                // the item initializes that whole element.
-                if (ranged && designator_equals != nested_designator_start)
-                {
-                    builder->failure_message = S8("a range designator followed by further designators is only supported for static aggregate initializers");
-                    goto c_ir_nested_compound_failed;
-                }
-                value_start = designator_equals + 1;
-            }
-            else if (member_designator)
-            {
-                if (item_start + 2 >= index || builder->preprocess.tokens[item_start + 1].kind != C_TOKEN_IDENTIFIER)
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                selected_index = type->field_count;
-                for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-                {
-                    if (string_equal(type->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[item_start + 1])))
-                    {
-                        selected_index = field_index;
-                        break;
-                    }
-                }
-                if (selected_index == type->field_count)
-                {
-                    promoted_designator = true;
-                    promoted_member = builder->preprocess.tokens[item_start + 1];
-                    selected_index = 0;
-                }
-                nested_designator_start = item_start + 2;
-                designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
-                if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                value_start = designator_equals + 1;
-            }
-            else
-            {
-                while (frame->as.nested_compound_literal.state->cursor_count)
-                {
-                    CIrNestedInitializerCursor* cursor = frame->as.nested_compound_literal.state->cursors +
-                                                         frame->as.nested_compound_literal.state->cursor_count - 1;
-                    IrType* cursor_type = ir_type_from_id(&builder->program->types, cursor->type);
-                    if (!cursor_type)
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                    u32 candidate = cursor->next_index;
-                    if (cursor_type->kind == IR_TYPE_STRUCT || cursor_type->kind == IR_TYPE_UNION)
-                    {
-                        candidate = c_ir_initializer_next_field_index(cursor_type, candidate);
-                    }
-                    u64 cursor_children = (cursor_type->kind == IR_TYPE_ARRAY || cursor_type->kind == IR_TYPE_VECTOR)
-                                              ? cursor_type->element_count
-                                              : cursor_type->field_count;
-                    bool union_exhausted = cursor_type->kind == IR_TYPE_UNION && cursor->next_index != 0;
-                    if (!union_exhausted && candidate < cursor_children)
-                    {
-                        owner_type = cursor_type;
-                        owner_place = cursor->place;
-                        selected_index = candidate;
-                        cursor->next_index = candidate + 1;
-                        cursor_item = true;
-                        break;
-                    }
-                    frame->as.nested_compound_literal.state->cursor_count -= 1;
-                }
-                if (!cursor_item)
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-            }
-            if (!ranged)
-            {
-                range_last = selected_index;
-            }
-            u64 child_count = (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_count : owner_type->field_count;
-            if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
-            {
-                goto c_ir_nested_compound_failed;
-            }
-            IrTypeId child_type = promoted_designator                                                    ? IR_TYPE_ID_INVALID
-                                  : (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_type
-                                                                                                            : owner_type->fields[selected_index].type;
-            IrValueId child_place = IR_VALUE_ID_INVALID;
-            IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[value_start]);
-            if (promoted_designator)
-            {
-                child_place = c_ir_emit_field_place_from_value(builder, task.place,
-                                                               (CToken){
-                                                                   .offset = C_SPELLING_DOT,
-                                                                   .length = 1,
-                                                                   .kind = C_TOKEN_PUNCTUATOR,
-                                                                   .punctuator = C_PUNCTUATOR_DOT,
-                                                               },
-                                                               promoted_member);
-                if (child_place.value < builder->function->value_count)
-                {
-                    child_type = builder->function->values[child_place.value].canonical_type;
-                }
-            }
-            else if (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR)
-            {
-                IrValueId subscript = c_ir_emit_integer_value(builder, selected_index, false, builder->preprocess.tokens[value_start]);
-                child_place = c_ir_emit_index_place(builder, owner_place, subscript, source);
-            }
-            else
-            {
-                child_place = c_ir_emit_field_index_place(builder, owner_place, selected_index, source);
-            }
-            if (child_place.value == IR_ID_UNDERLYING_INVALID)
-            {
-                goto c_ir_nested_compound_failed;
-            }
-            if (!cursor_item)
-            {
-                frame->as.nested_compound_literal.state->cursor_count = 0;
-                if (array_designator)
-                {
-                    if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                    frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
-                        (CIrNestedInitializerCursor){.place = task.place, .type = task.type, .next_index = range_last + 1};
-                }
-                else if (!c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, task.place, child_place))
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-            }
-            for (u32 designator = nested_designator_start; designator < designator_equals;)
-            {
-                if (c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    u32 subscript_close =
-                        c_ir_matching_delimiter_cached(builder, designator, designator_equals, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                    u64 subscript_value = UINT64_MAX;
-                    if (subscript_close < designator_equals && c_ir_array_designator_has_range(builder, designator, subscript_close))
-                    {
-                        builder->failure_message = S8("a range designator after another designator is only supported for static aggregate initializers");
-                        goto c_ir_nested_compound_failed;
-                    }
-                    if (subscript_close >= designator_equals ||
-                        !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, subscript_close, &subscript_value) ||
-                        subscript_value > UINT32_MAX)
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                    IrType* container = ir_type_from_id(&builder->program->types, child_type);
-                    if (!container || (container->kind != IR_TYPE_ARRAY && container->kind != IR_TYPE_VECTOR) ||
-                        subscript_value >= container->element_count ||
-                        frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                    frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
-                        (CIrNestedInitializerCursor){.place = child_place, .type = child_type, .next_index = (u32)subscript_value + 1};
-                    IrValueId subscript = c_ir_emit_integer_value(builder, subscript_value, false, builder->preprocess.tokens[designator]);
-                    child_place = c_ir_emit_index_place(builder, child_place, subscript, source);
-                    designator = subscript_close + 1;
-                }
-                else
-                {
-                    IrValueId parent_place = child_place;
-                    child_place = c_ir_emit_field_place_from_value(builder, child_place, builder->preprocess.tokens[designator],
-                                                                   builder->preprocess.tokens[designator + 1]);
-                    if (child_place.value >= builder->function->value_count ||
-                        !c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, parent_place, child_place))
-                    {
-                        goto c_ir_nested_compound_failed;
-                    }
-                    designator += 2;
-                }
-                if (child_place.value >= builder->function->value_count)
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                child_type = builder->function->values[child_place.value].canonical_type;
-            }
-            IrType* child = ir_type_from_id(&builder->program->types, child_type);
-            // A string literal initializes an entire character-array member;
-            // brace elision must not descend into its first character.
-            bool string_literal = c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
-            bool string_initializer = string_literal && c_ir_initializer_type_takes_string(builder, child);
-            // Brace elision reaches the first subobject that can consume
-            // this expression whole. An aggregate expression may still need
-            // to descend through a different enclosing record.
-            CScopeId initializer_scope = C_SCOPE_ID_INVALID;
-            if (builder->declaration_index < builder->parse.declaration_count)
-            {
-                initializer_scope = builder->parse.declarations[builder->declaration_index].scope;
-            }
-            IrTypeId value_type = IR_TYPE_ID_INVALID;
-            bool value_is_aggregate = !string_literal &&
-                                      c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index, &value_type);
-            // Either prediction can grow the type table.
-            type = ir_type_from_id(&builder->program->types, task.type);
-            child = ir_type_from_id(&builder->program->types, child_type);
-            bool whole_value = value_is_aggregate && child &&
-                               c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type);
-            bool elided = child && c_ir_initializer_type_is_aggregate(child) && !child->is_complex && !whole_value && !string_initializer &&
-                          !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE);
-            // A brace-elided range item initializes only part of each element,
-            // so the whole-element copy below cannot express it.
-            if (ranged && elided)
-            {
-                builder->failure_message = S8("a range designator whose value elides the braces of an aggregate element is only supported for static aggregate initializers");
-                goto c_ir_nested_compound_failed;
-            }
-            while (child && c_ir_initializer_type_is_aggregate(child) && !child->is_complex && !whole_value && !string_initializer &&
-                   !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
-            {
-                if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
-                {
-                    child_place = IR_VALUE_ID_INVALID;
-                    break;
-                }
-                CIrNestedInitializerCursor* cursor = frame->as.nested_compound_literal.state->cursors +
-                                                     frame->as.nested_compound_literal.state->cursor_count++;
-                *cursor = (CIrNestedInitializerCursor){
-                    .place = child_place,
-                    .type = child_type,
-                };
-                u32 descendant_index = 0;
-                if (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION)
-                {
-                    descendant_index = c_ir_initializer_next_field_index(child, descendant_index);
-                }
-                u64 descendant_count = (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR) ? child->element_count : child->field_count;
-                if (descendant_index >= descendant_count)
-                {
-                    child_place = IR_VALUE_ID_INVALID;
-                    break;
-                }
-                cursor->next_index = descendant_index + 1;
-                if (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR)
-                {
-                    IrValueId descendant = c_ir_emit_integer_value(builder, descendant_index, false, builder->preprocess.tokens[value_start]);
-                    child_place = c_ir_emit_index_place(builder, child_place, descendant, source);
-                    child_type = child->element_type;
-                }
-                else
-                {
-                    child_place = c_ir_emit_field_index_place(builder, child_place, descendant_index, source);
-                    if (child_place.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        child_type = child->fields[descendant_index].type;
-                    }
-                }
-                if (child_place.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    break;
-                }
-                child = ir_type_from_id(&builder->program->types, child_type);
-                whole_value = value_is_aggregate && child &&
-                              c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type);
-                string_initializer = string_literal && c_ir_initializer_type_takes_string(builder, child);
-            }
-            if (child_place.value == IR_ID_UNDERLYING_INVALID)
-            {
-                goto c_ir_nested_compound_failed;
-            }
-            bool nested = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) &&
-                          c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
-                          c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
-                          c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == index - 1;
-            if (string_initializer)
-            {
-                IrValueId string_value = c_ir_emit_string_range_typed(builder, value_start, index, child_type);
-                if (string_value.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_emit_store_place(builder, child_place, child_type, string_value, source) ||
-                    (ranged && !c_ir_nested_initializer_copy_range(builder, task.place, child_type, selected_index, range_last,
-                                                                   builder->preprocess.tokens[value_start])))
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-            }
-            else if (nested)
-            {
-                if (frame->as.nested_compound_literal.state->task_count + 2 + (u32)ranged > frame->as.nested_compound_literal.state->capacity)
-                {
-                    goto c_ir_nested_compound_failed;
-                }
-                // Suspend the parent before lowering this brace list. Its later
-                // scalar items must not run before the nested stores.
-                CIrNestedInitializerTask parent = task;
-                parent.resume = true;
-                parent.item_start = index + 1;
-                parent.index = index + 1;
-                parent.next_index = (!cursor_item && !promoted_designator) ? range_last + 1 : next_index;
-                parent.cursor_count = frame->as.nested_compound_literal.state->cursor_count;
-                parent.cursors = arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, parent.cursor_count);
-                memcpy(parent.cursors, frame->as.nested_compound_literal.state->cursors,
-                       parent.cursor_count * sizeof(*parent.cursors));
-                frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = parent;
-                if (ranged)
-                {
-                    // Runs after the child's brace list and before the parent's
-                    // next item.
-                    frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
-                        .place = task.place,
-                        .type = child_type,
-                        .open = value_start,
-                        .close = index - 1,
-                        .range_first = selected_index,
-                        .range_last = range_last,
-                        .range_copy = true,
-                    };
-                }
-                frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
-                    .place = child_place,
-                    .type = child_type,
-                    .open = value_start,
-                    .close = index - 1,
-                    .zero_subobject = true,
-                };
-                descended = true;
-                break;
-            }
-            else
-            {
-                u32 scalar_start = value_start;
-                u32 scalar_end = index;
-                if (child && child->kind != IR_TYPE_ARRAY && child->kind != IR_TYPE_VECTOR && child->kind != IR_TYPE_STRUCT && child->kind != IR_TYPE_UNION && scalar_end > scalar_start + 1 &&
-                    c_token_is_punctuator(&builder->preprocess.tokens[scalar_start], C_PUNCTUATOR_LEFT_BRACE) &&
-                    c_token_is_punctuator(&builder->preprocess.tokens[scalar_end - 1], C_PUNCTUATOR_RIGHT_BRACE))
-                {
-                    scalar_start += 1;
-                    scalar_end -= 1;
-                }
-                frame->as.nested_compound_literal.state->child_place = child_place;
-                frame->as.nested_compound_literal.state->child_type = child_type;
-                frame->as.nested_compound_literal.state->source = source;
-                frame->as.nested_compound_literal.state->item_start = item_start;
-                frame->as.nested_compound_literal.state->index = index;
-                frame->as.nested_compound_literal.state->next_index = next_index;
-                frame->as.nested_compound_literal.state->selected_index = selected_index;
-                frame->as.nested_compound_literal.state->range_last = range_last;
-                frame->as.nested_compound_literal.state->cursor_item = cursor_item;
-                frame->as.nested_compound_literal.state->promoted_designator = promoted_designator;
+                state->child_place = place;
+                state->child_type = type;
+                state->source = c_ir_token_source_range(builder, builder->preprocess.tokens[item->source_token]);
                 frame->stage = C_IR_LOWER_STAGE_CHILD;
-                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                        .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                        .as.expression =
-                                                            {
-                                                                .start = scalar_start,
-                                                                .end = scalar_end,
-                                                            },
-                                                    }))
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                }
-                return;
+                valid = c_ir_initializer_value_frame_push(builder, item);
+                suspended = valid;
             }
-            if (!cursor_item && !promoted_designator)
-            {
-                next_index = range_last + 1;
-            }
-            item_start = index + 1;
-            index += 1;
-        }
-        frame->as.nested_compound_literal.state->task_active = false;
-        if (descended)
-        {
-            continue;
         }
     }
+    if (!valid)
     {
-        CToken root_token = builder->preprocess.tokens[frame->as.nested_compound_literal.state->root_open];
-        IrValueId result = c_ir_emit_load_place(builder, frame->as.nested_compound_literal.state->root_place,
-                                                frame->as.nested_compound_literal.state->root_type,
-                                                c_ir_token_source_range(builder, root_token));
-        c_ir_lower_frame_finish(builder, result.value != IR_ID_UNDERLYING_INVALID, result);
-        return;
+        if (!builder->failure_message.length) builder->failure_message = S8("could not lower the semantic initializer plan");
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
     }
-c_ir_nested_compound_failed:
-    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+    else if (!suspended)
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[state->root_open]);
+        IrValueId value = c_ir_emit_load_place(builder, state->root_place, state->root_type, source);
+        c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+    }
 }
 
-// C11 6.7.9p9: unnamed members of a structure object take no part in
-// initialization, so a positional item skips an anonymous bit-field and lands
-// on the next member that has a name. The constant path spells the same rule
-// in c_ir_constant_initializer_field_at, and the two must agree or a local and
-// a static built from the same brace list read back differently. A named
-// member's own index is returned unchanged, so designators -- which resolve
-// their field by name before this runs -- are unaffected.
-BUSTER_C_INTERNAL u32 c_ir_compound_literal_positional_field(IrType* type, u32 field_index)
+// Runtime copies still initialize whole elements. Resolve each path's root
+// once, so an unrelated deep initializer beside a range stays linear. List
+// markers distinguish ranged brace contents from a suffix on the range item.
+BUSTER_C_INTERNAL bool c_ir_initializer_plan_runtime_ranges(CIntegerIrBuilder* builder, CInitializerPlan const* plan)
 {
-    u32 result = field_index;
-    if (type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION))
+    bool valid = true;
+    bool ranged = false;
+    for (u32 path = 0; valid && path < plan->path_count; path += 1)
     {
-        while (result < type->field_count && type->fields[result].is_bit_field && !type->fields[result].name.length)
+        CInitializerPath const* edge = plan->paths + path;
+        if (edge->first < edge->last)
         {
-            result += 1;
+            ranged = true;
+            valid = edge->parent_plus_one == 0;
+            if (!valid) builder->failure_message = S8("a range designator after another designator is only supported for static aggregate initializers");
         }
     }
-    return result;
+    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+    u32* roots = 0;
+    u32* pending = 0;
+    if (valid && ranged)
+    {
+        u64 position = builder->temporary_arena->position;
+        valid = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), plan->path_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), plan->path_count, BUSTER_ALIGN_OF(u32));
+        if (valid)
+        {
+            roots = arena_allocate_zeroed(builder->temporary_arena, u32, plan->path_count);
+            pending = arena_allocate(builder->temporary_arena, u32, plan->path_count);
+        }
+        for (u32 index = 0; valid && index < plan->path_count; index += 1)
+        {
+            u32 path = index + 1;
+            u32 count = 0;
+            while (valid && path && !roots[path - 1])
+            {
+                valid = count < plan->path_count;
+                if (valid)
+                {
+                    pending[count++] = path;
+                    path = plan->paths[path - 1].parent_plus_one;
+                    valid = path <= plan->path_count;
+                }
+            }
+            u32 root = valid ? (path ? roots[path - 1] : pending[count - 1]) : 0;
+            while (valid && count) roots[pending[--count] - 1] = root;
+        }
+    }
+    u32 active = 0;
+    for (u32 index = 0; valid && ranged && index < plan->item_count; index += 1)
+    {
+        CInitializerItem const* item = plan->items + index;
+        valid = item->path_plus_one <= plan->path_count;
+        u32 root = valid && item->path_plus_one ? roots[item->path_plus_one - 1] : 0;
+        CInitializerPath const* edge = root ? plan->paths + root - 1 : 0;
+        u32 range = edge && edge->first < edge->last ? root : 0;
+        if (range && range == item->path_plus_one && (item->flags & C_INITIALIZER_ITEM_LIST_BEGIN)) active = range;
+        if ((item->flags & C_INITIALIZER_ITEM_VALUE) && range && range != item->path_plus_one && range != active)
+        {
+            bool suffix = false;
+            for (u32 path = item->path_plus_one; path != range; path = plan->paths[path - 1].parent_plus_one)
+            {
+                suffix |= plan->paths[path - 1].source_token != UINT32_MAX;
+            }
+            valid = false;
+            builder->failure_message = suffix
+                ? S8("a range designator followed by further designators is only supported for static aggregate initializers")
+                : S8("a range designator whose value elides the braces of an aggregate element is only supported for static aggregate initializers");
+        }
+        if ((item->flags & C_INITIALIZER_ITEM_LIST_END) && range == active && range == item->path_plus_one) active = 0;
+    }
+    scratch_end(temporary);
+    return valid;
+}
+
+// Select the original storage path from plan topology and node kinds. Range
+// and promoted paths, explicit nested lists and brace-bearing expressions
+// retain that path; vectors remain with the value capture owner.
+BUSTER_C_INTERNAL bool c_ir_initializer_plan_uses_storage(CIntegerIrBuilder* builder, CInitializerPlan const* plan, IrType* type)
+{
+    bool storage = false;
+    for (u32 path = 0; path < plan->path_count && !storage; path += 1)
+    {
+        CInitializerPath const* edge = plan->paths + path;
+        storage = edge->parent_plus_one != 0 || edge->first != edge->last;
+    }
+    for (u32 index = 0; index < plan->item_count && !storage; index += 1)
+    {
+        CInitializerItem const* item = plan->items + index;
+        storage = item->path_plus_one && (item->flags & C_INITIALIZER_ITEM_LIST_BEGIN);
+        if (!storage && (item->flags & C_INITIALIZER_ITEM_VALUE))
+        {
+            CAst const* ast = builder->syntax_tree;
+            for (u32 node = c_ast_subtree_begin(ast, item->node); node <= item->node && !storage; node += 1)
+            {
+                u32 kind = ast->kinds[node];
+                storage = kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_MEMBER_LIST || kind == C_AST_ENUMERATOR_LIST ||
+                          (kind == C_AST_INITIALIZER_LIST && node + 1 < ast->node_count && ast->kinds[node + 1] != C_AST_COMPOUND_LITERAL);
+                if (!storage && kind == C_AST_MEMBER)
+                {
+                    u32 base = c_ir_tree_first_child(ast, node);
+                    storage = ast->kinds[base] == C_AST_MEMBER && !c_ir_core_wraps(builder, base, item->value_start);
+                }
+                if (!storage && type->kind != IR_TYPE_ARRAY && (kind == C_AST_MEMBER || kind == C_AST_DESIGNATOR_MEMBER))
+                {
+                    // The original capture owner chose storage for a dot-name
+                    // absent from the destination's direct fields, including
+                    // a member inside an initializer value. Keep that artifact
+                    // choice using the member node and its name provenance.
+                    String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[node]]);
+                    bool direct = false;
+                    for (u32 field = 0; field < type->field_count && !direct; field += 1)
+                    {
+                        direct = string_equal(type->fields[field].name, name);
+                    }
+                    storage = !direct;
+                }
+            }
+        }
+    }
+    return storage;
 }
 
 BUSTER_C_INTERNAL bool c_ir_initializer_has_aggregate_child(CIntegerIrBuilder* builder, IrType* type)
@@ -34013,465 +33503,198 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
 {
     CIrLowerMachine* machine = &builder->lower_machine;
     IrTypeId type_id = frame->as.compound_literal_machine.type;
-    u32 open = frame->as.compound_literal_machine.open;
-    u32 close = frame->as.compound_literal_machine.close;
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    bool valid = type != 0;
+    bool finished = false;
+    bool suspended = false;
     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
-        if (!machine->child_result.success)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        if (frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_NESTED)
+        valid = valid && machine->child_result.success;
+        if (valid && frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_NESTED)
         {
             c_ir_lower_frame_finish(builder, true, machine->child_result.value);
-            return;
+            finished = true;
         }
-        if (frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_SCALAR)
+        else if (valid && frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_SCALAR)
         {
             IrValueId value = c_ir_emit_cast(builder, machine->child_result.value, type_id, frame->as.compound_literal_machine.source);
             c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
-            return;
+            finished = true;
         }
-        if (frame->as.compound_literal_machine.continuation != C_IR_COMPOUND_CONTINUATION_ITEM)
+        else if (valid)
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        IrTypeId capture_type = frame->as.compound_literal_machine.child_type;
-        IrType* capture_type_value = ir_type_from_id(&builder->program->types, capture_type);
-        if (capture_type_value && capture_type_value->is_volatile && !capture_type_value->is_atomic)
-        {
-            // Capture an rvalue; volatile belongs to the destination place.
-            // The shared capture owner emits the qualified storage access.
-            capture_type = capture_type_value->unqualified_type;
-        }
-        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, capture_type,
-                                           frame->as.compound_literal_machine.source);
-        value = c_ir_emit_cast(builder, value, capture_type, frame->as.compound_literal_machine.source);
-        if (value.value == IR_ID_UNDERLYING_INVALID)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 field_index = frame->as.compound_literal_machine.field_index;
-        if (type && type->kind == IR_TYPE_UNION)
-        {
-            frame->as.compound_literal_machine.operands[0] = value;
-            frame->as.compound_literal_machine.fields[0] = field_index;
-            frame->as.compound_literal_machine.operand_count = 1;
-        }
-        else
-        {
-            frame->as.compound_literal_machine.operands[field_index] = value;
-            frame->as.compound_literal_machine.operand_count += !frame->as.compound_literal_machine.initialized[field_index];
-        }
-        frame->as.compound_literal_machine.initialized[field_index] = true;
-        frame->as.compound_literal_machine.next_field = field_index + 1;
-        frame->as.compound_literal_machine.index = frame->as.compound_literal_machine.item_end + 1;
-        frame->stage = C_IR_LOWER_STAGE_FINISH;
-    }
-    else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
-    {
-        if (!type || open >= close)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
-        frame->as.compound_literal_machine.source = source;
-        // C permits the string initializer of a character array to be wrapped
-        // in braces -- `const char units[] = {"\0KMGTPEZY"};` -- and that
-        // spelling initializes the whole array, not its first element.  The
-        // constant path already admits it (c_ir_constant_initializer_string_range);
-        // without this the slot machine would take the string as element zero
-        // and leave the rest of the array uninitialized.
-        if (type->kind == IR_TYPE_ARRAY)
-        {
-            u32 string_start = open + 1;
-            u32 string_end = close;
-            if (string_end > string_start && c_token_is_punctuator(&builder->preprocess.tokens[string_end - 1], C_PUNCTUATOR_COMMA))
+            valid = frame->as.compound_literal_machine.continuation == C_IR_COMPOUND_CONTINUATION_ITEM;
+            IrTypeId capture_type = frame->as.compound_literal_machine.child_type;
+            IrType* captured = ir_type_from_id(&builder->program->types, capture_type);
+            if (captured && captured->is_volatile && !captured->is_atomic) capture_type = captured->unqualified_type;
+            IrValueId value = valid ? c_ir_decay_array(builder, machine->child_result.value, capture_type, frame->as.compound_literal_machine.source)
+                                   : IR_VALUE_ID_INVALID;
+            value = valid ? c_ir_emit_cast(builder, value, capture_type, frame->as.compound_literal_machine.source) : IR_VALUE_ID_INVALID;
+            valid = valid && value.value != IR_ID_UNDERLYING_INVALID;
+            if (valid)
             {
-                string_end -= 1;
-            }
-            CIrDecodedString decoded = {0};
-            IrType* string_element = ir_type_from_id(&builder->program->types, type->element_type);
-            if (string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end) && string_element &&
-                string_element->layout.resolved &&
-                c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, builder->parse.string_literals, &decoded) &&
-                c_ir_string_array_element_compatible(builder, type->element_type, decoded))
-            {
-                IrValueId value = c_ir_emit_string_range_typed(builder, string_start, string_end, type_id);
-                c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
-                return;
-            }
-        }
-        if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
-        {
-            if (open + 1 >= close)
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
-            }
-            frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_SCALAR;
-            frame->stage = C_IR_LOWER_STAGE_CHILD;
-            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                    .as.expression =
-                                                        {
-                                                            .start = open + 1,
-                                                            .end = close,
-                                                        },
-                                                }))
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            }
-            return;
-        }
-        bool nested = c_ir_zero_storage_compatible(builder, type_id) || c_ir_initializer_has_aggregate_child(builder, type);
-        for (u32 token_index = open + 1; !nested && token_index < close; token_index += 1)
-        {
-            if (c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_LEFT_BRACE) &&
-                (token_index == open + 1 || !c_token_is_punctuator(&builder->preprocess.tokens[token_index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
-            {
-                nested = true;
-                break;
-            }
-            if (token_index + 2 < close && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_DOT) &&
-                builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
-                c_token_is_punctuator(&builder->preprocess.tokens[token_index + 2], C_PUNCTUATOR_DOT))
-            {
-                nested = true;
-                break;
-            }
-            // A designator chain may continue with a subscript as well as a
-            // member (C11 6.7.9p6): musl writes `._m_type`, which the header
-            // spells `__u.__i[0]`, and `struct ctx c = { .lim[0] = ... }`.
-            // The flat machine below holds one operand per slot and cannot
-            // express a path into one, so hand these to the nested walker.
-            // Only an item's first token starts a designator, which keeps a
-            // subscript inside a value expression out of the test.
-            bool item_start_token = token_index == open + 1 || c_token_is_punctuator(&builder->preprocess.tokens[token_index - 1], C_PUNCTUATOR_COMMA);
-            if (item_start_token && token_index + 2 < close && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_DOT) &&
-                builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
-                c_token_is_punctuator(&builder->preprocess.tokens[token_index + 2], C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                nested = true;
-                break;
-            }
-            if (item_start_token && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                u32 subscript_close =
-                    c_ir_matching_delimiter_cached(builder, token_index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                // The flat machine also holds one operand per slot, so a GNU
-                // range designator (`[0 ... 2] = v`) goes to the nested walker,
-                // which copies the first element over the rest of the range.
-                if (subscript_close + 1 < close &&
-                    (c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_LEFT_BRACKET) ||
-                     c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_DOT) ||
-                     c_ir_array_designator_has_range(builder, token_index, subscript_close)))
-                {
-                    nested = true;
-                    break;
-                }
-            }
-            if (token_index + 1 < close && type->kind != IR_TYPE_ARRAY && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_DOT) &&
-                builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                bool direct = false;
-                for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-                {
-                    if (string_equal(type->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index + 1])))
-                    {
-                        direct = true;
-                        break;
-                    }
-                }
-                if (!direct)
-                {
-                    nested = true;
-                    break;
-                }
-            }
-        }
-        if (nested)
-        {
-            CIrNestedCompoundLiteralState* nested_state = arena_allocate(builder->temporary_arena, CIrNestedCompoundLiteralState, 1);
-            *nested_state = (CIrNestedCompoundLiteralState){
-                .root_type = type_id,
-                .root_open = open,
-                .root_close = close,
-            };
-            frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_NESTED;
-            frame->stage = C_IR_LOWER_STAGE_CHILD;
-            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                    .kind = C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL,
-                                                    .as.nested_compound_literal =
-                                                        {
-                                                            .state = nested_state,
-                                                        },
-                                                }))
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            }
-            return;
-        }
-        if (close == open + 2)
-        {
-            CToken token = builder->preprocess.tokens[open + 1];
-            u64 zero = 1;
-            if (token.kind == C_TOKEN_PREPROCESSING_NUMBER && c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, token), &zero) && zero == 0)
-            {
-                IrValueId value = c_ir_emit_zero_value(builder, type_id, token);
-                c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
-                return;
-            }
-        }
-        if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && type->element_count > UINT32_MAX)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 slot_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? (u32)type->element_count : type->field_count;
-        frame->as.compound_literal_machine.operands = arena_allocate(builder->arena, IrValueId, slot_count);
-        frame->as.compound_literal_machine.fields = arena_allocate(builder->arena, u64, slot_count);
-        frame->as.compound_literal_machine.initialized = arena_allocate(builder->arena, bool, slot_count);
-        memset(frame->as.compound_literal_machine.initialized, 0, sizeof(bool) * slot_count);
-        frame->as.compound_literal_machine.slot_count = slot_count;
-        frame->as.compound_literal_machine.operand_count = 0;
-        frame->as.compound_literal_machine.next_field = 0;
-        frame->as.compound_literal_machine.index = open + 1;
-        frame->stage = C_IR_LOWER_STAGE_FINISH;
-    }
-    if (!type)
-    {
-        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-        return;
-    }
-    IrValueId* operands = frame->as.compound_literal_machine.operands;
-    u64* fields = frame->as.compound_literal_machine.fields;
-    bool* initialized = frame->as.compound_literal_machine.initialized;
-    u32 slot_count = frame->as.compound_literal_machine.slot_count;
-    u32 operand_count = frame->as.compound_literal_machine.operand_count;
-    u32 next_field = frame->as.compound_literal_machine.next_field;
-    u32 index = frame->as.compound_literal_machine.index;
-    while (index < close)
-    {
-        u32 field_index = c_ir_compound_literal_positional_field(type, next_field);
-        bool member_designator = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT);
-        if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            u32 designator_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            if (designator_close >= close || designator_close == index + 1 || designator_close + 1 >= close ||
-                !c_token_is_punctuator(&builder->preprocess.tokens[designator_close + 1], C_PUNCTUATOR_ASSIGN))
-            {
-                if (designator_close < close && c_ir_array_designator_has_range(builder, index, designator_close))
-                {
-                    builder->failure_message = S8("range designators are only supported for static aggregate initializers");
-                }
-                goto c_ir_compound_literal_failed;
-            }
-            if (c_ir_array_designator_has_range(builder, index, designator_close))
-            {
-                builder->failure_message = S8("range designators are only supported for static aggregate initializers");
-                goto c_ir_compound_literal_failed;
-            }
-            u64 designated_index = UINT64_MAX;
-            if (!c_ir_integer_constant_evaluate(builder->arena, builder, index + 1, designator_close, &designated_index) ||
-                designated_index > UINT32_MAX)
-            {
-                goto c_ir_compound_literal_failed;
-            }
-            field_index = (u32)designated_index;
-            index = designator_close + 2;
-        }
-        else if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT))
-        {
-            if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
-            {
-                goto c_ir_compound_literal_failed;
-            }
-            if (index + 2 >= close || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER ||
-                !c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_ASSIGN))
-            {
-                goto c_ir_compound_literal_failed;
-            }
-            field_index = type->field_count;
-            for (u32 candidate = 0; candidate < type->field_count; candidate += 1)
-            {
-                if (string_equal(type->fields[candidate].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1])))
-                {
-                    field_index = candidate;
-                    break;
-                }
-            }
-            index += 3;
-        }
-        // A later designator replaces a captured value without discarding its
-        // already-emitted evaluation. A union retains only the last member;
-        // a second positional item is still an excess initializer.
-        if (field_index >= slot_count || (type->kind == IR_TYPE_UNION && operand_count && !member_designator))
-        {
-            goto c_ir_compound_literal_failed;
-        }
-        u32 end = index;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        u32 conditional_depth = 0;
-        while (end < close)
-        {
-            CToken token = builder->preprocess.tokens[end];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces &&
-                     (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ||
-                      c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)))
-            {
-                conditional_depth = c_token_conditional_depth_step(&token, conditional_depth);
-            }
-            else if (!parentheses && !brackets && !braces && !conditional_depth &&
-                     c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-            {
-                break;
-            }
-            end += 1;
-        }
-        if (index == end)
-        {
-            goto c_ir_compound_literal_failed;
-        }
-        IrSourceRange source =
-            c_ir_token_source_range(builder, builder->preprocess.tokens[index]);
-        IrTypeId field_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[field_index].type;
-        // A string literal that initializes a character-array member or
-        // element fills that subobject, braces or not: `char name[23][8] =
-        // {"e2m1", ...}` -- which d_main.c writes for its shareware lump check
-        // -- gives each row its own string. The braced spelling is handled at
-        // the top of this machine; here the item is the bare literal, and
-        // lowering it as an expression would decay it to a pointer and then
-        // fail to convert that to the row's array type.
-        IrType* field_type_value = ir_type_from_id(&builder->program->types, field_type);
-        if (field_type_value && field_type_value->kind == IR_TYPE_ARRAY && c_ir_tokens_are_string_literals(builder->preprocess, index, end))
-        {
-            CIrDecodedString decoded = {0};
-            IrType* string_element = ir_type_from_id(&builder->program->types, field_type_value->element_type);
-            if (string_element && string_element->layout.resolved &&
-                c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, end, builder->parse.string_literals, &decoded) &&
-                c_ir_string_array_element_compatible(builder, field_type_value->element_type, decoded))
-            {
-                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, end, field_type);
-                if (string_value.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    goto c_ir_compound_literal_failed;
-                }
+                u32 field = frame->as.compound_literal_machine.field_index;
                 if (type->kind == IR_TYPE_UNION)
                 {
-                    operands[0] = string_value;
-                    fields[0] = field_index;
-                    operand_count = 1;
+                    frame->as.compound_literal_machine.operands[0] = value;
+                    frame->as.compound_literal_machine.fields[0] = field;
+                    frame->as.compound_literal_machine.operand_count = 1;
                 }
                 else
                 {
-                    operands[field_index] = string_value;
-                    operand_count += !initialized[field_index];
+                    frame->as.compound_literal_machine.operands[field] = value;
+                    frame->as.compound_literal_machine.operand_count += !frame->as.compound_literal_machine.initialized[field];
                 }
-                initialized[field_index] = true;
-                next_field = field_index + 1;
-                index = end + 1;
-                continue;
+                frame->as.compound_literal_machine.initialized[field] = true;
+                frame->as.compound_literal_machine.index += 1;
+                frame->stage = C_IR_LOWER_STAGE_FINISH;
             }
         }
-        frame->as.compound_literal_machine.index = index;
-        frame->as.compound_literal_machine.item_end = end;
-        frame->as.compound_literal_machine.field_index = field_index;
-        frame->as.compound_literal_machine.child_type = field_type;
+    }
+    else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+    {
+        u32 node = frame->as.compound_literal_machine.node_plus_one - 1;
+        CInitializerPlan const* plan = c_initializer_plan_find(&builder->parse, node);
+        frame->as.compound_literal_machine.plan = plan;
+        valid = valid && plan && !plan->failed && plan->complete && plan->item_count;
+        if (!valid) builder->failure_message = S8("semantic initializer plan is unavailable");
+        valid = valid && c_ir_initializer_plan_runtime_ranges(builder, plan);
+        u32 open = frame->as.compound_literal_machine.open;
+        IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
         frame->as.compound_literal_machine.source = source;
-        frame->as.compound_literal_machine.operand_count = operand_count;
-        frame->as.compound_literal_machine.next_field = next_field;
-        frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_ITEM;
-        frame->stage = C_IR_LOWER_STAGE_CHILD;
-        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                .as.expression =
-                                                    {
-                                                        .start = index,
-                                                        .end = end,
-                                                    },
-                                            }))
+        CInitializerItem const* whole = valid && plan->item_count == 1 ? plan->items : 0;
+        if (whole && c_ir_initializer_item_string(builder, whole, type_id))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            IrValueId value = c_ir_initializer_item_string_value(builder, whole, type_id);
+            c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+            finished = true;
         }
-        return;
-    }
-    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
-    {
-        for (u32 element_index = 0; element_index < slot_count; element_index += 1)
+        else if (valid && type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
         {
-            if (!initialized[element_index])
+            frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_SCALAR;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            valid = c_ir_initializer_value_frame_push(builder, plan->items);
+            suspended = valid;
+        }
+        else if (valid && (c_ir_zero_storage_compatible(builder, type_id) || c_ir_initializer_has_aggregate_child(builder, type) ||
+                          (!(plan->flags & C_INITIALIZER_PLAN_SINGLE_ZERO) && c_ir_initializer_plan_uses_storage(builder, plan, type))))
+        {
+            CIrNestedCompoundLiteralState* state = arena_allocate(builder->temporary_arena, CIrNestedCompoundLiteralState, 1);
+            *state = (CIrNestedCompoundLiteralState){.plan = plan, .root_type = type_id, .root_open = open,
+                                                   .root_close = frame->as.compound_literal_machine.close};
+            frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_NESTED;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            valid = c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL,
+                                                                 .as.nested_compound_literal = {.state = state}});
+            suspended = valid;
+        }
+        else if (valid && (plan->flags & C_INITIALIZER_PLAN_SINGLE_ZERO))
+        {
+            IrValueId value = c_ir_emit_zero_value(builder, type_id, builder->preprocess.tokens[plan->items[1].source_token]);
+            c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+            finished = true;
+        }
+        else if (valid)
+        {
+            u64 slots = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count : type->field_count;
+            valid = slots <= UINT32_MAX;
+            u64 position = builder->arena->position;
+            valid = valid && c_ir_arena_reservation_advance(builder->arena->reserved_size, &position, sizeof(IrValueId), slots, BUSTER_ALIGN_OF(IrValueId)) &&
+                    c_ir_arena_reservation_advance(builder->arena->reserved_size, &position, sizeof(u64), slots, BUSTER_ALIGN_OF(u64)) &&
+                    c_ir_arena_reservation_advance(builder->arena->reserved_size, &position, sizeof(bool), slots, BUSTER_ALIGN_OF(bool));
+            if (valid)
             {
-                operands[element_index] = c_ir_emit_zero_value(builder, type->element_type, builder->preprocess.tokens[open]);
-                if (operands[element_index].value == IR_ID_UNDERLYING_INVALID)
+                frame->as.compound_literal_machine.operands = arena_allocate(builder->arena, IrValueId, slots);
+                frame->as.compound_literal_machine.fields = arena_allocate(builder->arena, u64, slots);
+                frame->as.compound_literal_machine.initialized = arena_allocate_zeroed(builder->arena, bool, slots);
+                frame->as.compound_literal_machine.slot_count = (u32)slots;
+                frame->as.compound_literal_machine.index = 0;
+                frame->stage = C_IR_LOWER_STAGE_FINISH;
+            }
+        }
+    }
+    CInitializerPlan const* plan = frame->as.compound_literal_machine.plan;
+    while (valid && !finished && !suspended && frame->as.compound_literal_machine.index < plan->item_count)
+    {
+        CInitializerItem const* item = plan->items + frame->as.compound_literal_machine.index;
+        if (!(item->flags & C_INITIALIZER_ITEM_VALUE))
+        {
+            frame->as.compound_literal_machine.index += 1;
+        }
+        else
+        {
+            valid = item->path_plus_one && item->path_plus_one <= plan->path_count;
+            CInitializerPath const* edge = valid ? plan->paths + item->path_plus_one - 1 : 0;
+            u64 selected = edge ? (edge->member == UINT32_MAX ? edge->first : edge->member) : UINT64_MAX;
+            valid = valid && !edge->parent_plus_one && selected < frame->as.compound_literal_machine.slot_count;
+            if (valid)
+            {
+                u32 field = (u32)selected;
+                IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[field].type;
+                if (c_ir_initializer_item_string(builder, item, child_type))
                 {
-                    goto c_ir_compound_literal_failed;
+                    IrValueId value = c_ir_initializer_item_string_value(builder, item, child_type);
+                    valid = value.value != IR_ID_UNDERLYING_INVALID;
+                    if (valid)
+                    {
+                        if (type->kind == IR_TYPE_UNION)
+                        {
+                            frame->as.compound_literal_machine.operands[0] = value;
+                            frame->as.compound_literal_machine.fields[0] = field;
+                            frame->as.compound_literal_machine.operand_count = 1;
+                        }
+                        else
+                        {
+                            frame->as.compound_literal_machine.operands[field] = value;
+                            frame->as.compound_literal_machine.operand_count += !frame->as.compound_literal_machine.initialized[field];
+                        }
+                        frame->as.compound_literal_machine.initialized[field] = true;
+                        frame->as.compound_literal_machine.index += 1;
+                    }
+                }
+                else
+                {
+                    frame->as.compound_literal_machine.field_index = field;
+                    frame->as.compound_literal_machine.child_type = child_type;
+                    frame->as.compound_literal_machine.source = c_ir_token_source_range(builder, builder->preprocess.tokens[item->source_token]);
+                    frame->as.compound_literal_machine.continuation = C_IR_COMPOUND_CONTINUATION_ITEM;
+                    frame->stage = C_IR_LOWER_STAGE_CHILD;
+                    valid = c_ir_initializer_value_frame_push(builder, item);
+                    suspended = valid;
                 }
             }
         }
-        operand_count = slot_count;
     }
-    else if (type->kind == IR_TYPE_STRUCT)
+    if (!valid)
     {
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+        if (!builder->failure_message.length) builder->failure_message = S8("could not lower the semantic initializer plan");
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+    }
+    else if (!finished && !suspended)
+    {
+        IrValueId* operands = frame->as.compound_literal_machine.operands;
+        u64* fields = frame->as.compound_literal_machine.fields;
+        bool* initialized = frame->as.compound_literal_machine.initialized;
+        u32 count = frame->as.compound_literal_machine.operand_count;
+        if (type->kind != IR_TYPE_UNION)
         {
-            if (!initialized[field_index])
+            count = frame->as.compound_literal_machine.slot_count;
+            for (u32 field = 0; valid && field < count; field += 1)
             {
-                operands[field_index] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
-                if (operands[field_index].value == IR_ID_UNDERLYING_INVALID)
+                if (!initialized[field])
                 {
-                    goto c_ir_compound_literal_failed;
+                    IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[field].type;
+                    operands[field] = c_ir_emit_zero_value(builder, child_type, builder->preprocess.tokens[frame->as.compound_literal_machine.open]);
+                    valid = operands[field].value != IR_ID_UNDERLYING_INVALID;
                 }
+                if (type->kind == IR_TYPE_STRUCT) fields[field] = field;
             }
-            fields[field_index] = field_index;
         }
-        operand_count = type->field_count;
+        valid = valid && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || count <= UINT16_MAX);
+        IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[frame->as.compound_literal_machine.open]);
+        IrValueId value = valid ? c_ir_emit_initializer_capture(builder, type_id, operands, fields, count, source) : IR_VALUE_ID_INVALID;
+        c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
     }
-    if (type->kind == IR_TYPE_UNION && operand_count > 1)
-    {
-        goto c_ir_compound_literal_failed;
-    }
-    if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && operand_count > UINT16_MAX)
-    {
-        goto c_ir_compound_literal_failed;
-    }
-    IrSourceRange instruction_source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
-    IrValueId result = c_ir_emit_initializer_capture(builder, type_id, operands, fields, operand_count, instruction_source);
-    c_ir_lower_frame_finish(builder, result.value != IR_ID_UNDERLYING_INVALID, result);
-    return;
-c_ir_compound_literal_failed:
-    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
 }
 
 // One anonymous aggregate the promoted-member search walked through between
@@ -38255,7 +37478,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
             state->pending_type = literal_type;
             state->pending_source = c_ir_token_source_range(builder, builder->preprocess.tokens[first]);
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL;
-            status = c_ir_lower_compound_literal_frame_push(builder, literal_type, close + 1, end - 1) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
+            status = c_ir_lower_compound_literal_frame_push(builder, literal_type, node - 1, close + 1, end - 1) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
         }
     }
     break;
