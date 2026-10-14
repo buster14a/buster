@@ -949,7 +949,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
     }
     if (entity && c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
     {
-        c_ast_types_accept(body, relative, entity->type, flags);
+        c_ast_types_accept(body, relative, c_parse_expression_entity_type(result, entity), flags);
     }
     else if (identifier && !entity)
     {
