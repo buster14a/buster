@@ -2533,6 +2533,12 @@ own bound selects an earlier outer binding when present. The NORMAL fold
 publishes that committed operand identity with its answer; protected TYPE
 queries return only numeric receipts or cycle blame, never temporary rows.
 
+The shared constant dispatcher assigns named, disjoint continuation states
+to integer-transform operands and array dimensions. Their union payloads
+must never share a state value: a transform's token ordinals are not an array
+task's private type-list pointer. Mixed transform/array constant expressions
+run through the same permanent source-point and reference-parity fixture.
+
 ### Type queries
 
 The node task scheduler checkpoint uses exact `(kind, node, view)` keys for

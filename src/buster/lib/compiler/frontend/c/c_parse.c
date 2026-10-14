@@ -40050,6 +40050,16 @@ BUSTER_C_INTERNAL bool c_parse_entity_kind_redeclares(CEntityKind candidate, CEn
 // Typed integer constants used by semantic validation. The explicit range
 // stack shares the expression type rules with sizeof/typeof; no canonical
 // values, blocks, or instructions are constructed.
+// One dispatch owns both suspended arithmetic and array-layout tasks.
+// Named states keep independently composed families from sharing a payload.
+enum
+{
+    C_PARSE_CONSTANT_TASK_TRANSFORM_VALUE = 12,
+    C_PARSE_CONSTANT_TASK_TRANSFORM_SHIFT = 13,
+    C_PARSE_CONSTANT_TASK_ARRAY_DIMENSIONS = 14,
+    C_PARSE_CONSTANT_TASK_ARRAY_BOUND = 15,
+};
+
 typedef struct CParseConstantTask CParseConstantTask;
 struct CParseConstantTask
 {
@@ -41548,9 +41558,6 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             if (first.kind == C_TOKEN_IDENTIFIER && c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, first)) ==
                 C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
             {
-                // States 12 and 13 fold the first and second transform
-                // operands; 8 and 9 belong to __builtin_offsetof and 10 to the
-                // integer count and byte-swap fold.
                 CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target,
                     c_token_spelling(preprocess.spelling_base, first));
                 u32 close = begin + 1 < limit && c_token_is_punctuator(&preprocess.tokens[begin + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
@@ -41561,7 +41568,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                      c_parse_constraint_expression_end(result, preprocess, first_end + 1, close) == close);
                 if (valid)
                 {
-                    task->state = 12;
+                    task->state = C_PARSE_CONSTANT_TASK_TRANSFORM_VALUE;
                     task->split = first_end + 1;
                     task->colon = close;
                     task->cast_type = c_parse_expression_scalar_type(result, transform.type);
@@ -41664,7 +41671,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                             arrays[index] = current;
                             current = result->types[current.value].element_type;
                         }
-                        task->state = 11;
+                        task->state = C_PARSE_CONSTANT_TASK_ARRAY_DIMENSIONS;
                         task->array_types = arrays;
                         task->array_count = dimensions;
                         task->left = last;
@@ -41677,11 +41684,11 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             }
             count -= 1;
         }
-        else if (task->state == 11 || task->state == 12)
+        else if (task->state == C_PARSE_CONSTANT_TASK_ARRAY_DIMENSIONS || task->state == C_PARSE_CONSTANT_TASK_ARRAY_BOUND)
         {
             u64 maximum_size = preprocess.target.cpu_arch == CPU_ARCH_I386 ? UINT32_MAX : UINT64_MAX;
             u64 maximum_product = c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width);
-            if (task->state == 12)
+            if (task->state == C_PARSE_CONSTANT_TASK_ARRAY_BOUND)
             {
                 CArrayBound completed = result->array_bounds[result->types[task->array_types[task->array_count - 1].value].array_bound];
                 CParseArrayDependency* dependency = c_parse_array_dependency(arena, &dependencies,
@@ -41696,7 +41703,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 task->left.faulted |= last.faulted;
                 if (task->left.valid) task->left.integer *= last.integer;
                 task->array_count -= 1;
-                task->state = 11;
+                task->state = C_PARSE_CONSTANT_TASK_ARRAY_DIMENSIONS;
             }
             bool pending = false;
             while (task->left.valid && task->array_count)
@@ -41736,7 +41743,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
 #if BUSTER_INCLUDE_TESTS
                         c_parse_sizeof_array_work.bound_requests += 1;
 #endif
-                        task->state = 12;
+                        task->state = C_PARSE_CONSTANT_TASK_ARRAY_BOUND;
                         tasks[count++] = (CParseConstantTask){.start = child_start, .end = child_end, .cast_type = C_TYPE_ID_INVALID};
                         pending = true;
                     }
@@ -41828,7 +41835,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                                                                         machine->constant_evaluation_mode)
                                       : c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
             }
-            else if (task->state == 12 || task->state == 13)
+            else if (task->state == C_PARSE_CONSTANT_TASK_TRANSFORM_VALUE || task->state == C_PARSE_CONSTANT_TASK_TRANSFORM_SHIFT)
             {
                 CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target,
                     c_token_spelling(preprocess.spelling_base, preprocess.tokens[task->start]));
@@ -41837,16 +41844,16 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 // cannot be folded as its literal magnitude or real part here.
                 last.valid &= c_parse_expression_real_kind(kind);
                 last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
-                if (task->state == 12 && transform.argument_count == 2)
+                if (task->state == C_PARSE_CONSTANT_TASK_TRANSFORM_VALUE && transform.argument_count == 2)
                 {
                     task->left = last;
-                    task->state = 13;
+                    task->state = C_PARSE_CONSTANT_TASK_TRANSFORM_SHIFT;
                     tasks[count++] = (CParseConstantTask){.start = task->split, .end = task->colon, .cast_type = C_TYPE_ID_INVALID};
                     continue;
                 }
-                u64 value = task->state == 13 ? task->left.integer : last.integer;
-                u64 shift = task->state == 13 ? last.integer : 0;
-                if (task->state == 13)
+                u64 value = task->state == C_PARSE_CONSTANT_TASK_TRANSFORM_SHIFT ? task->left.integer : last.integer;
+                u64 shift = task->state == C_PARSE_CONSTANT_TASK_TRANSFORM_SHIFT ? last.integer : 0;
+                if (task->state == C_PARSE_CONSTANT_TASK_TRANSFORM_SHIFT)
                 {
                     last.valid &= task->left.valid;
                     last.faulted |= task->left.faulted;

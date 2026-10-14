@@ -7697,6 +7697,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTest
         {S8("int f(void){int a[3];{int a[sizeof(a)];return sizeof(a)!=48;}}"), true, false},
         {S8("typedef char T[3]; int f(void){typedef char T[sizeof(T)];return sizeof(T)!=3;}"), true, false},
         {S8("int f(int n){int a[n];a[0]=7;return sizeof(a)!=n*sizeof(int)||a[0]!=7;}"), true, false},
+        {S8("int a[sizeof(char[__builtin_rotateleft32(1u,2)])];"
+            "_Static_assert(sizeof(a)==16,\"array transform\");"
+            "_Static_assert(__builtin_rotateright32(sizeof(char[12]),1)==6,\"transform array\");"
+            "int f(void){return sizeof(a)!=16;}"), true, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dependencies); index += 1)
     {
