@@ -48347,7 +48347,7 @@ BUSTER_C_INTERNAL u32 c_parse_label_difference_end(CParseResult* result, CPrepro
 // Source label facts are compact entity flags. Aggregate storage keeps the
 // union of its possible labels; canonical control-flow validation still owns
 // the exact target edges and subobject provenance of generated branches.
-BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+BUSTER_GLOBAL_LOCAL bool c_parse_label_expression_has_value(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                   u8 const* labels, u32 start, u32 end)
 {
     bool label = false;
@@ -48397,44 +48397,122 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
             }
         }
     }
+    return label;
+}
+
+// The existing lowest-precedence operator proof, with parentheses stripped once.
+BUSTER_GLOBAL_LOCAL u32 c_parse_label_expression_root(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                       u32* first_out, u32* limit_out)
+{
+    u32 first = *first_out;
+    u32 limit = *limit_out;
+    while (first < limit && c_token_is_punctuator(&preprocess.tokens[first], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_parse_matching_delimiter_indexed(result, preprocess, first) + 1 == limit)
+    {
+        first += 1;
+        limit -= 1;
+    }
+    u32 root_precedence = UINT32_MAX;
+    for (u32 cursor = first; cursor < limit; cursor += 1)
+    {
+        CToken token = preprocess.tokens[cursor];
+        if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+            cursor = close < limit ? close : limit;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            root_precedence = BUSTER_MIN(root_precedence, 3u);
+        }
+        else
+        {
+            u32 precedence = c_parse_expression_operator_precedence(token);
+            bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, first, cursor);
+            bool binary = precedence && cursor > first && cursor + 1 < limit && !label_address &&
+                c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]);
+            if (binary) root_precedence = BUSTER_MIN(root_precedence, precedence);
+        }
+    }
+    *first_out = first;
+    *limit_out = limit;
+    return root_precedence;
+}
+
+typedef struct CParseLabelRange CParseLabelRange;
+struct CParseLabelRange
+{
+    u32 first, limit;
+};
+
+// Comparisons consume label values. Logical operators compose those booleans,
+// but each unsunk operand must still pass the original label-value scan.
+BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                  u8 const* labels, u32 start, u32 end)
+{
+    bool label = c_parse_label_expression_has_value(machine, result, preprocess, scope, labels, start, end);
     if (label)
     {
-        // Equality consumes a label pointer and produces an ordinary int,
-        // as canonical POINTER_EQUAL/NOT_EQUAL already do. Only a complete
-        // equality expression is a sink: conditional/comma/logical results
-        // and casts retain the existing conservative provenance policy.
-        u32 first = start;
-        u32 limit = end;
-        while (first < limit && c_token_is_punctuator(&preprocess.tokens[first], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-               c_parse_matching_delimiter_indexed(result, preprocess, first) + 1 == limit)
+        u32 first = start, limit = end;
+        u32 root = c_parse_label_expression_root(result, preprocess, scope, &first, &limit);
+        u32 equality = c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_EQUAL});
+        u32 conjunction = c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_AMPERSAND_AMPERSAND});
+        u32 disjunction = c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_PIPE_PIPE});
+        if (root == equality)
         {
-            first += 1;
-            limit -= 1;
+            label = false;
         }
-        u32 root_precedence = UINT32_MAX;
-        for (u32 cursor = first; cursor < limit; cursor += 1)
+        else if (root == conjunction || root == disjunction)
         {
-            CToken token = preprocess.tokens[cursor];
-            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+            u64 mark = machine->scratch_arena->position;
+            u32 capacity = end - start;
+            CParseLabelRange* work = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CParseLabelRange, capacity);
+            u32 count = work ? 1 : 0;
+            if (work) work[0] = (CParseLabelRange){.first = first, .limit = limit};
+            label = !work;
+            while (count && !label)
             {
-                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
-                cursor = close < limit ? close : limit;
+                CParseLabelRange range = work[--count];
+                u32 precedence = c_parse_label_expression_root(result, preprocess, scope, &range.first, &range.limit);
+                if (precedence == conjunction || precedence == disjunction)
+                {
+                    u32 operand = range.first;
+                    // Split all top-level logical operators in one walk. Each
+                    // child owns a disjoint token range; indexed delimiter jumps
+                    // skip nested groups until their own work item is visited.
+                    for (u32 cursor = operand; cursor < range.limit; cursor += 1)
+                    {
+                        CToken token = preprocess.tokens[cursor];
+                        if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+                        {
+                            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                            cursor = close < range.limit ? close : range.limit;
+                        }
+                        else
+                        {
+                            bool logical = c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE) ||
+                                (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                                 !c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, range.first, cursor));
+                            if (logical && cursor > operand && cursor + 1 < range.limit &&
+                                c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]))
+                            {
+                                // Each pushed range owns at least one token,
+                                // so outstanding ranges cannot fill capacity.
+                                work[count++] = (CParseLabelRange){.first = operand, .limit = cursor};
+                                operand = cursor + 1;
+                            }
+                        }
+                    }
+                    work[count++] = (CParseLabelRange){.first = operand, .limit = range.limit};
+                }
+                else if (precedence != equality)
+                {
+                    label = c_parse_label_expression_has_value(machine, result, preprocess, scope, labels, range.first, range.limit);
+                }
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-            {
-                root_precedence = BUSTER_MIN(root_precedence, 3u);
-            }
-            else
-            {
-                u32 precedence = c_parse_expression_operator_precedence(token);
-                bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                    c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, first, cursor);
-                bool binary = precedence && cursor > first && cursor + 1 < limit && !label_address &&
-                    c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]);
-                if (binary) root_precedence = BUSTER_MIN(root_precedence, precedence);
-            }
+            machine->scratch_arena->position = mark;
         }
-        label = root_precedence != c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_EQUAL});
     }
     return label;
 }
