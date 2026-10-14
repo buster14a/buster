@@ -36573,6 +36573,11 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
                     value.integer = string_equal(spelling, S8("true"));
                     value.type = c_parse_expression_scalar_type(result, C_TYPE_BOOL);
                 }
+                else if (c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(spelling, S8("nullptr")))
+                {
+                    value.valid = true;
+                    value.type = c_parse_expression_scalar_type(result, C_TYPE_NULLPTR);
+                }
             }
         }
     }
@@ -40083,7 +40088,8 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
             String8 name = c_token_spelling(preprocess.spelling_base, token);
             CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
             bool keyword = c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) ||
-                           string_equal(name, S8("true")) || string_equal(name, S8("false"));
+                           string_equal(name, S8("true")) || string_equal(name, S8("false")) ||
+                           (c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(name, S8("nullptr")));
             if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) && cursor + 1 < end &&
                 c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {

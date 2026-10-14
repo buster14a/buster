@@ -66748,6 +66748,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         CPreprocessResult tokens = c_preprocess(temporary.arena,
             S8("static int null_condition = nullptr ? 3 : 4; static int null_not = !nullptr; static _Bool null_bool = (_Bool)nullptr;"),
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CAnalysisResult analyzed = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        BUSTER_TEST(arguments, analyzed.analysis_complete && !analyzed.diagnostic_count);
         CParseResult parsed = c_parse_for_lowering(temporary.arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("nullptr-truth.c"), tokens, parsed, target_native,
             (CIRLowerOptions){.disable_direct_ssa = form != 0});
