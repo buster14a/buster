@@ -12262,6 +12262,116 @@ BUSTER_C_INTERNAL bool c_parse_type_name_trailer_invalid(CPreprocessResult prepr
 BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                         CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
                                                         u64* offset_out, bool* bit_field_out);
+// Semantic offsetof designator grammar and target-size_t arithmetic.
+// Lowering consumes only its retained numeric path and exact index nodes.
+typedef enum COffsetofStep
+{
+    C_OFFSETOF_STEP_INVALID,
+    C_OFFSETOF_STEP_MEMBER,
+    C_OFFSETOF_STEP_INDEX,
+    C_OFFSETOF_STEP_END,
+} COffsetofStep;
+
+typedef struct COffsetofWalk COffsetofWalk;
+struct COffsetofWalk
+{
+    u64 offset;
+    u64 maximum;
+    u32 cursor;
+    u32 end;
+    bool expect_member;
+    bool valid;
+    u8 reserved[2];
+};
+
+BUSTER_C_INTERNAL COffsetofWalk c_offsetof_walk_begin(Target target, u32 cursor, u32 end, u64 offset, bool expect_member, bool valid)
+{
+    u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(target).pointer.bit_width).low;
+    return (COffsetofWalk){
+        .offset = offset,
+        .maximum = maximum,
+        .cursor = cursor,
+        .end = end,
+        .expect_member = expect_member,
+        .valid = valid && offset <= maximum,
+    };
+}
+
+// A MEMBER step leaves the cursor on the member identifier and an INDEX step
+// on its `[`; a `.` is consumed here. END requires a member after every dot.
+BUSTER_C_INTERNAL COffsetofStep c_offsetof_walk_next(COffsetofWalk* walk, CToken const* tokens)
+{
+    COffsetofStep step = C_OFFSETOF_STEP_INVALID;
+    if (walk->valid && walk->cursor >= walk->end)
+    {
+        step = walk->expect_member ? C_OFFSETOF_STEP_INVALID : C_OFFSETOF_STEP_END;
+    }
+    else if (walk->valid)
+    {
+        CToken token = tokens[walk->cursor];
+        if (!walk->expect_member && c_token_is_punctuator(&token, C_PUNCTUATOR_DOT))
+        {
+            walk->cursor += 1;
+            walk->expect_member = true;
+            token = walk->cursor < walk->end ? tokens[walk->cursor] : (CToken){0};
+        }
+        if (walk->expect_member && walk->cursor < walk->end && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            step = C_OFFSETOF_STEP_MEMBER;
+        }
+        else if (!walk->expect_member && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            step = C_OFFSETOF_STEP_INDEX;
+        }
+    }
+    walk->valid = walk->valid && step != C_OFFSETOF_STEP_INVALID;
+    return step;
+}
+
+// `found` covers the caller's lookup: a named, non-bit-field member reached
+// through any depth of anonymous structs and unions.
+BUSTER_C_INTERNAL void c_offsetof_walk_member(COffsetofWalk* walk, bool found, u64 member_offset)
+{
+    walk->valid = walk->valid && found && member_offset <= walk->maximum && walk->offset <= walk->maximum - member_offset;
+    if (walk->valid)
+    {
+        walk->offset += member_offset;
+    }
+    walk->cursor += 1;
+    walk->expect_member = false;
+    return;
+}
+
+// `index_type` is null when the subscript is not an integer constant. A
+// signed index with its sign bit set, a value beyond 64 bits, and a product or
+// sum beyond the target's size_t are refused rather than wrapped.
+BUSTER_C_INTERNAL void c_offsetof_walk_index(COffsetofWalk* walk, IrType const* index_type, IrInteger index, bool element_resolved, u64 element_size,
+                                           u32 close)
+{
+    IrInteger bits = index_type && index_type->bit_width <= 128 ? ir_integer_mask(index, index_type->bit_width) : (IrInteger){0};
+    walk->valid = walk->valid && close < walk->end && element_resolved && index_type &&
+                  (index_type->kind == IR_TYPE_INTEGER || index_type->kind == IR_TYPE_BOOLEAN) && index_type->bit_width &&
+                  index_type->bit_width <= 128 && !bits.high && !(index_type->is_signed && ir_integer_sign_bit(bits, index_type->bit_width)) &&
+                  (!element_size || bits.low <= walk->maximum / element_size);
+    u64 element_offset = walk->valid ? bits.low * element_size : 0;
+    walk->valid = walk->valid && walk->offset <= walk->maximum - element_offset;
+    if (walk->valid)
+    {
+        walk->offset += element_offset;
+    }
+    walk->cursor = close + 1;
+    return;
+}
+
+// A runtime subscript adds nothing to the constant offset; lowering scales it
+// by the element size when it evaluates the subscript.
+BUSTER_C_INTERNAL void c_offsetof_walk_runtime_index(COffsetofWalk* walk, bool element_resolved, u32 close)
+{
+    walk->valid = walk->valid && close < walk->end && element_resolved;
+    walk->cursor = close + 1;
+    return;
+}
+
 BUSTER_C_INTERNAL void c_parse_ast_offsetof_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
                                                     u32 start, u32 end, CTypeId type);
 

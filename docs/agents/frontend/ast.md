@@ -2538,13 +2538,16 @@ one task and resumes its parent through the dispatch loop. Private graph
 state belongs to the standalone task root and does not escape its scratch
 lifetime. A settled declined child is distinct from a pending child.
 
-The scalar and complex constant tasks now read numeric, literal and selected
+The scalar and complex constant tasks read numeric, literal and selected
 children from nodes and share the existing arithmetic, cast and byte helpers.
-F2's type attempts are explicit declined placeholders in this checkpoint;
-the type materializer replaces them before the corresponding consumer gates
-are enabled. The token query families and shunting-yard evaluator still
-serve the earlier callers during this staging step and remain scheduled for
-deletion. This checkpoint does not complete F3 or F6.
+Type attempts materialize retained semantic recipes and exact source children.
+The old CONSTANT, SIZEOF and OFFSETOF range frame families, shunting-yard
+parser, saved token/operator resumes and their scratch arrays are removed.
+Condition literal shortcuts and switch label constants pass exact nodes.
+The semantic offsetof designator grammar is private to c_parse.c; lowering
+consumes its retained numeric path. The remaining legacy initializer closure
+and VLA C-type projection frame are retired by their respective owners before
+the final source-grammar guard is green.
 
 Each query kind becomes a fact read on the node its owner frame was handed.
 The machine, its keys, its memo and its resumes are deleted:
@@ -6020,6 +6023,5 @@ children. Runtime sizeof/_Alignof reads its operand node, uses saved VLA
 suffix dimensions by bound entity, and asks the shared constant task for fixed
 layouts. VLA operand evaluation hands the same node to call preparation and
 expression lowering. The previous prefix/subscript token walk, type-name probe,
-statement-tail scans and core fallback classifier are removed. Legacy whole
-SIZEOF callbacks referenced by remaining constant walkers await their owners'
-retirement; they are not a fallback for these migrated runtime consumers.
+statement-tail scans and core fallback classifier are removed. The legacy
+whole SIZEOF callback and its constant-parser callers are also removed.
