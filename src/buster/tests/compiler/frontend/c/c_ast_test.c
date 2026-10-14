@@ -6912,6 +6912,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_promoted_depth(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_refusal_cause(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    struct { String8 source; String8 message; u32 column; u8 refusal; } const cases[] = {
+        {S8("static int invalid_designator_value; static int invalid_designator_nonconstant[] = { [invalid_designator_value] = 1 };"),
+         S8("C IR lowering: array designator index is not an integer constant expression for incomplete array type of 'invalid_designator_nonconstant'"),
+         87, C_INITIALIZER_REFUSAL_INDEX_NONCONSTANT},
+        {S8("static int invalid_designator_value; static int invalid_designator_negative[] = { [-1] = 1 };"),
+         S8("C IR lowering: array designator index is negative for incomplete array type of 'invalid_designator_negative'"),
+         84, C_INITIALIZER_REFUSAL_INDEX_NEGATIVE},
+        {S8("static int invalid_designator_value; static int invalid_designator_overflow[] = { [18446744073709551615ULL] = 1 };"),
+         S8("C IR lowering: array designator index exceeds the target object size for incomplete array type of 'invalid_designator_overflow'"),
+         83, C_INITIALIZER_REFUSAL_INDEX_OBJECT_SIZE},
+        {S8("static int invalid_designator_value; static int invalid_designator_fixed_nonconstant[1] = { [invalid_designator_value] = 1 };"),
+         S8("C IR lowering: array designator index is not an integer constant expression"),
+         94, C_INITIALIZER_REFUSAL_INDEX_NONCONSTANT},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        TemporalArena one = arena_begin_temporal(temporary.arena);
+        CPreprocessResult preprocess = c_ast_test_preprocess(one.arena, cases[row].source, C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult analysis = c_parse_for_lowering(one.arena, preprocess);
+        BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+        CInitializerPlan const* refused = 0;
+        for (CInitializerPlan const* plan = analysis.initializer_plans; plan && !refused; plan = plan->next)
+            if (plan->refusal) refused = plan;
+        if (BUSTER_REQUIRE(arguments, refused != 0))
+        {
+            BUSTER_TEST(arguments, refused->refusal == cases[row].refusal && !refused->complete);
+            BUSTER_TEST(arguments, refused->refusal_token < preprocess.token_count);
+        }
+        CIRLowerResult lowered = c_lower_to_ir(one.arena, S8("initializer-refusal.c"), preprocess, analysis, target_native);
+        if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1 && !lowered.canonical_ir_certified))
+        {
+            BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                string_equal(lowered.diagnostics[0].message, cases[row].message) && lowered.diagnostics[0].location.column == cases[row].column);
+        }
+        scratch_end(one);
+    }
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("static int valid[] = { [(1)] = 9 };"), C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("initializer-completed.c"), preprocess, analysis, target_native);
+    BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_static_plan_object_contract(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8855,6 +8903,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_promoted_depth);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_refusal_cause);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);

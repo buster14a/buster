@@ -14135,8 +14135,32 @@ BUSTER_C_SHARED CInitializerPlan const* c_initializer_plan_find(CParseResult con
 {
     CInitializerPlan const* plan = result && result->initializer_plan_bucket_count
         ? result->initializer_plan_buckets[c_parse_initializer_plan_bucket(node, result->initializer_plan_bucket_count)] : 0;
-    while (plan && (plan->node != node || !plan->complete)) plan = plan->hash_next;
+    while (plan && (plan->node != node || !plan->complete || plan->refusal)) plan = plan->hash_next;
     return plan;
+}
+
+BUSTER_C_SHARED CInitializerPlan const* c_initializer_plan_refused(CParseResult const* result, u32 node)
+{
+    CInitializerPlan const* plan = result && result->initializer_plan_bucket_count
+        ? result->initializer_plan_buckets[c_parse_initializer_plan_bucket(node, result->initializer_plan_bucket_count)] : 0;
+    while (plan && (plan->node != node || !plan->refusal)) plan = plan->hash_next;
+    return plan;
+}
+
+BUSTER_C_SHARED String8 c_initializer_plan_refusal_message(CInitializerPlan const* plan)
+{
+    String8 message = {0};
+    if (plan)
+    {
+        switch (plan->refusal)
+        {
+        case C_INITIALIZER_REFUSAL_INDEX_NONCONSTANT: message = S8("array designator index is not an integer constant expression"); break;
+        case C_INITIALIZER_REFUSAL_INDEX_NEGATIVE: message = S8("array designator index is negative"); break;
+        case C_INITIALIZER_REFUSAL_INDEX_OBJECT_SIZE: message = S8("array designator index exceeds the target object size"); break;
+        default: break;
+        }
+    }
+    return message;
 }
 
 BUSTER_C_INTERNAL u32 c_parse_initializer_member_count_walk(CParseResult* result, CType* type);
@@ -14878,7 +14902,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
 }
 
 BUSTER_C_INTERNAL bool c_parse_initializer_index(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                    CScopeId scope, u32 start, u32 end, u64* value_out)
+                                                    CScopeId scope, u32 start, u32 end, u64* value_out, CInitializerPlan* plan)
 {
     bool valid = true;
     if (machine && machine->semantic_constant_queries)
@@ -14887,6 +14911,20 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index(CTypeParseMachine* machine, Are
         CParseConstant value = c_parse_typed_constant(machine, arena, preprocess, result, scope, start, end);
         machine->semantic_constant_queries = true;
         valid = value.valid && !value.is_float;
+        // Retain the validation query's refusal without changing the model's
+        // inference answer. A later successful walk supersedes this row.
+        if (plan && !plan->refusal)
+        {
+            CTypeKind kind = c_parse_expression_value_kind(result, value.type);
+            bool integer = value.valid && !value.is_float && !value.imaginary && c_parse_expression_integer_kind(kind);
+            bool signed_value = kind == C_TYPE_CHAR ? target_data_layout(preprocess.target).plain_char_is_signed : c_parse_expression_signed_kind(kind);
+            bool negative = integer && signed_value && (s64)(kind == C_TYPE_INT128 ? value.integer_high : value.integer) < 0;
+            if (!integer || negative)
+            {
+                plan->refusal = negative ? C_INITIALIZER_REFUSAL_INDEX_NEGATIVE : C_INITIALIZER_REFUSAL_INDEX_NONCONSTANT;
+                plan->refusal_token = start;
+            }
+        }
         if (valid)
         {
             *value_out = value.integer;
@@ -14904,7 +14942,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index(CTypeParseMachine* machine, Are
 }
 BUSTER_C_INTERNAL bool c_parse_initializer_index_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                          CScopeId scope, u32 start, u32 end, u64* first_out, u64* last_out, bool* range_out,
-                                                         CParseInitializerDiagnostic* diagnostic)
+                                                         CParseInitializerDiagnostic* diagnostic, CInitializerPlan* plan)
 {
     u32 parentheses = 0;
     u32 brackets = 0;
@@ -14951,15 +14989,15 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index_range(CTypeParseMachine* machin
     bool is_range = ellipsis != end;
     if (!is_range)
     {
-        if (!c_parse_initializer_index(machine, arena, preprocess, result, scope, start, end, &first))
+        if (!c_parse_initializer_index(machine, arena, preprocess, result, scope, start, end, &first, plan))
         {
             return false;
         }
         last = first;
     }
     else if (ellipsis == start || ellipsis + 1 >= end ||
-             !c_parse_initializer_index(machine, arena, preprocess, result, scope, start, ellipsis, &first) ||
-             !c_parse_initializer_index(machine, arena, preprocess, result, scope, ellipsis + 1, end, &last))
+             !c_parse_initializer_index(machine, arena, preprocess, result, scope, start, ellipsis, &first, plan) ||
+             !c_parse_initializer_index(machine, arena, preprocess, result, scope, ellipsis + 1, end, &last, plan))
     {
         return false;
     }
@@ -15051,13 +15089,21 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             u64 last = 0;
             bool is_range = false;
             if (close >= limit || close == cursor + 1 ||
-                !c_parse_initializer_index_range(machine, arena, preprocess, result, scope, cursor + 1, close, &index, &last, &is_range, diagnostic))
+                !c_parse_initializer_index_range(machine, arena, preprocess, result, scope, cursor + 1, close, &index, &last, &is_range, diagnostic, plan))
             {
                 return false;
             }
             CTypeId path_container = frame->root && first && plan ? plan->type : current;
             if (frame->root && first)
             {
+                // UINT64_MAX cannot name the final element of an object:
+                // even a one-byte element needs index + 1 bytes. The existing
+                // walk refuses the sentinel below; keep its lowering cause.
+                if (plan && !plan->refusal && last == UINT64_MAX)
+                {
+                    plan->refusal = C_INITIALIZER_REFUSAL_INDEX_OBJECT_SIZE;
+                    plan->refusal_token = cursor;
+                }
                 selected = index;
                 selected_end = last;
                 current = frame->element_type;

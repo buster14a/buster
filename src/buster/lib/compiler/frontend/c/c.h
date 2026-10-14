@@ -2395,6 +2395,14 @@ typedef enum CInitializerPlanFlag
 } CInitializerPlanFlag;
 
 typedef struct CInitializerPlan CInitializerPlan;
+typedef enum CInitializerRefusal
+{
+    C_INITIALIZER_REFUSAL_NONE,
+    C_INITIALIZER_REFUSAL_INDEX_NONCONSTANT,
+    C_INITIALIZER_REFUSAL_INDEX_NEGATIVE,
+    C_INITIALIZER_REFUSAL_INDEX_OBJECT_SIZE,
+} CInitializerRefusal;
+
 struct CInitializerPlan
 {
     CInitializerPlan* next;
@@ -2408,12 +2416,16 @@ struct CInitializerPlan
     u64 flexible_count;
     u32 flexible_member_plus_one;
     u32 unsupported_range_token_plus_one;
+    // A failed semantic walk retains its cause for lowering. The token is
+    // diagnostic provenance, never a range to reparse or evaluate.
+    u32 refusal_token;
     u32 node;
     u32 path_count;
     u32 item_count;
     u32 path_capacity;
     u32 item_capacity;
     u8 flags;
+    u8 refusal;
     bool complete;
     bool failed;
 };

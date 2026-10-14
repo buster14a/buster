@@ -46932,6 +46932,12 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
         u64 count = plan ? plan->inferred_count : 0;
         String8 failure = !count ? S8("missing retained inferred initializer count") : (String8){0};
         u32 failure_token = plan && plan->item_count ? plan->items[0].value_start : builder->syntax_tree->tokens[initializer_node];
+        CInitializerPlan const* refused = !plan ? c_initializer_plan_refused(&builder->parse, initializer_node) : 0;
+        if (refused)
+        {
+            failure = c_initializer_plan_refusal_message(refused);
+            failure_token = refused->refusal_token;
+        }
         if (!count)
         {
             if (failure.length && result->diagnostic_count < builder->parse.declaration_count + builder->parse.entity_count + 1)
@@ -55915,7 +55921,9 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
     }
     else if (!plan || !type || !type->layout.resolved)
     {
-        c_ir_constant_initializer_fail(builder, S8("missing retained static initializer plan"), node < builder->syntax_tree->node_count ? builder->syntax_tree->tokens[node] : 0);
+        CInitializerPlan const* refused = !plan ? c_initializer_plan_refused(&builder->parse, node) : 0;
+        c_ir_constant_initializer_fail(builder, refused ? c_initializer_plan_refusal_message(refused) : S8("missing retained static initializer plan"),
+            refused ? refused->refusal_token : node < builder->syntax_tree->node_count ? builder->syntax_tree->tokens[node] : 0);
     }
     else
     {

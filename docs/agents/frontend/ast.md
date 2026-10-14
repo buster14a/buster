@@ -2581,6 +2581,14 @@ An array's already inferred count is copied from its
 semantic bound. Plans and their checked sparse node index belong to the
 result arena and survive body-scratch rewinds.
 
+An unsuccessful designator walk retains its integer-constant, signed-negative
+or terminal-index refusal and diagnostic token on its plan row. Lowering reads
+that finished cause when the initializer has no complete plan, preserving the
+original incomplete-array and static-initializer diagnostics without evaluating
+the designator again. A later complete plan takes precedence over an earlier
+declined inference row. Refusal publication does not change the semantic
+model's inference answer.
+
 `c_parse_infer_initializer_array_count_core` records the selections it
 already makes. File-array inference publishes its plan before the replayed
 validation. Compound-literal publication uses the same semantic walker,
