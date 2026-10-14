@@ -323,15 +323,14 @@ lowers from nodes and facts.
   - A tree that cannot be reserved (`C_DIAGNOSTIC_SOURCE_TOO_LARGE`) fails the
     unit with the builder's diagnostic. So does a span table that cannot be
     reserved.
-  - A unit with a function body whose syntax the builder rejects fails with
-    the builder's diagnostics: the
+  - A unit whose syntax the builder rejects fails with the builder's
+    diagnostics and is counted in `tree_rejections`: since step 3 the tree is
+    mandatory for lowering, and the
     [statement walker](#statements-from-nodes-in-lowering) has no token path.
-    A unit without a body lowers without a tree, keeping lowering's own
-    diagnostics, and is counted in `tree_rejections`. These are inputs
-    semantic analysis accepts and lowering diagnoses, such as file-scope
-    `[1 ... 2 ... 3]` designators and stray initializer separators. Step 3
-    makes the tree mandatory for lowering, so it must first have the builder
-    or analysis diagnose them.
+    These are inputs the parser accepts, such as `[1 ... 2 ... 3]`
+    designators, empty initializer elements and a second global assembly
+    string; the driver's analysis reports the first two (and
+    `case a ... b ... c`) before lowering, with its own messages.
   - A hand-built stream with no symbol table no longer refuses the build: the
     builder interns into a table of its own (`c_symbol_table_standalone`), in
     its phase arena, whose ids no consumer compares with another table's.
@@ -445,15 +444,14 @@ answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
 given one either), so the builder creates and retires its own. A builder that
 cannot reserve its storage fails the unit with the parse error class and its
-diagnostic. A build the builder rejects on syntax no longer fails the unit:
-since the default switch the unit compiles without a tree, exactly as under `-fno-c-ast-pilot`, so its
-diagnostics come from `c_parse_ast` and analysis as before, and the driver
-counts it in `CompilerDriverCAstPilotResult.rejections`. On the corpus at the
-switch, every rejected unit was invalid input that also fails without the tree
-(missing `-std=c23` or `-D` options, deliberate syntax errors); the builder
-diagnosed the syntax error before analysis could give its semantic one.
-[#4069](https://github.com/buster14a/buster/issues/4069) owns making the tree
-mandatory, which needs those diagnoses in the builder or analysis first.
+diagnostic. A build the builder rejects on syntax passes no tree: parsing and
+analysis run as under `-fno-c-ast-pilot`, so their diagnostics come first, and
+the driver counts the unit in `CompilerDriverCAstPilotResult.rejections`. A
+unit analysis accepts then fails in lowering, which builds the tree itself and
+reports the builder's diagnostic: the tree is mandatory since step 3
+([#4059](https://github.com/buster14a/buster/issues/4059)). On the corpus at
+the switch, every rejected unit was invalid input that also fails without the
+tree (missing `-std=c23` or `-D` options, deliberate syntax errors).
 `-E` and assembly inputs never reach the hook.
 
 Under `-v` the driver prints these rows with the other verbose counters, plus
@@ -1959,8 +1957,7 @@ not from a token scan:
   `c_ir_abstract_pointer_declarator`.
 - **No tree, no hoisting.** A core whose range no node spans fails with "no
   syntax tree node spans this expression". A unit whose tree the builder
-  rejects lowers without a tree, and from (a) on its expressions fail this
-  way.
+  rejects does not lower at all (see below).
 
   The builder now accepts the vendor standard attributes that tripped this
   (`[[vendor::tag(gnu::error("m"))]]`): their argument clause is any balanced
@@ -2075,13 +2072,17 @@ byte.
 - **Still token ranges.** The place machine, the `sizeof`, compound-literal
   and statement-expression frames take their subtree's token range, and the
   prepared control and call records are keyed by their opening token.
-- **A unit the builder rejects.** Such a unit still lowers without a tree
-  (`tree_rejections`): its statements lower, and any expression that needs
-  the evaluator fails. These are inputs analysis accepts and lowering
-  diagnoses: invalid `__builtin_offsetof` designators, an omitted `?:`
-  operand outside a GNU dialect, `[a ... b ... c]` designators and case
-  ranges, empty initializer elements, a malformed global `asm`. Making the
-  tree mandatory first needs the builder or analysis to diagnose them.
+- **A unit the builder rejects.** The tree is mandatory: such a unit fails
+  with the builder's diagnostics (`tree_rejections`), and lowering does not
+  run. These are inputs the parser accepts: invalid `__builtin_offsetof`
+  designators, an omitted `?:` operand outside a GNU dialect,
+  `[a ... b ... c]` designators and case ranges, empty initializer
+  elements, a second global assembly string. Through the driver, analysis
+  reports the case ranges and initializer elements first, with its own
+  messages; the designator and the global assembly now report the builder's
+  (`expected ']' after the array range designator`, `expected ')' after the
+  assembler text`). `c_test_tree_rejection` checks each. No corpus input is
+  rejected.
 
 ## Initializers, declarations and type queries from the tree
 

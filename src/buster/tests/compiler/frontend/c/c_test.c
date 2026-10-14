@@ -16818,6 +16818,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArgumen
     return result;
 }
 
+// A unit the syntax tree builder rejects fails with the builder's diagnostic:
+// lowering needs the tree (GitHub #3102 step 3), so it does not run.
+BUSTER_GLOBAL_LOCAL void c_test_tree_rejection(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                               CPreprocessDialect dialect, String8 message)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                            (CPreprocessOptions){
+                                                .target = target_native,
+                                                .data_layout = target_data_layout(target_native),
+                                                .dialect = dialect,
+                                            });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CAstLowerStatistics statistics = {0};
+    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tree-rejection.c"), tokens, parse, target_native,
+                                                        (CIRLowerOptions){.ast_lower_statistics = &statistics});
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, statistics.tree_rejections == 1);
+    BUSTER_TEST(arguments, lowered.program == 0);
+    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 1 && string_equal(lowered.diagnostics[0].message, message),
+                    string_format(temporary.arena, S8("tree rejection: {u32} diagnostics, first '{S8}', expected '{S8}'"),
+                                  (u32)lowered.diagnostic_count, lowered.diagnostic_count ? lowered.diagnostics[0].message : S8(""), message));
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+    c_test_scratch_end(temporary);
+}
+
+// Trailing initializer separators are valid and lower. An empty element --
+// a leading, doubled or lone `,` -- is a syntax error the tree builder
+// reports (GitHub #3102 step 3); the driver's analysis reports it first, as
+// "invalid initializer separator".
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_separators(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16825,12 +16859,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_separators(UnitTestArgumen
     TemporalArena initializer_separator_temporary = scratch_begin(0, 0);
     CPreprocessResult initializer_separator_tokens = c_preprocess(
         initializer_separator_temporary.arena,
-        S8("static int separator_leading[2] = {, 1};"
-           " static int separator_doubled[3] = {1, , 2};"
-           " static int separator_inferred[] = {1, , 2};"
-           " static int separator_scalar = {,};"
-           " static int *separator_pointer = {,};"
-           " static int separator_trailing[2] = {1,};"
+        S8("static int separator_trailing[2] = {1,};"
            " static int separator_inferred_trailing[] = {1,};"
            " static char separator_string_trailing[] = {\"ok\",};"
            " static int separator_scalar_trailing = {1,};"
@@ -16843,23 +16872,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_separators(UnitTestArgumen
     CParseResult initializer_separator_parse = c_parse(initializer_separator_temporary.arena, initializer_separator_tokens);
     CIRLowerResult initializer_separator_ir = c_lower_to_ir(initializer_separator_temporary.arena, S8("initializer-separators.c"),
                                                              initializer_separator_tokens, initializer_separator_parse, target_native);
-    u32 invalid_separator_diagnostics = 0;
-    bool consistent_separator_diagnostics = true;
-    for (u32 diagnostic_index = 0; diagnostic_index < initializer_separator_ir.diagnostic_count; diagnostic_index += 1)
-    {
-        String8 message = initializer_separator_ir.diagnostics[diagnostic_index].message;
-        if (string_first_sequence(message, S8("invalid initializer separator")) != BUSTER_STRING_NO_MATCH)
-        {
-            invalid_separator_diagnostics += 1;
-            consistent_separator_diagnostics &= string_equal(message, S8("C IR lowering: invalid initializer separator"));
-        }
-    }
     BUSTER_TEST(arguments, initializer_separator_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, initializer_separator_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, invalid_separator_diagnostics == 5);
-    BUSTER_TEST(arguments, consistent_separator_diagnostics);
-    BUSTER_TEST(arguments, initializer_separator_ir.diagnostic_count == 5);
+    BUSTER_TEST(arguments, initializer_separator_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, initializer_separator_ir.program != 0);
     c_test_scratch_end(initializer_separator_temporary);
+    String8 invalid[] = {
+        S8("static int separator_leading[2] = {, 1};\n"),
+        S8("static int separator_doubled[3] = {1, , 2};\n"),
+        S8("static int separator_inferred[] = {1, , 2};\n"),
+        S8("static int separator_scalar = {,};\n"),
+        S8("static int *separator_pointer = {,};\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        c_test_tree_rejection(arguments, &result, invalid[index], C_PREPROCESS_DIALECT_C23, S8("expected an expression, found ','"));
+    }
     return result;
 }
 
@@ -17900,7 +17928,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
            " static int invalid_designator_negative[] = { [-1] = 1 };"
            " static int invalid_designator_overflow[] = { [18446744073709551615ULL] = 1 };"
            " static int invalid_designator_empty_range[8] = { [5 ... 2] = 1 };"
-           " static int invalid_designator_multiple_range[8] = { [1 ... 2 ... 3] = 1 };"
            " static int invalid_designator_negative_range[8] = { [-1 ... 2] = 1 };"
            " static int invalid_designator_outside_range[4] = { [2 ... 5] = 1 };"
            " static int invalid_designator_fixed_nonconstant[1] = { [invalid_designator_value] = 1 };"
@@ -17914,7 +17941,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
     bool found_negative = false;
     bool found_overflow = false;
     bool found_empty_range = false;
-    bool found_multiple_range = false;
     bool found_negative_range = false;
     bool found_outside_range = false;
     bool found_outside_bounds = false;
@@ -17925,23 +17951,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
         found_negative |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
         found_overflow |= string_starts_with_sequence(message, S8("C IR lowering: array designator index exceeds the target object size"));
         found_empty_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator range is empty"));
-        found_multiple_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator range has multiple ellipses"));
         found_negative_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
         found_outside_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
         found_outside_bounds |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
     }
     BUSTER_TEST(arguments, invalid_designator_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, invalid_designator_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, invalid_designator_ir.diagnostic_count == 10);
+    BUSTER_TEST(arguments, invalid_designator_ir.diagnostic_count == 9);
     BUSTER_TEST(arguments, found_nonconstant);
     BUSTER_TEST(arguments, found_negative);
     BUSTER_TEST(arguments, found_overflow);
     BUSTER_TEST(arguments, found_empty_range);
-    BUSTER_TEST(arguments, found_multiple_range);
     BUSTER_TEST(arguments, found_negative_range);
     BUSTER_TEST(arguments, found_outside_range);
     BUSTER_TEST(arguments, found_outside_bounds);
     c_test_scratch_end(invalid_designator_temporary);
+    // A second `...` is a syntax error the tree builder reports.
+    c_test_tree_rejection(arguments, &result, S8("static int invalid_designator_multiple_range[8] = { [1 ... 2 ... 3] = 1 };\n"),
+                          C_PREPROCESS_DIALECT_GNU23, S8("expected ']' after the array range designator, found '...'"));
     return result;
 }
 
@@ -40002,9 +40029,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         BUSTER_TEST(arguments, switch_count == 0);
         BUSTER_TEST(arguments, ir_validate_canonical_module(case_range_ir.program, module).error == IR_VALIDATION_NONE);
     }
-    c_test_case_range_lower_diagnostic(arguments, &result,
-                                       S8("int malformed(int value) { switch (value) { case 1 ... 2 ... 3: return 0; } return 1; }\n"),
-                                       S8("expected ':' after the case value, found '...'"));
+    // A second `...` is a syntax error the tree builder reports; the driver's
+    // analysis reports it first, as "malformed GNU case range".
+    c_test_tree_rejection(arguments, &result, S8("int malformed(int value) { switch (value) { case 1 ... 2 ... 3: return 0; } return 1; }\n"),
+                          C_PREPROCESS_DIALECT_GNU23, S8("expected ':' after the case value, found '...'"));
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int nonconstant_low(int value) { switch (value) { case value ... 2: return 0; } return 1; }\n"),
                                        S8("in function 'nonconstant_low': case range lower bound is not an integer constant expression"));
@@ -47968,22 +47996,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, found_asm_link_name);
     }
     c_test_scratch_end(hardening_temporary);
-    TemporalArena invalid_assembly_temporary = scratch_begin(0, 0);
-    CPreprocessResult invalid_assembly_tokens =
-        c_preprocess(invalid_assembly_temporary.arena, S8("__asm__(\"nop\", \"not adjacent\");"), (CPreprocessOptions){0});
-    CParseResult invalid_assembly_parse = c_parse(invalid_assembly_temporary.arena, invalid_assembly_tokens);
-    CIRLowerResult invalid_assembly_ir =
-        c_lower_to_ir(invalid_assembly_temporary.arena, S8("invalid-global-assembly.c"), invalid_assembly_tokens, invalid_assembly_parse, target_native);
-    BUSTER_TEST(arguments, invalid_assembly_tokens.diagnostic_count == 0);
-    BUSTER_TEST(arguments, invalid_assembly_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, invalid_assembly_ir.diagnostic_count == 1);
-    BUSTER_TEST(arguments, invalid_assembly_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-    BUSTER_TEST(arguments, invalid_assembly_ir.program != 0);
-    if (invalid_assembly_ir.program)
-    {
-        BUSTER_TEST(arguments, invalid_assembly_ir.program->modules[0].assembly_count == 0);
-    }
-    c_test_scratch_end(invalid_assembly_temporary);
+    // Global assembly takes one string: the tree builder rejects a second.
+    c_test_tree_rejection(arguments, &result, S8("__asm__(\"nop\", \"not adjacent\");\n"), C_PREPROCESS_DIALECT_GNU23,
+                          S8("expected ')' after the assembler text, found ','"));
     TemporalArena alignas_temporary = scratch_begin(0, 0);
     CPreprocessResult alignas_tokens = c_preprocess(alignas_temporary.arena,
                                                     S8("_Alignas(64) int global_value = 1;"

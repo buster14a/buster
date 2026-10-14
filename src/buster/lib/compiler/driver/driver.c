@@ -9236,10 +9236,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
-        // A unit the builder rejects on syntax takes the tree-free path, so
-        // its diagnostics (or, for a form only the builder refuses, its
-        // object) come from the same authority as under -fno-c-ast-pilot;
-        // the builder's own message is not published (#3102 default switch).
+        // A unit the builder rejects on syntax passes no tree, so lowering
+        // builds its own and reports the same rejection as under
+        // -fno-c-ast-pilot (#3102 step 3: the tree is mandatory); analysis
+        // diagnoses what it can first.
         // A builder that could not reserve its storage still fails the unit.
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
         bool exhausted = !tree.complete && tree.diagnostic_count && tree.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
