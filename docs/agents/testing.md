@@ -477,6 +477,14 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   hangs and abnormal exits still fail. This control establishes the reachable
   finalization tail, not the cause or acknowledgement timing of a native probe
   failure. Probe failure does not establish an app crash.
+  After GO authorization, the existing caller receipt retains
+  `reason=awaiting-completion` with `admission=0`, so an expired capture can
+  be distinguished from startup that never reached GO (#4158). This records
+  only the caller boundary; it proves neither native launch, readiness, exit,
+  EOF nor snapshot completion. The final closed snapshot still exclusively
+  admits stable receipts. A real native deadline with finite delayed owner
+  publication preserves this phase while remaining unadmitted; no retry or
+  recovery follows from the phase observation.
   `bash ios/launch_diagnostics_mock_test.sh` runs the existing attached-monitor
   controls, `python3 ios/lifecycle_capture_test.py -v` and the caller-clock
   controls in `python3 ios/lifecycle_capture_bridge_test.py -v`. They cover

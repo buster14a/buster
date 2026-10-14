@@ -22,7 +22,7 @@ check_probe_receipt() {
         # complete snapshot. Missing/malformed protocol evidence still fails.
         grep -qF 'outcome=evidence-failure status=125 native_status=unavailable capture_status=124 ' "$status_log" || return 1
         grep -qF 'capture_receipt=incomplete' "$status_log" || return 1
-        grep -qE '^BUSTER_IOS_CALLER_GATE monitor_status=(124|137) admission=0 invocation_status=unavailable generation=[A-Za-z0-9]{8,64} reason=starting$' "$status_log" || return 1
+        grep -qE '^BUSTER_IOS_CALLER_GATE monitor_status=(124|137) admission=0 invocation_status=unavailable generation=[A-Za-z0-9]{8,64} reason=(starting|awaiting-completion)$' "$status_log" || return 1
         grep -qF 'BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt' "$status_log" || return 1
     fi
     if ! grep -qE "^simctl spawn [[:xdigit:]-]+ $command " "$native_commands" 2>/dev/null; then
