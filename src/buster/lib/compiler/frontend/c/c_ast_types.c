@@ -3461,7 +3461,7 @@ BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_node(CAstFacts const*
 BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_nested(CAstFacts const* facts, CParseResult const* result,
                                                                  CAstFactTypeReference parent, CTypeId nested)
 {
-    CAstTypeRecipe const* recipe = parent.recipe ? facts->recipes + parent.index : 0;
+    CAstTypeRecipe const* recipe = parent.recipe && facts->recipes && parent.index < facts->recipe_count ? facts->recipes + parent.index : 0;
     bool temporary = recipe && nested.value != C_ID_UNDERLYING_INVALID && nested.value >= recipe->row_begin;
     u32 index = temporary ? recipe->recipe_begin + nested.value - recipe->row_begin : nested.value;
     return c_ast_types_fact_reference(facts, result, index, temporary);
@@ -3512,7 +3512,7 @@ BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParse
         }
         u32 child_flags = facts->flags[child];
         CAstTypeRecipe const* callee = (child_flags & (C_AST_FACT_TYPED | C_AST_FACT_RECIPE)) == (C_AST_FACT_TYPED | C_AST_FACT_RECIPE) &&
-                                              facts->types[child] < facts->recipe_count ? facts->recipes + facts->types[child] : 0;
+                                              facts->recipes && facts->types[child] < facts->recipe_count ? facts->recipes + facts->types[child] : 0;
         if (kind == C_AST_CALL && callee && callee->form == C_AST_TYPE_RECIPE_BUILTIN && callee->builtin == C_SYMBOL_BUILTIN_VA_ARG)
         {
             u32 argument = c_ast_child_at(ast, node, c_ast_child_count(ast, node) - 1);
