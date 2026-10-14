@@ -6620,8 +6620,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_node_tasks(UnitTestArgume
         {S8("1.25 + 2.5"), 0, 3.75, true},
         {S8("5.0 + 7.0i"), 5, 0, false},
         {S8("__builtin_complex(1.0, 2.0) + 3.0"), 4, 0, false},
+        {S8("__real__ (5.0 + 7.0i)"), 0, 5.0, true},
+        {S8("__imag__ (5.0 + 7.0i)"), 0, 7.0, true},
+        {S8("__imag__ 5.0"), 0, 0.0, true},
         {S8("_Generic(0, int: 13, default: (1 / 0))"), 13, 0, false},
         {S8("__builtin_constant_p(__builtin_constant_p(input))"), 1, 0, false},
+        {S8("__builtin_constant_p(5.0 + 7.0i)"), 1, 0, false},
+        {S8("__builtin_choose_expr(__builtin_constant_p(5), 13, (1 / 0))"), 13, 0, false},
+        {S8("__builtin_types_compatible_p(int, unsigned int)"), 0, 0, false},
+        {S8("__builtin_classify_type(1.0)"), 8, 0, false},
+        {S8("__builtin_bswap32(0x12345678)"), 0x78563412, 0, false},
+        {S8("__builtin_popcount(0xf0)"), 4, 0, false},
         {{.pointer = deep, .length = depth * 3 + 1}, 1, 0, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)

@@ -2528,6 +2528,7 @@ typedef enum CIrAstTypeView
     C_IR_AST_TYPE_STRICT,
     C_IR_AST_TYPE_PROMOTED,
     C_IR_AST_TYPE_PREDICTED,
+    C_IR_AST_CONSTANT_LVALUE,
 } CIrAstTypeView;
 
 typedef enum CIrNodeQueryKind
@@ -58620,6 +58621,8 @@ BUSTER_C_INTERNAL CConditionalOperator c_ir_constant_node_operation(u32 kind)
     case C_AST_NEGATE: result = C_CONDITIONAL_UNARY_MINUS; break;
     case C_AST_BIT_NOT: result = C_CONDITIONAL_BITWISE_NOT; break;
     case C_AST_LOGICAL_NOT: result = C_CONDITIONAL_LOGICAL_NOT; break;
+    case C_AST_REAL: result = C_CONDITIONAL_REAL_PART; break;
+    case C_AST_IMAG: result = C_CONDITIONAL_IMAGINARY_PART; break;
     case C_AST_MULTIPLY: result = C_CONDITIONAL_MULTIPLY; break;
     case C_AST_DIVIDE: result = C_CONDITIONAL_DIVIDE; break;
     case C_AST_REMAINDER: result = C_CONDITIONAL_REMAINDER; break;
@@ -58649,6 +58652,81 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_child(CIntegerIrBuilder* builder, u32 
     return c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_CONSTANT}, answer);
 }
 
+BUSTER_C_INTERNAL CAstTypeRecipe const* c_ir_constant_recipe_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    u32 flags = facts && node < facts->node_count ? facts->flags[node] : 0;
+    u32 index = (flags & (C_AST_FACT_TYPED | C_AST_FACT_RECIPE)) == (C_AST_FACT_TYPED | C_AST_FACT_RECIPE)
+                    ? facts->types[node] : C_AST_FACT_NONE;
+    return facts && index < facts->recipe_count ? facts->recipes + index : 0;
+}
+
+BUSTER_C_INTERNAL CSymbolBuiltin c_ir_constant_builtin_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAstTypeRecipe const* recipe = c_ir_constant_recipe_node(builder, node);
+    return recipe && recipe->form == C_AST_TYPE_RECIPE_BUILTIN ? (CSymbolBuiltin)recipe->builtin : C_SYMBOL_BUILTIN_NONE;
+}
+
+BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    return (CEntityId){.value = facts && node < facts->node_count && (facts->flags[node] & C_AST_FACT_BOUND)
+                                   ? facts->payloads[node] : C_ID_UNDERLYING_INVALID};
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_identifier_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* value)
+{
+    CAstTypeRecipe const* recipe = c_ir_constant_recipe_node(builder, node);
+    CEntityId id = c_ir_constant_entity_node(builder, node);
+    CEntity const* entity = id.value < builder->parse.entity_count ? builder->parse.entities + id.value : 0;
+    IrTypeId type = entity && entity->type.value < builder->parse.type_count && builder->c_type_ir_map
+                        ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+    bool valid = false;
+    if (recipe && recipe->form == C_AST_TYPE_RECIPE_FUNCTION_NAME)
+    {
+        *value = c_ir_function_name_object(builder, builder->preprocess.tokens[builder->syntax_tree->tokens[node]]);
+        valid = value->kind == C_IR_CONSTANT_LVALUE;
+    }
+    else if (entity && (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value)) &&
+             type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        CIrWideInteger bits = {.low = entity->constant_value};
+        if (entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count)
+            bits.high = builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high;
+        if (entity->constant_is_negative) bits = c_ir_wide_negate(bits);
+        *value = c_ir_constant_integer(type, bits.low);
+        value->integer_high = bits.high;
+        valid = true;
+    }
+    else if (entity && builder->entity_symbols)
+    {
+        IrSymbolId symbol = builder->entity_symbols[id.value];
+        IrType* row = ir_type_from_id(&builder->program->types, type);
+        bool static_local = entity->kind == C_ENTITY_LOCAL && symbol.value != IR_ID_UNDERLYING_INVALID;
+        if (entity->kind == C_ENTITY_OBJECT || static_local)
+        {
+            IrTypeId decay = !row && type.value == IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID
+                                 ? c_ir_sizeof_unlowered_array_decay(builder, entity->type) : IR_TYPE_ID_INVALID;
+            bool lvalue = row && row->layout.resolved;
+            valid = lvalue || decay.value != IR_ID_UNDERLYING_INVALID;
+            if (valid) *value = (CIrConstantValue){.type = lvalue ? type : decay, .symbol = symbol,
+                                                     .kind = lvalue ? C_IR_CONSTANT_LVALUE : C_IR_CONSTANT_POINTER};
+        }
+        else if (entity->kind == C_ENTITY_FUNCTION && type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrTypeId pointer = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+            valid = pointer.value != IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID;
+            if (valid) *value = (CIrConstantValue){.type = pointer, .symbol = symbol, .kind = C_IR_CONSTANT_POINTER, .function_designator = true};
+        }
+        else if ((entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) && type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            *value = (CIrConstantValue){.type = type, .kind = C_IR_CONSTANT_UNKNOWN};
+            valid = true;
+        }
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_node_fact(CIntegerIrBuilder* builder, CAstConstantFact fact, CIrConstantValue* value)
 {
     bool valid = fact.status == C_AST_CONSTANT_INTEGER || fact.status == C_AST_CONSTANT_FLOAT;
@@ -58676,7 +58754,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         u32 anchor = ast->tokens[node];
         CAstConstantFact fact = c_ast_facts_constant(builder->syntax_facts, node);
         u32 selected = c_ast_facts_selection(builder->syntax_facts, node);
-        bool fact_leaf = kind == C_AST_CALL || kind == C_AST_NUMBER || kind == C_AST_CHARACTER || kind == C_AST_IDENTIFIER ||
+        bool fact_leaf = kind == C_AST_NUMBER || kind == C_AST_CHARACTER || kind == C_AST_IDENTIFIER ||
                          kind == C_AST_BOOLEAN_CONSTANT;
         if (fact_leaf && c_ir_constant_node_fact(builder, fact, &value.real))
         {
@@ -58690,7 +58768,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         }
         else if (kind == C_AST_NUMBER)
         {
-            String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[anchor]);
+            String8 spelling = c_ir_source_spelling(&builder->preprocess, anchor);
             String8 real_spelling = {0};
             if (c_ir_number_imaginary_spelling(builder->arena, spelling, &real_spelling))
             {
@@ -58743,7 +58821,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         }
         else if (kind == C_AST_IDENTIFIER)
         {
-            admitted = c_ir_constant_identifier(builder, anchor, &value.real);
+            admitted = c_ir_constant_identifier_node(builder, node, &value.real);
             value.type = value.real.type;
         }
         else if (kind == C_AST_COMPOUND_LITERAL || kind == C_AST_CAST)
@@ -58754,12 +58832,31 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             admitted = c_ir_node_query_request(builder, key, &type) && type.success;
             IrType* target = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
             bool object = target && kind == C_AST_COMPOUND_LITERAL &&
-                          (target->kind == IR_TYPE_ARRAY || ((target->kind == IR_TYPE_STRUCT || target->kind == IR_TYPE_UNION) && !target->is_complex));
+                          (frame->view == C_IR_AST_CONSTANT_LVALUE || target->kind == IR_TYPE_ARRAY ||
+                           ((target->kind == IR_TYPE_STRUCT || target->kind == IR_TYPE_UNION) && !target->is_complex));
             if (object)
             {
                 value.real = c_ir_static_compound_literal_object_node(builder, node, type.result_type, builder->function != 0);
                 value.type = value.real.type;
                 admitted = value.real.kind == C_IR_CONSTANT_LVALUE;
+            }
+            else if (admitted && kind == C_AST_COMPOUND_LITERAL && target->is_complex &&
+                     ast->kinds[c_ast_child_at(ast, node, 1)] == C_AST_INITIALIZER_LIST &&
+                     c_ast_child_count(ast, c_ast_child_at(ast, node, 1)) == 2)
+            {
+                u32 initializer = c_ast_child_at(ast, node, 1);
+                CIrNodeQueryFrame real = {0};
+                CIrNodeQueryFrame imaginary = {0};
+                admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, initializer, 0), &real) && real.success && !real.constant.is_complex &&
+                           c_ir_constant_node_child(builder, c_ast_child_at(ast, initializer, 1), &imaginary) && imaginary.success && !imaginary.constant.is_complex;
+                if (admitted)
+                {
+                    value.type = type.result_type;
+                    value.element_type = target->element_type;
+                    admitted = c_ir_constant_cast(builder, &real.constant.real, value.element_type, &value.real) &&
+                               c_ir_constant_cast(builder, &imaginary.constant.real, value.element_type, &value.imaginary);
+                    value.is_complex = admitted;
+                }
             }
             else if (admitted)
             {
@@ -58784,7 +58881,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             bool tail = kind == C_AST_COMPOUND_STATEMENT;
             admitted = count && (tail || count == 1);
             CIrNodeQueryFrame child = {0};
-            admitted = admitted && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, tail ? count - 1 : 0), &child) && child.success;
+            admitted = admitted && c_ir_node_query_request(builder,
+                (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, tail ? count - 1 : 0), .kind = C_IR_NODE_QUERY_CONSTANT, .view = frame->view}, &child) && child.success;
             if (admitted) value = child.constant;
         }
         else if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE)
@@ -58806,7 +58904,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         else if (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX)
         {
             CIrNodeQueryFrame base = {0};
-            admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 0), &base) && base.success && !base.constant.is_complex;
+            admitted = c_ir_node_query_request(builder,
+                (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, 0), .kind = C_IR_NODE_QUERY_CONSTANT, .view = C_IR_AST_CONSTANT_LVALUE}, &base) &&
+                       base.success && !base.constant.is_complex;
             if (admitted)
             {
                 value = base.constant;
@@ -58820,7 +58920,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 {
                     if (kind == C_AST_MEMBER_ARROW) admitted = c_ir_constant_apply_unary(builder, C_CONDITIONAL_DEREFERENCE, IR_TYPE_ID_INVALID, &value.real);
                     admitted = admitted && c_ir_constant_lvalue_field(builder, &value.real,
-                        c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[anchor]));
+                        c_ir_source_spelling(&builder->preprocess, anchor));
                 }
                 value.type = value.real.type;
             }
@@ -58849,14 +58949,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             u32 callee = c_ast_child_at(ast, node, 0);
             u32 arguments = c_ast_child_count(ast, node) - 1;
             CSymbolBuiltin builtin = callee < ast->node_count && ast->kinds[callee] == C_AST_IDENTIFIER
-                                        ? c_ir_token_builtin_kind(builder, builder->preprocess.tokens[ast->tokens[callee]]) : C_SYMBOL_BUILTIN_NONE;
+                                        ? c_ir_constant_builtin_node(builder, callee) : C_SYMBOL_BUILTIN_NONE;
             CIrNodeQueryFrame operand = {0};
             bool probe = builtin == C_SYMBOL_BUILTIN_CONSTANT_P && arguments == 1;
             admitted = probe && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &operand);
             if (admitted)
             {
-                bool constant = operand.success && !operand.constant.is_complex && operand.constant.real.kind != C_IR_CONSTANT_UNKNOWN &&
-                                operand.constant.real.kind != C_IR_CONSTANT_INVALID;
+                bool constant = operand.success && operand.constant.real.kind != C_IR_CONSTANT_UNKNOWN && operand.constant.real.kind != C_IR_CONSTANT_INVALID &&
+                                (!operand.constant.is_complex || (operand.constant.imaginary.kind != C_IR_CONSTANT_UNKNOWN &&
+                                                                  operand.constant.imaginary.kind != C_IR_CONSTANT_INVALID));
                 value.real = c_ir_constant_integer(builder->s32_type, constant);
                 value.type = value.real.type;
             }
@@ -58881,9 +58982,69 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                     }
                 }
             }
+            else if (builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P || builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE)
+            {
+                admitted = c_ir_constant_node_fact(builder, fact, &value.real);
+                value.type = value.real.type;
+            }
+            else if (builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR && arguments == 3)
+            {
+                CIrNodeQueryFrame condition = {0};
+                CIrNodeQueryFrame chosen = {0};
+                admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &condition) && condition.success &&
+                           !condition.constant.is_complex && condition.constant.real.kind == C_IR_CONSTANT_INTEGER;
+                if (admitted)
+                {
+                    bool truth = !ir_integer_is_zero((IrInteger){.low = condition.constant.real.integer, .high = condition.constant.real.integer_high});
+                    admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, truth ? 2 : 3), &chosen) && chosen.success;
+                    if (admitted) value = chosen.constant;
+                }
+            }
+            else if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
+            {
+                CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(builder->target,
+                    c_ir_source_spelling(&builder->preprocess, ast->tokens[callee]));
+                CIrConstantValue operands[2] = {0};
+                IrTypeId type = c_ir_builder_scalar_type(builder, transform.type);
+                bool unknown = false;
+                admitted = arguments == transform.argument_count && arguments <= BUSTER_ARRAY_LENGTH(operands) && type.value != IR_ID_UNDERLYING_INVALID;
+                for (u32 argument = 0; admitted && argument < arguments; argument += 1)
+                {
+                    CIrNodeQueryFrame child = {0};
+                    admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, argument + 1), &child) && child.success && !child.constant.is_complex;
+                    IrType* row = admitted ? ir_type_from_id(&builder->program->types, child.constant.real.type) : 0;
+                    admitted = admitted && row && (c_ir_constant_type_is_integer(row) || row->kind == IR_TYPE_FLOAT) &&
+                               c_ir_constant_cast(builder, &child.constant.real, type, operands + argument);
+                    unknown |= admitted && operands[argument].kind == C_IR_CONSTANT_UNKNOWN;
+                }
+                if (admitted)
+                {
+                    value.real = unknown ? (CIrConstantValue){.type = type, .kind = C_IR_CONSTANT_UNKNOWN}
+                        : c_ir_constant_integer(type, c_integer_transform_bits(transform, operands[0].integer, operands[1].integer));
+                    value.type = type;
+                }
+            }
+            else if (builtin != C_SYMBOL_BUILTIN_NONE && arguments == 1 &&
+                     c_semantic_integer_builtin_fold_kind(builder->target, builtin, c_ir_source_spelling(&builder->preprocess, ast->tokens[callee])) != C_TYPE_INVALID)
+            {
+                String8 spelling = c_ir_source_spelling(&builder->preprocess, ast->tokens[callee]);
+                CTypeKind fold_kind = c_semantic_integer_builtin_fold_kind(builder->target, builtin, spelling);
+                IrTypeId type = c_ir_builder_scalar_type(builder, fold_kind);
+                IrType* row = ir_type_from_id(&builder->program->types, type);
+                CIrConstantValue converted = {0};
+                u64 result = 0;
+                admitted = row && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &operand) && operand.success && !operand.constant.is_complex &&
+                           operand.constant.real.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_cast(builder, &operand.constant.real, type, &converted) &&
+                           converted.kind == C_IR_CONSTANT_INTEGER && c_semantic_integer_builtin_fold(builtin, row->bit_width, converted.integer, &result);
+                if (admitted)
+                {
+                    value.real = c_ir_constant_integer(builder->s32_type, result);
+                    value.type = value.real.type;
+                }
+            }
             else if (!builder->queries->has_request && callee < ast->node_count && ast->kinds[callee] == C_AST_IDENTIFIER)
             {
-                CEntityId entity = c_ir_constant_entity_at(builder, ast->tokens[callee]);
+                CEntityId entity = c_ir_constant_entity_node(builder, callee);
                 CEntity const* function = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
                 IrTypeId type = function && function->kind == C_ENTITY_FUNCTION && function->type.value < builder->parse.type_count
                                     ? builder->c_type_ir_map[function->type.value] : IR_TYPE_ID_INVALID;
@@ -58903,11 +59064,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             CIrNodeQueryFrame first = {0};
             CIrNodeQueryFrame second = {0};
             admitted = operation != C_CONDITIONAL_OPERATOR_COUNT && (count == 1 || count == 2) &&
-                       c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 0), &first) && first.success;
+                       c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, 0), .kind = C_IR_NODE_QUERY_CONSTANT,
+                            .view = operation == C_CONDITIONAL_ADDRESS_OF ? C_IR_AST_CONSTANT_LVALUE : C_IR_AST_TYPE_STRICT}, &first) && first.success;
             if (admitted && count == 1)
             {
                 value = first.constant;
-                if (value.is_complex)
+                if (kind == C_AST_REAL || kind == C_AST_IMAG)
+                {
+                    value.real = kind == C_AST_REAL ? first.constant.real : first.constant.is_complex ? first.constant.imaginary
+                        : (CIrConstantValue){.type = first.constant.type, .kind = first.constant.real.kind};
+                    value.type = value.real.type;
+                    value.is_complex = false;
+                }
+                else if (value.is_complex)
                     admitted = c_ir_constant_complex_initializer_unary(builder, operation, &first.constant, &value);
                 else
                 {
