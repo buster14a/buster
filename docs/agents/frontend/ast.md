@@ -453,9 +453,19 @@ key. Their child tasks follow AST topology and the finished facts; sparse type
 recipes are materialized without appending a semantic model row. Private graph
 and projection state survives a child yield and is rewound only after its root
 finishes. Canonical IR stores the resulting IR types, never the node or state.
-The prediction entrypoint's remaining range boundary locates its retained node;
-the node task itself reads no expression grammar. The strict and promoted
-range entrypoints remain migration adapters until their callers carry nodes.
+The remaining range boundaries locate one retained node before querying it.
+Operand, prediction, conditional-type and null-constant range frame families
+and the operand precedence/postfix walkers have been removed. Conditional
+selection merges its already projected branches in private node-root state;
+it requests only the promoted or null-constant children the merge needs.
+Local identifiers use their retained entity binding and the existing local
+VLA source view, preserving the parameter's adjusted ABI pointer.
+
+`c_test_expression_type_projection` checks all three views against verified
+legacy shapes, including qualifiers, nested pointer/function types, bit-field
+conditional prediction and the leading-compound postfix method. Its test-owned
+provenance snapshot poisons every token kind and punctuator before the node
+query. The old expression walkers are absent from test builds too.
 
 ## Layouts
 
@@ -2418,8 +2428,8 @@ figures are approximate:
 | The constant evaluator and array bounds | 14 | 1,993 | 54 |
 | Declarations, declarators and labeled-local predeclaration | 31 | 1,873 | 103 |
 
-`c_ir_query_execute` runs a frame stack over twelve kinds, each keyed by a
-token range. A frame that needs a sub-answer raises a request, suspends
+At that baseline, `c_ir_query_execute` ran a frame stack over twelve kinds,
+each keyed by a token range. A frame that needs a sub-answer raises a request, suspends
 through `CIrQueryResume` and resumes past its finished prefix. Answers are
 memoized by key (`c_ir_query_key_hash`). Every kind rediscovers C grammar
 the semantic phase has already parsed:
