@@ -32198,7 +32198,6 @@ BUSTER_C_INTERNAL bool c_ir_static_postfix_type(CIntegerIrBuilder* builder, IrTy
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
-BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
 {
@@ -36569,89 +36568,6 @@ BUSTER_C_INTERNAL u32 c_ir_root_first_token(CIntegerIrBuilder* builder, u32 node
 {
     u32 found = c_ir_root_first_node(builder, node, which);
     return found != C_AST_NODE_INVALID ? builder->syntax_tree->tokens[found] : UINT32_MAX;
-}
-
-// The trailing expression statement of a statement-expression body, which is
-// what gives `({ ... })` its type and its value (GNU C: the last statement must
-// be an expression statement, and the construct is void otherwise). `open` and
-// `close` are the body's own braces.
-//
-// The walk is over the body's top-level statements only: a nested `{ ... }`,
-// a parenthesized group and a bracketed one all raise the depth, so a `;`
-// inside any of them belongs to a statement this walk never sees. A statement
-// that ends at a depth-0 `}` rather than at a `;` -- a compound statement, an
-// `if`, a loop -- is not an expression statement, and neither is a declaration
-// or a `typedef`, which is why the tail is rejected when it starts with a type
-// word or a typedef name. False means the body has no trailing expression
-// statement, which is the void answer.
-BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out)
-{
-    u32 statement_start = open + 1;
-    u32 tail_start = 0;
-    u32 tail_end = 0;
-    u32 depth = 0;
-    bool tail_is_expression = false;
-    for (u32 index = open + 1; index < close; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            depth -= depth != 0;
-            if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                // A block closed at the top level ends a statement that is not
-                // an expression statement, and the next one starts after it.
-                statement_start = index + 1;
-                tail_is_expression = false;
-            }
-        }
-        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-        {
-            tail_start = statement_start;
-            tail_end = index;
-            tail_is_expression = true;
-            statement_start = index + 1;
-        }
-    }
-    while (tail_start < tail_end && c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
-    {
-        tail_start += 1;
-    }
-    bool result = tail_is_expression && tail_start < tail_end && statement_start >= close;
-    if (result)
-    {
-        CToken first = builder->preprocess.tokens[tail_start];
-        CEntityId first_entity = c_ir_identifier_entity(builder, tail_start);
-#if BUSTER_REFERENCE_CHECKS
-        // The type-word test below reads the symbol's word bits; the
-        // spelling ladder it replaces is the reference.
-        if (first.kind == C_TOKEN_IDENTIFIER)
-        {
-            BUSTER_CHECK(c_parse_type_word_for_dialect_token(builder->preprocess, first) ==
-                         c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect));
-        }
-#endif
-        bool declaration = first.kind == C_TOKEN_IDENTIFIER &&
-                           (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF) ||
-                            c_parse_type_word_for_dialect_token(builder->preprocess, first) ||
-                            (first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF) ||
-                            (first_entity.value == C_ID_UNDERLYING_INVALID &&
-                             c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder), first)));
-        result = !declaration;
-    }
-    if (result)
-    {
-        *start_out = tail_start;
-        *end_out = tail_end;
-    }
-
-    return result;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
