@@ -3887,6 +3887,7 @@ struct CLayoutTypedQuery
 {
     CParseLayoutContext* owner;
     CParseResult original;
+    CParseResult owner_model;
     Arena* arena;
     CParseBodyScratchModel storage_guard;
     CLayoutTypedTask* tasks;
@@ -3941,6 +3942,85 @@ BUSTER_C_INTERNAL void* c_parse_layout_typed_allocate(CLayoutTypedQuery* query, 
     return pointer;
 }
 
+// Capture rows, not just their headers: the syntax checkpoint and value
+// walk reuse fixed-buffer slots, and machine rollback restores existing type
+// fields. Each saved view therefore owns every mutable semantic/binding row.
+// Fixed tables get only this expression's bounded append space; growable TYPE
+// tables copy on first append in the protected reader.
+BUSTER_C_INTERNAL void* c_parse_layout_typed_copy(CLayoutTypedQuery* query, void const* rows, u64 element_size,
+                                                 u32 count, u32 capacity, u64 alignment)
+{
+    void* copy = capacity && rows ? c_parse_layout_typed_allocate(query, element_size, capacity, alignment) : 0;
+    if (copy)
+    {
+        if (count) memcpy(copy, rows, element_size * count);
+        if (capacity > count) memset((u8*)copy + element_size * count, 0, element_size * (capacity - count));
+    }
+    return copy;
+}
+
+BUSTER_C_INTERNAL void c_parse_layout_typed_snapshot(CLayoutTypedQuery* query, CParseResult* model, u32 start, u32 end)
+{
+    u64 append = (u64)(end - start) + 16;
+#define C_PARSE_LAYOUT_TYPED_COPY(field, count_field, capacity_field, fixed) \
+    { \
+        u32 count = model->count_field; \
+        u32 capacity = (fixed) ? BUSTER_MAX(count, (u32)BUSTER_MIN((u64)model->capacity_field, (u64)count + append)) : count; \
+        model->field = c_parse_layout_typed_copy(query, model->field, sizeof(*model->field), count, capacity, BUSTER_ALIGN_OF(u64)); \
+        model->capacity_field = capacity; \
+    }
+    C_PARSE_LAYOUT_TYPED_COPY(types, type_count, type_capacity, false);
+    C_PARSE_LAYOUT_TYPED_COPY(array_bounds, array_bound_count, array_bound_capacity, false);
+    C_PARSE_LAYOUT_TYPED_COPY(type_alignments, type_alignment_count, type_alignment_capacity, false);
+    C_PARSE_LAYOUT_TYPED_COPY(noreturn_function_types, noreturn_function_type_count, noreturn_function_type_capacity, false);
+    C_PARSE_LAYOUT_TYPED_COPY(deferred_bit_field_width_diagnostics, deferred_bit_field_width_diagnostic_count,
+                              deferred_bit_field_width_diagnostic_capacity, false);
+    C_PARSE_LAYOUT_TYPED_COPY(declarations, declaration_count, declaration_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(parameters, parameter_count, parameter_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(members, member_count, member_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(enum_members, enum_member_count, enum_member_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(alignments, alignment_count, alignment_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(aggregate_attributes, aggregate_attribute_count, aggregate_attribute_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(entities, entity_count, entity_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(scopes, scope_count, scope_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(identifier_uses, identifier_use_count, identifier_use_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(diagnostics, diagnostic_count, diagnostic_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(warnings, warning_count, warning_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(deferred_static_asserts, deferred_static_assert_count, deferred_static_assert_capacity, true);
+    C_PARSE_LAYOUT_TYPED_COPY(binding_undo, binding_undo_count, binding_undo_capacity, true);
+#undef C_PARSE_LAYOUT_TYPED_COPY
+#define C_PARSE_LAYOUT_TYPED_MAP(field, count) \
+    model->field = c_parse_layout_typed_copy(query, model->field, sizeof(*model->field), (count), (count), BUSTER_ALIGN_OF(u64))
+    C_PARSE_LAYOUT_TYPED_MAP(entity_lookup_buckets, model->entity_lookup_bucket_count);
+    C_PARSE_LAYOUT_TYPED_MAP(typedef_lookup_buckets, model->entity_lookup_bucket_count);
+    C_PARSE_LAYOUT_TYPED_MAP(name_lookup_buckets, model->entity_lookup_bucket_count);
+    C_PARSE_LAYOUT_TYPED_MAP(binding_by_symbol, model->binding_capacity);
+    C_PARSE_LAYOUT_TYPED_MAP(symbol_bound_words, (model->binding_capacity + 63ull) / 64);
+    C_PARSE_LAYOUT_TYPED_MAP(identifier_use_by_token_plus_one, model->identifier_use_by_token_capacity);
+    C_PARSE_LAYOUT_TYPED_MAP(warning_tokens, model->warning_capacity);
+#undef C_PARSE_LAYOUT_TYPED_MAP
+    // TYPE recomputes identity answers; no NORMAL-mode private row is retained.
+    model->type_identity_queries = 0;
+    model->type_identity_query_count = 0;
+    model->type_identity_query_capacity = 0;
+#if BUSTER_INCLUDE_TESTS
+    model->sizeof_operand_types = c_parse_layout_typed_copy(query, model->sizeof_operand_types, sizeof(*model->sizeof_operand_types),
+        model->sizeof_operand_type_count, model->sizeof_operand_type_count, BUSTER_ALIGN_OF(CSizeofOperandType));
+    model->sizeof_operand_type_capacity = model->sizeof_operand_type_count;
+#endif
+    // This is the existing authoritative scope-and-symbol chain fallback.
+    // A saved view owns its scopes/entities/buckets instead of borrowing the
+    // validator's mutable cursor path or undo log.
+    model->scope_cursor = 0;
+    model->scope_children_offsets = 0;
+    model->scope_children = 0;
+    model->declarations_by_entity_offsets = 0;
+    model->declarations_by_entity = 0;
+    model->bfloat16_builtin_calls = c_parse_layout_typed_copy(query, model->bfloat16_builtin_calls, sizeof(u32),
+        model->bfloat16_builtin_call_count, model->bfloat16_builtin_call_count, BUSTER_ALIGN_OF(u32));
+    model->bfloat16_builtin_call_capacity = model->bfloat16_builtin_call_count;
+}
+
 // Captured result tables are kept alive by the worker's retained arenas.
 // These three headers/arrays are the exceptions: the protected reader places
 // them on its C stack. Give the continuation its own copy before unwinding.
@@ -3975,9 +4055,18 @@ BUSTER_C_INTERNAL u32 c_parse_layout_typed_task(CLayoutTypedQuery* query, CParse
             task->scope_start = model->scopes[scope.value].token_start;
             task->scope_end = model->scopes[scope.value].token_end;
         }
+        c_parse_layout_typed_snapshot(query, &task->model, start, end);
         if (model->position_index)
         {
             task->positions = *model->position_index;
+            task->positions.type_identity_positions = c_parse_layout_typed_copy(query, model->position_index->type_identity_positions,
+                sizeof(u32), task->positions.type_identity_count, task->positions.type_identity_count, BUSTER_ALIGN_OF(u32));
+            task->positions.type_identity_rows_plus_one = c_parse_layout_typed_copy(query, model->position_index->type_identity_rows_plus_one,
+                sizeof(u32), task->positions.type_identity_count, task->positions.type_identity_count, BUSTER_ALIGN_OF(u32));
+            task->positions.type_identity_capacity = task->positions.type_identity_count;
+            task->positions.typeof_positions = c_parse_layout_typed_copy(query, model->position_index->typeof_positions,
+                sizeof(u32), task->positions.typeof_count, task->positions.typeof_count, BUSTER_ALIGN_OF(u32));
+            task->positions.typeof_capacity = task->positions.typeof_count;
             task->model.position_index = &task->positions;
         }
         if (model->expression_scalar_types)
@@ -4015,21 +4104,37 @@ BUSTER_C_INTERNAL bool c_parse_layout_typed_retain(CLayoutTypedQuery* query, Are
 BUSTER_C_INTERNAL bool c_parse_layout_typed_original(CLayoutTypedQuery const* query, CParseResult const* model)
 {
     CParseResult const* original = &query->original;
+    CParseResult const* identity = &query->owner_model;
     CParseResult const* live = query->owner->result;
     u64 generation = 0;
     bool generation_available = c_parse_lookup_generation(live, &generation);
     bool same = generation_available == query->generation_available && generation == query->lookup_generation &&
-                live->types == original->types && live->type_count == original->type_count &&
-                live->members == original->members && live->member_count == original->member_count &&
-                live->entities == original->entities && live->entity_count == original->entity_count &&
-                live->scopes == original->scopes && live->scope_count == original->scope_count &&
-                live->array_bounds == original->array_bounds && live->array_bound_count == original->array_bound_count &&
-                live->alignments == original->alignments && live->alignment_count == original->alignment_count &&
-                live->type_alignments == original->type_alignments && live->type_alignment_count == original->type_alignment_count &&
-                model->scope_cursor == original->scope_cursor;
+                live->types == identity->types && live->type_count == identity->type_count &&
+                live->members == identity->members && live->member_count == identity->member_count &&
+                live->entities == identity->entities && live->entity_count == identity->entity_count &&
+                live->scopes == identity->scopes && live->scope_count == identity->scope_count &&
+                live->array_bounds == identity->array_bounds && live->array_bound_count == identity->array_bound_count &&
+                live->alignments == identity->alignments && live->alignment_count == identity->alignment_count &&
+                live->type_alignments == identity->type_alignments && live->type_alignment_count == identity->type_alignment_count &&
+                model->scope_cursor == identity->scope_cursor;
 #define C_PARSE_LAYOUT_TYPED_PREFIX(field, count_field) \
     same = same && model->count_field >= original->count_field && \
            (!original->count_field || memcmp(model->field, original->field, sizeof(*original->field) * original->count_field) == 0)
+    // The owning graph must still equal the frozen original rows as well.
+    CParseResult const* private_model = model;
+    model = live;
+    C_PARSE_LAYOUT_TYPED_PREFIX(types, type_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(members, member_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(enum_members, enum_member_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(parameters, parameter_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(entities, entity_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(scopes, scope_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(declarations, declaration_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(array_bounds, array_bound_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(alignments, alignment_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(type_alignments, type_alignment_count);
+    C_PARSE_LAYOUT_TYPED_PREFIX(aggregate_attributes, aggregate_attribute_count);
+    model = private_model;
     C_PARSE_LAYOUT_TYPED_PREFIX(types, type_count);
     C_PARSE_LAYOUT_TYPED_PREFIX(members, member_count);
     C_PARSE_LAYOUT_TYPED_PREFIX(enum_members, enum_member_count);
@@ -4131,7 +4236,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutC
     else
     {
         CLayoutTypedQuery query = {
-            .owner = context, .original = *context->result, .current = C_PARSE_LAYOUT_NONE, .missing = C_PARSE_LAYOUT_NONE,
+            .owner = context, .owner_model = *context->result, .current = C_PARSE_LAYOUT_NONE, .missing = C_PARSE_LAYOUT_NONE,
         };
         query.generation_available = c_parse_lookup_generation(context->result, &query.lookup_generation);
         query.arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
@@ -4142,6 +4247,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutC
             c_parse_body_scratch_model_end(enclosing);
             CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, start);
             query.current = c_parse_layout_typed_task(&query, context->result, scope, start, end, C_PARSE_LAYOUT_NONE);
+            if (query.count) query.original = query.tasks[0].model;
             c_parse_layout_typed_query = &query;
             while (query.current != C_PARSE_LAYOUT_NONE && !query.refused && !query.blocker)
             {
