@@ -4,7 +4,7 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
-## Transparent-union pointer arguments
+## Array parameter expression types
 
 An identifier denoting an array parameter has its adjusted pointer type in
 expression queries, including under address-of. `char *argv[]` therefore
@@ -17,6 +17,8 @@ parameter's bracket `const` are retained. The registered
 conversions in semantic-only analysis and both canonical frontend forms;
 `c_test_array_parameter_address_runtime` checks pointer-object mutation and
 multidimensional parameters with both allocators and tree/query routes (#4173).
+
+## Transparent-union pointer arguments
 
 A pointer argument matches a GNU transparent-union member through the ordinary
 `c_parse_assignment_conversion_message` rule. Compare unqualified pointee

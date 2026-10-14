@@ -7937,7 +7937,7 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
     return place;
 }
 
-// A parameter keeps its declared array spelling in its entity type, so a
+// A parameter keeps its declared array spelling in its entity type, so
 // bound/VLA readers retain `int a[4]` or `char *argv[]` as an array. Expression
 // queries use c_parse_expression_entity_type. C17 6.7.6.3p7
 // adjusts it to a pointer to the element, qualified by what the brackets
