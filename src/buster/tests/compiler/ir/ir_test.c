@@ -3226,6 +3226,213 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
     return result;
 }
 
+// Concatenates pieces[i] repeats[i] times.
+BUSTER_GLOBAL_LOCAL String8 ir_test_inline_repeat_source(Arena* arena, String8 const* pieces, u32 const* repeats, u32 count)
+{
+    u64 length = 0;
+    for (u32 index = 0; index < count; index += 1) length += pieces[index].length * repeats[index];
+    u8* bytes = arena_allocate(arena, u8, length ? length : 1u);
+    u64 cursor = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        for (u32 repeat = 0; repeat < repeats[index]; repeat += 1)
+        {
+            memcpy(bytes + cursor, pieces[index].pointer, pieces[index].length);
+            cursor += pieces[index].length;
+        }
+    }
+    String8 result = {.pointer = (char8*)bytes, .length = cursor};
+    return result;
+}
+
+// Blocks in the module carrying a local-value snapshot (IrBlock.local_values).
+BUSTER_GLOBAL_LOCAL u64 ir_test_inline_snapshot_blocks(IrModule* module)
+{
+    u64 result = 0;
+    for (u32 function = 0; function < module->function_count; function += 1)
+    {
+        IrFunction* row = module->functions + function;
+        for (u32 block = 0; block < row->block_count; block += 1) result += row->blocks[block].local_values != 0;
+    }
+    return result;
+}
+
+// Nested required expansion (#4050): a caller splices `outer_sites` copies of
+// a middle function that itself expanded `middle_sites` leaf copies. The
+// expanded middle's size is exact before the pass: each splice adds the
+// callee's blocks plus a continuation and all of its locals.
+typedef struct IrTestNestedRequired IrTestNestedRequired;
+struct IrTestNestedRequired
+{
+    u64 caller_blocks;
+    u64 caller_locals;
+    u64 middle_blocks;
+    u64 middle_locals;
+    u32 calls;
+    bool found;
+};
+
+BUSTER_GLOBAL_LOCAL IrTestNestedRequired ir_test_inline_nested_shape(IrProgram* program, IrModule* module, String8 caller_name,
+                                                                     String8 middle_name, String8 leaf_name, u32 middle_sites)
+{
+    IrTestNestedRequired result = {0};
+    IrFunction* caller = ir_test_inline_find_function(module, caller_name);
+    IrFunction* middle = ir_test_inline_find_function(module, middle_name);
+    IrFunction* leaf = ir_test_inline_find_function(module, leaf_name);
+    result.found = caller && middle && leaf && ir_test_direct_call_count(program, middle, leaf_name) == middle_sites;
+    if (result.found)
+    {
+        result.caller_blocks = caller->block_count;
+        result.caller_locals = caller->local_count;
+        result.middle_blocks = middle->block_count + (u64)middle_sites * (leaf->block_count + 1u);
+        result.middle_locals = middle->local_count + (u64)middle_sites * leaf->local_count;
+        result.calls = ir_test_direct_call_count(program, caller, middle_name);
+    }
+    return result;
+}
+
+// The previous reservation model charged a snapshot of every caller block at
+// the final local count. Once the caller's planned sites all fit, its charge
+// had reached at least this many snapshot slots; canonical C blocks carry no
+// snapshot, so none of them is retained or filled.
+BUSTER_GLOBAL_LOCAL u64 ir_test_inline_every_block_snapshot_slots(IrTestNestedRequired shape)
+{
+    u64 blocks = shape.caller_blocks + shape.calls * (shape.middle_blocks + 1u);
+    u64 locals = shape.caller_locals + shape.calls * shape.middle_locals;
+    return blocks * locals;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_snapshot_budget(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+
+    // ff_h264_filter_mb_fast shape: a small caller expands a middle function
+    // twice, after the middle expanded 80 branchy leaves with locals. The
+    // every-block model charged blocks x locals work for the copies.
+    enum { work_middle_sites = 80, work_outer_sites = 2 };
+    String8 work_pieces[] = {
+        S8("static inline __attribute__((always_inline)) void snapshot_leaf(unsigned char* p, int s, int q, int a, int b)\n{\n"),
+        S8("    { int t = p[0] + q; if (t > a) p[0] = (unsigned char)(t - b); p += s; }\n"),
+        S8("}\nstatic inline __attribute__((always_inline)) void snapshot_middle(unsigned char* y, int s, int q, int a, int b)\n{\n"),
+        S8("    snapshot_leaf(y, s, q, a, b);\n    y += 4;\n"),
+        S8("}\nvoid snapshot_outer(unsigned char* y, int s, int q, int a, int b, int shift)\n{\n"
+           "    if (shift) snapshot_middle(y + 1, s, q, a, b);\n    else snapshot_middle(y, s, q, a, b);\n}\n"),
+    };
+    u32 work_repeats[] = {1, 6, 1, work_middle_sites, 1};
+    String8 work_source = ir_test_inline_repeat_source(arena, work_pieces, work_repeats, BUSTER_ARRAY_LENGTH(work_pieces));
+    IrProgram* work_program = ir_test_inline_lower(arena, work_source, false);
+    if (BUSTER_REQUIRE(arguments, work_program != 0))
+    {
+        IrModule* module = work_program->modules;
+        work_program->fast_passes = 0;
+        work_program->inline_options = (IrInlineOptions){0};
+        IrTestNestedRequired shape = ir_test_inline_nested_shape(work_program, module, S8("snapshot_outer"),
+                                                                 S8("snapshot_middle"), S8("snapshot_leaf"), work_middle_sites);
+        BUSTER_TEST(arguments, shape.found && shape.calls == work_outer_sites);
+        BUSTER_TEST(arguments, ir_test_inline_snapshot_blocks(module) == 0);
+        // One snapshot slot was one work unit. Even after the outer caller's
+        // relocation allowance, the phantom fill alone exceeded the work cap.
+        u64 phantom = ir_test_inline_every_block_snapshot_slots(shape);
+        u64 old_allowance_bound = (shape.caller_blocks + 2u) * (shape.caller_locals + 4u) + 4096u;
+        BUSTER_TEST(arguments, phantom > IR_FAST_WORK_BUDGET + old_allowance_bound);
+        IrValidationResult prepared = ir_prepare_canonical_module(work_program, module, false);
+        if (prepared.error != IR_VALIDATION_NONE)
+        {
+            arguments->show(arguments, S8("snapshot work refusal: reason={u32} demand={u64} limit={u64}\n"),
+                (u32)module->inlining.required_budget_reason, module->inlining.required_budget_demand,
+                module->inlining.required_budget_limit);
+        }
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, module->inline_complete);
+        BUSTER_TEST(arguments, module->inlining.required_budget_reason == IR_INLINE_BUDGET_NONE);
+        BUSTER_TEST(arguments, module->inlining.always_inlined == work_middle_sites + work_outer_sites);
+        BUSTER_TEST(arguments, ir_test_inline_snapshot_blocks(module) == 0);
+        IrFunction* outer = ir_test_inline_find_function(module, S8("snapshot_outer"));
+        BUSTER_TEST(arguments, outer && ir_test_direct_call_count(work_program, outer, S8("snapshot_middle")) == 0);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(work_program, module).error == IR_VALIDATION_NONE);
+    }
+
+    // ff_h264_decode_mb_cabac shape: a caller with hundreds of blocks expands
+    // a middle function three times. The every-block model charged a
+    // snapshot's bytes per block and local.
+    enum { storage_middle_sites = 30, storage_outer_sites = 3 };
+    String8 storage_pieces[] = {
+        S8("static inline __attribute__((always_inline)) void residual_leaf(short* block, const unsigned char* ctx, int q)\n{\n"),
+        S8("    { int c = *ctx++; if (c & 1) *block = (short)(c * q); block += 1; }\n"),
+        S8("}\nstatic inline __attribute__((always_inline)) void residual_middle(short* block, const unsigned char* ctx, int q, int cbp)\n{\n"),
+        S8("    if (cbp & 1) residual_leaf(block, ctx, q);\n    block += 16;\n    cbp >>= 1;\n"),
+        S8("}\nint residual_caller(short* block, const unsigned char* ctx, int q, int cbp, int mode)\n{\n    int r = 0;\n"),
+        S8("    { int v = *ctx++ + mode; if (v > q) r += v; }\n"),
+        S8("    residual_middle(block, ctx, q, cbp);\n    if (mode & 1)\n    {\n"
+           "        residual_middle(block + 1, ctx, q, cbp);\n        residual_middle(block + 2, ctx, q, cbp);\n    }\n"
+           "    return r;\n}\n"),
+    };
+    u32 storage_repeats[] = {1, 8, 1, storage_middle_sites, 1, 200, 1};
+    String8 storage_source = ir_test_inline_repeat_source(arena, storage_pieces, storage_repeats, BUSTER_ARRAY_LENGTH(storage_pieces));
+    IrProgram* storage_program = ir_test_inline_lower(arena, storage_source, false);
+    if (BUSTER_REQUIRE(arguments, storage_program != 0))
+    {
+        IrModule* module = storage_program->modules;
+        storage_program->fast_passes = 0;
+        storage_program->inline_options = (IrInlineOptions){0};
+        IrTestNestedRequired shape = ir_test_inline_nested_shape(storage_program, module, S8("residual_caller"),
+                                                                 S8("residual_middle"), S8("residual_leaf"), storage_middle_sites);
+        BUSTER_TEST(arguments, shape.found && shape.calls == storage_outer_sites);
+        BUSTER_TEST(arguments, ir_test_inline_snapshot_blocks(module) == 0);
+        // The every-block model charged these phantom bytes on top of the real
+        // splice storage, and this caller then refused with budget_cause=storage
+        // (demand 20,679,060 against 17,914,669). The phantom alone is most of
+        // the unchanged cap; canonical blocks retain none of it.
+        u64 phantom_bytes = ir_test_inline_every_block_snapshot_slots(shape) * sizeof(IrValueId);
+        BUSTER_TEST(arguments, phantom_bytes > IR_FAST_SCRATCH_BUDGET / 2u);
+        IrValidationResult prepared = ir_prepare_canonical_module(storage_program, module, false);
+        if (prepared.error != IR_VALIDATION_NONE)
+        {
+            arguments->show(arguments, S8("snapshot storage refusal: reason={u32} demand={u64} limit={u64}\n"),
+                (u32)module->inlining.required_budget_reason, module->inlining.required_budget_demand,
+                module->inlining.required_budget_limit);
+        }
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, module->inline_complete);
+        BUSTER_TEST(arguments, module->inlining.required_budget_reason == IR_INLINE_BUDGET_NONE);
+        BUSTER_TEST(arguments, module->inlining.always_inlined == storage_middle_sites + storage_outer_sites);
+        BUSTER_TEST(arguments, ir_test_inline_snapshot_blocks(module) == 0);
+        IrFunction* caller = ir_test_inline_find_function(module, S8("residual_caller"));
+        BUSTER_TEST(arguments, caller && ir_test_direct_call_count(storage_program, caller, S8("residual_middle")) == 0);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(storage_program, module).error == IR_VALIDATION_NONE);
+    }
+
+    // Removing the phantom does not admit a genuinely large nested expansion:
+    // sixteen copies of a 300-leaf middle still refuse under the unchanged caps.
+    enum { huge_middle_sites = 300, huge_outer_sites = 16 };
+    String8 huge_pieces[] = {
+        work_pieces[0], work_pieces[1], work_pieces[2], work_pieces[3],
+        S8("}\nvoid snapshot_outer(unsigned char* y, int s, int q, int a, int b, int shift)\n{\n"),
+        S8("    if (shift == q) snapshot_middle(y, s, q, a, b);\n    y += 1;\n    q += 1;\n"),
+        S8("}\n"),
+    };
+    u32 huge_repeats[] = {1, 6, 1, huge_middle_sites, 1, huge_outer_sites, 1};
+    String8 huge_source = ir_test_inline_repeat_source(arena, huge_pieces, huge_repeats, BUSTER_ARRAY_LENGTH(huge_pieces));
+    IrProgram* huge_program = ir_test_inline_lower(arena, huge_source, false);
+    if (BUSTER_REQUIRE(arguments, huge_program != 0))
+    {
+        IrModule* module = huge_program->modules;
+        huge_program->fast_passes = 0;
+        huge_program->inline_options = (IrInlineOptions){0};
+        IrValidationResult refused = ir_prepare_canonical_module(huge_program, module, false);
+        IrFunction* outer = ir_test_inline_find_function(module, S8("snapshot_outer"));
+        BUSTER_TEST(arguments, refused.error == IR_VALIDATION_INLINE_REQUIRED);
+        BUSTER_TEST(arguments, !module->inline_complete);
+        BUSTER_TEST(arguments, module->inlining.required_budget_reason != IR_INLINE_BUDGET_NONE);
+        BUSTER_TEST(arguments, module->inlining.required_budget_demand > module->inlining.required_budget_limit);
+        BUSTER_TEST(arguments, outer && ir_test_direct_call_count(huge_program, outer, S8("snapshot_middle")) == huge_outer_sites);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 typedef struct IrI386AbiTestCase IrI386AbiTestCase;
 struct IrI386AbiTestCase
 {
@@ -3378,6 +3585,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, ir_test_type_from_id_bounds);
     BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
     BUSTER_TEST_FIXTURE(arguments, ir_test_inline_required_work_budget);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_inline_required_snapshot_budget);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_paths);

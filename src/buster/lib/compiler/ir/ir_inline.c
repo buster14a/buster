@@ -61,23 +61,37 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_storage_multiply(u64 left, u64 right)
     return left && right > UINT64_MAX / left ? UINT64_MAX : left * right;
 }
 
+// Blocks that carry a local-value snapshot (IrBlock.local_values). Canonical
+// construction attaches none, and a splice gives a cloned block one only when
+// its callee block or call block has one (ir_inline_cfg_local_values), so the
+// reservation below charges snapshots for these blocks rather than every block.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_snapshot_blocks(IrFunction const* function)
+{
+    u64 result = 0;
+    for (u32 block = 0; block < function->block_count; block += 1) result += function->blocks[block].local_values != 0;
+    return result;
+}
+
 // Retained bytes of a caller's splice reservation (IrInlineCfgReserve) once
-// its planned sites add `added_blocks` blocks and the other counts: snapshots
-// widened once to the final local count, the place/memory arrays, debug rows
-// when sites add any, and the single predecessor rebuild over `edges`. A
-// planned site is charged the increase over the previous planned total, so a
-// caller pays for widening once instead of once per site.
-BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_bytes(IrFunction const* caller, u64 added_blocks, u64 added_locals,
-                                                u64 added_debug_locals, u64 added_debug_scopes, u64 edges)
+// its planned sites add `added_blocks` blocks and the other counts: the
+// `snapshot_blocks` original blocks carrying snapshots, widened once to the
+// final local count when sites add locals, the `added_snapshots` new blocks
+// that carry one, the place/memory arrays, debug rows when sites add any, and
+// the single predecessor rebuild over `edges`. A planned site is charged the
+// increase over the previous planned total, so a caller pays for widening
+// once instead of once per site.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_bytes(IrFunction const* caller, u64 snapshot_blocks, u64 added_blocks,
+                                                u64 added_snapshots, u64 added_locals, u64 added_debug_locals,
+                                                u64 added_debug_scopes, u64 edges)
 {
     u64 result = 0;
     if (added_blocks)
     {
         u64 locals = ir_inline_storage_add(caller->local_count, added_locals);
-        u64 snapshot_blocks = added_locals ? ir_inline_storage_add(caller->block_count, added_blocks) : added_blocks;
+        u64 snapshots = added_locals ? ir_inline_storage_add(snapshot_blocks, added_snapshots) : added_snapshots;
         u64 snapshot_bytes = ir_inline_storage_add(ir_inline_storage_multiply(locals, sizeof(IrValueId)),
                                                    BUSTER_ALIGN_OF(IrValueId) - 1u);
-        result = ir_inline_storage_multiply(snapshot_blocks, snapshot_bytes);
+        result = ir_inline_storage_multiply(snapshots, snapshot_bytes);
         if (added_locals || !caller->local_places || !caller->local_uses_memory)
         {
             result = ir_inline_storage_add(result, ir_inline_storage_multiply(locals, sizeof(IrValueId) + sizeof(bool)));
@@ -101,18 +115,24 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_bytes(IrFunction const* caller, u64 ad
     return result;
 }
 
-// Work of the same reservation: filling every widened snapshot, copying the
-// place/debug arrays and one predecessor rebuild.
-BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_work(IrFunction const* caller, u64 added_blocks, u64 added_locals,
-                                               u64 added_debug_locals, u64 added_debug_scopes, u64 edges)
+// Work of the same reservation: filling every snapshot it widens or a new
+// block carries, the widening walk's visit to each other original block,
+// copying the place/debug arrays and one predecessor rebuild.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_work(IrFunction const* caller, u64 snapshot_blocks, u64 added_blocks,
+                                               u64 added_snapshots, u64 added_locals, u64 added_debug_locals,
+                                               u64 added_debug_scopes, u64 edges)
 {
     u64 result = 0;
     if (added_blocks)
     {
         u64 blocks = ir_inline_storage_add(caller->block_count, added_blocks);
         u64 locals = ir_inline_storage_add(caller->local_count, added_locals);
-        u64 snapshot_blocks = added_locals ? blocks : added_blocks;
-        result = ir_inline_storage_multiply(snapshot_blocks, ir_inline_storage_add(locals, 1u));
+        u64 snapshots = added_locals ? ir_inline_storage_add(snapshot_blocks, added_snapshots) : added_snapshots;
+        result = ir_inline_storage_multiply(snapshots, ir_inline_storage_add(locals, 1u));
+        if (added_locals && snapshot_blocks < caller->block_count)
+        {
+            result = ir_inline_storage_add(result, caller->block_count - snapshot_blocks);
+        }
         result = ir_inline_storage_add(result, ir_inline_storage_multiply(locals, 2u));
         if (added_debug_locals) result = ir_inline_storage_add(result, ir_inline_storage_add(caller->debug_local_count, added_debug_locals));
         if (added_debug_scopes) result = ir_inline_storage_add(result, ir_inline_storage_add(caller->debug_scope_count, added_debug_scopes));
@@ -850,13 +870,20 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     u64 caller_work_limit = IR_FAST_WORK_BUDGET;
                     u64 caller_storage_limit = IR_FAST_SCRATCH_BUDGET;
+                    // The optional tiny-inline heuristic keeps its existing
+                    // charge, which prices a snapshot for every block.
+                    u64 caller_snapshot_blocks = caller->block_count;
                     if (phase == 0)
                     {
+                        caller_snapshot_blocks = ir_inline_snapshot_blocks(caller);
                         // Required expansion must relocate the caller's existing
                         // tables/snapshots. Allow that input-proportional cost
                         // once, plus the fixed allowance for expansion itself.
-                        u64 relocation_work = ir_inline_reserve_work(caller, 1u, 1u, 1u, 1u, 0);
-                        u64 relocation_bytes = ir_inline_reserve_bytes(caller, 1u, 1u, 1u, 1u, 0);
+                        u64 relocation_snapshots = caller_snapshot_blocks ? 1u : 0u;
+                        u64 relocation_work = ir_inline_reserve_work(caller, caller_snapshot_blocks, 1u, relocation_snapshots,
+                                                                     1u, 1u, 1u, 0);
+                        u64 relocation_bytes = ir_inline_reserve_bytes(caller, caller_snapshot_blocks, 1u, relocation_snapshots,
+                                                                       1u, 1u, 1u, 0);
                         relocation_work = ir_inline_storage_add(relocation_work,
                             ir_inline_cfg_table_growth_work(caller,
                                 caller->block_count, (u64)caller->block_count + 1u,
@@ -1086,6 +1113,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     u64 function_projected_debug = 0;
                     u64 function_projected_edges = 0;
                     u64 function_projected_scopes = 0;
+                    u64 function_projected_snapshots = 0;
                     u32 function_sites = function_sites_used[caller_index];
                     u64 caller_main_scan = ir_inline_storage_add(original_instructions, original_blocks);
                     if (caller_main_scan > caller_work_limit -
@@ -1197,6 +1225,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             u64 callee_payload_units = callee->extra_count;
                             u64 callee_target_units = 0;
                             u64 callee_return_units = 0;
+                            u64 callee_snapshot_blocks = 0;
                             bool callee_scan_exhausted = false;
                             u64 callee_scan_demand = 0;
                             for (u32 row_id = 0; row_id < callee->instruction_count && !callee_scan_exhausted; row_id += 1)
@@ -1243,6 +1272,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 }
                                 total_work = ir_inline_storage_add(total_work, 1u);
                                 module->inlining.visits = ir_inline_storage_add(module->inlining.visits, 1u);
+                                callee_snapshot_blocks += callee->blocks[block_id].local_values != 0;
                                 for (IrBlockParameter const* parameter = callee->blocks[block_id].first_parameter;
                                      parameter && !callee_scan_exhausted; parameter = parameter->next)
                                 {
@@ -1382,10 +1412,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                 callee_has_debug ? (u64)callee->debug_scope_count + 1u : 0u);
                             u64 projected_debug_after = ir_inline_storage_add(function_projected_debug, callee->debug_local_count);
                             u64 reserve_edges_before = ir_inline_storage_add(caller_edge_units, function_projected_edges);
-                            u64 reserve_work_before = ir_inline_reserve_work(caller, function_projected_blocks, function_projected_locals,
+                            // A cloned block carries a snapshot when its callee block or
+                            // the call block does; the continuation, when the call block does.
+                            u64 site_snapshots = phase != 0 || caller->blocks[block].local_values
+                                                     ? (u64)callee->block_count + 1u : callee_snapshot_blocks;
+                            u64 projected_snapshots_after = ir_inline_storage_add(function_projected_snapshots, site_snapshots);
+                            u64 reserve_work_before = ir_inline_reserve_work(caller, caller_snapshot_blocks, function_projected_blocks,
+                                                                             function_projected_snapshots, function_projected_locals,
                                                                              function_projected_debug, function_projected_scopes,
                                                                              reserve_edges_before);
-                            u64 reserve_work_after = ir_inline_reserve_work(caller, projected_blocks_after - caller->block_count,
+                            u64 reserve_work_after = ir_inline_reserve_work(caller, caller_snapshot_blocks,
+                                                                            projected_blocks_after - caller->block_count,
+                                                                            projected_snapshots_after,
                                                                             projected_locals_after - caller->local_count,
                                                                             projected_debug_after, projected_scopes_after, projected_edges);
                             caller_work = ir_inline_storage_add(caller_work,
@@ -1491,10 +1529,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                 table_values_before, table_values_after,
                                                                                 table_extras_before, table_extras_after);
                             storage = ir_inline_storage_add(storage, table_growth);
-                            u64 reserve_bytes_before = ir_inline_reserve_bytes(caller, function_projected_blocks, function_projected_locals,
+                            u64 reserve_bytes_before = ir_inline_reserve_bytes(caller, caller_snapshot_blocks, function_projected_blocks,
+                                                                               function_projected_snapshots, function_projected_locals,
                                                                                function_projected_debug, function_projected_scopes,
                                                                                reserve_edges_before);
-                            u64 reserve_bytes_after = ir_inline_reserve_bytes(caller, projected_blocks_after - caller->block_count,
+                            u64 reserve_bytes_after = ir_inline_reserve_bytes(caller, caller_snapshot_blocks,
+                                                                              projected_blocks_after - caller->block_count,
+                                                                              projected_snapshots_after,
                                                                               projected_locals_after - caller->local_count,
                                                                               projected_debug_after, projected_scopes_after, projected_edges);
                             u64 reserve_growth = reserve_bytes_after == UINT64_MAX
@@ -1663,6 +1704,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             function_projected_debug =
                                 ir_inline_storage_add(function_projected_debug, callee->debug_local_count);
                             function_projected_scopes = projected_scopes_after;
+                            function_projected_snapshots = projected_snapshots_after;
                             u64 cloned_edge_delta = ir_inline_storage_add(callee_target_units,
                                                                                  ir_inline_storage_add(callee_return_units, 1u));
                             function_projected_edges =

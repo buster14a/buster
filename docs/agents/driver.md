@@ -715,6 +715,8 @@ inlining is disabled; an impossible requirement produces a source-mapped
 tiny inlining; zero is rejected on the command line. Zero-valued API row/site limits
 select the optional defaults while required expansion uses independent per-caller
 work/storage guards (including one relocation of existing caller data); other zero API fields normalize to the named defaults.
+Those guards price block local-value snapshots only for blocks that carry one,
+and canonical C construction attaches none (#4050).
 Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
 the shift sets the caller relocation bound described below. The callee limit
