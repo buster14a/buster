@@ -38373,7 +38373,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_parameter_expression_type(UnitTe
                         tree ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"),
                         action ? S8("-c") : S8("-fsyntax-only"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = true;
+                    invocation.reject_machine_fallback = action != 0;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, (compiled.error == COMPILER_DRIVER_ERROR_NONE) == cases[case_index].valid,
                         string_format(temporary.arena, S8("array alias case={u32} tree={u32} action={u32}: {S8}"),
@@ -50961,7 +50961,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
             BUSTER_TEST(arguments, entity->type.value < constexpr_parse.type_count);
             if (entity->type.value < constexpr_parse.type_count)
             {
-                BUSTER_TEST(arguments, constexpr_parse.types[entity->type.value].is_const);
+                CTypeId const_type = entity->type;
+                u32 remaining = constexpr_parse.type_count;
+                while (remaining && const_type.value < constexpr_parse.type_count && constexpr_parse.types[const_type.value].kind == C_TYPE_ARRAY)
+                {
+                    const_type = constexpr_parse.types[const_type.value].element_type;
+                    remaining -= 1;
+                }
+                BUSTER_TEST(arguments, const_type.value < constexpr_parse.type_count && constexpr_parse.types[const_type.value].is_const);
             }
             found_count |=
                 string_equal(entity->name, S8("count")) && entity->has_constant_value && !entity->constant_is_negative && entity->constant_value == 4;
