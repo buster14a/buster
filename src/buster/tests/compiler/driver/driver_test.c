@@ -36191,21 +36191,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                     }
                     for (u32 ordinal = 1; ordinal <= counts[phase]; ordinal += 1)
                     {
-                        // These reservations belong to the named phase;
-                        // the syntax builder's own phase is checked below.
+                        // This implicit tree retains its phase, four node
+                        // columns and block delimiter rows before analysis.
+                        // An object compile also retains two node-fact arenas.
+                        // Skip those reservations to keep this row testing
+                        // the semantic machine and phase arenas. Syntax
+                        // construction refusal is checked separately below.
                         String8 command[] = {S8("-g0"), S8("-fc-ast-pilot=implicit"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output,
                                              input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                         c_test_lowering_initial_reservation(phase == 2 && ordinal == 3 ? BUSTER_KB(64) : 0);
-                        c_test_fail_frontend_reservation(phases[phase], ordinal);
+                        u32 prefix = phases[phase] == C_FRONTEND_RESERVATION_ANALYSIS ? 6 + (syntax_only ? 0 : 2) : 0;
+                        c_test_fail_frontend_reservation(phases[phase], prefix + ordinal);
                         CompilerDriverResult failed = compiler_driver_execute_invocation(arena, invocation);
                         bool pending = c_test_frontend_reservation_pending();
                         c_test_fail_frontend_reservation(phases[phase], 0);
                         c_test_lowering_initial_reservation(0);
                         BUSTER_TEST(arguments, !pending);
-                        BUSTER_TEST(arguments, failed.error == (phase == 0 ? COMPILER_DRIVER_ERROR_TOKENIZE : COMPILER_DRIVER_ERROR_ANALYSIS));
+                        String8 failure_context = string_format(arena, S8("reservation phase={u32} ordinal={u32} syntax_only={u32}: {S8}"),
+                                                                 phase, prefix + ordinal, syntax_only, failed.diagnostic);
+                        BUSTER_TEST_RAW(arguments, failed.error == (phase == 0 ? COMPILER_DRIVER_ERROR_TOKENIZE : COMPILER_DRIVER_ERROR_ANALYSIS), failure_context);
                         BUSTER_TEST(arguments, failed.diagnostic.length != 0 && failed.diagnostic_count != 0);
-                        BUSTER_TEST(arguments, string_first_sequence(failed.diagnostic, names[phase]) != BUSTER_STRING_NO_MATCH);
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(failed.diagnostic, names[phase]) != BUSTER_STRING_NO_MATCH, failure_context);
                         BUSTER_TEST(arguments, !failed.has_object && failed.output.length == 0);
                         CompilerDriverResult recovered = compiler_driver_execute_invocation(arena, invocation);
                         BUSTER_TEST_RAW(arguments, recovered.error == COMPILER_DRIVER_ERROR_NONE, recovered.diagnostic);
