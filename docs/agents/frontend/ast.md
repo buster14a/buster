@@ -2585,6 +2585,10 @@ projects the operand's type before applying that answer and rejects a
 bit-field from its retained member flag. A plain `typeof(type-name)` wrapper
 projects its completed child F2 graph, so prototype parameter names remain
 scoped to that child without a second scalar-specifier parse.
+Statement-expression tails use their value context, including an incomplete
+array's decay. An unlowered variably modified object follows only its retained
+name, dereference and index nodes to the existing scalar or pointer layout;
+an arithmetic tail that the original resolver refused keeps its diagnostic.
 
 | Query frame | Replacement |
 |---|---|

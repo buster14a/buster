@@ -30347,6 +30347,101 @@ BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_parameter_type_node(CIntegerIrBuilder* bu
     return local && local->is_vla_parameter ? local->type : IR_TYPE_ID_INVALID;
 }
 
+// An unevaluated statement body has not created locals for its unmapped VM
+// declarations. The former tail fallback followed their source type through
+// only dereference/index nodes, then used the existing void-pointer layout
+// for a pointer/array value. No canonical VM constructor belongs to that path.
+BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_unlowered_vm_tail_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    u32 source = node;
+    u32 steps = 0;
+    while (source < ast->node_count && (ast->kinds[source] == C_AST_DEREFERENCE || ast->kinds[source] == C_AST_INDEX))
+    {
+        source = c_ast_child_at(ast, source, 0);
+        steps += 1;
+    }
+    bool bound = source < ast->node_count && ast->kinds[source] == C_AST_IDENTIFIER && (facts->flags[source] & C_AST_FACT_BOUND);
+    u32 entity = bound ? facts->payloads[source] : C_ID_UNDERLYING_INVALID;
+    CEntity const* object = entity < builder->parse.entity_count ? builder->parse.entities + entity : 0;
+    CTypeId type = object ? object->type : C_TYPE_ID_INVALID;
+    CType const* declared = type.value < builder->parse.type_count ? builder->parse.types + type.value : 0;
+    bool unavailable = declared && (declared->kind == C_TYPE_POINTER ||
+        (declared->kind == C_TYPE_ARRAY && declared->element_type.value < builder->parse.type_count &&
+         builder->c_type_ir_map[declared->element_type.value].value == IR_ID_UNDERLYING_INVALID));
+    bool valid = object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL) && unavailable &&
+                 builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID &&
+                 !c_ir_find_local_by_entity(builder, (CEntityId){.value = entity});
+    for (u32 step = 0; valid && step < steps; step += 1)
+    {
+        CType const* row = builder->parse.types + type.value;
+        valid = (row->kind == C_TYPE_POINTER || row->kind == C_TYPE_ARRAY) && row->element_type.value < builder->parse.type_count;
+        if (valid) type = row->element_type;
+    }
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    if (valid)
+    {
+        CTypeKind kind = builder->parse.types[type.value].kind;
+        result = kind == C_TYPE_POINTER || kind == C_TYPE_ARRAY
+                     ? c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type) : builder->c_type_ir_map[type.value];
+    }
+    return result;
+}
+
+// The old unevaluated statement-tail resolver admitted an unmapped VM
+// object only through its name, dereferences and subscripts. Arithmetic on
+// a pointer to an unmapped array remains a named refusal. Inspect that exact
+// tail's topology and bound entities; do not reinterpret its source grammar.
+BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_admit_node(CIntegerIrBuilder* builder, u32 query, u32 operand)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    u32 root = operand;
+    while (root < ast->node_count && ast->kinds[root] == C_AST_EXTENSION) root = c_ast_child_at(ast, root, 0);
+    bool statement = root < ast->node_count && ast->kinds[root] == C_AST_STATEMENT_EXPRESSION;
+    u32 compound = statement ? c_ast_child_at(ast, root, 0) : C_AST_NODE_INVALID;
+    u32 count = statement ? c_ast_child_count(ast, compound) : 0;
+    u32 last = count ? c_ast_child_at(ast, compound, count - 1) : C_AST_NODE_INVALID;
+    bool tail = last != C_AST_NODE_INVALID && ast->kinds[last] == C_AST_EXPRESSION_STATEMENT && c_ast_child_count(ast, last);
+    u32 node = tail ? c_ast_child_at(ast, last, 0) : C_AST_NODE_INVALID;
+    u32 source = node;
+    while (source < ast->node_count && (ast->kinds[source] == C_AST_DEREFERENCE || ast->kinds[source] == C_AST_INDEX))
+        source = c_ast_child_at(ast, source, 0);
+    bool simple = source < ast->node_count && ast->kinds[source] == C_AST_IDENTIFIER;
+    bool valid = true;
+    if (tail && !simple)
+    {
+        for (u32 child = c_ast_subtree_begin(ast, node); child <= node && valid; child += 1)
+        {
+            bool bound = ast->kinds[child] == C_AST_IDENTIFIER && (facts->flags[child] & C_AST_FACT_BOUND);
+            u32 entity = bound ? facts->payloads[child] : C_ID_UNDERLYING_INVALID;
+            CEntity const* object = entity < builder->parse.entity_count ? builder->parse.entities + entity : 0;
+            CTypeId type = object ? object->type : C_TYPE_ID_INVALID;
+            bool unmapped = object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL) &&
+                            type.value < builder->parse.type_count && builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID;
+            CType const* row = unmapped ? builder->parse.types + type.value : 0;
+            bool decay = row && row->kind == C_TYPE_ARRAY && row->element_type.value < builder->parse.type_count &&
+                         builder->c_type_ir_map[row->element_type.value].value != IR_ID_UNDERLYING_INVALID;
+            valid = !row || (row->kind != C_TYPE_POINTER && (row->kind != C_TYPE_ARRAY || decay));
+        }
+        if (!valid)
+        {
+            builder->failure_message = S8("statement expression result type is unresolved: its tail names a variably modified array");
+            u32 anchor = ast->tokens[compound];
+            CAstParentheses groups = c_ast_parentheses(ast, operand);
+            for (u32 group = 0; group < groups.count; group += 1)
+            {
+                CAstParenthesis const* owner = c_ast_parenthesis_at(ast, operand, group);
+                if ((owner->flags & C_AST_PARENTHESIS_AFTER_IDENTIFIER) && owner->open == ast->tokens[query] + 1)
+                    anchor = owner->open + 1;
+            }
+            builder->failure_token_index = anchor;
+        }
+    }
+    return valid;
+}
+
 // sizeof/_Alignof own an exact type-name or expression operand. Saved VLA
 // shapes supply runtime sizes; fixed layouts go through the same node constant
 // task as initializers, including strings and GNU object alignment facts.
@@ -34028,6 +34123,15 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
                                    ? c_ir_expression_projection_array_value(builder, frame->node) : IR_TYPE_ID_INVALID;
         CIntegerIrLocal* local = kind == C_AST_IDENTIFIER && (facts->flags[frame->node] & C_AST_FACT_BOUND)
                                     ? c_ir_find_local_by_entity(builder, (CEntityId){.value = facts->payloads[frame->node]}) : 0;
+        u32 entity = kind == C_AST_IDENTIFIER && (facts->flags[frame->node] & C_AST_FACT_BOUND) ? facts->payloads[frame->node] : C_ID_UNDERLYING_INVALID;
+        CEntity const* bound_object = entity < builder->parse.entity_count ? builder->parse.entities + entity : 0;
+        CTypeId source_type = bound_object ? bound_object->type : C_TYPE_ID_INVALID;
+        CType const* source_row = source_type.value < builder->parse.type_count ? builder->parse.types + source_type.value : 0;
+        bool unavailable = source_row && (source_row->kind == C_TYPE_POINTER ||
+            (source_row->kind == C_TYPE_ARRAY && source_row->element_type.value < builder->parse.type_count &&
+             builder->c_type_ir_map[source_row->element_type.value].value == IR_ID_UNDERLYING_INVALID));
+        bool unmapped_source = !local && bound_object && (bound_object->kind == C_ENTITY_OBJECT || bound_object->kind == C_ENTITY_LOCAL) && unavailable &&
+            builder->c_type_ir_map[source_type.value].value == IR_ID_UNDERLYING_INVALID;
         if (leading != C_AST_NODE_INVALID)
         {
             // Preserve the prediction method's leading-compound decision
@@ -34092,10 +34196,15 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
             if (kind == C_AST_COMMA) first_node = c_ast_child_at(ast, frame->node, 1);
             if (kind == C_AST_COMPOUND_STATEMENT) first_node = count ? c_ast_child_at(ast, frame->node, count - 1) : C_AST_NODE_INVALID;
             if (kind == C_AST_EXTENSION || kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_COMPOUND_STATEMENT || kind == C_AST_EXPRESSION_STATEMENT) view = frame->view;
+            if (kind == C_AST_EXPRESSION_STATEMENT) view = C_IR_AST_TYPE_PREDICTED;
             if (kind == C_AST_PLUS || kind == C_AST_NEGATE || kind == C_AST_BIT_NOT || kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT) view = C_IR_AST_TYPE_PROMOTED;
             bool empty = kind == C_AST_COMPOUND_STATEMENT && (first_node == C_AST_NODE_INVALID || ast->kinds[first_node] != C_AST_EXPRESSION_STATEMENT);
+            IrTypeId tail_type = kind == C_AST_EXPRESSION_STATEMENT ? c_ir_sizeof_unlowered_vm_tail_node(builder, first_node) : IR_TYPE_ID_INVALID;
             if (empty) frame->result_type = builder->void_type;
-            else if (c_ir_expression_projection_child(builder, state, first_node, view, &state->first))
+            else if (tail_type.value != IR_ID_UNDERLYING_INVALID) frame->result_type = tail_type;
+            else if (kind == C_AST_DEREFERENCE
+                         ? c_ir_expression_projection_value_child(builder, state, first_node, view, &state->first)
+                         : c_ir_expression_projection_child(builder, state, first_node, view, &state->first))
             {
                 IrType const* first = ir_type_from_id(&builder->program->types, state->first);
                 frame->result_type = state->first;
@@ -34134,6 +34243,7 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
             // A semantic array recipe must not remint its adjusted pointer.
             frame->result_type = c_ir_vla_local_query_type(builder, local);
         }
+        else if (unmapped_source) admitted = false;
         else if (kind == C_AST_COMPOUND_LITERAL || kind == C_AST_CAST)
         {
             CIrNodeQueryFrame answer = {0};
@@ -47274,6 +47384,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 bool settled = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = operand,
                     .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME, .view = C_IR_AST_TYPE_STRICT}, &type);
                 admitted = settled && type.success;
+                if (settled && !admitted && expression) c_ir_sizeof_statement_expression_admit_node(builder, node, operand);
                 if (settled && !admitted && expression && !alignment)
                 {
                     type.result_type = c_ir_sizeof_parameter_type_node(builder, operand);
