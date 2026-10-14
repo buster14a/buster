@@ -6827,6 +6827,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_lower_reuse(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_promoted_depth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u32 const depth = 128;
+    String8 body = S8("struct { int x, y; };");
+    for (u32 level = 0; level < depth; level += 1)
+        body = string_format(temporary.arena, S8("union {{ {S8} }};"), body);
+    String8 source = string_format(temporary.arena,
+        S8("struct D {{ {S8} }}; struct D designated = {{.x=7}}; struct D flat = {{1,2}}; struct D inferred[] = {{[0].x=9}};"), body);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    u32 plans = 0;
+    u32 inferred = 0;
+    u32 bound_index = UINT32_MAX;
+    for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
+    {
+        plans += 1;
+        BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->path_count > depth);
+        CType type = analysis.types[plan->type.value];
+        if (type.kind == C_TYPE_ARRAY)
+        {
+            inferred += 1;
+            bound_index = type.array_bound;
+            BUSTER_TEST(arguments, plan->inferred_count == 1 && bound_index < analysis.array_bound_count);
+            if (bound_index < analysis.array_bound_count)
+                BUSTER_TEST(arguments, !analysis.array_bounds[bound_index].has_inferred_count);
+        }
+    }
+    BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && plans == 3 && inferred == 1);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("deep-initializer-plan.c"), preprocess, analysis, target_native);
+    if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified))
+    {
+        struct { String8 name; u32 values[2]; } const expected[] = {
+            {S8("designated"), {7, 0}}, {S8("flat"), {1, 2}}, {S8("inferred"), {9, 0}},
+        };
+        IrModule* module = lowered.program->modules;
+        u32 checked = 0;
+        for (u32 index = 0; index < module->global_count; index += 1)
+        {
+            IrGlobal* global = module->globals + index;
+            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            for (u32 row = 0; symbol && row < BUSTER_ARRAY_LENGTH(expected); row += 1)
+            {
+                if (string_equal(symbol->name, expected[row].name))
+                {
+                    checked += 1;
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.length == sizeof(expected[row].values));
+                    if (global->bytes.length == sizeof(expected[row].values))
+                        BUSTER_TEST(arguments, memcmp(global->bytes.pointer, expected[row].values, sizeof(expected[row].values)) == 0);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, checked == BUSTER_ARRAY_LENGTH(expected));
+        if (bound_index < analysis.array_bound_count)
+            BUSTER_TEST(arguments, !analysis.array_bounds[bound_index].has_inferred_count);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_static_plan_object_contract(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8553,6 +8614,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_promoted_depth);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);

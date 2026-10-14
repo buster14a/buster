@@ -14189,6 +14189,27 @@ struct CParseInitializerInferenceDesignator
     bool has_designator;
 };
 
+// Anonymous promoted members can add more type edges than source tokens.
+// Grow only the reached containment path, within the same by-value type bound
+// as the inference walk; no expression or designator query is replayed.
+BUSTER_C_INTERNAL void* c_parse_initializer_workspace_grow(Arena* arena, void* rows, u32 count, u32* capacity,
+                                                          u64 needed, u64 maximum, u64 size, u64 alignment)
+{
+    void* result = rows;
+    if (needed > *capacity)
+    {
+        u64 grown = BUSTER_MIN(maximum, BUSTER_MAX(needed, (u64)*capacity * 2));
+        result = needed <= maximum && grown <= UINT32_MAX
+            ? c_parse_body_scratch_allocate(arena, size, grown, alignment) : 0;
+        if (result)
+        {
+            if (count) memcpy(result, rows, size * count);
+            *capacity = (u32)grown;
+        }
+    }
+    return result;
+}
+
 // One element check of an initializer walk: the value's destination and its
 // tokens, as c_parse_initializer_expression_constraint takes them.
 typedef struct CParseInitializerElement CParseInitializerElement;
@@ -14945,9 +14966,12 @@ BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMach
 BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                          CScopeId scope, CParseInitializerSlotCache* slot_cache,
                                                          CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
-                                                         CParseInitializerContinuation* continuation_work, u32 continuation_capacity,
-                                                         CParseInitializerInferenceDesignator* designator, CParseInitializerDiagnostic* diagnostic, CInitializerPlan* plan)
+                                                         CParseInitializerContinuation** continuation_work_out, u32* continuation_capacity_out,
+                                                         CParseInitializerInferenceDesignator* designator, CParseInitializerDiagnostic* diagnostic, CInitializerPlan* plan,
+                                                         bool* publication_only)
 {
+    CParseInitializerContinuation* continuation_work = *continuation_work_out;
+    u32 continuation_capacity = *continuation_capacity_out;
     CTypeId current = frame->root ? frame->element_type : frame->type;
     u64 selected = frame->next_index;
     u64 selected_end = selected;
@@ -15061,6 +15085,18 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                                                                           S8("aggregate designator names an unknown field"), cursor + 1, current);
             }
             current = member_type;
+            u64 needed = (u64)designator->continuation_count + machine->promoted_member_work[found_work].depth + 2;
+            if (needed > continuation_capacity)
+            {
+                if (!plan) return false;
+                *publication_only = true;
+            }
+            continuation_work = (CParseInitializerContinuation*)c_parse_initializer_workspace_grow(slot_cache->arena, continuation_work, designator->continuation_count,
+                &continuation_capacity, needed, (u64)result->type_count + 1, sizeof(*continuation_work), BUSTER_ALIGN_OF(CParseInitializerContinuation));
+            if (!continuation_work) return false;
+            *continuation_work_out = continuation_work;
+            *continuation_capacity_out = continuation_capacity;
+            designator->continuations = continuation_work;
             if (first)
             {
                 u32 member_slot = c_parse_initializer_member_slot(slot_cache, result, type, field_index);
@@ -15559,6 +15595,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         .arena = temporary_arena,
     };
     bool workspace = frames && continuation_work;
+    bool publication_only = false;
     u32 frame_count = workspace ? 1 : 0;
     // Only a list that reaches the frame loop has element checks to log.
     if (log) log->replayable = workspace;
@@ -15576,7 +15613,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     if (workspace) frames[0].begin_item_plus_one = c_parse_initializer_plan_item(machine, result, &preprocess, plan,
         plan ? plan->type : aggregate_type, 0, start, end, start, C_INITIALIZER_ITEM_LIST_BEGIN);
     u64 count = 0;
-    u64 progress_budget = ((u64)span + 1) * ((u64)span + 1);
+    u64 progress_budget = (span + 1) * (plan ? (u64)BUSTER_MAX((u32)span, result->type_count) + 1 : span + 1);
     while (frame_count)
     {
         CParseInitializerInferenceFrame* frame = frames + frame_count - 1;
@@ -15705,7 +15742,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         frame->source_token_plus_one = 0;
         CParseInitializerInferenceDesignator designator = {0};
         if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, &slot_cache, frame, frame->cursor, frame->limit,
-                                             continuation_work, continuation_capacity, &designator, diagnostic, plan) ||
+                                             &continuation_work, &continuation_capacity, &designator, diagnostic, plan, &publication_only) ||
             designator.selected_end == UINT64_MAX)
         {
             return false;
@@ -15730,15 +15767,20 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             BUSTER_CHECK(c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit) > designator.value_start);
 #endif
             u32 close = c_parse_initializer_brace_close(result, preprocess, designator.value_start, frame->limit);
-            if (close >= frame->limit || frame_count >= capacity)
+            if (close >= frame->limit)
             {
                 return false;
             }
+            if ((u64)frame_count + designator.continuation_count + 1 > capacity)
+            {
+                if (!plan) return false;
+                publication_only = true;
+            }
+            frames = (CParseInitializerInferenceFrame*)c_parse_initializer_workspace_grow(temporary_arena, frames, frame_count, &capacity,
+                (u64)frame_count + designator.continuation_count + 1, (u64)result->type_count + 2, sizeof(*frames), BUSTER_ALIGN_OF(CParseInitializerInferenceFrame));
+            if (!frames) return false;
+            frame = frames + frame_count - 1;
             frame->cursor = close + 1;
-            if (frame_count + designator.continuation_count >= capacity)
-            {
-                return false;
-            }
             for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
             {
                 CParseInitializerContinuation continuation = designator.continuations[continuation_index];
@@ -15807,10 +15849,15 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                 plan->unsupported_range_token_plus_one = designator.value_start + 1;
             }
             if (log) log->replayable = false;
-            if (frame_count + designator.continuation_count >= capacity)
+            if ((u64)frame_count + designator.continuation_count + 1 > capacity)
             {
-                return false;
+                if (!plan) return false;
+                publication_only = true;
             }
+            frames = (CParseInitializerInferenceFrame*)c_parse_initializer_workspace_grow(temporary_arena, frames, frame_count, &capacity,
+                (u64)frame_count + designator.continuation_count + 1, (u64)result->type_count + 2, sizeof(*frames), BUSTER_ALIGN_OF(CParseInitializerInferenceFrame));
+            if (!frames) return false;
+            frame = frames + frame_count - 1;
             frame->cursor = value_end;
             for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
             {
@@ -15845,16 +15892,21 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             else
                 log->replayable = false;
         }
-        if (diagnostic && machine->semantic_constant_queries && !frame->producer_extension && !(log && log->record_only) &&
+        if (diagnostic && !publication_only && machine->semantic_constant_queries && !frame->producer_extension && !(log && log->record_only) &&
             !c_parse_initializer_expression_constraint(machine, result, preprocess, scope, designator.value_type, designator.value_start, value_end, diagnostic))
         {
             return false;
         }
         frame->cursor = value_end;
-        if (frame_count + designator.continuation_count > capacity)
+        if ((u64)frame_count + designator.continuation_count > capacity)
         {
-            return false;
+            if (!plan) return false;
+            publication_only = true;
         }
+        frames = (CParseInitializerInferenceFrame*)c_parse_initializer_workspace_grow(temporary_arena, frames, frame_count, &capacity,
+            (u64)frame_count + designator.continuation_count, (u64)result->type_count + 2, sizeof(*frames), BUSTER_ALIGN_OF(CParseInitializerInferenceFrame));
+        if (!frames) return false;
+        frame = frames + frame_count - 1;
         for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
         {
             CParseInitializerContinuation continuation = designator.continuations[continuation_index];
@@ -15869,10 +15921,14 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             };
         }
     }
-    *count_out = count;
+    if (!publication_only) *count_out = count;
     bool success = workspace && (count != 0 || aggregate_type.value < result->type_count);
-    if (plan) plan->complete = success && !plan->failed;
-    return success;
+    if (plan)
+    {
+        plan->complete = success && !plan->failed;
+        if (frames[0].root && plan->complete) plan->inferred_count = count;
+    }
+    return success && !publication_only;
 }
 
 BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,

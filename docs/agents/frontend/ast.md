@@ -2593,6 +2593,12 @@ through the completed type graph, including list markers and any omitted
 outer count, while preserving the original inference answer and model.
 No expression query or shared-bound mutation is added by that publication.
 
+Anonymous promoted-member paths can exceed the initializer's token span.
+Publication grows the reached frame/continuation workspace within the
+by-value type bound. Beyond the original inference capacity it retains the
+plan and its canonical count, while leaving the semantic answer, array-bound
+row and subsequent validation authority unchanged.
+
 The accepted block-static single-statement-expression shortcut publishes its
 already-selected tail node and exact emission provenance in the scalar item.
 The original initializer node remains the plan key. Lowering does not inspect
