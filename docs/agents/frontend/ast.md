@@ -2587,7 +2587,8 @@ The machine, its keys, its memo and its resumes are deleted:
 Runtime alignment queries retain the semantic producer's nonzero declared
 object or member alignment in F3, including packed placement. Lowering still
 projects the operand's type before applying that answer and rejects a
-bit-field from its retained member flag. A plain `typeof(type-name)` wrapper
+bit-field through extension wrappers from its retained member flag, retaining
+the query's owned group as the diagnostic anchor. A plain `typeof(type-name)` wrapper
 projects its completed child F2 graph, so prototype parameter names remain
 scoped to that child without a second scalar-specifier parse.
 Statement-expression tails use their value context, including an incomplete

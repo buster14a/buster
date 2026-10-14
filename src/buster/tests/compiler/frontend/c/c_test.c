@@ -36101,6 +36101,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             c_test_scratch_end(temporary);
         }
     }
+    String8 grouped_bit_fields[] = {
+        S8("struct S { int x : 3; } s;\nint f(void) { return __alignof__((s.x)); }\n"),
+        S8("struct S { int x : 3; } s;\nint f(void) { return __alignof__((__extension__ s.x)); }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(grouped_bit_fields); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, grouped_bit_fields[index],
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult refused = c_analyze_with_options(temporary.arena, S8("alignof-grouped-bit-field.c"), tokens, syntax, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+            BUSTER_TEST(arguments, refused.diagnostic_count == 1 && !refused.canonical_ir_certified);
+            if (refused.diagnostic_count)
+            {
+                CDiagnostic diagnostic = refused.diagnostics[0];
+                BUSTER_TEST(arguments, string_ends_with_sequence(diagnostic.message,
+                    S8("the alignment of the _Alignof operand's object is not an integer constant expression")));
+                BUSTER_TEST(arguments, diagnostic.location.line == 2 && diagnostic.location.column == 34);
+            }
+            c_preprocess_release(&tokens);
+            c_test_scratch_end(temporary);
+        }
+    }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = buster_test_temporary_path(arguments->arena, S8("alignof-member"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
@@ -39367,6 +39394,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
         {S8("sizeof({ short (*p)[n] = 0; **p; })"), {0}, 2, true, true},
         {S8("_Alignof({ int (*p)[n] = 0; *p; })"), {0}, _Alignof(void*), true, true},
         {S8("sizeof({ int (*p)[n] = 0; p + 1; })"), S8("variably modified array"), 0, false, true},
+        {S8("sizeof(({ int (*p)[n] = 0; p + 1; }))"), S8("variably modified array"), 0, false, true},
+        {S8("sizeof((({ int (*p)[n] = 0; p + 1; })))"), S8("variably modified array"), 0, false, true},
         // An incomplete array object with a sized element decays in the tail.
         {S8("sizeof({ ext[0]; })"), {0}, 4, true, true},
         {S8("sizeof(({ ext[0]; }))"), {0}, 4, true, true},

@@ -30432,7 +30432,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_admit_node(CIntegerIrBui
             CAstParentheses groups = c_ast_parentheses(ast, operand);
             for (u32 group = 0; group < groups.count; group += 1)
             {
-                CAstParenthesis const* owner = c_ast_parenthesis_at(ast, operand, group);
+                CAstParenthesis const* owner = c_ast_parenthesis_at(ast, operand, group + 1);
                 if ((owner->flags & C_AST_PARENTHESIS_AFTER_IDENTIFIER) && owner->open == ast->tokens[query] + 1)
                     anchor = owner->open + 1;
             }
@@ -47365,7 +47365,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             u32 operand = c_ast_child_at(ast, node, 0);
             IrType const* projected_operand = 0;
             CAstFacts const* facts = builder->syntax_facts;
-            u32 operand_flags = facts && operand < facts->node_count ? facts->flags[operand] : 0;
+            u32 bit_operand = operand;
+            while (bit_operand < ast->node_count && ast->kinds[bit_operand] == C_AST_EXTENSION) bit_operand = c_ast_child_at(ast, bit_operand, 0);
+            u32 operand_flags = facts && bit_operand < facts->node_count ? facts->flags[bit_operand] : 0;
             bool bit_field = expression && alignment && (operand_flags & C_AST_FACT_BIT_FIELD);
             bool storage_half = c_ir_storage_half_layout_node(builder, operand);
             if (expression && !c_ir_sizeof_operand_admit_node(builder, operand))
@@ -47375,7 +47377,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             else if (bit_field)
             {
                 builder->failure_message = S8("the alignment of the _Alignof operand's object is not an integer constant expression");
-                builder->failure_token_index = builder->syntax_spans->first[operand];
+                u32 source = builder->syntax_spans->first[operand];
+                CAstParentheses groups = c_ast_parentheses(ast, operand);
+                for (u32 group = 0; group < groups.count; group += 1)
+                {
+                    CAstParenthesis const* owner = c_ast_parenthesis_at(ast, operand, group + 1);
+                    if ((owner->flags & C_AST_PARENTHESIS_AFTER_IDENTIFIER) && owner->open == anchor + 1) source = owner->open + 1;
+                }
+                builder->failure_token_index = source;
                 admitted = false;
             }
             else if ((storage_half || (expression && ast->kinds[operand] == C_AST_CALL)) && fact.status == C_AST_CONSTANT_INTEGER)
