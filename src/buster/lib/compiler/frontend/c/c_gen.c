@@ -47433,7 +47433,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 }
                 IrType* row = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
                 projected_operand = row;
-                admitted = admitted && row && (row->layout.resolved || row->kind == IR_TYPE_VOID || row->kind == IR_TYPE_FUNCTION);
+                // A materialized VM array retains its element's certified
+                // alignment even when its runtime size is unresolved. A
+                // type alignment query neither needs nor evaluates bounds.
+                bool variable_alignment = alignment && !expression && row && row->kind == IR_TYPE_ARRAY && row->layout.alignment;
+                admitted = admitted && row && (row->layout.resolved || row->kind == IR_TYPE_VOID || row->kind == IR_TYPE_FUNCTION || variable_alignment);
                 if (admitted)
                 {
                     value.real = c_ir_constant_integer(builder->size_type,

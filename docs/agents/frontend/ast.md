@@ -6046,7 +6046,10 @@ the declaration-link adapter is deleted.
 Runtime casts and compound literals now read their exact TYPE_NAME/list
 children. Runtime sizeof/_Alignof reads its operand node, uses saved VLA
 suffix dimensions by bound entity, and asks the shared constant task for fixed
-layouts. VLA operand evaluation hands the same node to call preparation and
+layouts. A materialized VLA type retains its element alignment even while its
+total size is unresolved: `_Alignof(T[n])` reads that completed alignment and
+does not evaluate the bound. `sizeof(T[n])` still requires the saved or
+computed runtime dimensions. VLA operand evaluation hands the same node to call preparation and
 expression lowering. The previous prefix/subscript token walk, type-name probe,
 statement-tail scans and core fallback classifier are removed. The legacy
 whole SIZEOF callback and its constant-parser callers are also removed.

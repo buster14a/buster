@@ -7879,6 +7879,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_operand_admission(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vla_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const accepted[] = {
+        S8("struct M { double d; int i; }; int f(int n) { return _Alignof(struct M[n]) != 8; }"),
+        S8("struct M { double d; int i; }; int f(int n) { return _Alignof(struct M[n][n+1]) != 8; }"),
+        S8("int calls; int bound(void) { calls++; return 3; } struct M { double d; int i; }; "
+           "int f(void) { return _Alignof(struct M[bound()]) != 8 || calls; }"),
+        S8("struct M { double d; int i; }; int f(int n) { typedef struct M A[n]; return _Alignof(A) != 8; }"),
+    };
+    String8 const refused[] = {
+        S8("int f(int n) { return _Alignof(struct Missing[n]); }"),
+        S8("int f(void) { return _Alignof(int[-1]); }"),
+        S8("struct S { unsigned value:3; }; int f(void) { struct S s; return _Alignof(s.value); }"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(accepted); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, accepted[sample], C_PREPROCESS_DIALECT_GNU17);
+            CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !analysis.diagnostic_count, accepted[sample]);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vla-alignment.c"), preprocess, analysis, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : accepted[sample]);
+            if (!sample && analysis.ast && analysis.ast_facts)
+            {
+                CAstFacts missing = *analysis.ast_facts;
+                missing.flags = arena_allocate(temporary.arena, u8, missing.node_count);
+                memcpy(missing.flags, analysis.ast_facts->flags, missing.node_count);
+                for (u32 node = 0; node < analysis.ast->node_count; node += 1)
+                    if (analysis.ast->kinds[node] == C_AST_TYPE_NAME) missing.flags[node] &= (u8)~C_AST_FACT_TYPED;
+                CIRLowerResult absent = c_lower_to_ir_with_options(temporary.arena, S8("vla-alignment-missing.c"), preprocess, analysis, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0, .syntax_facts = &missing});
+                BUSTER_TEST(arguments, !absent.canonical_ir_certified && absent.diagnostic_count != 0);
+            }
+            c_test_scratch_end(temporary);
+        }
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(refused); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, refused[sample], C_PREPROCESS_DIALECT_GNU17);
+            CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vla-alignment-refusal.c"), preprocess, analysis, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified && lowered.diagnostic_count != 0, refused[sample]);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9323,6 +9377,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_operand_admission);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vla_alignment);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_plan_object_contract);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
