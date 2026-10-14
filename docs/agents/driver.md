@@ -2516,11 +2516,14 @@ mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs 
 large-bucket merge order is deterministic but may differ from insertion order.
 No comparator or on-disk format change is made. The diagnostic
 `pdb_test_gsi_mixed_reader` covers all six cyclic-triple permutations below and
-above the insertion threshold, case ties, and isolated ASCII/UTF-8 controls.
+above the insertion threshold, case ties, and a separate acyclic ASCII/UTF-8
+control PDB. A test-only data PE supplies each PDB's matching RSDS identity.
 On Windows it uses the installed SDK's `SymFromNameW` for separate global and
-public lookups, reporting every exact spelling/address or miss. A missing
-cyclic lookup remains a #3752 finding; the test's positive-control assertions
-and `diagnostic=1` summary do not establish that mixed-name lookup is fixed.
+public lookups under strict symbol matching, reporting exact spelling/address
+or misses for both bare and observed-module-qualified names. Reader outcomes
+are evidence only after the acyclic controls and matched module metadata
+succeed; mixed misses remain explicit diagnostic findings. The positive-control
+assertions and `diagnostic=1` summary do not establish that #3752 is fixed.
 Non-Windows runs report the external reader unavailable.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
