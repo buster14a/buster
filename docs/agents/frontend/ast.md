@@ -2539,6 +2539,13 @@ must never share a state value: a transform's token ordinals are not an array
 task's private type-list pointer. Mixed transform/array constant expressions
 run through the same permanent source-point and reference-parity fixture.
 
+The array dependency route also admits the existing valid enum alignment
+case `_Alignas(A)` followed by an array bound `_Alignof(g)`. Its prior
+NOT_CONSTANT expectation is now a positive size/count check. A reference
+analysis with no AST or sidecar agrees with retained analysis under matched
+interning on all supported data layouts and i386; native controls observe
+the aligned global address and write/read the array's final element.
+
 ### Type queries
 
 The node task scheduler checkpoint uses exact `(kind, node, view)` keys for

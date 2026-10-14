@@ -7748,6 +7748,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTest
         }
     }
 
+    // This valid enum alignment dependency used to be a NOT_CONSTANT
+    // refusal. Compare the historical method without any AST or sidecar.
+    Target const alignment_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_I386, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(alignment_targets); target_index += 1)
+    {
+        for (u32 policy = 0; policy < 2; policy += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = alignment_targets[target_index];
+            String8 source = S8("enum {A=32}; _Alignas(A) int g; int arr[_Alignof(g)];"
+                               "_Static_assert(sizeof(arr)==128,\"alignment dependency\");"
+                               "int f(void){return _Alignof(g)!=32 || sizeof(arr)!=128;}");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+            CAstFacts facts = {0};
+            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+            {
+                CParserResult reference = c_parse_ast_reference(temporary.arena, preprocess);
+                reference.type_interning = policy != 0;
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, reference);
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.type_interning = policy != 0;
+                syntax.ast = &built.ast;
+                syntax.ast_facts = &facts;
+                CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                u64 rows = 0;
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
+                if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
+                BUSTER_TEST(arguments, !plain.ast && !plain.ast_facts && retained.ast == &built.ast && retained.ast_facts == &facts);
+                BUSTER_TEST_RAW(arguments, plain.analysis_complete && retained.analysis_complete &&
+                    !plain.diagnostic_count && !retained.diagnostic_count && !difference.length, difference);
+                CAstConstantFact bound = c_ast_facts_constant(&facts, c_ast_facts_bound_node(&facts, 0));
+                BUSTER_TEST(arguments, bound.status == C_AST_CONSTANT_INTEGER && bound.low == 32 && !bound.high);
+                if (target.cpu_arch != CPU_ARCH_I386)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("enum-alignment-dependency.c"), preprocess, retained, target);
+                    BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("enum alignment canonical validation"));
+                }
+            }
+            c_ast_facts_release(&facts);
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+
     return result;
 }
 

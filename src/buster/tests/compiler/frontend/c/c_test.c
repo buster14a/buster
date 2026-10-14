@@ -35520,6 +35520,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_object_layout(UnitTestArgu
             "_Static_assert(E == sizeof(void *) * sizeof(int), \"adjusted parameter\"); return 0; }\n"), 32, 8},
         {S8("int arr[sizeof(int)]; enum { E = sizeof(arr) };\n"
             "_Static_assert(E == 16, \"type-name control\");\n"), 16, 4},
+        {S8("enum { A = 32 }; _Alignas(A) int g; int arr[_Alignof(g)];\n"
+            "_Static_assert(sizeof(arr) == 128, \"unsupported alignment request\");\n"
+            "enum { E = sizeof(arr) };\n"), 128, 32},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -35595,11 +35598,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_object_layout(UnitTestArgu
         {S8("int observe(int n) { int g[n]; int arr[sizeof(g)];\n"
             "_Static_assert(sizeof(arr) == 16, \"runtime VLA\"); return 0; }\n"),
          C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
-        // Valid GNU source remains unsupported by the legacy layout reader
-        // until #1247 replaces its identifier-as-zero alignment evaluator.
-        {S8("enum { A = 32 }; _Alignas(A) int g; int arr[_Alignof(g)];\n"
-            "_Static_assert(sizeof(arr) == 128, \"unsupported alignment request\");\n"),
-         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
@@ -35617,6 +35615,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_object_layout(UnitTestArgu
         if (analysis.diagnostic_count == 1) BUSTER_TEST(arguments, analysis.diagnostics[0].kind == refused[index].kind);
         c_test_scratch_end(temporary);
     }
+    UnitTestResult alignment = c_test_run_exit_zero_program(arguments, S8("enum-alignment-array-dependency"), S8(
+        "enum{A=32}; _Alignas(A) int g; int arr[_Alignof(g)];"
+        "_Static_assert(sizeof(arr)==128,\"alignment dependency\");"
+        "volatile int *observed=&g; volatile int *last=&arr[31];"
+        "int main(void){*observed=7;*last=11;"
+        "return ((unsigned long long)observed&31)!=0 || g!=7 || arr[31]!=11 || sizeof(arr)!=128;}"));
+    result.test_count += alignment.test_count;
+    result.succeeded_test_count += alignment.succeeded_test_count;
     return result;
 }
 
