@@ -192,7 +192,7 @@ independent call ceiling. They verify bounded return, retained identity,
 admission refusal, stale-copy rejection and subsequent native finalization.
 A worker destroys its result arena and exits before another thread resumes its
 pending owner. Multiple pre-admitted owners exercise admission refusal, retry
-rotation past a persistent failure and simultaneous distinct resume claims.
+rotation past a persistent failure and concurrent resume callers with distinct consuming identities.
 Separate native controls cover ordinary timeout cleanup with and without a job,
 healthy captured exit, empty-job proof and isolated shutdown inventory/refusal.
 Linux builds establish shared-source compatibility only, not native Windows

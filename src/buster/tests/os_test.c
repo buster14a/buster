@@ -2075,8 +2075,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
     }
     if (BUSTER_REQUIRE(arguments, resume_spawns[0].handle && resume_spawns[1].handle))
     {
-        AtomicU64 start = {0};
-        AtomicU64 ready_count = {0};
+        AtomicU64 start;
+        AtomicU64 ready_count;
+        atomic_u64_store(&start, 0);
+        atomic_u64_store(&ready_count, 0);
         OsTestCleanupResume workers[2] = {{.start = &start, .ready = &ready_count}, {.start = &start, .ready = &ready_count}};
         OsThreadHandle* threads[2] = {0};
         u32 started = 0;
