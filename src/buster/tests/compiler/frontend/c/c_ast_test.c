@@ -1931,7 +1931,8 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_models_differ(Arena* arena, CAnalysisRe
 // alignment specifier, type alignment, member, parameter, entity and
 // declaration's types. The declaration specifier read (c_parse.c, #3102)
 // must leave every table exactly as the type machine builds it, in the same
-// order; the diagnostics are compared by c_ast_corpus_analyses_differ.
+// order; the diagnostics are compared by c_ast_corpus_analyses_differ. Node
+// provenance is checked independently: the token model has no node ids.
 BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
 {
     String8 difference = {0};
@@ -6842,6 +6843,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_owners(UnitTestArgumen
                     BUSTER_TEST(arguments, ast->kinds[init] == C_AST_INIT_DECLARATOR && name < ast->node_count &&
                                                (facts.flags[name] & C_AST_FACT_BOUND) && facts.payloads[name] == entity &&
                                                ast->tokens[name] + 1 == binding->declaration_token_plus_one);
+                    u32 owner = binding->declaration_node_plus_one - 1;
+                    BUSTER_TEST(arguments, owner < ast->node_count && ast->kinds[owner] == C_AST_DECLARATION && init < owner &&
+                                               c_ast_subtree_begin(ast, owner) <= c_ast_subtree_begin(ast, init));
                 }
                 if (binding->kind == C_ENTITY_LOCAL)
                 {

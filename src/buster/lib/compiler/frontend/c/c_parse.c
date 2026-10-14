@@ -9930,18 +9930,25 @@ BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* mach
         u32 synthetic = syntax_count;
         for (u32 node = 0; node < ast->node_count; node += 1)
         {
-            // Each init-declarator owns one disjoint inner-child chain. The
-            // final name fact selects the entity at this declaration anchor.
-            if (ast->kinds[node] == C_AST_INIT_DECLARATOR && facts && facts->node_count == ast->node_count)
+            // Direct declaration children supply both owners in one bounded
+            // walk. The name fact selects the entity at its final anchor.
+            if (ast->kinds[node] == C_AST_DECLARATION && facts && facts->node_count == ast->node_count)
             {
-                u32 name = c_ast_declarator_name(ast, node);
-                if (name != C_AST_NODE_INVALID && (facts->flags[name] & C_AST_FACT_BOUND))
+                u32 init = node - 1;
+                u32 init_count = c_ast_list_count(ast, node);
+                for (u32 item = 0; item < init_count; item += 1)
                 {
-                    u32 entity = facts->payloads[name];
-                    if (entity < result->entity_count && result->entities[entity].declaration_token_plus_one == ast->tokens[name] + 1)
+                    u32 name = c_ast_declarator_name(ast, init);
+                    if (name != C_AST_NODE_INVALID && (facts->flags[name] & C_AST_FACT_BOUND))
                     {
-                        result->entities[entity].init_declarator_plus_one = node + 1;
+                        u32 entity = facts->payloads[name];
+                        if (entity < result->entity_count && result->entities[entity].declaration_token_plus_one == ast->tokens[name] + 1)
+                        {
+                            result->entities[entity].init_declarator_plus_one = init + 1;
+                            result->entities[entity].declaration_node_plus_one = node + 1;
+                        }
                     }
+                    init -= ast->extents[init];
                 }
             }
             if (ast->kinds[node] == C_AST_DECLARATION && synthetic < result->declaration_count && c_ast_list_count(ast, node))

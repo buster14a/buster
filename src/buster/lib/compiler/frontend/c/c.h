@@ -1281,6 +1281,9 @@ struct CEntity
     // Retained INIT_DECLARATOR owner of the current declaration anchor, plus
     // one; zero for entities whose declaration is not an init-declarator.
     u32 init_declarator_plus_one;
+    // The containing declaration supplies shared specifiers to local symbol
+    // attributes; no parent table or source lookup is needed by lowering.
+    u32 declaration_node_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;

@@ -261,7 +261,11 @@ selects the translation-unit child, `init_declarator_plus_one` selects its
 own declarator, and `initializer_node_plus_one` selects its optional last
 child. Zero denotes absence. `CEntity.init_declarator_plus_one` keeps the
 init-declarator at its finalized declaration anchor, including a local's
-`ASM_LABEL`; compatible earlier declarations do not replace it. Source-order
+`ASM_LABEL`; `CEntity.declaration_node_plus_one` retains its containing
+declaration for shared local symbol attributes. Compatible earlier
+declarations do not replace these owners. The existing semantic array arena
+allocations account their sizes: twelve bytes per declaration capacity row
+and eight bytes per entity capacity row. Source-order
 extent cursors publish these links without a parent table or punctuation
 classification. `c_ast_declarator_name` follows only the inner-child chain,
 so function parameter names cannot substitute for a declaration's owner.
