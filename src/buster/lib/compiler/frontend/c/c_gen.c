@@ -3311,8 +3311,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_builder_scalar_type(CIntegerIrBuilder* builder, 
 // Source spelling is provenance. Syntax consumers pass an already owned anchor.
 BUSTER_C_INTERNAL String8 c_ir_source_spelling(CPreprocessResult const* preprocess, u32 token_index)
 {
-    return preprocess && token_index < preprocess->token_count
-        ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]) : (String8){0};
+    return c_source_anchor_spelling(preprocess, c_source_anchor_at(preprocess, token_index));
 }
 
 BUSTER_C_INTERNAL IrSourceRange c_ir_site_source_range(CSourceSite site, u64 length);
