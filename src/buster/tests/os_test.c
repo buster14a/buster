@@ -1882,6 +1882,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_spill(UnitTestArguments*
 #endif
 
 #if BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if !BUSTER_SINGLE_THREADED
+typedef struct OsTestCleanupThread OsTestCleanupThread;
+struct OsTestCleanupThread
+{
+    ProcessSpawnResult spawn;
+    ProcessWaitResult waited;
+    OsProcessCleanupWindowsTestStats stats;
+    bool arena_destroyed;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_cleanup_thread(void* argument)
+{
+    OsTestCleanupThread* state = (OsTestCleanupThread*)argument;
+    Arena* arena = arena_create((ArenaCreation){0});
+    if (arena)
+    {
+        os_process_cleanup_windows_test_begin(state->spawn, OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION |
+            OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY);
+        state->waited = os_process_wait_deadline(arena, state->spawn, 1);
+        state->stats = os_process_cleanup_windows_test_end();
+        state->arena_destroyed = arena_destroy(arena, 1);
+    }
+}
+#endif
+
+#if !BUSTER_SINGLE_THREADED
+typedef struct OsTestCleanupResume OsTestCleanupResume;
+struct OsTestCleanupResume
+{
+    AtomicU64* start;
+    AtomicU64* ready;
+    ProcessCleanupResult result;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_cleanup_resume_thread(void* argument)
+{
+    OsTestCleanupResume* state = (OsTestCleanupResume*)argument;
+    atomic_u64_increment(state->ready);
+    while (!atomic_u64_load(state->start)) os_test_sleep_milliseconds(1);
+    state->result = os_process_cleanup_pending(5000000);
+}
+#endif
 BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1961,6 +2003,109 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
             BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before && !os_process_cleanup_snapshot().active_owners);
         }
     }
+#if !BUSTER_SINGLE_THREADED
+    // Both launches are admitted before any pending failure. One consuming wait
+    // loses its arena/thread, then the other fails; process-global owners survive.
+    ProcessSpawnResult concurrent[2];
+    for (EACH_ARRAY_INDEX(index, concurrent))
+    {
+        concurrent[index] = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
+            (ProcessSpawnOptions){.new_process_group = 1});
+    }
+    if (BUSTER_REQUIRE(arguments, concurrent[0].handle && concurrent[1].handle))
+    {
+        OsTestCleanupThread worker = {.spawn = concurrent[0]};
+        OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){.callback = &os_test_cleanup_thread, .argument = &worker});
+        if (BUSTER_REQUIRE(arguments, thread != 0))
+        {
+            BUSTER_TEST(arguments, os_thread_join(thread));
+            BUSTER_TEST(arguments, worker.arena_destroyed && worker.waited.pending_windows_owner_id == concurrent[0].windows_owner_id);
+            BUSTER_TEST(arguments, !worker.stats.ceiling_reached && !worker.stats.infinite_waits);
+            os_process_cleanup_windows_test_begin(concurrent[1], OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION |
+                OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY);
+            ProcessWaitResult second = os_process_wait_deadline(arena, concurrent[1], 1);
+            OsProcessCleanupWindowsTestStats stats = os_process_cleanup_windows_test_end();
+            BUSTER_TEST(arguments, second.pending_windows_owner_id == concurrent[1].windows_owner_id && !stats.ceiling_reached);
+            ProcessCleanupResult snapshot = os_process_cleanup_snapshot();
+            BUSTER_TEST(arguments, snapshot.active_owners == 2 && snapshot.pending_owners == 2);
+            os_process_cleanup_windows_test_begin(concurrent[1], OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION |
+                OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY);
+            ProcessCleanupResult first_retry = os_process_cleanup_pending(0);
+            ProcessCleanupResult next_retry = os_process_cleanup_pending(5000000);
+            stats = os_process_cleanup_windows_test_end();
+            BUSTER_TEST(arguments, first_retry.resumed_owner_id == concurrent[1].windows_owner_id && first_retry.pending_owners == 2);
+            BUSTER_TEST(arguments, next_retry.resumed_owner_id == concurrent[0].windows_owner_id && next_retry.pending_owners == 1);
+            BUSTER_TEST(arguments, first_retry.error.v == ERROR_ACCESS_DENIED && first_retry.error_owner_id == concurrent[1].windows_owner_id);
+            BUSTER_TEST(arguments, !stats.ceiling_reached && !stats.infinite_waits);
+            ProcessCleanupResult recovered = os_process_cleanup_pending(5000000);
+            BUSTER_TEST(arguments, !recovered.active_owners && !recovered.pending_owners);
+        }
+        else
+        {
+            os_process_wait_deadline(arena, concurrent[0], 1);
+            os_process_wait_deadline(arena, concurrent[1], 1);
+        }
+    }
+    else
+    {
+        for (EACH_ARRAY_INDEX(index, concurrent))
+        {
+            if (concurrent[index].handle) os_process_wait_deadline(arena, concurrent[index], 1);
+        }
+    }
+    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+#endif
+#if !BUSTER_SINGLE_THREADED
+    ProcessSpawnResult resume_spawns[2];
+    for (EACH_ARRAY_INDEX(index, resume_spawns))
+    {
+        resume_spawns[index] = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
+            (ProcessSpawnOptions){.new_process_group = 1});
+    }
+    for (EACH_ARRAY_INDEX(index, resume_spawns))
+    {
+        if (resume_spawns[index].handle)
+        {
+            os_process_cleanup_windows_test_begin(resume_spawns[index], OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION |
+                OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY);
+            ProcessWaitResult waited = os_process_wait_deadline(arena, resume_spawns[index], 1);
+            OsProcessCleanupWindowsTestStats stats = os_process_cleanup_windows_test_end();
+            BUSTER_TEST(arguments, waited.pending_windows_owner_id == resume_spawns[index].windows_owner_id && !stats.ceiling_reached);
+        }
+    }
+    if (BUSTER_REQUIRE(arguments, resume_spawns[0].handle && resume_spawns[1].handle))
+    {
+        AtomicU64 start = {0};
+        AtomicU64 ready_count = {0};
+        OsTestCleanupResume workers[2] = {{.start = &start, .ready = &ready_count}, {.start = &start, .ready = &ready_count}};
+        OsThreadHandle* threads[2] = {0};
+        u32 started = 0;
+        for (EACH_ARRAY_INDEX(index, threads))
+        {
+            threads[index] = os_thread_create((ThreadCreateOptions){.callback = &os_test_cleanup_resume_thread, .argument = &workers[index]});
+            BUSTER_TEST(arguments, threads[index] != 0);
+            started += threads[index] != 0;
+        }
+        while (atomic_u64_load(&ready_count) < started) os_test_sleep_milliseconds(1);
+        atomic_u64_increment(&start);
+        for (EACH_ARRAY_INDEX(index, threads))
+        {
+            if (threads[index]) BUSTER_TEST(arguments, os_thread_join(threads[index]));
+        }
+        if (started == 2)
+        {
+            BUSTER_TEST(arguments, workers[0].result.resumed_owner_id != workers[1].result.resumed_owner_id);
+            for (EACH_ARRAY_INDEX(index, workers))
+            {
+                BUSTER_TEST(arguments, workers[index].result.resumed_owner_id == resume_spawns[0].windows_owner_id ||
+                    workers[index].result.resumed_owner_id == resume_spawns[1].windows_owner_id);
+            }
+        }
+    }
+    // A failed test thread creation still leaves an owned, recoverable record.
+    for (u32 index = 0; index < 2; index += 1) os_process_cleanup_pending(5000000);
+    BUSTER_TEST(arguments, !os_process_cleanup_snapshot().active_owners && os_process_spawn_test_resource_count() == resources_before);
+#endif
     // Native successful timeout cleanup, with and without a job.
     for (u32 grouped = 0; grouped < 2; grouped += 1)
     {
