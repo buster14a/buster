@@ -47807,7 +47807,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     c_parse_publish_declaration_facts(&machine, &result, preprocess);
     c_parse_ast_identity_publish(&machine, preprocess, &result);
     // The retained facts are final with the type tables (GitHub #4062).
-    c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result);
+    c_ast_types_facts_finish(machine.ast_facts, syntax.ast, &result, &preprocess);
     result.analysis_complete = true;
     // The literal memo stays published: lowering reads the recorded bytes
     // and never records.

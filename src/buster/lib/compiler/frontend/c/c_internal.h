@@ -1864,7 +1864,7 @@ BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult c
 BUSTER_C_EXTERN CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
 BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
-BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);
+BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result, CPreprocessResult const* preprocess);
 BUSTER_C_EXTERN CInitializerPlan const* c_initializer_plan_find(CParseResult const* result, u32 node);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);

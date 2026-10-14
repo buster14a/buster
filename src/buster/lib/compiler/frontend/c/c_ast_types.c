@@ -2790,6 +2790,14 @@ u32 c_ast_facts_selection(CAstFacts const* facts, u32 node)
                ? fact.selected_node_plus_one - 1 : C_AST_NODE_INVALID;
 }
 
+u32 c_ast_facts_call_builtin(CAst const* ast, CAstFacts const* facts, u32 node)
+{
+    u32 result = ast && facts && node < ast->node_count && node < facts->node_count && ast->kinds[node] == C_AST_CALL &&
+                         facts->payloads[node] < C_SYMBOL_BUILTIN_COUNT
+                     ? facts->payloads[node] : C_AST_FACT_NONE;
+    return result;
+}
+
 bool c_ast_facts_store_selection(CAstFacts* facts, u32 node, u32 selected_node)
 {
     u32 stored = facts && selected_node < facts->node_count ? c_ast_facts_constant_slot(facts, node) : 0;
@@ -3445,7 +3453,39 @@ BUSTER_C_SHARED void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 st
 // counts the expression nodes no typed region covered, inside a function
 // definition or not. The backward scan keeps the interval of the outermost
 // definition it is in; a node before that interval's first node has left it.
-BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result)
+// Direct CALL callees retain builtin identity independently of their type.
+// A header may declare an intrinsic (for example _mm_pause) as a function;
+// standalone uses of that function designator still keep its ordinary CType.
+BUSTER_GLOBAL_LOCAL CSymbolBuiltin c_ast_types_call_builtin(CAst const* ast, CPreprocessResult const* preprocess, u32 node)
+{
+    u32 callee = c_ast_child_at(ast, node, 0);
+    CSymbolBuiltin result = C_SYMBOL_BUILTIN_NONE;
+    u32 kind = callee < ast->node_count ? ast->kinds[callee] : C_AST_KIND_COUNT;
+    bool named = kind == C_AST_IDENTIFIER || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW;
+    if (named && !c_ast_parentheses(ast, callee).count)
+    {
+        // Preserve the existing member-name admission in the identity slice;
+        // its ordinary callback classification is a separate correctness fix.
+        u32 anchor = ast->tokens[callee];
+        CToken token = preprocess->tokens[anchor];
+        CSymbolTable* symbols = preprocess->symbols;
+        if (token.symbol && symbols && token.symbol <= symbols->predefined_limit)
+        {
+            result = (CSymbolBuiltin)symbols->builtin_kinds[token.symbol];
+        }
+        else
+        {
+            String8 spelling = c_token_spelling(preprocess->spelling_base, token);
+            if (!token.symbol || !symbols || string_starts_with_sequence(spelling, S8("__builtin_")) || string_equal(spelling, S8("__rdtsc")))
+            {
+                result = c_symbol_builtin_from_spelling(spelling);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result, CPreprocessResult const* preprocess)
 {
     if (facts && facts->flags && ast && ast->node_count == facts->node_count)
     {
@@ -3456,6 +3496,10 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
             u32 node = index - 1;
             u32 flags = facts->flags[node];
             u32 kind = ast->kinds[node];
+            if (kind == C_AST_CALL)
+            {
+                facts->payloads[node] = (u32)c_ast_types_call_builtin(ast, preprocess, node);
+            }
             floor = floor != C_AST_TYPE_NONE && node < floor ? C_AST_TYPE_NONE : floor;
             floor = floor == C_AST_TYPE_NONE && kind == C_AST_FUNCTION_DEFINITION ? c_ast_subtree_begin(ast, node) : floor;
             if ((flags & C_AST_FACT_TYPED) && !(flags & C_AST_FACT_RECIPE) && facts->types[node] >= result->type_count)

@@ -1909,7 +1909,9 @@ struct CAstExt80InitializerFact
 
 // The retained columns: `types` (a CTypeId value or C_AST_FACT_NONE),
 // `payloads` (an entity id or a bit-field width, per flag, else
-// C_AST_FACT_NONE) and `flags` (CAstFactFlag), each `node_count` long. They
+// C_AST_FACT_NONE) and `flags` (CAstFactFlag), each `node_count` long.
+// CALL payloads instead retain their normalized CSymbolBuiltin family;
+// C_AST_FACT_NONE means no publication and zero means an ordinary call. They
 // are the only allocations in `arena`, which the facts own: c_ast_facts_create
 // reserves it, c_ast_facts_release retires it once lowering is done.
 typedef struct CAstSpans CAstSpans;
@@ -2858,6 +2860,10 @@ BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult c
 BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
 BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
 BUSTER_F_DECL u32 c_ast_facts_selection(CAstFacts const* facts, u32 node);
+// Normalized semantic builtin family on a CALL; zero for an ordinary call
+// and C_AST_FACT_NONE for a missing publication or a different node kind.
+// This uses the CALL payload and preserves its result and callee type facts.
+BUSTER_F_DECL u32 c_ast_facts_call_builtin(CAst const* ast, CAstFacts const* facts, u32 node);
 BUSTER_F_DECL bool c_ast_facts_store_selection(CAstFacts* facts, u32 node, u32 selected_node);
 BUSTER_F_DECL CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node);
 BUSTER_F_DECL bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid);

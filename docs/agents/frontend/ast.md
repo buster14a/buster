@@ -2157,6 +2157,18 @@ byte.
   the exact argument's node kind and intrinsic span, including grouped and
   concatenated strings; they do not strip token parentheses or classify a
   token sequence as an argument.
+  CALL payloads retain the normalized semantic builtin family, independently
+  of the CALL result and callee type. This includes intrinsics declared by
+  headers, such as `_mm_pause`; standalone function designators keep their
+  ordinary CType. `c_ast_facts_call_builtin` returns that family, zero for an
+  ordinary call, and `C_AST_FACT_NONE` when no CALL fact was published. The
+  call prepass refuses a missing publication. The classifier reads pointer
+  and function types from the retained graph without materializing type rows;
+  spelling only selects an operation within the retained builtin family.
+  Core source-location calls use the exact CALL arity, C23 constants use their
+  node kinds, and function-name objects use their semantic recipe. Explicit
+  postfix-update nodes own their effects, without looking beyond a consumed
+  place's source span for an update token.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment

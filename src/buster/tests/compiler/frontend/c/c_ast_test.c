@@ -7185,6 +7185,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
 
 // Completion descriptions remain independent of the type table they were
 // queried against, including a qualified element and an array-decay pointer.
+// Declared intrinsics keep CALL identity without replacing their ordinary
+// function-designator type. The sealed payload survives private-arena release.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+            S8("void _mm_pause(void); int ordinary(void); void f(void) { "
+               "void (*p)(void) = _mm_pause; _mm_pause(); __builtin_ia32_pause(); p(); (void)ordinary(); }"),
+            C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast_from_tree(temporary.arena, preprocess, &built.ast, 0);
+            syntax.ast_facts = &facts;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count))
+            {
+                u32 calls = 0;
+                u32 builtins = 0;
+                u32 designators = 0;
+                u32 builtin_family = 0;
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    if (built.ast.kinds[node] == C_AST_CALL)
+                    {
+                        calls += 1;
+                        u32 builtin = c_ast_facts_call_builtin(&built.ast, &facts, node);
+                        u32 callee = c_ast_child_at(&built.ast, node, 0);
+                        String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[callee]]);
+                        bool expected = string_equal(name, S8("_mm_pause")) || string_equal(name, S8("__builtin_ia32_pause"));
+                        builtins += builtin != 0;
+                        BUSTER_TEST(arguments, facts.payloads[node] != C_AST_FACT_NONE && (builtin != 0) == expected);
+                        if (builtin)
+                        {
+                            BUSTER_TEST(arguments, !builtin_family || builtin_family == builtin);
+                            builtin_family = builtin;
+                        }
+                    }
+                    else if (built.ast.kinds[node] == C_AST_IDENTIFIER &&
+                             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[node]]), S8("_mm_pause")))
+                    {
+                        designators += 1;
+                        u32 flags = facts.flags[node];
+                        u32 type = facts.types[node];
+                        BUSTER_TEST(arguments, (flags & (C_AST_FACT_BOUND | C_AST_FACT_TYPED)) == (C_AST_FACT_BOUND | C_AST_FACT_TYPED) &&
+                                               !(flags & C_AST_FACT_RECIPE) && type < analysis.type_count && analysis.types[type].kind == C_TYPE_FUNCTION);
+                        BUSTER_TEST(arguments, c_ast_facts_call_builtin(&built.ast, &facts, node) == C_AST_FACT_NONE);
+                    }
+                }
+                BUSTER_TEST(arguments, calls == 4 && builtins == 2 && designators == 2);
+                BUSTER_TEST(arguments, c_ast_facts_retain_in_arena(temporary.arena, &facts) != 0 && !facts.arena);
+                u32 sealed = 0;
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    sealed += c_ast_facts_call_builtin(&built.ast, &facts, node) == builtin_family;
+                }
+                BUSTER_TEST(arguments, sealed == 2);
+            }
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7714,6 +7784,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_call_builtin_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
