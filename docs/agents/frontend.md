@@ -32,8 +32,10 @@ Lowering dispatches block declarations through their `DECLARATION` and
 node's entity binding; storage flags and the initializer assignment source
 anchor come from the entity. Declarator parameter names cannot replace the
 declared name, and initializer storage words cannot change its storage.
-Initializer-layout and VLA type-query owners retain their documented temporary
-adapters; see [the syntax-tree contract](frontend/ast.md#declarations).
+Initializer layouts and VLA type queries consume completed semantic plans and
+exact nodes; source spelling and sites use opaque anchors. The required CI
+guard rejects token grammar and source-range node recovery throughout lowering;
+see [the syntax-tree contract](frontend/ast.md#lowering-provenance-boundary).
 
 ## Macro argument rescan boundaries
 

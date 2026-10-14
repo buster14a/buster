@@ -385,51 +385,29 @@ Step 1 of the [owner direction](https://github.com/buster14a/buster/issues/3102#
 on #3102: each phase keeps its finished output for the next, and `c_gen.c`
 lowers from nodes and facts.
 
-- **The tree.** `CIRLowerOptions.syntax_tree` is never missing for lowering.
-  When the caller passes none, `c_lower_to_ir_tree_run` (`c_gen.c`) builds
-  the implicit tree from the final token stream with `c_ast_build`, keeps it
-  for the whole lowering call and releases it on the same thread before
-  returning. `-fsyntax-only` does not lower, so it builds no tree.
-  - A tree that cannot be reserved (`C_DIAGNOSTIC_SOURCE_TOO_LARGE`) fails the
-    unit with the builder's diagnostic. So does a span table that cannot be
-    reserved.
-  - A unit whose syntax the builder rejects fails with the builder's
-    diagnostics and is counted in `tree_rejections`: since step 3 the tree is
-    mandatory for lowering, and the
-    [statement walker](#statements-from-nodes-in-lowering) has no token path.
-    These are inputs the parser accepts, such as `[1 ... 2 ... 3]`
-    designators, empty initializer elements and a second global assembly
-    string; the driver's analysis reports the first two (and
-    `case a ... b ... c`) before lowering, with its own messages.
-  - A hand-built stream with no symbol table no longer refuses the build: the
-    builder interns into a table of its own (`c_symbol_table_standalone`), in
-    its phase arena, whose ids no consumer compares with another table's.
-  - The builder reads `__fp16`, ARM's storage-only half, as a type word
-    (`C_AST_WORD_FP16`), as the parser does. The tree's specifier readers do
-    not treat it as a primitive, so they hand it to the type machine.
-- **Token spans.** `c_ast_spans_build` gives every node the span
-  [first, end) defined by `c_ast_span_rule`, which is also the
-  [typer](#tree-expression-typer)'s rule; there is one statement of it. It
-  is computed once per unit in index order, so each operand's span is known
-  before its parent. A per-start-token chain maps a token range back to its
-  node (`c_ast_spans_locate`, which strips balanced outer parentheses as the
-  typer's lookup does). This is the
-  [token-to-node map](#token-to-node-map-for-lowering)'s design A, built once
-  per unit instead of per body: 12 bytes per node and 4 per token, in a
-  private arena (`c_ir_syntax_spans_create`). Lowering keeps it in
-  `CIntegerIrBuilder.syntax_spans`. Token and node indices stay in that
-  arena; no node id reaches the IR.
-- **Types.** The tree typer's per-node C types are still body scratch in
-  analysis and run only under the pilot. They are not retained yet. Lowering's
-  expression IR types come from the values it emits; the C types its type
-  queries need (`sizeof` operands, `typeof`, type names) belong to the query
-  machine, which step 4 moves to nodes. Retaining typer facts is that step's
-  dependency, not this one's.
-- **Counts.** `CAstLowerStatistics` records the trees lowering built
-  (`trees_built`, `tree_nodes`, `tree_bytes`) and the span facts
-  (`span_nodes`, `span_bytes`), and the rejections above (`tree_rejections`).
-  `-v` prints them on every compile as `C_AST_RETAINED trees_built=<>
-  tree_rejections=<> tree_nodes=<> tree_bytes=<> span_nodes=<> span_bytes=<>`.
+- **The tree.** Parsing and semantic analysis retain the completed syntax tree
+  and facts before lowering. Direct callers use `c_parse_for_lowering`; a
+  model-only result cannot lower. `c_lower_to_ir_tree_run` borrows the retained
+  tree when no override is supplied and rejects missing authority. It never
+  builds syntax or reruns semantics. `-fsyntax-only` prepares syntax without
+  allocating lowering-only fact/literal storage.
+- **Spans.** Semantic analysis computes `CAstSpans` and seals delimiter
+  provenance before publication. Its private range index serves semantic
+  producers; lowering borrows the columns and selects them only by an exact
+  carried node. A missing span/delimiter column refuses the lowering boundary.
+  `c_ir_syntax_spans_create` owns only the lowering hoist bytes and walk bits;
+  no lower-time span or matching-delimiter build remains.
+- **Types and constants.** Completed C model references, sparse constructor
+  recipes, bindings, selections, numeric answers and initializer plans live
+  with `CAstFacts`. The checked node scheduler materializes the canonical
+  type/value projection in the established order, without changing C rows,
+  recovering nodes from ranges or calling a private grammar reader.
+- **Counts.** `CAstLowerStatistics` records borrowed spans (`span_nodes`,
+  `span_bytes`) and actual hoist/evaluator work. `-v` prints
+  `C_AST_RETAINED span_nodes=<> span_bytes=<> hoist_steps=<> evaluator_steps=<>`.
+  Syntax construction counts remain in the driver's `C_AST` row. The
+  always-zero lower-time tree-build and range-adapter fields are removed;
+  historical receipts retain their original fields.
 
 Retained bytes are measured and reported, not budgeted per slice. The
 end-to-end measurement waits until lowering is complete (step 5).
@@ -599,9 +577,7 @@ Under `-v` the driver prints these rows with the other verbose counters, plus
 - `C_AST_LOWER steps=<nodes the root-conditional descents visited>
   answers=<root-conditional queries answered true> negatives=<queries
   answered false> statement_bodies=<bodies the statement walker lowered from
-  their nodes> statements=<statement nodes it lowered>
-  range_adapters=<token ranges its temporary expression and declaration
-  adapter derived>`
+  their nodes> statements=<statement nodes it lowered>`
 
 - `C_AST_FACTS nodes=<tree nodes> retained_bytes=<the facts' committed
   columns> regions=<typed regions published> candidates=<their expression
@@ -1636,16 +1612,12 @@ targets ask the parse result's scopes about. A statement's extent comes from
 its siblings: the items of a block tile its tokens, so an item ends where the
 next starts (`c_ir_node_list_end`), and the last at the block's `}`.
 
-**Temporary adapter.** Expressions, declarations, typedefs and assembly
-still enter their token frames until steps 3 and 4. The walker hands each a
-token range derived from the node at that boundary only, and the boundary is
-marked for step 5 (#4058) to delete:
-- `c_ir_node_expression_range` gives an expression's first and last token
-  from its edge children, widened over the parentheses that wrap exactly it;
-- `c_ir_node_declaration_start` steps over a leading attribute run;
-
-`-v` adds three fields to `C_AST_LOWER`: `statement_bodies`, `statements` and
-`range_adapters`, the token ranges the adapter derived.
+**Child handoff.** Expressions, declarations, type constructors and assembly
+carry exact nodes through their frames. Source spans retain the original debug
+and diagnostic extents; they never select a structural node. Cleanup and loop
+targets query finished scope intervals at the recorded source positions.
+`-v` reports `statement_bodies` and `statements` in `C_AST_LOWER`; the retired
+range-adapter counter has no remaining producer.
 
 Tests: `c_ast_test_statement_nodes` lowers one body with every
 controlled-substatement shape alike in every layout and with or without a
@@ -1798,9 +1770,9 @@ verdict), the token scan it fell back to (`c_ir_root_conditional_scan`) and the
 **Status: (a) to (c), CALL record identity and control group identity are
 implemented. Statement-expression, place, `EXPRESSION`, evaluator-core,
 condition, logical-value and conditional-value owners retain their exact nodes
-through their child handoffs and continuations. The type and initializer
-owners still take their subtree's token range, and the step-4 callers read operand extents through
-marked temporary adapters.** This is
+through their child handoffs and continuations. Type, constant, bound and
+initializer owners likewise consume exact child nodes and finished facts;
+the temporary range adapters are deleted.** This is
 step 3 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
 ([#4059](https://github.com/buster14a/buster/issues/4059)). It lands as a
 short stack, each part byte-identical on its own:
@@ -1826,11 +1798,9 @@ and the unchanged call emission order. Returned-call chains no longer need
 callee-token chains or a reference scan: their inner and outer calls have
 distinct nodes even when their source starts coincide.
 
-The place and type-query owners that still accept token ranges resolve the
-range's postfix base through retained nodes before asking for a prepared
-CALL. These boundaries remain temporary until the owner frames take nodes;
-there is no token-index or prepared-record scan fallback. The standalone
-argument-separator query adapter is still part of step 4.
+Place and type-query owners retain their exact subtree and prepared CALL
+identity. Argument queries use cached CALL children. The range-only entry
+boundaries and standalone argument-separator query adapter are deleted.
 
 The rest of this section is the design that (a) to (c) follow. It describes
 the token path as it was before (a).
@@ -2257,8 +2227,8 @@ byte.
   carry their exact children, and an argument-list continuation takes its
   next argument from the CALL's children. The assignment's place route reads
   the operand's node kinds and wrapper facts. Declaration, query and assembly
-  boundaries still hand over token ranges; the marked entry adapter resolves
-  each once, before the expression frame runs.
+  boundaries hand over their exact child nodes; missing nodes are rejected at
+  frame entry without range recovery.
 - **Conditions.** `c_ir_lower_condition_step` strips parentheses, takes a
   `!` over a chain, reads the `__builtin_expect` hint, and splits the
   `&&`/`||` spine from the node. A spine is split once, into an array of its
@@ -2310,23 +2280,13 @@ byte.
   `c_ir_has_control_operator_anywhere`, `c_ir_has_top_level_comma`,
   `c_ir_unary_expression_end`, `c_ir_postfix_suffix_end` and
   `c_ir_unevaluated_operand_end`.
-- **Temporary adapters for step 4.** The query machine, the constant
-  evaluator, the static-initializer and array-bound folds and the vendor
-  budget still take token ranges. Where they asked a token walk how far an
-  operand reaches, they read the node's span:
-  `c_ir_tree_unevaluated_operand_end` (a `sizeof`/`_Alignof` keyword's node),
-  `c_ir_tree_range_is_cast` and `c_ir_tree_anchored_node`. Each is marked
-  `TEMPORARY ADAPTER` in `c_gen.c`; step 4 deletes them with their callers.
-  The `sizeof` type machine's operator scan reads a `+`, `-`, `*` or `&`
-  right after `sizeof (T)` as a cast operand's prefix. The token walker
-  agreed, so `sizeof(sizeof(int) + 1.0f)` folded `size_t`'s 8. The
-  classifier now splits at the tier of the binary operator the tree has at
-  the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
-- **Still token ranges.** The `sizeof` and compound-literal frames take
-  their subtree's token range. Prepared calls use CALL node identity;
-  prepared control records use node and wrapping level. Statement-expression
-  frames enter their compound child directly, and `EXPRESSION` continuations
-  retain their subtree identity. Places and VLA indices use exact syntax nodes.
+- **Step 4 retirement.** Type, constant, static-initializer, array-bound and
+  vendor-budget consumers carry exact nodes and finished semantic facts.
+  `c_ir_tree_unevaluated_operand_end`, `c_ir_tree_range_is_cast`,
+  `c_ir_tree_anchored_node`, range type prediction and sizeof/group recovery
+  adapters are deleted. Runtime sizeof and compound literals use their exact
+  operand/type/list children; declaration and assembly child handoffs likewise
+  carry explicit nodes. Prepared controls use node and wrapping-level identity.
 - **A unit the builder rejects.** The tree is mandatory: such a unit fails
   with the builder's diagnostics (`tree_rejections`), and lowering does not
   run. These are inputs the parser accepts: invalid `__builtin_offsetof`
@@ -3083,9 +3043,9 @@ unevaluated `sizeof`/`typeof` regions where no initializer execution plan is
 required. These producers still restore their semantic checkpoints completely.
 
 The obsolete token TYPE_NAME, COMPOUND_TYPE and COMPOUND_ELEMENT_COUNT frame
-families and declarator walkers are removed. Transitional range callers locate
-an exact retained TYPE_NAME boundary; their remaining expression/operand and
-VLA readers are still an explicit retirement task. TYPEOF and atomic-specifier operands now request their exact TYPE_NAME or
+families and declarator walkers are removed. Expression/operand and VLA
+consumers likewise carry exact nodes; the transitional range callers are
+deleted. TYPEOF and atomic-specifier operands now request their exact TYPE_NAME or
 STRICT EXPRESSION_TYPE child through the shared scheduler. Stable source
 TYPE_NAME constructor projections have one owner per function subtree, shared
 by constant and runtime readers. The producer marks those body source owners
@@ -3203,20 +3163,26 @@ and terminator directly, creating no array or pointer constructor.
 
 ## Consumer and retirement map
 
-These token walkers currently rediscover structure that the tree records once.
-A row may be retired only when its consumer reads nodes and the corresponding
-differential tests pass.
+The production driver always builds the retained tree. Semantic analysis owns
+source grammar and publishes completed ownership, bindings, type recipes,
+constants and initializer plans. Lowering consumes those results and exact
+nodes; it cannot opt out of the syntax boundary or recover a node from a
+source range. Independent reference/model APIs remain test controls.
 
-| Current owner | Rediscovers | Tree replacement | Status |
-|---|---|---|---|
-| `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
-| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)); so do members' plain runs inside tag definitions ([members](#members)); the statement plan's [declaration hints](#statement-plan-from-the-tree) give block declarations their storage-class set and auto precheck from it. The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
-| `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
-| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Retired by #4060: the walker reads [statement nodes](#statements-from-nodes-in-lowering) in every compile, and the first-token classification, `c_ir_statement_end*`, `c_ir_statement_span`, `c_ir_statement_labels_end`, `c_ir_controlled_body_range`, the switch's label scan and the extent table are deleted. Expressions and declarations still receive a token range from a marked adapter until steps 3 to 5. |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Retired: the evaluator walks its node in postorder and the frames split at their node's root operator ([Expression lowering from the tree](#expression-lowering-from-the-tree)); the `c_ir_has_root_*` scans and the shunting-yard loop are deleted. |
-| `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | The facts are retained under `-fc-ast-pilot` and passed to lowering ([retained facts](#retained-facts), #4062), but no lowering consumer reads them yet. Not migrated. Step 4 of the owner direction deletes the query machine; see [Initializers, declarations and type queries from the tree](#initializers-declarations-and-type-queries-from-the-tree). Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate. |
-| `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
+| Current owner | Input and responsibility | Retirement status |
+|---|---|---|
+| `c_parse_ast_from_tree`, declaration analysis | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` records | Production declaration ownership comes from the mandatory tree. `c_parse_ast_reference` retains the independent token reference. |
+| `c_parse_bind_block_statements`, `c_parse_local_declarations` | `COMPOUND_STATEMENT` plan and declaration children | Semantic producers use the statement plan and publish local bindings; private semantic grammar remains owned by `c_parse.c`. |
+| `c_type_parse_*` declarator/specifier machine | Source type grammar, layout and retained type recipes | Remains a semantic producer. No type-parser machine, mutation or token-query entry is available to lowering. |
+| Tree expression typer and semantic type queries | Completed source type/category, binding, selection and numeric facts | Producer coverage and refusal are explicit; missing authority is rejected rather than reconstructed by lowering. |
+| `c_ir_lower_body_advance` | Exact statement nodes and declaration owners | First-token classification, statement-end scans, switch label scans and token extent tables are deleted. |
+| `c_ir_lower_expression_core_step` and runtime place owners | Postorder expression nodes, explicit child handoffs and AST operator/member kinds | Shunting-yard precedence, root splits and member/operator token classifiers are deleted. |
+| `c_ir_node_query_attempt`, initializer-plan consumers | Exact `TYPE_NAME`, compound, expression projection, constant, bound and initializer child tasks | The checked node scheduler preserves constructor effects and ordered publication. All token query families, range recovery wrappers and initializer/designator grammar walkers are deleted. |
+| `c_ir_syntax_spans_create`, source-anchor getters | Borrowed completed spans/delimiter provenance and opaque spelling/site handles | The lower-time delimiter-index builder and fallback are deleted. No raw token classification is exposed; the [source guard](#lowering-provenance-boundary) covers every included lowering implementation. |
+
+The following notes describe the earlier optional-hook migration, before the
+mandatory boundary and lowering retirement. Their pilot/default distinction is
+historical; current behavior is the map above.
 
 Under `-fc-ast-pilot`, the first row's three walkers no longer run for a unit
 whose records the split publishes. Their consumer, semantic analysis's
@@ -3269,26 +3235,27 @@ retired.
 
 ## Measurement plan
 
-Comparisons are between matched endpoints only. The pilot's tree is
-complete, and its first consumer is the
-[tree expression typer](#tree-expression-typer), so `-fc-ast-pilot` on versus
-off is now an end-to-end comparison of the same checked frontend that includes
-the tree's build cost. Hosted measurements are diagnostic. Acceptance needs the Ryzen 7 9700X route required by
+Comparisons are between matched endpoints only. The final migrated frontend
+is compared with the frozen original compiler and workload, including syntax
+construction, retained semantic facts, all lowering work, diagnostics, object
+identity at `-g0` and `-g`, and the self-host fixed point. Hosted measurements
+are diagnostic. Acceptance needs the Ryzen 7 9700X route required by
 [#2761](https://github.com/buster14a/buster/issues/2761) and described in
-[benchmarking](../benchmarking.md).
+[benchmarking](../benchmarking.md); correctness and source-guard success alone
+do not establish that performance result.
 
-**Since the default switch** (2026-10-13), the arms are renamed, not
-re-budgeted. The sections below were measured when the tree-free path was the
-default, so their "default path" and "D against A" mean the path that is now
-the historical tree-free driver path; they stay as recorded. Under the
+The sections below preserve the budgets and measurements of the earlier
+optional pilot. Since the default switch (2026-10-13), their "default path"
+and "D against A" refer to the historical tree-free driver path. That
+production opt-out is now retired; a frozen original binary supplies the
+reference endpoint. Under the
 [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034),
-lowering slices carry no per-slice budget. Work after the switch reports
-correctness and counters, the opt-out is the no-added-work reference arm
-while it exists, and the end-to-end measurement and the Zen 5 acceptance
-follow [#4058](https://github.com/buster14a/buster/issues/4058). The
-`ast-pilot-acceptance-v1` profile compares no flag against `-fc-ast-pilot`,
-so on a head after the switch its two arms are the same compile and it no
-longer measures the tree.
+lowering slices carry no per-slice budget. The final end-to-end measurement
+and Zen 5 acceptance follow
+[#4058](https://github.com/buster14a/buster/issues/4058). The older
+`ast-pilot-acceptance-v1` profile compares no flag against `-fc-ast-pilot`;
+after the default switch those arms select the same layout and do not measure
+the migration.
 
 For the pilot, the budgets for the self-host unity input (about 3.97 M tokens
 reach the parser) were declared before any timing was taken:
@@ -6073,8 +6040,8 @@ and constraint/register validation retain their existing implementation.
 Operand continuations carry the exact expression node and retained source
 provenance, preserving evaluation order and memory-place recovery. Semantic
 analysis owns the token-based GNU dialect preflight; lowering no longer
-repeats it. The remaining local register-label adapter is retired with the
-published entity-to-`INIT_DECLARATOR` link in the global declaration migration.
+repeats it. Local register labels use the published entity-to-`INIT_DECLARATOR` link;
+the declaration-link adapter is deleted.
 
 Runtime casts and compound literals now read their exact TYPE_NAME/list
 children. Runtime sizeof/_Alignof reads its operand node, uses saved VLA
@@ -6102,3 +6069,20 @@ getters, raw preprocessing token columns, range-to-node recovery and parser
 grammar helpers. Its named model-helper allowlist consists only of audited
 target layouts and finished semantic tables. It has no test-build exception
 inside lowering.
+
+The driver regression `compiler_driver_test_lowering_token_poison` poisons the
+expanded stream's kind, punctuator and symbol columns after semantic analysis,
+while preserving spelling ranges and numeric-cache identity. Its FAST/QUALITY,
+implicit/hybrid and `-g0`/`-g` rows require byte-identical objects; native rows
+check the member, bit-field, atomic and update results. The source-anchor fixture
+also checks macro mapping, `#line`, oversized strings and foreign numeric-cache
+identity. The compiler and source API remain C-only; Python is a CI test tool.
+
+Leading constructor projections preserve the original order while a comma or
+CALL-list continuation keeps the same prefix. The expression frame reuses its
+settled answer only for the same known node, or that node's exact first child
+at the same recorded start. Assignment, branch and statement-tail transitions
+recheck identity. The geometric regression counts actual prefix visits for
+comma, CALL-list, assignment, branch, statement-tail and pointer-constructor
+shapes and checks the C type rows remain immutable; no unit cache or extra
+syntax pass is introduced.

@@ -5957,11 +5957,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments*
         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("statement nodes, no tree"), preprocess, analysis, target_native,
                                                             (CIRLowerOptions){.ast_lower_statistics = &lower});
         BUSTER_TEST_RAW(arguments,
-                        lowered.program && lower.statement_bodies == 1 && lower.trees_built == 0 && lower.tree_rejections == 0 && analysis.ast &&
+                        lowered.program && lower.statement_bodies == 1 && analysis.ast &&
                             analysis.ast->node_count != 0 && analysis.frontend_retained_copy_bytes != 0 && lower.span_nodes != 0 && lower.span_bytes != 0,
-                        string_format(temporary.arena, S8("statement nodes, no tree: program={u32} bodies={u64} trees={u64} rejections={u64} nodes={u64} spans={u64}"),
-                                      (u32)(lowered.program != 0), lower.statement_bodies, lower.trees_built, lower.tree_rejections, lower.tree_nodes,
-                                      lower.span_nodes));
+                        string_format(temporary.arena, S8("statement nodes, no tree: program={u32} bodies={u64} spans={u64}"),
+                                      (u32)(lowered.program != 0), lower.statement_bodies, lower.span_nodes));
         c_test_scratch_end(temporary);
     }
     return result;
@@ -7229,6 +7228,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_shape_work(UnitTestArgume
         }
         previous = work;
         c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_lowering_prefix_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const forms[] = {
+        S8("int f(int x) {{ return {S8}; }}"),
+        S8("int g(int first, ...) {{return first;}} int f(int x) {{ return g({S8}); }}"),
+        S8("int f(int x) {{ int y; return y={S8},y; }}"),
+        S8("int f(int x) {{ return x ? ({S8}) : ((short)x,x); }}"),
+        S8("int f(int x) {{ return ({{ int y=x; {S8}; }}); }}"),
+        S8("int f(int x) {{ return (int(*)[3])0,{S8}; }}"),
+    };
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(forms); shape += 1)
+    {
+        u64 previous = 0;
+        for (u32 sample = 0; sample < 3; sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 terms = 128u << sample;
+            char8* expression = arena_allocate(temporary.arena, char8, (u64)terms * 2 + 6);
+            memcpy(expression, "(long)x", 7);
+            u32 length = 7;
+            for (u32 term = 1; term < terms; term += 1)
+            {
+                expression[length++] = ',';
+                expression[length++] = 'x';
+            }
+            String8 source = string_format(temporary.arena, forms[shape], (String8){.pointer = expression, .length = length});
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+            CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+            CType* original_types = arena_allocate(temporary.arena, CType, analysis.type_count);
+            memcpy(original_types, analysis.types, sizeof(CType) * analysis.type_count);
+            u32 type_count = analysis.type_count;
+            c_test_lowering_prefix_work_take();
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("lowering-prefix-work.c"), preprocess, analysis, target_native);
+            u64 work = c_test_lowering_prefix_work_take();
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : source);
+            BUSTER_TEST(arguments, analysis.type_count == type_count && !memcmp(original_types, analysis.types, sizeof(CType) * type_count));
+            BUSTER_TEST_RAW(arguments, work <= (u64)terms * 16 && (!previous || work <= previous * 3 + 16),
+                string_format(temporary.arena, S8("leading constructor: shape={u32} terms={u32} visits={u64} previous={u64}"), shape, terms, work, previous));
+            if (!shape) BUSTER_TEST(arguments, work >= terms);
+            string_print(string_format(temporary.arena, S8("C_LOWER_PREFIX_WORK shape={u32} terms={u32} visits={u64}\n"), shape, terms, work));
+            previous = work;
+            c_test_scratch_end(temporary);
+        }
     }
     return result;
 }
@@ -9286,6 +9335,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_bound_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_object_context);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_lowering_prefix_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_pointer_probe);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_enum_scope);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_declaration_point);

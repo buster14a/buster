@@ -76,6 +76,8 @@ BUSTER_F_DECL bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult 
                                                  u32 node, u64* low, u64* high, f64* floating, bool* is_float);
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
+// Visits along known leading-constructor paths on the calling thread.
+BUSTER_F_DECL u64 c_test_lowering_prefix_work_take(void);
 // Token-free structural groups, replayed row reuse and restored node heads.
 BUSTER_F_DECL bool c_test_prepared_control_identity_replay(void);
 // Wrapper levels and hoist facts with no token stream or delimiter index.
@@ -114,11 +116,12 @@ typedef enum CTestIrScratchProbeKind
     C_TEST_IR_SCRATCH_SSA_FINISH_CFG,
     C_TEST_IR_SCRATCH_SSA_FINISH_PUBLISH,
 } CTestIrScratchProbeKind;
-BUSTER_F_DECL bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclaration declaration, CTestIrScratchProbeKind kind);
+BUSTER_F_DECL bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CAst const* ast, CDeclaration declaration, CTestIrScratchProbeKind kind);
 
-// Execute the production inference/materialization machines over a synthetic
-// flat integer token stream, independently of the TU query-stack reservation.
-BUSTER_F_DECL bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_count, u8* bytes,
+// Execute the production materializer over a caller-owned node/plan fixture,
+// independently of the TU query-stack reservation.
+BUSTER_F_DECL bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, CPreprocessResult preprocess, CAst const* syntax,
+                                                  u32 element_count, u8* bytes,
                                                   u64* inferred_count, u64* scratch_bytes, String8* failure_message);
 BUSTER_F_DECL IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_arena, IrProgram* program,
                                                IrFunction* function, IrValueId operand, String8 member, u32 kind,

@@ -1723,35 +1723,19 @@ struct CAstSpecifierStatistics
     u32 fallback_token;
 };
 
-// What lowering read from the tree (GitHub #3102) over one lowering: how each
-// root-conditional query (c_ir_root_conditional) ended, an answer being a
-// root `?:` the range's node holds and a negative any other range, and the
-// nodes those queries' descents visited, a work count that must stay linear in
-// the input.
-// The retained facts (GitHub #3102 step 1): trees_built counts the units whose
-// tree lowering built itself because the caller passed none, with that tree's
-// nodes and retained bytes (CAstStatistics.retained_bytes); tree_rejections
-// the units whose syntax that build rejected, which fail with its
-// diagnostics (c_lower_to_ir_tree_run); span_nodes and
-// span_bytes are the nodes c_ast_spans_build gave a span and the bytes of its
-// columns, for every lowered unit with a tree.
+// What lowering read from the completed tree: root-conditional answers,
+// negative answers and their descent work, statement traversal, and borrowed
+// semantic spans. Syntax construction is owned and counted by the driver;
+// lowering never builds a tree or a span index.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
     u64 steps;
     u64 answers;
     u64 negatives;
-    // The statement walker (#4060): bodies and statements it lowered from
-    // their statement nodes, and the token ranges it derived at the
-    // temporary expression and declaration adapter (#4058). It has no token
-    // fallback to count.
+    // Bodies and statements lowered from their exact statement nodes.
     u64 statement_bodies;
     u64 statements;
-    u64 range_adapters;
-    u64 trees_built;
-    u64 tree_rejections;
-    u64 tree_nodes;
-    u64 tree_bytes;
     u64 span_nodes;
     u64 span_bytes;
     // The nodes the control-group walk visited (c_ir_tree_control_groups), a

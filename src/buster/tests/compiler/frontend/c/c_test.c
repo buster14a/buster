@@ -1863,13 +1863,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_scratch_capacity(UnitTestArgu
                         BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
                         BUSTER_TEST(arguments, lowered.program->modules[0].lowered_function_count == 1);
                     }
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_EVENTS));
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_READS));
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_BODY_TASKS));
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_SLOTS));
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_PARAMETERS));
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_FINISH_CFG));
-                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_FINISH_PUBLISH));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_EVENTS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_READS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_BODY_TASKS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_SSA_SLOTS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_SSA_PARAMETERS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_SSA_FINISH_CFG));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, parse.ast, large, C_TEST_IR_SCRATCH_SSA_FINISH_PUBLISH));
                 }
                 else if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
                 {
@@ -8859,12 +8859,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArg
     BUSTER_TEST(arguments, persistent && work);
     if (persistent && work)
     {
+        CPreprocessResult flat_preprocess = c_preprocess(persistent, S8("unsigned short flat[] = {0,1,2,3,4,5,6,7,8,9};"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CAstResult flat_tree = c_ast_build(persistent, flat_preprocess, (CAstOptions){0});
+        BUSTER_TEST(arguments, !flat_preprocess.diagnostic_count && flat_tree.complete);
         u32 const million_count = 1000001;
         u8* bytes = arena_allocate_zeroed(persistent, u8, (u64)million_count * 2);
         u64 inferred_count = 0;
         u64 scratch_bytes = 0;
         String8 failure = {0};
-        bool materialized = c_test_initializer_flat_bytes(persistent, work, million_count, bytes, &inferred_count, &scratch_bytes, &failure);
+        bool materialized = c_test_initializer_flat_bytes(persistent, work, flat_preprocess, &flat_tree.ast, million_count, bytes, &inferred_count, &scratch_bytes, &failure);
         BUSTER_TEST(arguments, materialized && !failure.length && inferred_count == million_count);
         BUSTER_TEST(arguments, scratch_bytes < BUSTER_KB(16));
         if (materialized)
@@ -8881,8 +8885,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArg
         arena_reset_to_start(work);
         arena_allocate(work, u8, work->reserved_size - work->position - 64);
         failure = (String8){0};
-        BUSTER_TEST(arguments, !c_test_initializer_flat_bytes(persistent, work, 16, bytes, &inferred_count, &scratch_bytes, &failure));
+        BUSTER_TEST(arguments, !c_test_initializer_flat_bytes(persistent, work, flat_preprocess, &flat_tree.ast, 16, bytes, &inferred_count, &scratch_bytes, &failure));
         BUSTER_STRING_TEST(arguments, failure, S8("initializer working storage exceeds the scratch reservation"));
+        c_ast_release(&flat_tree.ast);
+        c_preprocess_release(&flat_preprocess);
         arena_reset_to_start(persistent);
         arena_reset_to_start(work);
 
@@ -17447,7 +17453,7 @@ BUSTER_GLOBAL_LOCAL void c_test_tree_rejection(UnitTestArguments* arguments, Uni
                                                         (CIRLowerOptions){.ast_lower_statistics = &statistics});
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == expected_count);
-    BUSTER_TEST(arguments, statistics.tree_rejections == 0);
+    BUSTER_TEST(arguments, statistics.span_nodes == 0 && statistics.hoist_steps == 0 && statistics.evaluator_steps == 0);
     BUSTER_TEST(arguments, lowered.program == 0);
     BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == expected_count && string_equal(lowered.diagnostics[0].message, expected_message),
                     string_format(temporary.arena, S8("tree rejection: {u32} diagnostics, first '{S8}', expected '{S8}'"),
@@ -44084,7 +44090,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         // Both routes retain the required tree before semantic analysis.
         CAstLowerStatistics lower = compiled[1].c_ast.lower;
         CAstLowerStatistics own = compiled[0].c_ast.lower;
-        BUSTER_TEST(arguments, own.trees_built == 0 && lower.trees_built == 0);
+        BUSTER_TEST(arguments, compiled[0].c_ast.units == 1 && compiled[1].c_ast.units == 1 && own.span_nodes && lower.span_nodes);
         BUSTER_TEST(arguments, own.steps == lower.steps && own.answers == lower.answers && own.negatives == lower.negatives &&
                                    own.span_nodes == lower.span_nodes);
         BUSTER_TEST(arguments, lower.answers >= 20);
@@ -44347,7 +44353,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting_skew(UnitTestArguments* 
             // conditionals at the top of an expression; only the shapes that
             // reach the evaluator walk at all.
             bool walks = shape == 0 || shape == 2;
-            BUSTER_TEST_RAW(arguments, statistics.trees_built == 0 && (!walks || statistics.hoist_steps != 0),
+            BUSTER_TEST_RAW(arguments, statistics.span_nodes && (!walks || statistics.hoist_steps != 0),
                             string_format(arena, S8("hoisting skew {S8} depth {u32}: no hoisting walk"), names[shape], depth));
             steps[depth_index] = statistics.hoist_steps;
         }
@@ -44420,7 +44426,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_evaluator_skew(UnitTestArguments*
             BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0 && lowered.canonical_ir_certified,
                             string_format(arena, S8("evaluator skew {S8} depth {u32}: {S8}"), names[shape], depth,
                                           lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("no program")));
-            BUSTER_TEST_RAW(arguments, statistics.trees_built == 0 && statistics.evaluator_steps >= depth,
+            BUSTER_TEST_RAW(arguments, statistics.span_nodes && statistics.evaluator_steps >= depth,
                             string_format(arena, S8("evaluator skew {S8} depth {u32}: {u64} walk steps"), names[shape], depth,
                                           statistics.evaluator_steps));
             steps[depth_index] = statistics.evaluator_steps;

@@ -1,7 +1,11 @@
 // C -> canonical IR lowering, the third stage of the frontend. The entry
 // point is c_lower_to_ir at the bottom of the file: it sizes and fills one
-// IrProgram from the preprocessed token stream and the parser's entities,
-// scopes, and types, lowering every function body and global initializer.
+// IrProgram from the completed syntax tree and semantic entities, scopes,
+// types and retained plans, lowering every function body and global initializer.
+// c_source_anchor_* supplies spelling and mapped sites through CSourceAnchor;
+// lowering has no token classification or source-range-to-node recovery API.
+// tools/check_c_lowering_provenance.py guards this file and its included
+// vendor implementations in required lint and queue-lint CI jobs.
 // c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
 // the program arena is touched. c_ir_constant_initializer_bytes_node and
 // c_ir_static_compound_literal_node_attempt own checked private context arrays;
@@ -35,9 +39,9 @@
 // below), and reads expression source provenance from retained semantic spans
 // (c_ir_node_expression_provenance). Header and block boundaries read syntax-
 // owned delimiter records; no token/delimiter adapter remains there (#4058).
-// c_ir_syntax_spans_create keeps every node's token span
-// (c_ast_spans_build), its range-to-node chain and a CIrHoistFact byte for
-// the whole call (CIntegerIrBuilder.syntax_spans, syntax_hoist). An
+// c_ir_syntax_spans_create borrows the finished semantic node spans and
+// delimiter provenance. c_ir_hoist_facts_build supplies a CIrHoistFact byte
+// for the whole call (CIntegerIrBuilder.syntax_spans, syntax_hoist). An
 // expression core's control groups and calls are hoisted from its node
 // (c_ir_tree_control_groups, c_ir_tree_calls_discover; GitHub #3102 step 3),
 // and the core then evaluates the node in postorder
@@ -50,21 +54,17 @@
 // sharing a callee's first token keep distinct rows. Prepared control groups
 // use their node and wrapping level. Place owners read their exact subtree,
 // collecting member/index suffixes into a source-order node path; their VLA
-// child consumes consecutive INDEX nodes from that path. The sizeof and
-// compound-literal owners still take their subtree's token range. The step-4
-// callers that take token ranges (the query machine, the constant evaluator,
-// static initializers, array bounds) read operand extents from the spans
-// through the marked temporary adapters c_ir_tree_unevaluated_operand_end,
-// c_ir_tree_range_is_cast and c_ir_tree_anchored_node (GitHub #4061). Most
-// other structure questions still re-walk token ranges, resolving identifiers
-// through the parse result's scopes and the prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). Required node facts are inherited from the
+// child consumes consecutive INDEX nodes from that path. Runtime sizeof,
+// casts and compound literals retain their exact operand/type/list children.
+// Constant, type projection, array-bound and initializer tasks carry exact
+// node identities through their continuations; source spans supply only
+// diagnostic and emission provenance. Required node facts are inherited from the
 // finished semantic output (CIRLowerOptions.syntax_facts, GitHub #4062).
 // Local declarations read their DECLARATOR_NAME bindings from these facts;
 // their storage and assignment provenance come from CEntity. Declarator lists,
 // initializer presence and labeled-local predeclaration use node topology
 // (c_ast_declarator_name, c_parse_publish_declaration_facts; GitHub #4061 F4).
-// Initializer-layout, attributes and VLA queries retain marked owner adapters.
+// Initializer layout, attributes and VLA dimensions use finished owner facts.
 // Expression type node tasks (c_ir_expression_type_node) retain their view:
 // STRICT keeps the operand type, PROMOTED applies the legacy bit-field view,
 // and PREDICTED applies value-context decay and conditional prediction. Their
@@ -72,7 +72,7 @@
 // stack; the projection state stays private until that root completes.
 // Operand, prediction, conditional and null-constant token-range frame
 // families and their precedence/postfix walkers have been retired. Range
-// boundaries locate a retained node; the checked task key is node plus view.
+// callers carry their exact retained node; the checked task key is node plus view.
 // c_ir_conditional_result_type_node reuses projected branch types and requests
 // only the promoted/null children its conditional merge still needs.
 // No node id reaches the IR. Prepared control
@@ -84,13 +84,12 @@
 // The range's node and its CIrHoistFact bits let
 // c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_node_may_prepare_control) or a call prepass
-// (c_ir_range_may_prepare_calls) that cannot find anything.
+// (c_ir_node_may_prepare_calls) that cannot find anything.
 // Assembly reads ASM/ASM_TOP_LEVEL, ordered operand section children and
 // label/clobber lists directly (c_ir_lower_inline_assembly_step). STRING
-// nodes retain each template run; token anchors fetch spelling/source only.
+// nodes retain each template run; source anchors fetch spelling/site only.
 // Dialect extension policy belongs to c_parse_unsupported_gnu_construct.
-// Local register bindings still have a marked declaration-link adapter until
-// the global declaration publication contract supplies INIT_DECLARATOR ids.
+// Local register bindings read the published entity-to-INIT_DECLARATOR link.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -147,8 +146,8 @@
 //   prediction and null-pointer-constant tests. Exact node tasks queue their
 //   child dependencies and retain private numeric or type-graph state across
 //   suspension. TYPE_NAME tasks preserve source constructor ownership while
-//   reading sparse semantic recipes and explicit node children. The legacy
-//   VLA C-type projection frame remains until its type owner retires it.
+//   reading sparse semantic recipes and explicit node children. The token
+//   query frame families, including VLA C-type projection, are deleted.
 // - Calls are discovered and lowered before the surrounding expression
 //   consumes their values (c_ir_tree_calls_discover,
 //   c_ir_emit_prepared_call_step), so the expression machine sees each
@@ -217,8 +216,8 @@
 //                                                 core's node (c_ir_core_*)
 //   c_ir_lower_condition_step                     depth-zero logical splits
 //   c_ir_lower_dispatch                           lowering-machine dispatch
-//   c_ir_root_conditional                         root `?:` splits from the
-//                                                 range's node
+//   c_ir_node_root_conditional                    root `?:` splits from the
+//                                                 known expression node
 //   c_ir_call_arguments_counted,                  call arguments from the
 //                                                 CALL node
 //   c_ir_cleanup_*                                __attribute__((cleanup))
@@ -239,8 +238,8 @@
 //                                                 and ordered retained stores
 //   c_ir_initializer_nesting_depth                by-value type depth that sizes
 //                                                 initializer frames/contexts
-//   c_ir_constant_apply_*, c_ir_constant_evaluate constant-expression
-//                                                 evaluator (128-bit integers)
+//   c_ir_constant_apply_*,                       exact-node constant tasks
+//   c_ir_constant_evaluate_node                   (128-bit integers)
 //   c_ir_constant_float_* ..                     source-format-preserving
 //   c_ir_constant_wide_float_*                    x87/binary128 constants
 //   c_ir_global_initializer                       globals
@@ -1780,8 +1779,8 @@ struct CIrConstantComplexInitializerValue
     bool is_complex;
 };
 
-// Node tasks share the checked frontend query stack during the family
-// migration. Their keys contain no source range; state is private scratch.
+// Exact node tasks share a checked frontend scheduler. Their keys contain no
+// source range; state is private scratch and never reaches canonical IR.
 typedef enum CIrAstTypeView
 {
     C_IR_AST_TYPE_STRICT,
@@ -1826,13 +1825,8 @@ typedef struct CIrQueryFrame CIrQueryFrame;
 struct CIrQueryFrame
 {
     CIrNodeQueryFrame node_task;
-    IrTypeId result_type;
-    u32 start;
-    u32 end;
     CIrQueryFrameKind kind;
-    bool flag;
     bool success;
-    u8 reserved[2];
 };
 
 typedef struct CIrQueryMachine CIrQueryMachine;
@@ -3034,9 +3028,8 @@ struct CIntegerIrBuilder
     // Receives the statement walker's counts (CAstLowerStatistics); null when
     // the caller asked for none.
     CAstLowerStatistics* statement_statistics;
-    // The unit's retained token spans and their range-to-node chain
-    // (c_ir_syntax_spans_create, GitHub #3102 step 1): read-only, shared by
-    // every function of the unit. Null without a tree.
+    // Completed semantic node spans, borrowed read-only by every function.
+    // Consumers select rows by exact node, never by a source range.
     CAstSpans const* syntax_spans;
     // Semantic facts retained through lowering; DECLARATOR_NAME payloads bind declarations.
     CAstFacts const* syntax_facts;
@@ -3110,13 +3103,6 @@ struct CIntegerIrBuilder
     CSourceLocation failure_location;
     bool has_failure_location;
     CIrErrorAttributeCall* error_attribute_calls;
-    // A proven constraint violation is not an unresolved type-query shape:
-    // keep it across fallback attempts so the legacy prediction cannot guess
-    // int and accept the operand. Missing members retain their operand-start
-    // location; named-call arity failures record the called identifier. The
-    // sizeof/_Alignof lowering clears both fields before each operand.
-    String8 sizeof_operand_constraint;
-    u32 sizeof_operand_constraint_token;
     // Set while a type-mapping pass runs and the array types of locals may
     // still map later in the same pass: an unmapped local array is then not
     // yet known to be variably modified, so a bare sizeof operand naming one
@@ -3439,15 +3425,6 @@ BUSTER_C_INTERNAL CSourceAnchor c_ir_space_name_anchor(CIntegerIrBuilder* builde
 
 
 
-#if BUSTER_INCLUDE_TESTS
-// Reports the resolver's `sizeof` answer for the operand [start, end) to the
-// handoff comparison (c_test_sizeof_handoff_set). The keyword is the token
-// before the operand, or before its `(` when the operand fills that group;
-// the comparison ignores any other token. `type` is the operand type the
-// resolver sized, when it had one; only an integer type has a signedness to
-// compare.
-#endif
-
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
@@ -3481,8 +3458,8 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
 BUSTER_C_INTERNAL u32 c_ir_query_key_hash(CIrQueryFrame key)
 {
     u64 hash = (u64)key.kind + 1;
-    u64 first = key.start;
-    u64 second = key.end;
+    u64 first = 0;
+    u64 second = 0;
     switch (key.kind)
     {
     case C_IR_QUERY_FRAME_NODE_TASK:
@@ -3545,7 +3522,8 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
     if (!ready)
     {
         builder->failure_message = S8("C query nesting exceeds the query frame capacity");
-        builder->failure_token_index = root.start;
+        builder->failure_token_index = builder->syntax_tree && root.node_task.node < builder->syntax_tree->node_count
+            ? builder->syntax_tree->tokens[root.node_task.node] : UINT32_MAX;
     }
     else
     {
@@ -3570,7 +3548,8 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
                 if (machine->frame_count >= machine->frame_capacity)
                 {
                     builder->failure_message = S8("C query nesting exceeds the query frame capacity");
-                    builder->failure_token_index = frame->start;
+                    builder->failure_token_index = builder->syntax_tree && frame->node_task.node < builder->syntax_tree->node_count
+                        ? builder->syntax_tree->tokens[frame->node_task.node] : UINT32_MAX;
                     stopped = true;
                 }
                 else
@@ -3596,7 +3575,8 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             else if (machine->completed_count >= machine->completed_capacity)
             {
                 builder->failure_message = S8("C query result count exceeds the query buffer capacity");
-                builder->failure_token_index = frame->start;
+                builder->failure_token_index = builder->syntax_tree && frame->node_task.node < builder->syntax_tree->node_count
+                    ? builder->syntax_tree->tokens[frame->node_task.node] : UINT32_MAX;
                 stopped = true;
             }
             else
@@ -4413,11 +4393,6 @@ BUSTER_C_INTERNAL bool c_ir_node_may_prepare_calls(CIntegerIrBuilder* builder, u
 }
 
 
-/* Steps a top-level token scan over a whole `(`/`[`/`{` group in one hop instead of counting
-   every nested token, so scans that look for a top-level separator stay linear in the number
-   of top-level tokens rather than quadratic in expression nesting depth. `C_IR_GROUP_SCAN_UNCLOSED`
-   means the group at `*index_in_out` has no match before `end`; a well-nested body can never
-   return to that group's level again, so no later token in the range is top level. */
 BUSTER_C_INTERNAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrTypeId type)
 {
     return (IrInstruction){
@@ -5664,13 +5639,6 @@ BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity_or_lookup(CIntegerIrBuilder* 
     }
     return entity;
 }
-
-// This compatibility caller still supplies a source opener, whose retained
-// delimiter boundary identifies an exact TYPE_NAME. No token word is tested.
-
-
-// Transitional range callers select an exact retained TYPE_NAME only.
-
 
 BUSTER_C_INTERNAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)
 {
@@ -16115,9 +16083,14 @@ struct CIrLowerFrame
             IrValueId value;
             u32 start;
             u32 end;
-            // The exact subtree currently lowered. Zero is reserved for
-            // the temporary range-boundary adapters at frame entry.
+            // The exact subtree currently lowered, biased by one. A missing
+            // node is rejected at frame entry; no range lookup supplies it.
             u32 node_plus_one;
+            // One settled leading-constructor projection. Reuse requires the
+            // same node, or its exact first child at the same source start.
+            u32 leading_node_plus_one;
+            u32 leading_start_plus_one;
+            IrTypeId leading_type;
             u32 task_count;
             u32 task_capacity;
             // A call's argument list lowered as one comma expression: the
@@ -17366,10 +17339,9 @@ BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
 // point a diagnostic, a debug location or a scope lookup reports, and nothing
 // here scans tokens for structure.
 //
-// A statement's token extent is still needed at two kinds of boundary, and
-// both are marked as temporary adapters for #3102 step 5 (#4058) to delete:
-// - The expression, declaration, typedef and assembly frames still read token
-//   ranges until steps 3 and 4 (#4059) lower them from nodes.
+// Every expression, declaration and assembly child carries its exact node.
+// Source extents preserve the original emission/debug anchors and finished
+// scope ownership:
 // - Cleanup and break/continue targets ask the parse result's scopes about a
 //   task's first and end tokens (c_ir_cleanup_target_for_task), and the label,
 //   switch-prefix and jump-target tables compare token positions.
@@ -17441,6 +17413,16 @@ BUSTER_C_INTERNAL u32 c_ir_node_owned_close(CAst const* ast, u32 node, u32 role)
 {
     CAstParenthesis const* delimiter = c_ast_owned_delimiter(ast, node, role);
     return delimiter ? delimiter->close : UINT32_MAX;
+}
+
+// A condition header's recorded opener follows its keyword anchor. Check
+// that provenance identity before handing the exact condition node onward;
+// an override tree cannot borrow spans from a differently anchored header.
+BUSTER_C_INTERNAL u32 c_ir_node_header_close(CAst const* ast, u32 statement)
+{
+    u32 condition = c_ast_child_at(ast, statement, 0);
+    CAstParenthesis const* delimiter = c_ast_owned_delimiter(ast, condition, C_AST_DELIMITER_CONDITION);
+    return delimiter && delimiter->open == ast->tokens[statement] + 1 ? delimiter->close : UINT32_MAX;
 }
 
 // Statement kinds the walker lowers. Anything else in a statement position is
@@ -33627,9 +33609,16 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 // The root splits' token work, for the tests' linearity checks.
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_lower_work;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_lowering_prefix_work;
 u64 c_test_assignment_lower_work(void)
 {
     return c_assignment_lower_work;
+}
+u64 c_test_lowering_prefix_work_take(void)
+{
+    u64 work = c_lowering_prefix_work;
+    c_lowering_prefix_work = 0;
+    return work;
 }
 #endif
 
@@ -34873,6 +34862,9 @@ BUSTER_C_INTERNAL u32 c_ir_leading_type_name_node(CIntegerIrBuilder* builder, u3
     u32 result = C_AST_NODE_INVALID;
     while (node < ast->node_count && builder->syntax_spans->first[node] == start && result == C_AST_NODE_INVALID)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_lowering_prefix_work += 1;
+#endif
         u32 kind = ast->kinds[node];
         if ((kind == C_AST_CAST || kind == C_AST_COMPOUND_LITERAL) && ast->tokens[node] == start)
         {
@@ -34887,6 +34879,25 @@ BUSTER_C_INTERNAL u32 c_ir_leading_type_name_node(CIntegerIrBuilder* builder, u3
             node = C_AST_NODE_INVALID;
         }
     }
+    return result;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_leading_type(CIntegerIrBuilder* builder, CIrLowerFrame* frame, u32 node, u32 start, u32 end)
+{
+    CAst const* ast = builder->syntax_tree;
+    u32 previous = frame->as.expression.leading_node_plus_one - 1;
+    bool same = frame->as.expression.leading_start_plus_one == start + 1 && previous < ast->node_count &&
+        (previous == node || (ast->kinds[previous] != C_AST_CAST && ast->kinds[previous] != C_AST_COMPOUND_LITERAL &&
+                             builder->syntax_spans->first[previous] == start && !c_ir_core_wraps(builder, previous, start) &&
+                             c_ast_child_count(ast, previous) && c_ast_child_at(ast, previous, 0) == node));
+    IrTypeId result = same ? frame->as.expression.leading_type : IR_TYPE_ID_INVALID;
+    if (!same && start + 4 < end)
+    {
+        result = c_ir_type_name_node(builder, c_ir_leading_type_name_node(builder, node, start));
+    }
+    frame->as.expression.leading_node_plus_one = node + 1;
+    frame->as.expression.leading_start_plus_one = start + 1;
+    frame->as.expression.leading_type = result;
     return result;
 }
 
@@ -35186,11 +35197,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             // token path made it (below), then its last argument splits off
             // as a comma's right operand would.
             u32 call = frame->as.expression.node_plus_one - 1;
-            if (start + 4 < end)
-            {
-                u32 first_argument = c_ast_child_at(builder->syntax_tree, call, 1);
-                c_ir_type_name_node(builder, c_ir_leading_type_name_node(builder, first_argument, start));
-            }
+            u32 first_argument = c_ast_child_at(builder->syntax_tree, call, 1);
+            c_ir_expression_leading_type(builder, frame, first_argument, start, end);
             frame->as.expression.argument_count -= 1;
             u32 last_start = frame->as.expression.argument_starts[frame->as.expression.argument_count];
             u32 argument = c_ast_child_at(builder->syntax_tree, call, frame->as.expression.argument_count + 1);
@@ -35400,8 +35408,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         // that opens with one, as the token path made it: the query machine
         // creates types as it answers, and their order is the object's
         // (step 4 moves type queries to nodes).
-        u32 leading_type = start + 4 < end ? c_ir_leading_type_name_node(builder, node, start) : C_AST_NODE_INVALID;
-        IrTypeId cast_type = c_ir_type_name_node(builder, leading_type);
+        IrTypeId cast_type = c_ir_expression_leading_type(builder, frame, node, start, end);
         u32 cast_operand = whole && kind == C_AST_CAST ? c_ir_core_last_child(node) : C_AST_NODE_INVALID;
         u32 cast_close = cast_operand != C_AST_NODE_INVALID ? builder->syntax_matches[start] - 1 : 0;
         if (cast_operand != C_AST_NODE_INVALID && cast_close + 2 < end && builder->syntax_matches[cast_close + 1] == end &&
@@ -36673,29 +36680,22 @@ BUSTER_C_SHARED u64 c_test_ir_label_find_probes(void)
 }
 #endif
 
-// The unit's retained span facts (GitHub #3102 step 1), in a private arena:
-// one c_ast_spans_build over the whole tree, before the first function is
-// lowered. Null without a tree or a delimiter index, or when the arena cannot
-// be reserved or cannot hold the four columns.
+// A read-only view of completed semantic spans and delimiter provenance.
+// Its private arena owns only hoist bytes and walk bits. Missing finished
+// output or a refused reservation yields no view; no syntax is rebuilt.
 typedef struct CIrSyntaxSpans CIrSyntaxSpans;
 struct CIrSyntaxSpans
 {
     CAstSpans spans;
     // One CIrHoistFact byte per node (c_ir_hoist_facts_build).
     u8* hoist;
-    // The delimiter index the spans were computed with: the stream's, or one
-    // of the arena's own (c_ir_syntax_delimiters_build).
+    // Borrowed delimiter provenance sealed by semantic analysis.
     u32 const* matches;
     // One bit per node: a control walk visited it off its leftmost path, and
     // every group the walk found has been recorded (c_ir_tree_control_groups).
     u8* walked;
     Arena* arena;
 };
-
-// The unit's matching-delimiter index (closer + 1 at each opener), built from
-// the token stream with a stack when semantic analysis left none; false when
-// the stream's delimiters do not nest, and then the unit has no spans.
-
 
 BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CAstFacts const* facts, CAstLowerStatistics* statistics)
 {
@@ -40208,7 +40208,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             case C_AST_SWITCH:
             {
-                u32 condition_close = c_ir_node_owned_close(ast, c_ast_child_at(ast, node, 0), C_AST_DELIMITER_CONDITION);
+                u32 condition_close = c_ir_node_header_close(ast, node);
                 CIrNodeControlled body = {0};
                 if (condition_close == UINT32_MAX || !c_ir_node_controlled(builder, node - 1, after, &body) ||
                     !c_ir_lower_switch_cases(builder, state, node, body, after))
@@ -40236,7 +40236,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             case C_AST_IF_ELSE:
             {
                 bool has_else = kind == C_AST_IF_ELSE;
-                u32 condition_close = c_ir_node_owned_close(ast, c_ast_child_at(ast, node, 0), C_AST_DELIMITER_CONDITION);
+                u32 condition_close = c_ir_node_header_close(ast, node);
                 u32 then_node = c_ast_child_at(ast, node, 1);
                 u32 else_node = node - 1;
                 IrSourceRange condition_source = c_ir_anchor_source_range(builder, first_token);
@@ -40435,7 +40435,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             case C_AST_WHILE:
             {
-                u32 condition_close = c_ir_node_owned_close(ast, c_ast_child_at(ast, node, 0), C_AST_DELIMITER_CONDITION);
+                u32 condition_close = c_ir_node_header_close(ast, node);
                 CIrNodeControlled body = {0};
                 if (condition_close == UINT32_MAX || !c_ir_node_controlled(builder, node - 1, after, &body))
                 {
@@ -44213,22 +44213,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_node(CIntegerIrBuilder* b
 
 
 #if BUSTER_INCLUDE_TESTS
-bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_count, u8* bytes,
+bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, CPreprocessResult preprocess, CAst const* syntax,
+                                   u32 element_count, u8* bytes,
                                    u64* inferred_count, u64* scratch_bytes, String8* failure_message)
 {
-    bool valid = arena && task_arena && bytes && inferred_count && scratch_bytes && failure_message &&
+    bool valid = arena && task_arena && syntax && bytes && inferred_count && scratch_bytes && failure_message &&
                  element_count && element_count <= (UINT32_MAX - 2) / 2;
     if (valid)
     {
-        CPreprocessResult preprocess = c_preprocess(arena, S8("unsigned short flat[] = {0,1,2,3,4,5,6,7,8,9};"),
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
-                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
-        CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
-        CAst ast = built.ast;
+        CAst ast = *syntax;
         u32 initializer = C_AST_NODE_INVALID;
         for (u32 node = 0; node < ast.node_count; node += 1)
             if (ast.kinds[node] == C_AST_INITIALIZER_LIST && c_ast_child_count(&ast, node) == 10) initializer = node;
-        valid = !preprocess.diagnostic_count && built.complete && initializer != C_AST_NODE_INVALID;
+        valid = !preprocess.diagnostic_count && initializer != C_AST_NODE_INVALID;
         CAstFacts facts = {0};
         valid = valid && c_ast_facts_create(&facts, &ast);
         for (u32 digit = 0; valid && digit < 10; digit += 1)
@@ -52187,7 +52184,7 @@ bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 e
     return c_ir_arena_reservation_advance(reserved_size, position, element_size, count, alignment);
 }
 
-bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclaration declaration, CTestIrScratchProbeKind kind)
+bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CAst const* ast, CDeclaration declaration, CTestIrScratchProbeKind kind)
 {
     bool rejected = false;
     Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64),
@@ -52235,25 +52232,18 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclarat
             {
                 // The walker reads the body from its node (#4060); the scratch
                 // left is one label row, too little for the body's tables.
-                Arena* tree_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = true}});
-                CAstResult tree = tree_arena ? c_ast_build(tree_arena, preprocess, (CAstOptions){0}) : (CAstResult){0};
                 u32 compound = C_AST_NODE_INVALID;
-                for (u32 node = 1; tree.complete && node < tree.ast.node_count; node += 1)
+                for (u32 node = 1; ast && node < ast->node_count; node += 1)
                 {
-                    if (tree.ast.kinds[node] == C_AST_FUNCTION_DEFINITION && tree.ast.kinds[node - 1] == C_AST_COMPOUND_STATEMENT &&
-                        tree.ast.tokens[node - 1] + 1 == declaration.body_start)
+                    if (ast->kinds[node] == C_AST_FUNCTION_DEFINITION && ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT &&
+                        ast->tokens[node - 1] + 1 == declaration.body_start)
                     {
                         compound = node - 1;
                     }
                 }
-                builder.ast = tree.complete ? &tree.ast : 0;
+                builder.ast = ast;
                 CIrLowerBodyState state = {.declaration = declaration, .compound = compound};
                 refused = compound != C_AST_NODE_INVALID && !c_ir_lower_body_initialize(&builder, &state);
-                c_ast_release(&tree.ast);
-                if (tree_arena)
-                {
-                    arena_destroy(tree_arena, 1);
-                }
                 break;
             }
             case C_TEST_IR_SCRATCH_SSA_SLOTS:

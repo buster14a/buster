@@ -11831,11 +11831,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
         result.c_ast.lower.statement_bodies += unit.c_ast.lower.statement_bodies;
         result.c_ast.lower.statements += unit.c_ast.lower.statements;
-        result.c_ast.lower.range_adapters += unit.c_ast.lower.range_adapters;
-        result.c_ast.lower.trees_built += unit.c_ast.lower.trees_built;
-        result.c_ast.lower.tree_rejections += unit.c_ast.lower.tree_rejections;
-        result.c_ast.lower.tree_nodes += unit.c_ast.lower.tree_nodes;
-        result.c_ast.lower.tree_bytes += unit.c_ast.lower.tree_bytes;
         result.c_ast.lower.span_nodes += unit.c_ast.lower.span_nodes;
         result.c_ast.lower.span_bytes += unit.c_ast.lower.span_bytes;
         result.c_ast.lower.hoist_steps += unit.c_ast.lower.hoist_steps;
