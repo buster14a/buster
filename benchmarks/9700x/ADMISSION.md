@@ -92,6 +92,13 @@ succeeded in an earlier attempt, so a maintainer re-run
 must use **Re-run all jobs**. An agent that pushes with the owner's
 credentials is the owner for this gate.
 
+The adapter's read-only API GETs allow at most three attempts, retaining the
+30-second timeout per attempt and waiting one then two seconds after transient
+transport failures or HTTP 5xx responses (#4145). HTTP 4xx responses, malformed
+JSON and authorization refusals are not retried. An exhausted transport failure
+still fails closed before host outputs are emitted. This repeats only an API
+read; it does not retry a campaign or physical work or change native admission.
+
 `bench` receives no token capability, no secret and no environment. It checks
 out `main`'s `tools/bench_direct` as the trusted harness and the pull request
 head's `benchmarks/9700x` as data, both without persisted credentials, then
