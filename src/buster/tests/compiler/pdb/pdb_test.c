@@ -1221,6 +1221,7 @@ typedef DWORD (WINAPI PdbTestSymSetOptions)(DWORD);
 typedef DWORD64 (WINAPI PdbTestSymLoadModule)(HANDLE, HANDLE, PCWSTR, PCWSTR, DWORD64, DWORD, PMODLOAD_DATA, DWORD);
 typedef BOOL (WINAPI PdbTestSymFromName)(HANDLE, PCWSTR, PSYMBOL_INFOW);
 typedef BOOL (WINAPI PdbTestSymGetModuleInfo)(HANDLE, DWORD64, PIMAGEHLP_MODULEW64);
+typedef BOOL (WINAPI PdbTestSymRegisterCallback)(HANDLE, PSYMBOL_REGISTERED_CALLBACK64, ULONG64);
 
 typedef union PdbTestDbghelpProcedure PdbTestDbghelpProcedure;
 union PdbTestDbghelpProcedure
@@ -1233,6 +1234,7 @@ union PdbTestDbghelpProcedure
     PdbTestSymLoadModule* load_module;
     PdbTestSymFromName* from_name;
     PdbTestSymGetModuleInfo* get_module_info;
+    PdbTestSymRegisterCallback* register_callback;
 };
 #endif
 
@@ -1330,6 +1332,24 @@ BUSTER_GLOBAL_LOCAL String8 pdb_test_reader_wide_text(Arena* arena, WCHAR const*
     }
     return string8_from_string16(arena, (String16){.pointer = (char16*)text, .length = length}, false);
 }
+
+// This SDK notification callback only logs diagnostics. It never calls back
+// into DbgHelp or changes a lookup, and preserves the reader's Win32 error.
+BUSTER_GLOBAL_LOCAL BOOL CALLBACK pdb_test_reader_notification(HANDLE session, ULONG action, ULONG64 callback_data, ULONG64 user_context)
+{
+    DWORD previous_error = GetLastError();
+    BOOL handled = FALSE;
+    (void)session;
+    if (action == CBA_DEBUG_INFO && callback_data)
+    {
+        UnitTestArguments* arguments = (UnitTestArguments*)user_context;
+        String8 message = pdb_test_reader_wide_text(arguments->arena, (WCHAR const*)callback_data, 4096);
+        arguments->show(arguments, S8("PDB_GSI_SDK {S8}\n"), message);
+        handled = TRUE;
+    }
+    SetLastError(previous_error);
+    return handled;
+}
 #endif
 
 // This diagnostic reports every collision lookup, including misses. Positive
@@ -1350,6 +1370,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
     // already used by pdb_test_dbghelp_consumer; its absence is a failed gate.
     if (BUSTER_REQUIRE(arguments, library != 0))
     {
+        WCHAR loaded_path[1024] = {0};
+        DWORD loaded_length = GetModuleFileNameW(library, loaded_path, BUSTER_ARRAY_LENGTH(loaded_path));
+        DWORD loaded_error = loaded_length ? 0 : GetLastError();
+        String8 loaded_name = pdb_test_reader_wide_text(arguments->arena, loaded_path, BUSTER_ARRAY_LENGTH(loaded_path));
+        arguments->show(arguments, S8("PDB_GSI_LOOKUP loaded_provider={S8} error={u32}\n"), loaded_name, (u32)loaded_error);
+        BUSTER_TEST(arguments, loaded_length != 0 && loaded_length < BUSTER_ARRAY_LENGTH(loaded_path));
         PdbTestDbghelpProcedure initialize = {.procedure = GetProcAddress(library, "SymInitializeW")};
         PdbTestDbghelpProcedure cleanup = {.procedure = GetProcAddress(library, "SymCleanup")};
         PdbTestDbghelpProcedure get_options = {.procedure = GetProcAddress(library, "SymGetOptions")};
@@ -1357,8 +1383,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
         PdbTestDbghelpProcedure load_module = {.procedure = GetProcAddress(library, "SymLoadModuleExW")};
         PdbTestDbghelpProcedure from_name = {.procedure = GetProcAddress(library, "SymFromNameW")};
         PdbTestDbghelpProcedure get_module_info = {.procedure = GetProcAddress(library, "SymGetModuleInfoW64")};
+        PdbTestDbghelpProcedure register_callback = {.procedure = GetProcAddress(library, "SymRegisterCallbackW64")};
         bool exports = initialize.initialize && cleanup.cleanup && get_options.get_options && set_options.set_options &&
-                       load_module.load_module && from_name.from_name && get_module_info.get_module_info;
+                       load_module.load_module && from_name.from_name && get_module_info.get_module_info && register_callback.register_callback;
         if (BUSTER_REQUIRE(arguments, exports))
         {
             String8 path = buster_test_temporary_unique_path(arguments->arena, S8("buster-mixed-gsi"), S8(".pdb"));
@@ -1373,13 +1400,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                     // SymInitialize accepts a unique nonzero session token
                     // when invade-process is false; it need not be an OS handle.
                     HANDLE session = (HANDLE)pdb.pointer;
-                    set_options.set_options(SYMOPT_EXACT_SYMBOLS | (publics_only ? SYMOPT_PUBLICS_ONLY : SYMOPT_NO_PUBLICS));
+                    set_options.set_options(SYMOPT_EXACT_SYMBOLS | SYMOPT_DEBUG | (publics_only ? SYMOPT_PUBLICS_ONLY : SYMOPT_NO_PUBLICS));
                     BOOL initialized = initialize.initialize(session, 0, FALSE);
                     DWORD initialize_error = initialized ? 0 : GetLastError();
                     arguments->show(arguments, S8("PDB_GSI_LOOKUP initialized={u32} index={S8} error={u32}\n"),
                                     (u32)(initialized != 0), publics_only ? S8("publics") : S8("globals"), (u32)initialize_error);
                     if (BUSTER_REQUIRE(arguments, initialized != 0))
                     {
+                        BOOL notifications = register_callback.register_callback(session, pdb_test_reader_notification, (ULONG64)arguments);
+                        DWORD notification_error = notifications ? 0 : GetLastError();
+                        arguments->show(arguments, S8("PDB_GSI_LOOKUP notifications={u32} error={u32}\n"),
+                                        (u32)(notifications != 0), (u32)notification_error);
+                        BUSTER_TEST(arguments, notifications != 0);
                         DWORD64 requested_base = PDB_TEST_READER_IMAGE_BASE;
                         String16 module_name = string16_from_string8(arguments->arena, S8("mixed"), true);
                         DWORD64 base = load_module.load_module(session, 0, path_wide.pointer, module_name.pointer, requested_base, PDB_TEST_READER_IMAGE_SIZE, 0, 0);
@@ -1409,6 +1441,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                 symbol->MaxNameLen = 64;
                                 BOOL bare_found = from_name.from_name(session, query.pointer, symbol);
                                 DWORD bare_error = bare_found ? 0 : GetLastError();
+                                u64 expected_address = (u64)base + PDB_TEST_READER_DATA_RVA + (u64)index * 4;
+                                u64 bare_address = bare_found ? (u64)symbol->Address : 0;
+                                bool bare_exact = bare_found && symbol->NameLen == query.length &&
+                                                  memcmp(symbol->Name, query.pointer, query.length * sizeof(WCHAR)) == 0 &&
+                                                  bare_address == expected_address;
                                 String8 qualified = string_format(arguments->arena, S8("{S8}!{S8}"), info_name, names.pointer[index]);
                                 String16 qualified_query = string16_from_string8(arguments->arena, qualified, true);
                                 memset(symbol, 0, symbol_bytes);
@@ -1416,15 +1453,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                                 symbol->MaxNameLen = 64;
                                 BOOL found = from_name.from_name(session, qualified_query.pointer, symbol);
                                 DWORD lookup_error = found ? 0 : GetLastError();
-                                u64 expected_address = (u64)base + PDB_TEST_READER_DATA_RVA + (u64)index * 4;
                                 bool exact = found && symbol->NameLen == query.length &&
                                              memcmp(symbol->Name, query.pointer, query.length * sizeof(WCHAR)) == 0 &&
                                              symbol->Address == expected_address;
                                 missing += !found;
                                 arguments->show(arguments,
-                                    S8("PDB_GSI_LOOKUP permutation={u32} count={u64} index={S8} name={S8} bare_found={u32} bare_error={u32} qualified=1 found={u32} exact={u32} address={u64} expected={u64} error={u32}\n"),
+                                    S8("PDB_GSI_LOOKUP permutation={u32} count={u64} index={S8} name={S8} bare_found={u32} bare_exact={u32} bare_address={u64} bare_error={u32} qualified=1 found={u32} exact={u32} address={u64} expected={u64} error={u32}\n"),
                                     permutation, names.length, publics_only ? S8("publics") : S8("globals"), names.pointer[index],
-                                    (u32)(bare_found != 0), (u32)bare_error, (u32)(found != 0), (u32)exact, found ? (u64)symbol->Address : 0, expected_address, (u32)lookup_error);
+                                    (u32)(bare_found != 0), (u32)bare_exact, bare_address, (u32)bare_error, (u32)(found != 0), (u32)exact, found ? (u64)symbol->Address : 0, expected_address, (u32)lookup_error);
+                                BUSTER_TEST(arguments, !bare_found || bare_exact);
                                 BUSTER_TEST(arguments, !found || exact);
                                 // The final two names are isolated ASCII and
                                 // UTF-8 controls, so a broken provider or name
