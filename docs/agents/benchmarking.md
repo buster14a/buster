@@ -883,7 +883,9 @@ incomplete or refused; `preflight` exits 3 when the tool cannot run here.
   Other modifier combinations or event syntax are refused before any run;
   ambiguous matching counters are missing. A comparison must select one
   primary scope (`instructions` for work reduction, `task-clock` for native
-  runtime); multiple primary scopes leave the result incomplete. A scoped
+  runtime); an absent required primary records an explicit problem, writes
+  `complete: false` and exits 2. Multiple primary scopes leave the result
+  incomplete. A scoped
   result establishes only the selected scope. `perf-stat` refuses an event
   that is unsupported, not
   counted, or ran less than 50% of the time. A multiplexed event is marked.
