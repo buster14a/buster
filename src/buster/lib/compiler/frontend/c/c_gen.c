@@ -26956,7 +26956,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 if (selected_node == C_AST_NODE_INVALID)
                 {
                     u64 condition = 0;
-                    if (!c_ir_constant_condition_evaluate(builder, starts[0], ends[0], &condition))
+                    if (!c_ir_constant_condition_evaluate_node(builder, c_ir_call_argument_node(builder, selected, 0), &condition))
                     {
                         return C_IR_PREPARED_CALL_STEP_FAILED;
                     }
