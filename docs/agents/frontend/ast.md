@@ -1548,15 +1548,14 @@ function body from its statement nodes (#4060, step 2 of the
 It has no token path and no fallback: a body without a COMPOUND_STATEMENT
 node is refused with `function body has no syntax tree node`.
 
-**The tree.** The walker needs a tree in every compile that lowers a body.
-The driver passes the parse phase's tree under `-fc-ast-pilot`, the default
-since 2026-10-13; otherwise `c_lower_to_ir_tree_run` builds it
-([retained facts for lowering](#retained-facts-for-lowering), #3102 step 1).
+**The tree.** The walker consumes the tree retained by completed semantic
+analysis ([retained facts for lowering](#retained-facts-for-lowering), #3102
+step 1). Every production compile builds that tree before analysis; lowering
+does not build a missing tree or recover a body from a source range.
 Because the walker has no token path, a unit with a function body whose
 syntax the builder rejects fails with the builder's diagnostics: a malformed
 GNU case range (`case 1 ... 2 ... 3:`) is the builder's syntax error rather
-than lowering's. Only a unit without a body lowers without a tree
-(`tree_rejections`).
+than lowering's. A model-only result has not established lowering authority.
 
 Lowering every body from the tree surfaced two builder gaps, which also
 failed `-fc-ast-pilot` and are closed with it:
@@ -1566,12 +1565,16 @@ failed `-fc-ast-pilot` and are closed with it:
   namespace alone (`[[vendor::tag({...})]]`);
 - `__fp16`, Arm's storage-only half, is a type word (`C_AST_WORD_FP16`). The
   tree's specifier readers leave it to the type machine, as they leave
-  `__float128`. The unit's
-body index (`c_ir_body_nodes_build`) maps the `{` of every function
-definition to its COMPOUND_STATEMENT node. A statement-expression frame
-takes its STATEMENT_EXPRESSION node and enters its block child directly;
-it needs no brace index. The function index lives in the tree arena next to the
-[root-conditional records](#lowering-from-the-tree).
+  `__float128`.
+
+Each finished declaration names its exact FUNCTION_DEFINITION owner. Lowering
+enters that definition's last COMPOUND_STATEMENT child and checks its brace
+anchor against the declaration's provenance. A missing, mismatched or
+non-definition owner refuses; source positions never choose a replacement
+node. A statement-expression frame similarly enters its known block child.
+The `c_ast_test_function_body_owners` fixture covers ordinary, inline, extern,
+attributed and function-pointer-return definitions, local/nested record
+definitions, all tree layouts and missing or tampered owners.
 
 **Tasks.** The body is a stack of `CIrBodyTask`s, as before. Each task now
 holds a node cursor: the comma operands of a split expression statement,

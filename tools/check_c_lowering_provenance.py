@@ -23,6 +23,7 @@ FORBIDDEN_RECOVERY = {
     "c_ir_compound_literal_type", "c_ir_sizeof_operand_type_attempt",
     "c_ir_predict_expression_type", "c_ir_conditional_node",
     "c_ast_build", "c_ast_spans_build",
+    "c_ir_body_nodes_size", "c_ir_body_nodes_build", "c_ir_body_nodes_find", "CIrBodyNodes",
 }
 # Audited in c_parse.c: these read target layout or finished model tables,
 # never source tokens. Scope indices use completed scope intervals; they do

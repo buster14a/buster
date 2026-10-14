@@ -202,8 +202,8 @@
 //   c_ir_lower_assignment_statement_advance       and ordered child handoffs
 //   c_ir_place_node_begin, c_ir_place_path,        place topology and ordered
 //   c_ir_lower_vla_index_place_step               member/index and VLA emission
-//   c_ir_body_nodes_build, c_ir_node_*,           statement nodes (#4060):
-//   CIrNodeList, c_ir_node_expression_provenance  the body index, block items,
+//   c_ir_function_body_node, c_ir_node_*,         statement nodes (#4060):
+//   CIrNodeList, c_ir_node_expression_provenance  exact body owners, block items,
 //   c_ir_node_owned_close                         retained source provenance
 //   c_ir_emit_initializer_capture                 exact constructor types and
 //                                                 qualified subobject stores
@@ -2685,16 +2685,6 @@ struct CIrErrorAttributeCall
     u32 binding_plus_one;
 };
 
-// The unit's index of function bodies lowering enters by brace (GitHub #4060):
-// every FUNCTION_DEFINITION's COMPOUND_STATEMENT, each as a sorted
-// (token << 32 | node) key of its `{` (c_ir_body_nodes_build).
-typedef struct CIrBodyNodes CIrBodyNodes;
-struct CIrBodyNodes
-{
-    u64* functions;
-    u32 function_count;
-};
-
 // What the hoisting walks (c_ir_tree_control_groups, c_ir_tree_calls_discover;
 // GitHub #3102 step 3) need to know about a node without visiting it again.
 // The ROOT bits describe the node's root region: the operators reachable from
@@ -3020,11 +3010,9 @@ struct CIntegerIrBuilder
     u32 prepared_control_lowering_count;
     u32 prepared_control_node_start;
     u32 prepared_control_node_count;
-    // The unit's syntax tree, and its index of the bodies lowering enters by
-    // brace (c_ir_body_nodes_build): the statement walker reads the body's
-    // structure from its statement nodes (GitHub #4060).
+    // The unit's syntax tree: the statement walker enters the published
+    // definition owner's last compound child (GitHub #4060).
     CAst const* ast;
-    CIrBodyNodes const* body_nodes;
     // Receives the statement walker's counts (CAstLowerStatistics); null when
     // the caller asked for none.
     CAstLowerStatistics* statement_statistics;
@@ -17350,61 +17338,17 @@ BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
 // brace. c_ir_node_statement_first gives a statement's first token from its
 // anchor, and c_ir_node_expression_provenance reads its retained span and true groups.
 
-BUSTER_C_INTERNAL u64 c_ir_body_nodes_size(CAst const* ast, u32* function_count_out)
+// Semantic analysis names the exact definition. Its last child is the body;
+// the brace anchor only verifies that the caller retained the same provenance.
+BUSTER_C_INTERNAL u32 c_ir_function_body_node(CAst const* ast, CDeclaration declaration)
 {
-    u32 functions = 0;
-    for (u32 node = 1; ast && node < ast->node_count; node += 1)
-    {
-        u8 kind = ast->kinds[node];
-        bool body = ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT;
-        functions += kind == C_AST_FUNCTION_DEFINITION && body;
-    }
-    *function_count_out = functions;
-    // The function keys and their sort scratch, each with a spare element
-    // and alignment slack.
-    return ((u64)functions + 1) * sizeof(u64) * 2 + 2 * 16;
-}
-
-BUSTER_C_INTERNAL CIrBodyNodes c_ir_body_nodes_build(Arena* arena, CAst const* ast, u32 function_count)
-{
-    CIrBodyNodes nodes = {0};
-    nodes.functions = arena_allocate(arena, u64, function_count + 1);
-    u64* scratch = arena_allocate(arena, u64, function_count + 1);
-    for (u32 node = 1; node < ast->node_count; node += 1)
-    {
-        u8 kind = ast->kinds[node];
-        if (ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT)
-        {
-            u64 key = ((u64)ast->tokens[node - 1] << 32) | (node - 1);
-            if (kind == C_AST_FUNCTION_DEFINITION && nodes.function_count < function_count)
-            {
-                nodes.functions[nodes.function_count++] = key;
-            }
-        }
-    }
-    // Postorder lists a nested definition before the one that encloses it,
-    // so the keys are sorted by brace.
-    c_ir_tree_sort_keys(nodes.functions, scratch, nodes.function_count);
-    return nodes;
-}
-
-BUSTER_C_INTERNAL u32 c_ir_body_nodes_find(u64 const* keys, u32 count, u32 brace)
-{
-    u32 low = 0;
-    u32 high = count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if ((u32)(keys[middle] >> 32) < brace)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low < count && (u32)(keys[low] >> 32) == brace ? (u32)keys[low] : C_AST_NODE_INVALID;
+    u32 definition = declaration.declaration_node_plus_one - 1;
+    bool valid = ast && definition < ast->node_count && definition &&
+                 ast->kinds[definition] == C_AST_FUNCTION_DEFINITION;
+    u32 body = valid ? definition - 1 : C_AST_NODE_INVALID;
+    valid = valid && ast->kinds[body] == C_AST_COMPOUND_STATEMENT &&
+            ast->tokens[body] + 1 == declaration.body_start;
+    return valid ? body : C_AST_NODE_INVALID;
 }
 
 // Syntax-owned delimiters were committed by the parser; tokens only provide
@@ -48941,7 +48885,7 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
 
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
-                                                             u64 function_reservation_limit, Arena* tree_arena, u32 body_function_count)
+                                                             u64 function_reservation_limit)
 {
     CIRLowerResult result = {0};
     CAst const* unit_ast = options.syntax_tree;
@@ -48952,11 +48896,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // Scopes are final here, so every builder copy of this parse result can
     // answer c_parse_scope_for_token by descent instead of a full scope scan.
     if (!parse.scope_children_offsets) c_parse_index_scope_children(&parse, temporary_arena);
-    // The producer already published this immutable provenance column. Its
-    // remaining legacy query consumers share it without classifying source.
-    // The bodies the statement walker enters by brace (GitHub #4060).
-    CIrBodyNodes body_nodes = tree_arena ? c_ir_body_nodes_build(tree_arena, options.syntax_tree, body_function_count)
-                                         : (CIrBodyNodes){0};
     CIrQueryMachine queries = {
         .frame_capacity = (u32)query_frame_capacity,
         .completed_capacity = (u32)query_frame_capacity,
@@ -51306,7 +51245,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         u64 prepared_call_capacity = 0;
         u64 prepared_control_expression_capacity = 0;
-        u32 body_compound = c_ir_body_nodes_find(body_nodes.functions, body_nodes.function_count, declaration.body_start - 1);
+        u32 body_compound = c_ir_function_body_node(options.syntax_tree, declaration);
         u32 prepared_node_start = body_compound != C_AST_NODE_INVALID ? c_ast_subtree_begin(options.syntax_tree, body_compound + 1) : 0;
         u32 prepared_node_count = body_compound != C_AST_NODE_INVALID ? body_compound + 2 - prepared_node_start : 0;
         // The complete definition subtree includes evaluated parameter bounds.
@@ -51541,7 +51480,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
             .ast = options.syntax_tree,
-            .body_nodes = &body_nodes,
             .statement_statistics = options.ast_lower_statistics,
         };
         c_ir_builder_syntax_attach(&builder, syntax_spans, options.syntax_tree, options.ast_lower_statistics, options.syntax_facts);
@@ -52043,23 +51981,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (fits)
         {
-            // The tree's body index (c_ir_body_nodes_build) lives in an
-            // arena of its own for the call. A unit with no body needs none;
-            // when the reservation is refused, no body lowers.
-            u32 body_function_count = 0;
-            u64 tree_size = options.syntax_tree ? c_ir_body_nodes_size(options.syntax_tree, &body_function_count) : 0;
-            u64 tree_reservation = 0;
-            bool tree_sized = body_function_count && align_forward_checked(arena_minimum_position + tree_size, BUSTER_KB(64), &tree_reservation);
-            Arena* tree_arena = tree_sized ? arena_create((ArenaCreation){.reserved_size = tree_reservation,
-                                                                          .initial_size = BUSTER_KB(64),
-                                                                          .flags = {.no_pool = true}})
-                                           : 0;
-            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit,
-                                                tree_arena, body_function_count);
-            if (tree_arena)
-            {
-                arena_destroy(tree_arena, 1);
-            }
+            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena,
+                                                function_reservation_limit);
         }
         else
         {
@@ -52240,15 +52163,7 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CAst cons
             {
                 // The walker reads the body from its node (#4060); the scratch
                 // left is one label row, too little for the body's tables.
-                u32 compound = C_AST_NODE_INVALID;
-                for (u32 node = 1; ast && node < ast->node_count; node += 1)
-                {
-                    if (ast->kinds[node] == C_AST_FUNCTION_DEFINITION && ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT &&
-                        ast->tokens[node - 1] + 1 == declaration.body_start)
-                    {
-                        compound = node - 1;
-                    }
-                }
+                u32 compound = c_ir_function_body_node(ast, declaration);
                 builder.ast = ast;
                 CIrLowerBodyState state = {.declaration = declaration, .compound = compound};
                 refused = compound != C_AST_NODE_INVALID && !c_ir_lower_body_initialize(&builder, &state);

@@ -5965,6 +5965,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments*
     }
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_function_body_owners(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int f(void) { return 3; } int main(void) { return f() != 3; }"),
+        S8("static inline int f(void) { return 3; } int main(void) { return f() != 3; }"),
+        S8("extern int f(void) { return 3; } int main(void) { return f() != 3; }"),
+        S8("__attribute__((noinline)) int f(void) { return 3; } int main(void) { return f() != 3; }"),
+        S8("int g(void) { return 3; } int (*f(void))(void) { return g; } int main(void) { return f()() != 3; }"),
+        S8("struct Outer { struct Inner { int value; } inner; }; int f(void) { struct Local { int value; } x = {3}; return x.value; } int main(void) { return f() != 3; }"),
+    };
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[source], C_PREPROCESS_DIALECT_GNU17);
+            CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            if (BUSTER_REQUIRE(arguments, !preprocess.error_count && !analysis.diagnostic_count && built.complete))
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    String8 label = string_format(temporary.arena, S8("function body owner, source {u32}, layout {u32}, form {u32}"), source, layout, form);
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native,
+                        (CIRLowerOptions){.syntax_tree = &built.ast, .disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified, label);
+                }
+                CAnalysisResult missing = analysis;
+                missing.declarations = arena_allocate(temporary.arena, CDeclaration, analysis.declaration_count);
+                memcpy(missing.declarations, analysis.declarations, sizeof(CDeclaration) * analysis.declaration_count);
+                u32 index = 0;
+                while (index < analysis.declaration_count && !string_equal(analysis.declarations[index].name, S8("f"))) index += 1;
+                if (BUSTER_REQUIRE(arguments, index < analysis.declaration_count))
+                {
+                    u32 owner = analysis.declarations[index].declaration_node_plus_one;
+                    u32 other = 0;
+                    for (u32 declaration = 0; declaration < analysis.declaration_count; declaration += 1)
+                    {
+                        if (string_equal(analysis.declarations[declaration].name, S8("main")))
+                            other = analysis.declarations[declaration].declaration_node_plus_one;
+                    }
+                    u32 invalid_owners[] = {0, built.ast.node_count + 1, owner - 1, other};
+                    for (u32 tamper = 0; tamper < BUSTER_ARRAY_LENGTH(invalid_owners); tamper += 1)
+                    {
+                        missing.declarations[index].declaration_node_plus_one = invalid_owners[tamper];
+                        String8 label = string_format(temporary.arena, S8("function body owner refusal, source {u32}, layout {u32}, tamper {u32}"), source, layout, tamper);
+                        CIRLowerResult refused = c_lower_to_ir_with_options(temporary.arena, label, preprocess, missing, target_native,
+                            (CIRLowerOptions){.syntax_tree = &built.ast});
+                        BUSTER_TEST_RAW(arguments, refused.diagnostic_count && !refused.canonical_ir_certified, label);
+                    }
+                }
+            }
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
 // Each test ends its scratch with c_test_scratch_end, so the module's address
 // space is bounded by the units one fixture holds at once, not by how many
 // sources it preprocesses; C_TEST_BOUNDED_FIXTURE checks it (GitHub #3306).
@@ -9363,6 +9423,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_split);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statements);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statement_nodes);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_function_body_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_assembly_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_specifiers);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
