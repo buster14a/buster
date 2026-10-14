@@ -6826,6 +6826,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
 // A lexer differential helper reuses its arena. Its rewind must retain the
 // dirty prefix, or the following semantic parse can read non-bool bytes from
 // an aggregate lookup table allocated with arena_allocate_zeroed (#235).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_type_projection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct { String8 expression; u32 strict; u32 promoted; u32 predicted; } const cases[] = {
+        {S8("x"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("+x"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("object.value"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("bits.narrow"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("choose ? bits.narrow : bits.narrow"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("array"), IR_TYPE_ARRAY, IR_TYPE_ARRAY, IR_TYPE_POINTER},
+        {S8("target"), IR_TYPE_FUNCTION, IR_TYPE_FUNCTION, IR_TYPE_POINTER},
+        {S8("&target"), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
+        {S8("\"abc\""), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
+        {S8("&\"abc\""), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
+        {S8("__func__"), IR_TYPE_ARRAY, IR_TYPE_ARRAY, IR_TYPE_POINTER},
+        {S8("((struct S *)&object)->value"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("(int[]){1, 2}[0]"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_POINTER},
+        {S8("((int[]){1, 2})[0]"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("_Generic(x, int: bits.narrow, default: object.value)"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("__builtin_choose_expr(1, bits.narrow, object.value)"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+        {S8("choose ? &array[0] : 0"), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
+        {S8("choose ? (void *)0 : &array[0]"), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
+        {S8("__extension__ ({ x; })"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena,
+            S8("struct S {{ int value; }}; struct Bits {{ unsigned long long narrow : 4; }}; int target(int); "
+               "void projection(volatile int x, volatile struct S object, struct Bits bits, int choose) {{ "
+               "int array[3]; (void)({S8}); }}"), cases[index].expression);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !preprocess.diagnostic_count && !analysis.diagnostic_count, cases[index].expression);
+        CTestExpressionTypeProjection projection = {.node = C_AST_NODE_INVALID};
+        CAst const* ast = analysis.ast;
+        for (u32 node = 0; ast && node < ast->node_count; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_EXPRESSION_STATEMENT)
+            {
+                u32 cast = c_ast_child_at(ast, node, 0);
+                if (ast->kinds[cast] == C_AST_CAST) projection.node = c_ast_child_at(ast, cast, 1);
+            }
+        }
+        c_test_expression_type_projection_set(&projection);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("expression-projection.c"), preprocess, analysis, target_native);
+        c_test_expression_type_projection_set(0);
+        BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && projection.visited, cases[index].expression);
+        for (u32 view = 0; projection.visited && view < 3; view += 1)
+        {
+            IrType reference = projection.reference[view];
+            IrType projected = projection.projected[view];
+            u32 expected = view == 0 ? cases[index].strict : view == 1 ? cases[index].promoted : cases[index].predicted;
+            BUSTER_TEST_RAW(arguments, projection.reference_success[view] && projection.projected_success[view] && reference.kind == expected &&
+                reference.kind == projected.kind && reference.bit_width == projected.bit_width && reference.is_signed == projected.is_signed &&
+                reference.is_atomic == projected.is_atomic && reference.is_volatile == projected.is_volatile &&
+                reference.layout.size == projected.layout.size && reference.layout.alignment == projected.layout.alignment &&
+                reference.element_type.value == projected.element_type.value && reference.element_count == projected.element_count &&
+                reference.return_type.value == projected.return_type.value && reference.parameter_count == projected.parameter_count,
+                cases[index].expression);
+        }
+        c_preprocess_release(&preprocess);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -69320,6 +69388,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_vendor_storage_half_admission);
     C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
+    C_TEST_FIXTURE(arguments, c_test_expression_type_projection);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
     C_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     C_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);

@@ -40,6 +40,20 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+// Runs the three retained views against the independent range authorities in
+// an actual function builder, after its locals and C-to-IR map exist. The
+// node belongs only to this test handoff; neither it nor query state enters IR.
+typedef struct CTestExpressionTypeProjection CTestExpressionTypeProjection;
+struct CTestExpressionTypeProjection
+{
+    u32 node;
+    bool visited;
+    bool reference_success[3];
+    bool projected_success[3];
+    IrType reference[3];
+    IrType projected[3];
+};
+BUSTER_F_DECL void c_test_expression_type_projection_set(CTestExpressionTypeProjection* projection);
 BUSTER_F_DECL bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CAstFacts const* facts,
                                                  u32 node, u64* low, u64* high, f64* floating, bool* is_float);
 // Calling-thread root-conditional, comma and assignment operator visits.

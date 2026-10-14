@@ -3671,6 +3671,7 @@ BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields);
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, CTypeId type);
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out);
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end);
@@ -3820,7 +3821,11 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             case C_IR_QUERY_FRAME_ARRAY_BOUND: frame->success = c_ir_array_bound_evaluate_attempt(builder, frame->bound, &frame->integer); break;
             case C_IR_QUERY_FRAME_CONSTANT: frame->success = c_ir_constant_evaluate_attempt(builder, frame->start, frame->end, &frame->constant); break;
             case C_IR_QUERY_FRAME_OPERAND_TYPE:
+#if BUSTER_INCLUDE_TESTS
+                frame->success = c_ir_sizeof_operand_type_attempt_promoted(builder, frame->start, frame->end, &frame->result_type, frame->flag);
+#else
                 frame->success = c_ir_sizeof_operand_type_attempt(builder, frame->start, frame->end, &frame->result_type);
+#endif
                 break;
             case C_IR_QUERY_FRAME_VLA_C_TYPE:
                 frame->result_type = c_ir_vla_c_type_attempt(builder, (CTypeId){.value = frame->start});
@@ -39842,6 +39847,8 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
             frame->result_type = builder->s32_type;
         else if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE)
             frame->result_type = builder->size_type;
+        else if (kind == C_AST_LABEL_ADDRESS)
+            frame->result_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
         else if (kind == C_AST_COMPOUND_LITERAL || kind == C_AST_CAST)
         {
             CIrNodeQueryFrame answer = {0};
@@ -39921,6 +39928,56 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* build
     u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
     return c_ir_expression_type_node(builder, node, C_IR_AST_TYPE_PREDICTED);
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestExpressionTypeProjection* c_ir_test_expression_projection;
+
+void c_test_expression_type_projection_set(CTestExpressionTypeProjection* projection)
+{
+    c_ir_test_expression_projection = projection;
+}
+
+BUSTER_C_INTERNAL void c_ir_expression_projection_compare(CIntegerIrBuilder* builder)
+{
+    CTestExpressionTypeProjection* test = c_ir_test_expression_projection;
+    CAstSpans const* spans = builder->syntax_spans;
+    bool running = test && !test->visited && spans && test->node < builder->syntax_tree->node_count &&
+                   spans->first[test->node] >= builder->body_token_start &&
+                   spans->end[test->node] <= builder->body_token_start + builder->body_token_count;
+    if (running)
+    {
+        test->visited = true;
+        for (u32 view = 0; view <= C_IR_AST_TYPE_PREDICTED; view += 1)
+        {
+            u64 mark = builder->temporary_arena->position;
+            CIrQueryFrame reference = {0};
+            CIrQueryFrame key = {.start = spans->first[test->node], .end = spans->end[test->node],
+                .kind = view == C_IR_AST_TYPE_PREDICTED ? C_IR_QUERY_FRAME_TYPE_PREDICTION : C_IR_QUERY_FRAME_OPERAND_TYPE,
+                .flag = view == C_IR_AST_TYPE_PROMOTED};
+            bool settled = c_ir_query_execute(builder, key, &reference);
+            IrType const* row = settled && reference.success ? ir_type_from_id(&builder->program->types, reference.result_type) : 0;
+            test->reference_success[view] = row != 0;
+            if (row) test->reference[view] = *row;
+            arena_set_position(builder->temporary_arena, mark);
+            CToken* source_tokens = builder->preprocess.tokens;
+            CToken* provenance = arena_allocate(builder->temporary_arena, CToken, builder->preprocess.token_count);
+            memcpy(provenance, source_tokens, sizeof(CToken) * builder->preprocess.token_count);
+            for (u32 token = 0; token < builder->preprocess.token_count; token += 1)
+            {
+                provenance[token].kind = C_TOKEN_IDENTIFIER;
+                provenance[token].punctuator = 0;
+            }
+            builder->preprocess.tokens = provenance;
+            IrTypeId projected = c_ir_expression_type_node(builder, test->node, (CIrAstTypeView)view);
+            builder->preprocess.tokens = source_tokens;
+            row = ir_type_from_id(&builder->program->types, projected);
+            test->projected_success[view] = row != 0;
+            if (row) test->projected[view] = *row;
+            arena_set_position(builder->temporary_arena, mark);
+        }
+    }
+}
+#endif
 
 // Type immediate conditional children in postorder before flattening their
 // control flow. Reuse the selection task storage, then retain only one type
@@ -62515,6 +62572,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         function->state = IR_FUNCTION_LOWERED;
+#if BUSTER_INCLUDE_TESTS
+        c_ir_expression_projection_compare(&builder);
+#endif
         function->debug_local_count = options.omit_debug_locals ? 0 : builder.local_count;
         function->debug_locals = options.omit_debug_locals ? 0 : arena_allocate(arena, IrDebugLocal, function->debug_local_count);
         IR_DIAGNOSTIC_CENSUS_RECORD(DEBUG_LOCALS, function->debug_local_count);
