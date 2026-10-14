@@ -40,18 +40,32 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
-// Runs the three retained views against the independent range authorities in
-// an actual function builder, after its locals and C-to-IR map exist. The
-// node belongs only to this test handoff; neither it nor query state enters IR.
+// Captures the three retained views in an actual function builder, after its
+// locals and C-to-IR map exist. Tests supply a poisoned provenance snapshot
+// and verified legacy shapes; neither the node nor query state enters IR.
+#define C_TEST_EXPRESSION_TYPE_DEPTH 4
+typedef struct CTestExpressionTypeShape CTestExpressionTypeShape;
+struct CTestExpressionTypeShape
+{
+    u64 size;
+    u64 alignment;
+    u64 element_count;
+    u32 kind;
+    u32 bit_width;
+    u32 parameter_count;
+    bool is_signed;
+    bool is_atomic;
+    bool is_volatile;
+};
 typedef struct CTestExpressionTypeProjection CTestExpressionTypeProjection;
 struct CTestExpressionTypeProjection
 {
+    CPreprocessResult const* provenance;
     u32 node;
     bool visited;
-    bool reference_success[3];
-    bool projected_success[3];
-    IrType reference[3];
-    IrType projected[3];
+    bool success[3];
+    u32 depth[3];
+    CTestExpressionTypeShape shapes[3][C_TEST_EXPRESSION_TYPE_DEPTH];
 };
 BUSTER_F_DECL void c_test_expression_type_projection_set(CTestExpressionTypeProjection* projection);
 BUSTER_F_DECL bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CAstFacts const* facts,

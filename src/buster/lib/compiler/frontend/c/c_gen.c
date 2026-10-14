@@ -37633,31 +37633,21 @@ BUSTER_C_INTERNAL void c_ir_expression_projection_compare(CIntegerIrBuilder* bui
         test->visited = true;
         for (u32 view = 0; view <= C_IR_AST_TYPE_PREDICTED; view += 1)
         {
-            u64 mark = builder->temporary_arena->position;
-            CIrQueryFrame reference = {0};
-            CIrQueryFrame key = {.start = spans->first[test->node], .end = spans->end[test->node],
-                .kind = view == C_IR_AST_TYPE_PREDICTED ? C_IR_QUERY_FRAME_TYPE_PREDICTION : C_IR_QUERY_FRAME_OPERAND_TYPE,
-                .flag = view == C_IR_AST_TYPE_PROMOTED};
-            bool settled = c_ir_query_execute(builder, key, &reference);
-            IrType const* row = settled && reference.success ? ir_type_from_id(&builder->program->types, reference.result_type) : 0;
-            test->reference_success[view] = row != 0;
-            if (row) test->reference[view] = *row;
-            arena_set_position(builder->temporary_arena, mark);
-            CToken* source_tokens = builder->preprocess.tokens;
-            CToken* provenance = arena_allocate(builder->temporary_arena, CToken, builder->preprocess.token_count);
-            memcpy(provenance, source_tokens, sizeof(CToken) * builder->preprocess.token_count);
-            for (u32 token = 0; token < builder->preprocess.token_count; token += 1)
-            {
-                provenance[token].kind = C_TOKEN_IDENTIFIER;
-                provenance[token].punctuator = 0;
-            }
-            builder->preprocess.tokens = provenance;
+            CPreprocessResult source = builder->preprocess;
+            if (test->provenance) builder->preprocess = *test->provenance;
             IrTypeId projected = c_ir_expression_type_node(builder, test->node, (CIrAstTypeView)view);
-            builder->preprocess.tokens = source_tokens;
-            row = ir_type_from_id(&builder->program->types, projected);
-            test->projected_success[view] = row != 0;
-            if (row) test->projected[view] = *row;
-            arena_set_position(builder->temporary_arena, mark);
+            builder->preprocess = source;
+            IrType const* row = ir_type_from_id(&builder->program->types, projected);
+            test->success[view] = row != 0;
+            for (u32 depth = 0; row && depth < C_TEST_EXPRESSION_TYPE_DEPTH; depth += 1)
+            {
+                test->shapes[view][depth] = (CTestExpressionTypeShape){.kind = row->kind, .bit_width = row->bit_width,
+                    .size = row->layout.size, .alignment = row->layout.alignment, .element_count = row->element_count,
+                    .parameter_count = row->parameter_count, .is_signed = row->is_signed,
+                    .is_atomic = row->is_atomic, .is_volatile = row->is_volatile};
+                test->depth[view] = depth + 1;
+                row = ir_type_from_id(&builder->program->types, row->kind == IR_TYPE_FUNCTION ? row->return_type : row->element_type);
+            }
         }
     }
 }

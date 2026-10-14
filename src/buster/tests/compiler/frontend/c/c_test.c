@@ -7043,26 +7043,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_type_projection(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    struct { String8 expression; u32 strict; u32 promoted; u32 predicted; } const cases[] = {
-        {S8("x"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("+x"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("object.value"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("bits.narrow"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("choose ? bits.narrow : bits.narrow"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("array"), IR_TYPE_ARRAY, IR_TYPE_ARRAY, IR_TYPE_POINTER},
-        {S8("target"), IR_TYPE_FUNCTION, IR_TYPE_FUNCTION, IR_TYPE_POINTER},
-        {S8("&target"), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
-        {S8("\"abc\""), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
-        {S8("&\"abc\""), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
-        {S8("__func__"), IR_TYPE_ARRAY, IR_TYPE_ARRAY, IR_TYPE_POINTER},
-        {S8("((struct S *)&object)->value"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("(int[]){1, 2}[0]"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_POINTER},
-        {S8("((int[]){1, 2})[0]"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("_Generic(x, int: bits.narrow, default: object.value)"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("__builtin_choose_expr(1, bits.narrow, object.value)"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
-        {S8("choose ? &array[0] : 0"), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
-        {S8("choose ? (void *)0 : &array[0]"), IR_TYPE_POINTER, IR_TYPE_POINTER, IR_TYPE_POINTER},
-        {S8("__extension__ ({ x; })"), IR_TYPE_INTEGER, IR_TYPE_INTEGER, IR_TYPE_INTEGER},
+    // Frozen from the independent STRICT/PROMOTED/PREDICTED builder
+    // authorities: all 95 assertions agreed before deleting those walkers.
+    // The unsigned 64-bit conditional prediction and compound postfix
+    // prediction are existing method choices, independent of semantic C rows.
+    enum { NONE, I, V, U, P, A, F, C, N };
+    TargetDataLayout layout = target_data_layout(target_native);
+    CTestExpressionTypeShape const shapes[] = {
+        {0},
+        {.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true, .size = 4, .alignment = 4},
+        {.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true, .is_volatile = true, .size = 4, .alignment = 4},
+        {.kind = IR_TYPE_INTEGER, .bit_width = 64, .size = 8, .alignment = layout.long_long_integer.alignment},
+        {.kind = IR_TYPE_POINTER, .bit_width = layout.pointer.bit_width, .size = layout.pointer.size, .alignment = layout.pointer.alignment},
+        {.kind = IR_TYPE_ARRAY, .element_count = 3, .size = 12, .alignment = 4},
+        {.kind = IR_TYPE_FUNCTION, .parameter_count = 1, .size = layout.pointer.size, .alignment = layout.pointer.alignment},
+        {.kind = IR_TYPE_INTEGER, .bit_width = 8, .is_signed = layout.plain_char_is_signed, .size = 1, .alignment = 1},
+        {.kind = IR_TYPE_ARRAY, .element_count = 11, .size = 11, .alignment = 1},
+    };
+    struct { String8 expression; u32 shapes[3][C_TEST_EXPRESSION_TYPE_DEPTH]; } const cases[] = {
+        {S8("x"), {{V}, {V}, {V}}},
+        {S8("+x"), {{V}, {V}, {V}}},
+        {S8("object.value"), {{I}, {I}, {I}}},
+        {S8("bits.narrow"), {{U}, {I}, {U}}},
+        {S8("choose ? bits.narrow : bits.narrow"), {{I}, {I}, {U}}},
+        {S8("array"), {{A,I}, {A,I}, {P,I}}},
+        {S8("target"), {{F,I}, {F,I}, {P,F,I}}},
+        {S8("&target"), {{P,F,I}, {P,F,I}, {P,F,I}}},
+        {S8("\"abc\""), {{P,C}, {P,C}, {P,C}}},
+        {S8("&\"abc\""), {{P,P,C}, {P,P,C}, {P,P,C}}},
+        {S8("__func__"), {{N,C}, {N,C}, {P,C}}},
+        {S8("((struct S *)&object)->value"), {{I}, {I}, {I}}},
+        {S8("(int[]){1, 2}[0]"), {{I}, {I}, {P,I}}},
+        {S8("((int[]){1, 2})[0]"), {{I}, {I}, {I}}},
+        {S8("_Generic(x, int: bits.narrow, default: object.value)"), {{U}, {I}, {U}}},
+        {S8("__builtin_choose_expr(1, bits.narrow, object.value)"), {{U}, {I}, {U}}},
+        {S8("choose ? &array[0] : 0"), {{P,I}, {P,I}, {P,I}}},
+        {S8("choose ? (void *)0 : &array[0]"), {{P,I}, {P,I}, {P,I}}},
+        {S8("__extension__ ({ x; })"), {{V}, {V}, {V}}},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
@@ -7085,22 +7102,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_type_projection(UnitTestArg
                 if (ast->kinds[cast] == C_AST_CAST) projection.node = c_ast_child_at(ast, cast, 1);
             }
         }
+        CPreprocessResult provenance = preprocess;
+        provenance.tokens = arena_allocate(temporary.arena, CToken, preprocess.token_count);
+        memcpy(provenance.tokens, preprocess.tokens, sizeof(CToken) * preprocess.token_count);
+        for (u32 token = 0; token < preprocess.token_count; token += 1)
+        {
+            provenance.tokens[token].kind = C_TOKEN_IDENTIFIER;
+            provenance.tokens[token].punctuator = 0;
+        }
+        projection.provenance = &provenance;
         c_test_expression_type_projection_set(&projection);
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("expression-projection.c"), preprocess, analysis, target_native);
         c_test_expression_type_projection_set(0);
         BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && projection.visited, cases[index].expression);
         for (u32 view = 0; projection.visited && view < 3; view += 1)
         {
-            IrType reference = projection.reference[view];
-            IrType projected = projection.projected[view];
-            u32 expected = view == 0 ? cases[index].strict : view == 1 ? cases[index].promoted : cases[index].predicted;
-            BUSTER_TEST_RAW(arguments, projection.reference_success[view] && projection.projected_success[view] && reference.kind == expected &&
-                reference.kind == projected.kind && reference.bit_width == projected.bit_width && reference.is_signed == projected.is_signed &&
-                reference.is_atomic == projected.is_atomic && reference.is_volatile == projected.is_volatile &&
-                reference.layout.size == projected.layout.size && reference.layout.alignment == projected.layout.alignment &&
-                reference.element_type.value == projected.element_type.value && reference.element_count == projected.element_count &&
-                reference.return_type.value == projected.return_type.value && reference.parameter_count == projected.parameter_count,
-                cases[index].expression);
+            u32 expected_depth = 0;
+            for (u32 depth = 0; depth < C_TEST_EXPRESSION_TYPE_DEPTH && cases[index].shapes[view][depth] != NONE; depth += 1)
+            {
+                CTestExpressionTypeShape expected = shapes[cases[index].shapes[view][depth]];
+                CTestExpressionTypeShape actual = projection.shapes[view][depth];
+                BUSTER_TEST_RAW(arguments, actual.kind == expected.kind && actual.bit_width == expected.bit_width &&
+                    actual.size == expected.size && actual.alignment == expected.alignment && actual.element_count == expected.element_count &&
+                    actual.parameter_count == expected.parameter_count && actual.is_signed == expected.is_signed &&
+                    actual.is_atomic == expected.is_atomic && actual.is_volatile == expected.is_volatile, cases[index].expression);
+                expected_depth += 1;
+            }
+            BUSTER_TEST_RAW(arguments, projection.success[view] && projection.depth[view] == expected_depth, cases[index].expression);
         }
         c_preprocess_release(&preprocess);
         c_test_scratch_end(temporary);
