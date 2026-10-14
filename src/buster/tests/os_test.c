@@ -1009,6 +1009,30 @@ enum { OS_TEST_PROCESS_DEADLINE_LARGE_OUTPUT_LENGTH = 32 * 1024 + 4096 };
 
 // Private child payloads must run before compiler prewarming and unrelated test
 // modules, so process deadlines measure the payload and not a nested suite.
+#if BUSTER_WINDOWS && !BUSTER_SINGLE_THREADED
+typedef struct OsTestExitWaiter OsTestExitWaiter;
+struct OsTestExitWaiter
+{
+    ProcessSpawnResult spawn;
+    OsProcessHandle* release;
+    OsProcessHandle* ready;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_exit_waiter(void* argument)
+{
+    OsTestExitWaiter* state = (OsTestExitWaiter*)argument;
+    Arena* arena = arena_create((ArenaCreation){0});
+    if (arena)
+    {
+        os_process_cleanup_windows_test_begin(state->spawn, 0);
+        os_process_shutdown_windows_test_claim_gate(state->release, state->ready);
+        os_process_wait_deadline(arena, state->spawn, 1);
+        os_process_cleanup_windows_test_end();
+        arena_destroy(arena, 1);
+    }
+}
+#endif
+
 void os_test_process_child_run(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -1097,6 +1121,54 @@ void os_test_process_child_run(UnitTestArguments* arguments)
         if (!ready) os_exit(96);
         for (;;) os_test_sleep_milliseconds(10);
     }
+    if (string_starts_with_sequence(process_test_mode, S8("cleanup-exit-")))
+    {
+        String8 argv[] = {program_state->input.arguments.pointer[0], S8("test")};
+        String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE")};
+        String8 values[] = {S8("cleanup-park")};
+        OsTestEnvironment environment = os_test_environment(arguments->arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
+            (ProcessSpawnOptions){.new_process_group = 1, .capture = (u64)1 << STANDARD_STREAM_OUTPUT});
+        String16Z event_name = {0};
+        bool converted = string16z_from_string8_arena(arguments->arena, os_get_environment_variable(S8("BUSTER_OS_CLEANUP_RELEASE_EVENT")), &event_name);
+        HANDLE release = converted ? OpenEventW(SYNCHRONIZE, FALSE, event_name.pointer) : 0;
+        if (!spawn.handle || !release) os_exit(98);
+        String8 ready = os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY"));
+        u32 ready_polls = 0;
+        while (ready_polls < 3000 && !os_test_regular_file_exists(ready))
+        {
+            os_test_sleep_milliseconds(1);
+            ready_polls += 1;
+        }
+        if (!os_test_regular_file_exists(ready)) os_exit(97);
+#if !BUSTER_SINGLE_THREADED
+        if (string_equal(process_test_mode, S8("cleanup-exit-concurrent")))
+        {
+            HANDLE claimed = CreateEventW(0, TRUE, FALSE, 0);
+            if (!claimed) os_exit(96);
+            OsTestExitWaiter waiter = {.spawn = spawn, .release = (OsProcessHandle*)release, .ready = (OsProcessHandle*)claimed};
+            OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){.callback = &os_test_exit_waiter, .argument = &waiter});
+            if (!thread || WaitForSingleObject(claimed, 30000) != WAIT_OBJECT_0) os_exit(95);
+            // The worker is parked AFTER the exclusive WAITING claim. This
+            // main thread cannot steal it; the parent releases its owned gate.
+            os_exit(0);
+        }
+#endif
+        u32 flags = OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION | OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY;
+        if (string_equal(process_test_mode, S8("cleanup-exit-waiting"))) flags |= OS_PROCESS_CLEANUP_TEST_EXIT_IN_CLAIM;
+        if (string_equal(process_test_mode, S8("cleanup-exit-reserved"))) flags |= OS_PROCESS_CLEANUP_TEST_EXIT_AFTER_RESERVE;
+        os_process_cleanup_windows_test_begin(spawn, flags);
+        os_process_shutdown_windows_test_release_event((OsProcessHandle*)release);
+        if (string_equal(process_test_mode, S8("cleanup-exit-reserved")))
+        {
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values, (ProcessSpawnOptions){.new_process_group = 1});
+        }
+        else if (!string_equal(process_test_mode, S8("cleanup-exit-running")))
+        {
+            os_process_wait_deadline(arguments->arena, spawn, 1);
+        }
+        if (!string_equal(process_test_mode, S8("cleanup-exit-return"))) os_exit(0);
+    }
     if (string_equal(process_test_mode, S8("cleanup-shutdown")))
     {
         String8 argv[] = {program_state->input.arguments.pointer[0], S8("test")};
@@ -1108,16 +1180,15 @@ void os_test_process_child_run(UnitTestArguments* arguments)
         bool passed = spawn.handle != 0;
         if (spawn.handle)
         {
-            // An unconsumed running owner remains visible after shutdown closes admission.
-            ProcessCleanupResult active = os_process_shutdown(0);
-            passed = passed && active.active_owners == 1 && !active.pending_owners && active.error.v == ERROR_BUSY;
+            ProcessCleanupResult active = os_process_cleanup_snapshot();
+            passed = passed && active.active_owners == 1 && !active.pending_owners && active.error.v == ERROR_BUSY &&
+                active.error_owner_id == spawn.windows_owner_id;
             os_process_cleanup_windows_test_begin(spawn, OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION |
                 OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY);
-            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 1);
-            ProcessCleanupResult retained = os_process_shutdown(5000000);
+            ProcessCleanupResult retained = os_process_shutdown(0);
             OsProcessCleanupWindowsTestStats stats = os_process_cleanup_windows_test_end();
-            passed = passed && waited.pending_windows_owner_id == spawn.windows_owner_id && retained.active_owners == 1 &&
-                retained.pending_owners == 1 && retained.error.v != 0 && !stats.ceiling_reached && !stats.infinite_waits;
+            passed = passed && retained.active_owners == 1 && retained.pending_owners == 1 && retained.error.v != 0 &&
+                !stats.ceiling_reached && !stats.infinite_waits;
             ProcessCleanupResult resumed = os_process_cleanup_pending(5000000);
             passed = passed && !resumed.active_owners && !os_process_shutdown(0).active_owners;
             ProcessSpawnResult refused = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
@@ -2075,10 +2146,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
     }
     if (BUSTER_REQUIRE(arguments, resume_spawns[0].handle && resume_spawns[1].handle))
     {
-        AtomicU64 start;
-        AtomicU64 ready_count;
-        atomic_u64_store(&start, 0);
-        atomic_u64_store(&ready_count, 0);
+        AtomicU64 start = 0;
+        AtomicU64 ready_count = 0;
         OsTestCleanupResume workers[2] = {{.start = &start, .ready = &ready_count}, {.start = &start, .ready = &ready_count}};
         OsThreadHandle* threads[2] = {0};
         u32 started = 0;
@@ -2144,6 +2213,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
         BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.process_tree_cleanup_failed);
     }
     BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 argv[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--module=integer_tests"), S8("--verbose=0")};
+    String8 modes[] = {S8("cleanup-exit-pending"), S8("cleanup-exit-running"), S8("cleanup-exit-waiting"), S8("cleanup-exit-reserved"), S8("cleanup-exit-return")
+#if !BUSTER_SINGLE_THREADED
+        , S8("cleanup-exit-concurrent")
+#endif
+    };
+    for (EACH_ARRAY_INDEX(index, modes))
+    {
+        String8 event_name8 = string_format(arena, S8("Local\\BusterCleanup{u64}_{u64}_{u64}"),
+            (u64)GetCurrentProcessId(), os_now_microseconds(), index);
+        String16Z event_name = {0};
+        bool converted = string16z_from_string8_arena(arena, event_name8, &event_name);
+        HANDLE release = converted ? CreateEventW(0, TRUE, FALSE, event_name.pointer) : 0;
+        String8 ready = buster_test_temporary_unique_path(arena, S8("process-cleanup-exit-ready"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(ready));
+        if (BUSTER_REQUIRE(arguments, release != 0))
+        {
+            String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CLEANUP_RELEASE_EVENT"), S8("BUSTER_TEST_JOBS"), S8("BUSTER_OS_PROCESS_READY")};
+            String8 values[] = {modes[index], event_name8, S8("1"), ready};
+            OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+            u64 resources_before = os_process_spawn_test_resource_count();
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
+                (ProcessSpawnOptions){.new_process_group = 1, .capture = ((u64)1 << STANDARD_STREAM_ERROR) | ((u64)1 << STANDARD_STREAM_OUTPUT)});
+            if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+            {
+                DWORD available = 0;
+                u32 polls = 0;
+                while (polls < 30000 && !available && WaitForSingleObject((HANDLE)spawn.handle, 0) == WAIT_TIMEOUT)
+                {
+                    if (!PeekNamedPipe((HANDLE)spawn.pipes[STANDARD_STREAM_ERROR][0], 0, 0, 0, &available, 0)) break;
+                    os_test_sleep_milliseconds(1);
+                    polls += 1;
+                }
+                bool host_alive = WaitForSingleObject((HANDLE)spawn.handle, 0) == WAIT_TIMEOUT;
+                BUSTER_TEST(arguments, available != 0 && host_alive);
+                u8 receipt[256] = {0};
+                DWORD read_count = 0;
+                if (available)
+                {
+                    DWORD requested = available < sizeof(receipt) ? available : (DWORD)sizeof(receipt);
+                    BUSTER_TEST(arguments, ReadFile((HANDLE)spawn.pipes[STANDARD_STREAM_ERROR][0], receipt, requested, &read_count, 0) != 0);
+                    String8 text = {(char8*)receipt, read_count};
+                    BUSTER_TEST(arguments, string_starts_with_sequence(text, S8("WINDOWS_PROCESS_SHUTDOWN_REFUSED_V1 active=")));
+                    BUSTER_TEST(arguments, string_first_sequence(text, S8(" owner_id=")) != (u64)-1 && string_first_sequence(text, S8(" native_error=")) != (u64)-1);
+                }
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information = {0};
+                bool queried = QueryInformationJobObject((HANDLE)spawn.process_tree, JobObjectBasicAccountingInformation,
+                    &information, sizeof(information), 0) != 0;
+                BUSTER_TEST(arguments, queried && information.ActiveProcesses >= 2);
+                BUSTER_TEST(arguments, SetEvent(release) != 0);
+                // Observe host exit and an empty outer job BEFORE the consuming
+                // parent wait can terminate descendants and mask a broken hook.
+                DWORD host_wait = WaitForSingleObject((HANDLE)spawn.handle, 30000);
+                BUSTER_TEST(arguments, host_wait == WAIT_OBJECT_0);
+                bool empty = false;
+                u64 cleanup_deadline = os_now_microseconds() + 5000000;
+                while (queried && !empty && os_now_microseconds() < cleanup_deadline)
+                {
+                    queried = QueryInformationJobObject((HANDLE)spawn.process_tree, JobObjectBasicAccountingInformation,
+                        &information, sizeof(information), 0) != 0;
+                    empty = queried && information.ActiveProcesses == 0;
+                    if (queried && !empty) os_test_sleep_milliseconds(1);
+                }
+                BUSTER_TEST(arguments, queried && empty);
+                ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !waited.timed_out && !waited.process_tree_cleanup_failed && !waited.pending_windows_owner_id);
+                BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.platform_status == PROCESS_RESULT_FAILED);
+            }
+            BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+            BUSTER_TEST(arguments, CloseHandle(release) != 0);
+        }
+        BUSTER_TEST(arguments, os_file_delete(ready));
+    }
     return result;
 }
 
@@ -3019,6 +3168,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #if BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, os_test_process_deadline_windows);
     BUSTER_TEST_FIXTURE(arguments, os_test_process_cleanup_windows);
+    BUSTER_TEST_FIXTURE(arguments, os_test_process_shutdown_exit_windows);
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS

@@ -2,7 +2,9 @@
 // freestanding variants, argument processing into buster_entry_point,
 // crash-signal reporting, the fuzzer entry, and — for freestanding links —
 // the minimal libc surface (memset/memcpy/strlen/abort/...) the compiler
-// may emit calls to. Opt-in buster_ios_launch_trace native observations span
+// may emit calls to. Windows buster_entry_point/os_exit retain host lifetime
+// through os_process_shutdown_keep_alive before destroying global storage.
+// Opt-in buster_ios_launch_trace native observations span
 // main/worker and runtime setup before ordinary output is initialized.
 
 #include <buster/lib/entry_point.h>
@@ -336,6 +338,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
         result = entry_point();
     }
 
+#if BUSTER_WINDOWS
+    // Refused process cleanup keeps the complete host runtime alive until exact
+    // ownership can finalize; do this before releasing contexts and OS storage.
+    lane_release();
+    if (!os_process_shutdown_keep_alive())
+    {
+        result = PROCESS_RESULT_FAILED;
+        entry_point_exit_code_set(PROCESS_RESULT_FAILED);
+    }
+    // Returning with an unjoined raw worker must not free globals under its
+    // wait/callback tail. A fatal exit keeps them intact until OS teardown.
+    if (!os_is_only_live_thread()) os_exit(PROCESS_RESULT_FAILED);
+#endif
+
 #if !BUSTER_IOS && !BUSTER_ANDROID
     // Mobile entry points terminate or return through their platform-owned
     // process lifecycle after this function. In particular, the iOS worker
@@ -648,7 +664,7 @@ BUSTER_NORETURN BUSTER_EXPORT void mainCRTStartup(void)
     {
         FreeEnvironmentStringsW(environment);
     }
-    ExitProcess((UINT)result);
+    os_exit((u32)result);
 }
 #endif
 

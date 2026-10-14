@@ -91,6 +91,9 @@ enum
     OS_PROCESS_CLEANUP_TEST_UNSIGNALED = 2,
     OS_PROCESS_CLEANUP_TEST_WAIT_FAILED = 4,
     OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY = 8,
+    OS_PROCESS_CLEANUP_TEST_RELEASE_AFTER_RECEIPT = 16,
+    OS_PROCESS_CLEANUP_TEST_EXIT_IN_CLAIM = 32,
+    OS_PROCESS_CLEANUP_TEST_EXIT_AFTER_RESERVE = 64,
 };
 typedef struct OsProcessCleanupWindowsTestStats OsProcessCleanupWindowsTestStats;
 struct OsProcessCleanupWindowsTestStats
@@ -103,6 +106,8 @@ struct OsProcessCleanupWindowsTestStats
 };
 BUSTER_F_DECL void os_process_cleanup_windows_test_begin(ProcessSpawnResult spawn, u32 flags);
 BUSTER_F_DECL OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void);
+BUSTER_F_DECL void os_process_shutdown_windows_test_release_event(OsProcessHandle* event);
+BUSTER_F_DECL void os_process_shutdown_windows_test_claim_gate(OsProcessHandle* release, OsProcessHandle* ready);
 
 // Calling-thread observation of the Windows captured-pipe deadline loop. The
 // scan limit is a test-only independent guard against a regression hanging a

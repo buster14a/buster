@@ -417,6 +417,8 @@ struct ProcessCleanupResult
     u64 pending_owners;
     u64 resumed_owner_id;
     u64 error_owner_id;
+    // Windows receipt state: 0 reserved, 1 running, 2 waiting, 3 pending.
+    u32 error_owner_state;
     OsError error;
 };
 // Windows: resume at most one pending owner under a shared <=5-second native
@@ -425,12 +427,16 @@ struct ProcessCleanupResult
 // Other platforms return an empty result and retain their current contracts.
 BUSTER_F_DECL ProcessCleanupResult os_process_cleanup_pending(u64 timeout_microseconds);
 BUSTER_F_DECL ProcessCleanupResult os_process_cleanup_snapshot(void);
-// Permanently close admission, retry pending ownership within <=5 seconds and
-// report every active owner, including a caller currently waiting or launching.
-// A nonzero active_owners refuses finalization: the embedding host must remain
-// alive or transfer ownership. Existing executable exit policy is unresolved;
-// this API does not claim that exiting/closing a kill-on-close job proves cleanup.
+// Permanently close admission, claim unconsumed running/pending ownership within
+// <=5 seconds and report every active owner, including an exclusive caller still
+// waiting or launching. A nonzero active_owners refuses finalization: the host
+// must remain alive. Closing a kill-on-close job never proves tree cleanup.
 BUSTER_F_DECL ProcessCleanupResult os_process_shutdown(u64 timeout_microseconds);
+// Executable exit contract: close admission, keep the host alive while exact
+// process/job ownership remains, emit an allocation-free failure receipt and
+// repeat bounded cleanup. False means a refusal was observed even if a later
+// retry finalized everything. This intentionally has no total shutdown deadline.
+BUSTER_F_DECL bool os_process_shutdown_keep_alive(void);
 
 // The same wait, given up on after `timeout_microseconds`: the child is killed,
 // whatever it had already written is still returned, and `timed_out` says the
