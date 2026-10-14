@@ -685,6 +685,7 @@ struct CAstOperator
     u32 token;
     u8 kind;
     u8 precedence;
+    u8 flags;
 };
 
 // A `*` of a declarator level awaiting emission after that level's suffixes.
@@ -713,6 +714,7 @@ struct CAstStorage
     // kinds, extents, tokens, data: each column is the only allocation in its
     // arena and starts at the arena's buffer, so it grows in place.
     Arena* columns[C_AST_COLUMN_COUNT];
+    Arena* parentheses;
 };
 
 typedef struct CAstBuilder CAstBuilder;
@@ -740,6 +742,10 @@ struct CAstBuilder
     u32 node_count;
     u32 column_end;
     u32 column_capacity;
+    CAstParenthesis* parentheses;
+    u32 parenthesis_count;
+    u32 parenthesis_end;
+    u32 parenthesis_capacity;
     CAstStorage storage;
     // ---- explicit stacks.
     CAstFrame* frames;
@@ -847,6 +853,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_operator_push(CAstBuilder* builder,
     entry->token = token;
     entry->kind = (u8)kind;
     entry->precedence = (u8)precedence;
+    entry->flags = 0;
 #if C_AST_COUNTERS
     builder->statistics.operator_high_water = BUSTER_MAX(builder->statistics.operator_high_water, (u64)builder->operator_count);
 #endif
@@ -1068,6 +1075,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_columns_move(CAstBuilder* builder, u32 capacity)
         }
         builder->statistics.column_copy_bytes += (u64)builder->column_end * C_AST_NODE_BYTES;
         c_ast_columns_retire(&builder->storage);
+        moved.parentheses = builder->storage.parentheses;
         builder->storage = moved;
         builder->column_capacity = capacity;
         c_ast_columns_bind(builder);
@@ -1076,6 +1084,60 @@ BUSTER_GLOBAL_LOCAL void c_ast_columns_move(CAstBuilder* builder, u32 capacity)
     {
         c_ast_columns_retire(&moved);
         c_ast_fail(builder, builder->position, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve the syntax tree columns"));
+    }
+}
+
+// Keeps sparse group rows in their own reservation, committed in steps and
+// moved only when that reservation is full. A failed move keeps the old rows
+// alive until the failed build releases all its storage.
+BUSTER_GLOBAL_LOCAL void c_ast_parenthesis_append(CAstBuilder* builder, u32 node, u32 open, u32 close, u32 flags)
+{
+    if (!builder->failed && builder->parenthesis_count == builder->parenthesis_end)
+    {
+        u32 capacity = builder->parenthesis_capacity;
+        bool moving = builder->storage.parentheses && builder->parenthesis_end == capacity;
+        u64 grown = moving ? (u64)capacity * 2 : capacity;
+        if (!builder->storage.parentheses || moving)
+        {
+            Arena* arena = grown <= UINT32_MAX && grown <= (UINT64_MAX - C_AST_COLUMN_HEADROOM) / sizeof(CAstParenthesis)
+                               ? c_frontend_arena_create((ArenaCreation){
+                                     .reserved_size = grown * sizeof(CAstParenthesis) + C_AST_COLUMN_HEADROOM,
+                                     .initial_size = C_AST_COLUMN_HEADROOM,
+                                     .flags = {.pool_reuse = 1},
+                                 }, C_FRONTEND_RESERVATION_ANALYSIS)
+                               : 0;
+            if (arena)
+            {
+                if (moving)
+                {
+                    u64 bytes = (u64)builder->parenthesis_count * sizeof(CAstParenthesis);
+                    CAstParenthesis* rows = arena_allocate(arena, CAstParenthesis, builder->parenthesis_count);
+                    memcpy(rows, builder->parentheses, bytes);
+                    builder->statistics.parenthesis_copy_bytes += bytes;
+                    Arena* previous = builder->storage.parentheses;
+                    arena_retire(previous, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, previous->reserved_size - arena_minimum_position));
+                }
+                builder->storage.parentheses = arena;
+                builder->parentheses = (CAstParenthesis*)arena_buffer_start(arena);
+                builder->parenthesis_capacity = (u32)grown;
+            }
+            else
+            {
+                c_ast_fail(builder, close, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve the syntax tree expression groups"));
+            }
+        }
+        if (!builder->failed)
+        {
+            u32 committed = BUSTER_MIN(C_AST_PARENTHESIS_STEP, builder->parenthesis_capacity - builder->parenthesis_end);
+            arena_allocate(builder->storage.parentheses, CAstParenthesis, committed);
+            builder->parenthesis_end += committed;
+            builder->statistics.parenthesis_committed_bytes = (u64)builder->parenthesis_end * sizeof(CAstParenthesis);
+        }
+    }
+    if (!builder->failed)
+    {
+        builder->parentheses[builder->parenthesis_count] = (CAstParenthesis){.node = node, .open = open, .close = close, .flags = flags};
+        builder->parenthesis_count += 1;
     }
 }
 
@@ -1746,6 +1808,8 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_expr(CAstBuilder* builder, CAstFrame* frame)
                     else
                     {
                         c_ast_operator_push(builder, C_AST_OP_PAREN, 0, builder->node_count, position);
+                        builder->operators[builder->operator_count - 1].flags =
+                            (u8)(position && builder->source[position - 1].kind == C_TOKEN_IDENTIFIER ? C_AST_PARENTHESIS_AFTER_IDENTIFIER : 0);
                         nest += 1;
                         c_ast_advance(builder);
                     }
@@ -1900,6 +1964,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_expr(CAstBuilder* builder, CAstFrame* frame)
                 CAstOperator marker = builder->operators[builder->operator_count - 1];
                 if (marker.kind == C_AST_OP_PAREN)
                 {
+                    c_ast_parenthesis_append(builder, builder->node_count - 1, marker.token, position, marker.flags);
                     builder->operator_count -= 1;
                     begin = marker.begin;
                     nest -= 1;
@@ -6180,11 +6245,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_publish(CAstBuilder* builder, Arena* arena, CAst*
     ast->extents = builder->extents;
     ast->tokens = builder->tokens;
     ast->data = builder->data;
+    ast->parentheses = builder->parentheses;
+    ast->parenthesis_count = builder->parenthesis_count;
     ast->storage = storage;
     ast->node_count = count;
     ast->root = count ? count - 1 : C_AST_NODE_INVALID;
     ast->layout = C_AST_LAYOUT_IMPLICIT;
-    builder->statistics.retained_bytes = (u64)count * C_AST_NODE_BYTES;
+    builder->statistics.retained_bytes = (u64)count * C_AST_NODE_BYTES + (u64)builder->parenthesis_count * sizeof(CAstParenthesis);
 }
 
 // Writes the children of `node` in source order into `roots[0..count)`; the
@@ -6317,6 +6384,7 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         CAstBuilder builder = {0};
         builder.arena = arena;
         builder.phase = phase;
+        builder.parenthesis_capacity = options.parenthesis_capacity ? options.parenthesis_capacity : C_AST_PARENTHESIS_CAPACITY;
         c_ast_builder_init(&builder, preprocess, options);
         if (!builder.failed)
         {
@@ -6338,6 +6406,11 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         else
         {
             c_ast_columns_retire(&builder.storage);
+            if (builder.storage.parentheses)
+            {
+                Arena* groups = builder.storage.parentheses;
+                arena_retire(groups, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, groups->reserved_size - arena_minimum_position));
+            }
             CDiagnostic diagnostic = {
                 .message = builder.fail_message,
                 .kind = builder.fail_kind,
@@ -6372,8 +6445,53 @@ void c_ast_release(CAst* ast)
     if (ast->storage)
     {
         c_ast_columns_retire(ast->storage);
+        if (ast->storage->parentheses)
+        {
+            Arena* groups = ast->storage->parentheses;
+            arena_retire(groups, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, groups->reserved_size - arena_minimum_position));
+            ast->storage->parentheses = 0;
+        }
     }
     *ast = (CAst){.root = C_AST_NODE_INVALID};
+}
+
+CAstParentheses c_ast_parentheses(CAst const* ast, u32 node)
+{
+    u32 low = 0;
+    u32 high = ast->parenthesis_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (ast->parentheses[middle].node < node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    u32 first = low;
+    high = ast->parenthesis_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (ast->parentheses[middle].node <= node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return (CAstParentheses){.first = first, .count = low - first};
+}
+
+CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level)
+{
+    CAstParentheses slice = c_ast_parentheses(ast, node);
+    return level && level <= slice.count ? ast->parentheses + slice.first + level - 1 : 0;
 }
 
 // ---- names, accessors and traversal ---------------------------------------
@@ -6770,6 +6888,22 @@ u32 c_ast_validate(CAst const* ast)
     if (count && (ast->root != count - 1 || ast->extents[count - 1] != count))
     {
         result = count - 1;
+    }
+    for (u32 index = 0; index < ast->parenthesis_count && result == C_AST_NODE_INVALID; index += 1)
+    {
+        CAstParenthesis group = ast->parentheses[index];
+        bool valid = group.node < count && group.open < group.close && group.open < ast->tokens[group.node] &&
+                     ast->tokens[group.node] < group.close;
+        if (index)
+        {
+            CAstParenthesis previous = ast->parentheses[index - 1];
+            valid = valid && (previous.node < group.node ||
+                              (previous.node == group.node && previous.open > group.open && previous.close < group.close));
+        }
+        if (!valid)
+        {
+            result = group.node;
+        }
     }
     for (u32 node = 0; node < count && result == C_AST_NODE_INVALID; node += 1)
     {

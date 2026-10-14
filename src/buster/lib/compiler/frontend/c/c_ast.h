@@ -111,6 +111,11 @@
 // is reaching the committed end. C_AST_NODE_LIMIT is a multiple of it.
 #define C_AST_COLUMN_STEP (1u << 16)
 
+// Sparse expression groups reserve and commit independently of the node
+// columns. Tests can force reservation moves through parenthesis_capacity.
+#define C_AST_PARENTHESIS_CAPACITY (1u << 20)
+#define C_AST_PARENTHESIS_STEP 4096u
+
 #define C_AST_PRESENCE_MASK 0xffu
 
 // X(name, contract, a, b): see the contract classes above. The comment
@@ -379,6 +384,7 @@ struct CAstOptions
     // C_AST_COLUMN_CAPACITY; tests set a small value so ordinary trees outgrow
     // it and move.
     u32 column_capacity;
+    u32 parenthesis_capacity;
 };
 
 // Work counts. Counters are live only when C_AST_COUNTERS is nonzero (test
@@ -392,6 +398,8 @@ struct CAstStatistics
     u64 retained_bytes;      // the columns (13 bytes per node), plus children/slices in HYBRID and EXPLICIT
     u64 transient_high_water; // peak builder bytes in the phase arena: frames, stacks, bindings, refill ring
     u64 column_copy_bytes;   // bytes copied moving the columns to larger reservations; 0 below C_AST_COLUMN_CAPACITY
+    u64 parenthesis_copy_bytes; // sparse group rows copied when their reservation grows
+    u64 parenthesis_committed_bytes; // committed sparse row capacity, including unused rows
     u64 finalize_child_entries; // slice entries written by HYBRID/EXPLICIT finalization
     // Counted only under C_AST_COUNTERS.
     u64 tokens_consumed;
@@ -409,6 +417,26 @@ struct CAstStatistics
 // points at it, so c_ast_release through any copy retires them once.
 typedef struct CAstStorage CAstStorage;
 
+// A redundant expression group, committed when its closing `)` is read.
+// These rows are ordered by node, then innermost to outermost. They are
+// structural metadata, not punctuation nodes or a second syntax tree.
+typedef struct CAstParenthesis CAstParenthesis;
+#define C_AST_PARENTHESIS_AFTER_IDENTIFIER 1u
+struct CAstParenthesis
+{
+    u32 node;
+    u32 open;
+    u32 close;
+    u32 flags; // parser-known opening context; C_AST_PARENTHESIS_*
+};
+
+typedef struct CAstParentheses CAstParentheses;
+struct CAstParentheses
+{
+    u32 first;
+    u32 count;
+};
+
 struct CAst
 {
     // In the arenas of `storage`, not in the caller's arena.
@@ -416,6 +444,8 @@ struct CAst
     u32* extents;
     u32* tokens;
     u32* data;
+    CAstParenthesis* parentheses;
+    u32 parenthesis_count;
     // HYBRID and EXPLICIT: slice storage. EXPLICIT also fills `slices`.
     u32* children;
     u32* slices;
@@ -449,6 +479,11 @@ BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess,
 // record and any HYBRID/EXPLICIT slices. Idempotent through any copy, and a
 // no-op for an empty tree.
 BUSTER_F_DECL void c_ast_release(CAst* ast);
+
+// The sparse slice belonging to a node, and a level in that slice (1 is the
+// innermost group). An absent level returns null. No tokens are inspected.
+BUSTER_F_DECL CAstParentheses c_ast_parentheses(CAst const* ast, u32 node);
+BUSTER_F_DECL CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level);
 
 // Checks every node's contract, extent tiling and containment, layout slices
 // against the implicit topology, and that the root spans the tree. Returns

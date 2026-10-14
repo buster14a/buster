@@ -469,7 +469,7 @@ Under `-v` the driver prints these rows with the other verbose counters, plus
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
-  finalize_child_entries=<> layout=<name>`
+  parenthesis_copy_bytes=<> parenthesis_committed_bytes=<> finalize_child_entries=<> layout=<name>`
 - `C_AST_WALK walk_ns=<one full c_ast_walk over the root> walk_steps=<events>
   scan_ns=<one linear pass over the kinds column> children_ns=<c_ast_children
   over every node into a scratch buffer> child_entries=<sum of child counts>
@@ -1880,6 +1880,27 @@ the one the token path uses for the same row. For a binary operator that is
 the operator token, and for a cast its `(`: both are the nodes' anchors.
 Every other kind is listed when its slice is implemented, and the
 byte-for-byte comparison of `-g` objects checks it.
+
+### Retained expression parentheses
+
+`CAst.parentheses` retains sparse `(node, open, close)` records when the
+forward expression builder consumes a `C_AST_OP_PAREN` marker's closing
+parenthesis. These groups add no nodes and preserve implicit, hybrid and
+explicit topology. Records are append-built in node order, then innermost to
+outermost for a shared root. `c_ast_parentheses` finds a node's sparse slice;
+`c_ast_parenthesis_at` reads a wrapping level, with level 1 innermost.
+Call argument and statement condition delimiters belong to their owning
+syntax nodes and are not redundant expression groups.
+
+The rows live in a private retained arena owned by `CAstStorage`, with checked
+reservation growth and independent step commits. A failed build retires it;
+`c_ast_release` releases it once through any copy of the tree. Logical rows
+are charged to `retained_bytes`, unused committed capacity is visible as
+`parenthesis_committed_bytes`, and reservation moves charge
+`parenthesis_copy_bytes`. The producer does no token reparse or sorting.
+`c_ast_test_parentheses` specifies exact roots and delimiters independently,
+checks every layout and refill batch, forces both column and group moves,
+and covers deep nesting, release through copies and failed-build rollback.
 
 ### Delimiters (map row 8)
 
