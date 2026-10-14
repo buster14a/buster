@@ -138,10 +138,12 @@ def evidence() -> tuple:
             image = b"identical object" if receipt.AST_RETIREMENT_CELLS[cell]["operation"] == "object" else b""
             chunks = [image, b""]
             reference[key] = {"size_bytes": len(image), "sha256": digest(image), "chunks": [
-                {"path": f"{key}/reference.{index:03d}.bin", "size_bytes": len(chunk), "sha256": digest(chunk)}
+                {"path": f"reference.{index:03d}.bin.gz", "compression": "gzip-v1", "size_bytes": len(chunk),
+                 "sha256": digest(chunk), "stored_size_bytes": len(retirement.compress_reference(chunk)),
+                 "stored_sha256": digest(retirement.compress_reference(chunk))}
                 for index, chunk in enumerate(chunks)]}
             for index, chunk in enumerate(chunks):
-                files[prefix + f"{key}/reference.{index:03d}.bin"] = chunk
+                files[prefix + f"reference.{index:03d}.bin.gz"] = retirement.compress_reference(chunk)
             files[prefix + key + "/reference.diagnostics"] = b""
         meta = {"version": 1, "mode": "compare", "config": config, "plan": plan, "variants": variants, "phase_metrics": phase}
         summary = {"schema": _lab.COMPARE_SCHEMA, "plan": dict(plan, seed=_lab.DEFAULT_SEED, confidence=_lab.CONFIDENCE,
@@ -216,7 +218,7 @@ class RetirementPublisherTest(unittest.TestCase):
                 b["files"][prefix + "pairs/0001-a.csv"] + b"100000000.0,,instructions:k,2000000000,100.00,,\n"),
             "counter changes inference": lambda b: b["files"].__setitem__(prefix + "pairs/0001-a.csv",
                 b["files"][prefix + "pairs/0001-a.csv"].replace(b"100000000.0,,instructions:u", b"200000000.0,,instructions:u")),
-            "missing reference chunk": lambda b: b["files"].pop(prefix + "a/reference.001.bin"),
+            "missing reference chunk": lambda b: b["files"].pop(prefix + "reference.001.bin.gz"),
             "different raw diagnostics": lambda b: b["files"].__setitem__(prefix + "a/reference.diagnostics", b"changed diagnostics"),
             "missing probe log": lambda b: b["files"].pop(f"ast_retirement_acceptance/probe/{cell}/a.log"),
             "probe log differs": lambda b: b["files"].__setitem__(f"ast_retirement_acceptance/probe/{cell}/b.log", b"C_AST_RETAINED tree_bytes=1000\n"),
@@ -291,6 +293,35 @@ class RetirementPublisherTest(unittest.TestCase):
         mutate_document(bundle, "unity-syntax-only_probe", lambda p: p["a"].update(output_size_bytes=16))
         self.assertTrue(self.validate(record, bundle))
 
+    def test_shared_compressed_reference_rejects_corruption_and_unbounded_expansion(self) -> None:
+        cell = "unity-object"
+        prefix = f"ast_retirement_acceptance/{cell}/"
+        path = prefix + "reference.000.bin.gz"
+        for case in ("stored corruption", "gzip CRC", "truncated gzip", "excess raw bytes", "trailing bytes",
+                     "second gzip stream", "raw hash", "whole hash", "other arm"):
+            with self.subTest(case=case):
+                _, bundle = copy.deepcopy(self.good)
+                raw = bundle["files"][path]
+                if case == "stored corruption":
+                    bundle["files"][path] = raw[:-1] + bytes([raw[-1] ^ 1])
+                elif case == "other arm":
+                    bundle[f"{cell}_reference"]["b"]["sha256"] = "f" * 64
+                elif case == "raw hash":
+                    for arm in ("a", "b"):
+                        bundle[f"{cell}_reference"][arm]["chunks"][0]["sha256"] = "f" * 64
+                elif case == "whole hash":
+                    for arm in ("a", "b"):
+                        bundle[f"{cell}_reference"][arm]["sha256"] = "f" * 64
+                else:
+                    changed = {"gzip CRC": raw[:-8] + bytes([raw[-8] ^ 1]) + raw[-7:],
+                               "truncated gzip": raw[:-1], "excess raw bytes": retirement.compress_reference(b"x" * 1024),
+                               "trailing bytes": raw + b"trailing", "second gzip stream": raw + retirement.compress_reference(b"")}[case]
+                    bundle["files"][path] = changed
+                    for arm in ("a", "b"):
+                        chunk = bundle[f"{cell}_reference"][arm]["chunks"][0]
+                        chunk.update(stored_size_bytes=len(changed), stored_sha256=digest(changed))
+                with self.assertRaises(ValueError):
+                    publisher.ast_retirement_reference(cell, bundle)
     def test_retained_aliases_do_not_double_count_or_invent_binding_bytes(self) -> None:
         record, bundle = copy.deepcopy(self.good)
         cell = "unity-syntax-only"
@@ -394,6 +425,33 @@ class RetirementPublicationPolicyTest(unittest.TestCase):
 
 
 class RetirementProducerRoutingTest(unittest.TestCase):
+    def test_actual_reference_transport_crosses_raw_chunk_boundary_without_raising_limits(self) -> None:
+        data = b"B" * (retirement.CHUNK_BYTES + 17)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for arm in ("a", "b"):
+                (root / arm).mkdir()
+                (root / arm / "reference.exe").write_bytes(data)
+            manifest = retirement.split_reference(root)
+            self.assertEqual(manifest["a"], manifest["b"])
+            self.assertEqual(manifest["a"]["size_bytes"], len(data))
+            self.assertEqual([chunk["size_bytes"] for chunk in manifest["a"]["chunks"]], [retirement.CHUNK_BYTES, 17])
+            self.assertEqual(len(list(root.glob("*.bin.gz"))), 2)
+            self.assertEqual(retirement.compress_reference(b"same raw bytes"), retirement.compress_reference(b"same raw bytes"))
+            prefix = "ast_retirement_acceptance/unity-object/"
+            files = {prefix + chunk["path"]: (root / chunk["path"]).read_bytes() for chunk in manifest["a"]["chunks"]}
+            files.update({prefix + arm + "/reference.diagnostics": b"" for arm in ("a", "b")})
+            bundle = {"files": files, "unity-object_reference": manifest,
+                      "unity-object_summary": {"outputs_identical": True, "diagnostics_identical": True}}
+            self.assertEqual(publisher.ast_retirement_reference("unity-object", bundle), manifest)
+            (root / "b" / "reference.exe").write_bytes(b"different compiler output")
+            with self.assertRaises(RuntimeError):
+                retirement.split_reference(root)
+            with (root / "a" / "reference.exe").open("wb") as stream:
+                stream.truncate(2 * retirement.CHUNK_BYTES + 1)
+            with self.assertRaises(RuntimeError):
+                retirement.split_reference(root)
+
     def test_sealed_export_cannot_complete_without_every_raw_counter(self) -> None:
         _, bundle = evidence()
         counters = {f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in receipt.AST_RETIREMENT_CELLS

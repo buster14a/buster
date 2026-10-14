@@ -1179,8 +1179,12 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    The publisher recomputes each cell's metrics from all forty raw timed
    rows, checks the exact commands/host/binaries/source population, compares
    reference diagnostics and object bytes, and re-reads the retained-byte
-   probe logs. Reference objects use two fixed chunks under the existing
-   32-MiB archive-member bound; exceeding their 64-MiB total fails the leg.
+   probe logs. Identical arm objects share one raw reference stored as two
+   deterministic gzip chunks. Both arm manifests bind its raw size/hash;
+   stored and decompressed chunks retain the existing 32-MiB member bound.
+   The publisher bounds decompression and verifies each stored/raw chunk and
+   whole object. Exceeding 64 MiB raw or the unchanged whole-bundle byte/file
+   budget fails the leg; compression raises no resource limit.
    Source/header/generator/binary hashes must remain unchanged. Sealed raw
    evidence and the observed approved 9700X machine record remain required.
    Failed or unavailable counters retain their reason and raw attempt;

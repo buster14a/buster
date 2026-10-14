@@ -99,6 +99,7 @@ import sys
 import urllib.error
 import urllib.parse
 import zipfile
+import zlib
 from datetime import datetime
 
 from authorize_compiler import verify as verify_main
@@ -310,7 +311,9 @@ def ast_retirement_reference(cell: str, bundle: dict) -> dict:
     summary = bundle[f"{cell}_summary"]
     if not isinstance(manifest, dict) or set(manifest) != {"a", "b"}:
         raise ValueError(f"{cell} reference image manifest is malformed")
-    images, diagnostics = {}, {}
+    if manifest["a"] != manifest["b"]:
+        raise ValueError(f"{cell} compiler arms do not bind one identical shared raw reference")
+    images, diagnostics, decoded_chunks = {}, {}, {}
     for key in ("a", "b"):
         image = manifest[key]
         if not isinstance(image, dict) or set(image) != {"size_bytes", "sha256", "chunks"} or \
@@ -320,15 +323,29 @@ def ast_retirement_reference(cell: str, bundle: dict) -> dict:
             raise ValueError(f"{cell} {key} reference image identity is malformed")
         parts = []
         for index, chunk in enumerate(image["chunks"]):
-            wanted = f"{key}/reference.{index:03d}.bin"
+            wanted = f"reference.{index:03d}.bin.gz"
             raw = files.get(prefix + wanted)
-            if not isinstance(chunk, dict) or set(chunk) != {"path", "size_bytes", "sha256"} or \
+            if not isinstance(chunk, dict) or set(chunk) != {"path", "compression", "size_bytes", "sha256",
+                                                           "stored_size_bytes", "stored_sha256"} or \
                     chunk.get("path") != wanted or not isinstance(raw, bytes) or \
-                    type(chunk.get("size_bytes")) is not int or chunk["size_bytes"] != len(raw) or \
-                    len(raw) != min(max(0, image["size_bytes"] - index * ANALYZER_MEMBER_LIMIT), ANALYZER_MEMBER_LIMIT) or \
-                    len(raw) > ANALYZER_MEMBER_LIMIT or chunk.get("sha256") != hashlib.sha256(raw).hexdigest():
-                raise ValueError(f"{cell} {key} reference chunk differs from its exact retained bytes")
-            parts.append(raw)
+                    chunk.get("compression") != "gzip-v1" or type(chunk.get("size_bytes")) is not int or \
+                    chunk["size_bytes"] != min(max(0, image["size_bytes"] - index * ANALYZER_MEMBER_LIMIT), ANALYZER_MEMBER_LIMIT) or \
+                    type(chunk.get("stored_size_bytes")) is not int or chunk["stored_size_bytes"] != len(raw) or \
+                    len(raw) > ANALYZER_MEMBER_LIMIT or chunk.get("stored_sha256") != hashlib.sha256(raw).hexdigest() or \
+                    raw[:10] != b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff":
+                raise ValueError(f"{cell} {key} reference chunk differs from its bounded stored bytes")
+            decoded = decoded_chunks.get(wanted)
+            if decoded is None:
+                try:
+                    decoder = zlib.decompressobj(31)
+                    decoded = decoder.decompress(raw, chunk["size_bytes"] + 1)
+                except zlib.error as error:
+                    raise ValueError(f"{cell} {key} reference gzip is invalid: {error}") from error
+                if len(decoded) != chunk["size_bytes"] or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or \
+                        chunk.get("sha256") != hashlib.sha256(decoded).hexdigest():
+                    raise ValueError(f"{cell} {key} reference gzip differs from its bounded raw identity")
+                decoded_chunks[wanted] = decoded
+            parts.append(decoded)
         images[key] = b"".join(parts)
         if image["size_bytes"] != len(images[key]) or image["sha256"] != hashlib.sha256(images[key]).hexdigest() or \
                 AST_RETIREMENT_CELLS[cell]["operation"] == "object" and not images[key]:

@@ -13,7 +13,9 @@ execute, main. The publisher independently replays raw pairs and probes.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -144,21 +146,35 @@ def validate_probe(cell: str, probe: dict, binaries: dict, source_binding: dict,
     return retained
 
 
+def compress_reference(block: bytes) -> bytes:
+    """A fixed gzip header, level and empty filename make reference transport reproducible."""
+    output = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=output, compresslevel=9, mtime=0) as stream:
+        stream.write(block)
+    return output.getvalue()
+
+
 def split_reference(directory: Path) -> dict:
-    """Keep fixed transport chunks under the existing 32-MiB member bound."""
-    result = {}
-    for key, _ in ROLES:
-        reference = directory / key / "reference.exe"
-        if reference.stat().st_size > 2 * CHUNK_BYTES:
-            raise RuntimeError("retirement reference exceeds its fixed two-chunk transport bound")
-        data = reference.read_bytes()
-        chunks = []
-        for number in range(2):
-            block = data[number * CHUNK_BYTES:(number + 1) * CHUNK_BYTES]
-            relative = f"{key}/reference.{number:03}.bin"
-            (directory / relative).write_bytes(block)
-            chunks.append({"path": relative, "size_bytes": len(block), "sha256": hashlib.sha256(block).hexdigest()})
-        result[key] = {"size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "chunks": chunks}
+    """Share identical raw objects, with two bounded compressed chunks and both arm identities."""
+    paths = [directory / key / "reference.exe" for key, _ in ROLES]
+    if any(path.stat().st_size > 2 * CHUNK_BYTES for path in paths):
+        raise RuntimeError("retirement reference exceeds its fixed two-chunk transport bound")
+    data = paths[0].read_bytes()
+    if paths[1].read_bytes() != data:
+        raise RuntimeError("retirement reference objects differ; shared raw transport is unavailable")
+    chunks = []
+    for number in range(2):
+        block = data[number * CHUNK_BYTES:(number + 1) * CHUNK_BYTES]
+        stored = compress_reference(block)
+        if len(stored) > CHUNK_BYTES:
+            raise RuntimeError("retirement compressed reference exceeds the existing member bound")
+        relative = f"reference.{number:03}.bin.gz"
+        (directory / relative).write_bytes(stored)
+        chunks.append({"path": relative, "compression": "gzip-v1", "size_bytes": len(block),
+                       "sha256": hashlib.sha256(block).hexdigest(), "stored_size_bytes": len(stored),
+                       "stored_sha256": hashlib.sha256(stored).hexdigest()})
+    identity = {"size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "chunks": chunks}
+    result = {key: identity for key, _ in ROLES}
     (directory / "reference.json").write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result
 
