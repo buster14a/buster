@@ -404,6 +404,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_rejections(UnitTestArguments* argu
         {S8("typedef unsigned V4 __attribute__((vector_size(16))); void kernel(V4 *b,unsigned i){ (void)b; (void)i; }"), vector_rejection},
         {S8("_Thread_local unsigned global; void kernel(unsigned *b,unsigned i){ b[i]=global; }"), tls_rejection},
         {S8("void kernel(unsigned *b,unsigned i,...){ b[i]=1u; }"), variadic_rejection},
+        {S8("unsigned external(unsigned,...); void kernel(unsigned *b,unsigned i){ b[i]=external(i,1u); }"), call_rejection},
         {S8("struct R {unsigned n;}; struct R external(unsigned); void kernel(unsigned *b,unsigned i){ b[i]=external(i).n; }"), call_rejection},
         {S8("unsigned external(unsigned); void kernel(unsigned *b,unsigned i){ unsigned (*f)(unsigned)=external; b[i]=f(i); }"), call_rejection},
         {S8("void kernel(unsigned *b,unsigned i){ ((void (*)(void))0)(); }"), call_rejection},
