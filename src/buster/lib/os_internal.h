@@ -83,6 +83,27 @@ BUSTER_F_DECL OsProcessCaptureTestResult os_process_capture_test_collect(Arena* 
     OsProcessCaptureTestInput const* inputs, u64 input_count);
 
 #if BUSTER_WINDOWS
+// Calling-thread injection at actual Windows wait, termination and job-query
+// boundaries. An independent 64-call ceiling rejects infinite waits safely.
+enum
+{
+    OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION = 1,
+    OS_PROCESS_CLEANUP_TEST_UNSIGNALED = 2,
+    OS_PROCESS_CLEANUP_TEST_WAIT_FAILED = 4,
+    OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY = 8,
+};
+typedef struct OsProcessCleanupWindowsTestStats OsProcessCleanupWindowsTestStats;
+struct OsProcessCleanupWindowsTestStats
+{
+    u64 calls;
+    u64 infinite_waits;
+    u64 termination_calls;
+    u64 job_queries;
+    bool ceiling_reached;
+};
+BUSTER_F_DECL void os_process_cleanup_windows_test_begin(ProcessSpawnResult spawn, u32 flags);
+BUSTER_F_DECL OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void);
+
 // Calling-thread observation of the Windows captured-pipe deadline loop. The
 // scan limit is a test-only independent guard against a regression hanging a
 // native child; deadline progression is controlled without callbacks.

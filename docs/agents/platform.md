@@ -147,6 +147,54 @@ Registered `os_tests` cover load/store/set-if-zero in both modes, plus serial
 negative-value loads with independent numeric expectations. Serial builds use
 the same lane path as a one-lane gang, as described in [parallelism](parallelism.md).
 
+## Windows failed-finalization ownership (draft #3838)
+
+Every admitted Windows spawn reserves a process-global owner before acquiring
+child resources. The record outlives its caller's arena and thread; it holds
+exact leader/job handles and a monotonic consuming identity. A copied consumed
+`ProcessSpawnResult` cannot wait, close pipes or terminate a reused handle.
+Registry claims and publication use an SRW lock; native launch, observation,
+termination and closing run outside the lock. Allocation failure rejects launch,
+and IDs refuse wrap. The registry has no fixed active-process cap.
+
+A finite timeout, native wait failure or failed launch unwind makes bounded
+termination attempts and spends at most five seconds observing leader exit and
+job emptiness. Both facts must be proven before handles close. A refused
+termination remains a sticky native error even when later cleanup succeeds.
+Failed finalization returns `pending_windows_owner_id`; the module retains the
+handles even if a caller discards the result. The original launch error remains
+`ProcessSpawnResult.error`; `cleanup_error` separately retains its unwind error.
+`os_process_cleanup_snapshot` associates its reported error with `error_owner_id`. No successful asynchronous termination
+or kill-on-close handle close is accepted as proof of job emptiness.
+
+Admission rejects new reservations while any pending owner exists, including a
+pending owner currently being retried. Work reserved before the failure may
+finish launching and remains visible. `os_process_cleanup_snapshot` inventories
+all active records (reserved, running, waiting and pending); pending is a subset.
+`os_process_cleanup_pending` claims at most one pending owner, rotates among IDs
+and applies a shared observation budget clamped to five seconds. Zero performs
+polls with no native wait or sleep. A permanently failed owner cannot starve other
+records. The first native failure remains available through retries.
+
+`os_process_shutdown` permanently closes admission before inventory, retries
+pending records within one clamped five-second budget, and reports active owners
+that another caller is launching or waiting. A nonzero `active_owners` refuses
+finalization; the embedding host must stay alive or transfer ownership to a
+surviving owner. This draft does **not** integrate that refusal into executable
+exit paths: `os_exit`, libc return and `mainCRTStartup` can still end the host,
+causing OS handle teardown without proven tree cleanup. An indefinite entrypoint
+park would move the hang to shutdown; no park is installed. This unresolved
+host-exit policy prevents completion/merge of #3838 and remains part of #2986.
+
+Registered Windows controls script refusal, persistent nonsignaled observation,
+wait failure and nonempty jobs at the actual native boundaries under an
+independent call ceiling. They verify bounded return, retained identity,
+admission refusal, stale-copy rejection and subsequent native finalization.
+Separate native controls cover ordinary timeout cleanup with and without a job,
+healthy captured exit, empty-job proof and isolated shutdown inventory/refusal.
+Linux builds establish shared-source compatibility only, not native Windows
+qualification or safe executable shutdown.
+
 ## Linux process-group census reads
 
 When `self/status` proves that procfs and the caller use the same PID namespace

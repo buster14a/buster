@@ -8,7 +8,9 @@
 // checked file IO (os_file_write_checked,
 // os_file_close_checked, os_file_flush), replacement publication
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
-// process spawn/wait with deadlines, executable lookup, dynamic libraries, and
+// process spawn/wait with deadlines (os_windows_owner_* retains failed cleanup;
+// os_process_cleanup_pending resumes it; os_process_shutdown closes admission),
+// executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close;
 // The opt-in fork-to-exit-early protocol (os_early_exit_arm/
 // os_early_exit_release, #3686) follows the spawn pipe helpers it reuses
@@ -4052,24 +4054,388 @@ bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe)
     return SetHandleInformation((HANDLE)pipe, HANDLE_FLAG_INHERIT, 0) != 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool os_windows_job_wait_empty(HANDLE job, u64 timeout_microseconds)
+enum { OS_WINDOWS_CLEANUP_OBSERVATION_US = 5000000 };
+
+typedef enum OsWindowsProcessOwnerState
 {
-    bool result = false;
-    u64 deadline = os_now_microseconds() + timeout_microseconds;
-    bool query_valid = true;
-    while (query_valid && !result && os_now_microseconds() < deadline)
+    OS_WINDOWS_OWNER_RESERVED,
+    OS_WINDOWS_OWNER_RUNNING,
+    OS_WINDOWS_OWNER_WAITING,
+    OS_WINDOWS_OWNER_PENDING,
+} OsWindowsProcessOwnerState;
+
+typedef struct OsWindowsProcessOwner OsWindowsProcessOwner;
+struct OsWindowsProcessOwner
+{
+    OsWindowsProcessOwner* next;
+    u64 id;
+    HANDLE process;
+    HANDLE job;
+    OsError error;
+    OsWindowsProcessOwnerState state;
+    bool pending;
+};
+
+// Process-global storage has no dependency on an arena, lane or thread context.
+// Reserve before acquiring child resources. Every native operation runs outside
+// the lock; WAITING gives exactly one caller authority to use a node's handles.
+BUSTER_GLOBAL_LOCAL SRWLOCK os_windows_owner_lock = SRWLOCK_INIT;
+BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owners;
+BUSTER_GLOBAL_LOCAL u64 os_windows_owner_next_id;
+BUSTER_GLOBAL_LOCAL u64 os_windows_pending_count;
+BUSTER_GLOBAL_LOCAL bool os_windows_shutdown_requested;
+BUSTER_GLOBAL_LOCAL u64 os_windows_resume_before_id = (u64)-1;
+
+#if BUSTER_INCLUDE_TESTS
+typedef struct OsWindowsCleanupTest OsWindowsCleanupTest;
+struct OsWindowsCleanupTest
+{
+    HANDLE process;
+    HANDLE job;
+    u32 flags;
+    u64 clock;
+    bool active;
+    OsProcessCleanupWindowsTestStats stats;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsWindowsCleanupTest os_windows_cleanup_test;
+
+void os_process_cleanup_windows_test_begin(ProcessSpawnResult spawn, u32 flags)
+{
+    os_windows_cleanup_test = (OsWindowsCleanupTest){.process = (HANDLE)spawn.handle,
+        .job = (HANDLE)spawn.process_tree, .flags = flags, .active = true};
+}
+
+OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void)
+{
+    OsProcessCleanupWindowsTestStats result = os_windows_cleanup_test.stats;
+    os_windows_cleanup_test = (OsWindowsCleanupTest){0};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_cleanup_test_call(HANDLE handle)
+{
+    bool injected = os_windows_cleanup_test.active &&
+        (handle == os_windows_cleanup_test.process || handle == os_windows_cleanup_test.job);
+    if (injected)
     {
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information = {0};
-        query_valid = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &information, sizeof(information), 0) != 0;
-        result = query_valid && information.ActiveProcesses == 0;
-        if (query_valid && !result)
+        os_windows_cleanup_test.stats.calls += 1;
+        os_windows_cleanup_test.stats.ceiling_reached |= os_windows_cleanup_test.stats.calls > 64;
+    }
+    return injected;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u64 os_windows_cleanup_clock(void)
+{
+    u64 result;
+#if BUSTER_INCLUDE_TESTS
+    if (os_windows_cleanup_test.active)
+    {
+        os_windows_cleanup_test.clock += 1000000;
+        result = os_windows_cleanup_test.clock;
+    }
+    else
+#endif
+    {
+        result = os_now_microseconds();
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DWORD os_windows_process_wait(HANDLE process, DWORD milliseconds)
+{
+    DWORD result;
+#if BUSTER_INCLUDE_TESTS
+    bool injected = os_windows_cleanup_test_call(process);
+    if (injected && milliseconds == INFINITE) os_windows_cleanup_test.stats.infinite_waits += 1;
+    if (injected && (os_windows_cleanup_test.stats.ceiling_reached ||
+        (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_WAIT_FAILED)))
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        result = WAIT_FAILED;
+    }
+    else if (injected && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_UNSIGNALED))
+    {
+        result = WAIT_TIMEOUT;
+    }
+    else
+#endif
+    {
+        result = WaitForSingleObject(process, milliseconds);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_process_terminate(HANDLE handle, bool job)
+{
+    bool result;
+#if BUSTER_INCLUDE_TESTS
+    bool injected = os_windows_cleanup_test_call(handle);
+    if (injected) os_windows_cleanup_test.stats.termination_calls += 1;
+    if (injected && (os_windows_cleanup_test.stats.ceiling_reached ||
+        (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION)))
+    {
+        SetLastError(ERROR_ACCESS_DENIED);
+        result = false;
+    }
+    else
+#endif
+    {
+        result = (job ? TerminateJobObject(handle, 1) : TerminateProcess(handle, 1)) != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_job_query(HANDLE job, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION* information)
+{
+    bool result;
+#if BUSTER_INCLUDE_TESTS
+    bool injected = os_windows_cleanup_test_call(job);
+    if (injected) os_windows_cleanup_test.stats.job_queries += 1;
+    if (injected && os_windows_cleanup_test.stats.ceiling_reached)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        result = false;
+    }
+    else if (injected && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY))
+    {
+        information->ActiveProcesses = 1;
+        result = true;
+    }
+    else
+#endif
+    {
+        result = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, information, sizeof(*information), 0) != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_windows_cleanup_error(OsError* error)
+{
+    if (!error->v)
+    {
+        *error = os_get_last_error();
+        if (!error->v) error->v = ERROR_GEN_FAILURE;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owner_reserve(OsError* error)
+{
+    OsWindowsProcessOwner* result = (OsWindowsProcessOwner*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*result));
+    if (!result)
+    {
+        error->v = ERROR_NOT_ENOUGH_MEMORY;
+    }
+    else
+    {
+        AcquireSRWLockExclusive(&os_windows_owner_lock);
+        bool admitted = !os_windows_pending_count && !os_windows_shutdown_requested && os_windows_owner_next_id != (u64)-1;
+        if (admitted)
         {
-            Sleep(1);
+            result->id = ++os_windows_owner_next_id;
+            result->next = os_windows_owners;
+            os_windows_owners = result;
+        }
+        ReleaseSRWLockExclusive(&os_windows_owner_lock);
+        if (!admitted)
+        {
+            HeapFree(GetProcessHeap(), 0, result);
+            result = 0;
+            error->v = ERROR_BUSY;
         }
     }
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL void os_windows_owner_publish(OsWindowsProcessOwner* owner, HANDLE process, HANDLE job)
+{
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    owner->process = process;
+    owner->job = job;
+    owner->state = OS_WINDOWS_OWNER_RUNNING;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+}
+
+BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owner_claim(ProcessSpawnResult spawn, bool pending, u64 before_id)
+{
+    OsWindowsProcessOwner* result = 0;
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    for (OsWindowsProcessOwner* owner = os_windows_owners; owner && !result; owner = owner->next)
+    {
+        bool matches = pending ? owner->state == OS_WINDOWS_OWNER_PENDING && owner->id < before_id :
+            owner->state == OS_WINDOWS_OWNER_RUNNING && owner->id == spawn.windows_owner_id &&
+            owner->process == (HANDLE)spawn.handle && owner->job == (HANDLE)spawn.process_tree;
+        if (matches)
+        {
+            owner->state = OS_WINDOWS_OWNER_WAITING;
+            result = owner;
+        }
+    }
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_windows_owner_finish(OsWindowsProcessOwner* owner, bool finalized, OsError error)
+{
+    // WAITING/RESERVED keeps shutdown aware while handles close outside the lock.
+    if (finalized)
+    {
+        if (owner->job) CloseHandle(owner->job);
+        if (owner->process) CloseHandle(owner->process);
+    }
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    if (finalized)
+    {
+        OsWindowsProcessOwner** link = &os_windows_owners;
+        while (*link != owner) link = &(*link)->next;
+        *link = owner->next;
+        if (owner->pending) os_windows_pending_count -= 1;
+    }
+    else
+    {
+        if (!owner->error.v) owner->error = error;
+        owner->state = OS_WINDOWS_OWNER_PENDING;
+        if (!owner->pending) os_windows_pending_count += 1;
+        owner->pending = true;
+    }
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    if (finalized) HeapFree(GetProcessHeap(), 0, owner);
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_owner_cleanup(OsWindowsProcessOwner* owner, bool terminate, u64 timeout_microseconds,
+                                                 DWORD* leader_wait, OsError* error)
+{
+    u64 budget = timeout_microseconds < OS_WINDOWS_CLEANUP_OBSERVATION_US ? timeout_microseconds : OS_WINDOWS_CLEANUP_OBSERVATION_US;
+    u64 deadline = os_windows_cleanup_clock() + budget;
+    if (terminate)
+    {
+        bool job_terminated = owner->job && os_windows_process_terminate(owner->job, true);
+        if (owner->job && !job_terminated) os_windows_cleanup_error(error);
+        // Exact owned leader fallback, including containment-assignment failure.
+        DWORD before = os_windows_process_wait(owner->process, 0);
+        if (before == WAIT_FAILED) os_windows_cleanup_error(error);
+        if (before != WAIT_OBJECT_0 && !job_terminated && !os_windows_process_terminate(owner->process, false)) os_windows_cleanup_error(error);
+    }
+    u64 now = os_windows_cleanup_clock();
+    DWORD milliseconds = now < deadline ? (DWORD)((deadline - now + 999) / 1000) : 0;
+    *leader_wait = os_windows_process_wait(owner->process, milliseconds);
+    if (*leader_wait == WAIT_FAILED) os_windows_cleanup_error(error);
+    bool job_empty = !owner->job;
+    bool query_valid = true;
+    bool first_query = true;
+    while (owner->job && query_valid && !job_empty && (first_query || os_windows_cleanup_clock() < deadline))
+    {
+        first_query = false;
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information = {0};
+        query_valid = os_windows_job_query(owner->job, &information);
+        if (!query_valid) os_windows_cleanup_error(error);
+        job_empty = query_valid && information.ActiveProcesses == 0;
+        if (query_valid && !job_empty && budget && os_windows_cleanup_clock() < deadline) Sleep(1);
+    }
+    bool result = *leader_wait == WAIT_OBJECT_0 && job_empty;
+    if (!result && !error->v) error->v = WAIT_TIMEOUT;
+    return result;
+}
+
 #endif
+
+ProcessCleanupResult os_process_cleanup_snapshot(void)
+{
+    ProcessCleanupResult result = {0};
+#if BUSTER_WINDOWS
+    AcquireSRWLockShared(&os_windows_owner_lock);
+    result.pending_owners = os_windows_pending_count;
+    for (OsWindowsProcessOwner* owner = os_windows_owners; owner; owner = owner->next)
+    {
+        result.active_owners += 1;
+        if (!result.error.v && owner->error.v)
+        {
+            result.error = owner->error;
+            result.error_owner_id = owner->id;
+        }
+    }
+    if (result.active_owners && !result.error.v) result.error.v = ERROR_BUSY;
+    ReleaseSRWLockShared(&os_windows_owner_lock);
+#endif
+    return result;
+}
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL ProcessCleanupResult os_windows_cleanup_pending_before(u64 timeout_microseconds, u64 before_id)
+{
+    OsWindowsProcessOwner* owner = os_windows_owner_claim((ProcessSpawnResult){0}, true, before_id);
+    u64 resumed_id = 0;
+    OsError error = {0};
+    if (owner)
+    {
+        resumed_id = owner->id;
+        error = owner->error;
+        DWORD leader_wait;
+        bool finalized = os_windows_owner_cleanup(owner, true, timeout_microseconds, &leader_wait, &error);
+        os_windows_owner_finish(owner, finalized, error);
+    }
+    ProcessCleanupResult result = os_process_cleanup_snapshot();
+    result.resumed_owner_id = resumed_id;
+    if (error.v)
+    {
+        result.error = error;
+        result.error_owner_id = resumed_id;
+    }
+    return result;
+}
+#endif
+
+ProcessCleanupResult os_process_cleanup_pending(u64 timeout_microseconds)
+{
+    ProcessCleanupResult result = {0};
+#if BUSTER_WINDOWS
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    u64 before_id = os_windows_resume_before_id;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    result = os_windows_cleanup_pending_before(timeout_microseconds, before_id);
+    if (!result.resumed_owner_id && before_id != (u64)-1)
+    {
+        result = os_windows_cleanup_pending_before(timeout_microseconds, (u64)-1);
+    }
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    os_windows_resume_before_id = result.resumed_owner_id ? result.resumed_owner_id : (u64)-1;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+#else
+    BUSTER_UNUSED(timeout_microseconds);
+#endif
+    return result;
+}
+
+ProcessCleanupResult os_process_shutdown(u64 timeout_microseconds)
+{
+    ProcessCleanupResult result = {0};
+#if BUSTER_WINDOWS
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    os_windows_shutdown_requested = true;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    u64 budget = timeout_microseconds < OS_WINDOWS_CLEANUP_OBSERVATION_US ? timeout_microseconds : OS_WINDOWS_CLEANUP_OBSERVATION_US;
+    u64 started = os_windows_cleanup_clock();
+    u64 before_id = (u64)-1;
+    bool first = true;
+    bool keep_trying = true;
+    while (keep_trying)
+    {
+        u64 elapsed = os_windows_cleanup_clock() - started;
+        keep_trying = first || elapsed < budget;
+        if (keep_trying)
+        {
+            first = false;
+            result = os_windows_cleanup_pending_before(elapsed < budget ? budget - elapsed : 0, before_id);
+            before_id = result.resumed_owner_id;
+            keep_trying = before_id != 0;
+        }
+    }
+    result = os_process_cleanup_snapshot();
+#else
+    BUSTER_UNUSED(timeout_microseconds);
+#endif
+    return result;
+}
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct OsProcessSpawnTestState OsProcessSpawnTestState;
@@ -4692,6 +5058,17 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 #endif
 
 #if defined(_WIN32)
+    OsWindowsProcessOwner* windows_owner = 0;
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        OsError owner_error = {0};
+        windows_owner = os_windows_owner_reserve(&owner_error);
+        if (!windows_owner)
+        {
+            os_process_spawn_fail(&result, owner_error.v == ERROR_BUSY ? PROCESS_SPAWN_FAILURE_PENDING_CLEANUP :
+                PROCESS_SPAWN_FAILURE_OWNER_ALLOCATION, owner_error);
+        }
+    }
     HANDLE duplicated_standard[STANDARD_STREAM_COUNT] = {0};
     HANDLE inherited_handles[STANDARD_STREAM_COUNT] = {0};
     u32 inherited_handle_count = 0;
@@ -4887,16 +5264,21 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             if (child_ready)
             {
                 result.handle = (OsProcessHandle*)process_information.hProcess;
+                result.windows_owner_id = windows_owner->id;
+                os_windows_owner_publish(windows_owner, process_information.hProcess, (HANDLE)result.process_tree);
             }
             else
             {
-                if (result.process_tree)
-                {
-                    (void)TerminateJobObject((HANDLE)result.process_tree, 1);
-                }
-                (void)TerminateProcess(process_information.hProcess, 1);
-                (void)WaitForSingleObject(process_information.hProcess, INFINITE);
-                CloseHandle(process_information.hProcess);
+                windows_owner->process = process_information.hProcess;
+                windows_owner->job = (HANDLE)result.process_tree;
+                DWORD leader_wait;
+                OsError cleanup_error = {0};
+                bool finalized = os_windows_owner_cleanup(windows_owner, true, OS_WINDOWS_CLEANUP_OBSERVATION_US, &leader_wait, &cleanup_error);
+                if (!finalized) result.pending_windows_owner_id = windows_owner->id;
+                result.cleanup_error = cleanup_error;
+                os_windows_owner_finish(windows_owner, finalized, cleanup_error);
+                windows_owner = 0;
+                result.process_tree = 0;
             }
             CloseHandle(process_information.hThread);
         }
@@ -4930,6 +5312,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         result.process_tree = 0;
     }
     result.process_group = result.handle != 0 && result.process_tree != 0;
+    if (!result.handle && windows_owner) os_windows_owner_finish(windows_owner, true, (OsError){0});
 #elif BUSTER_ANDROID
     if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
     {
@@ -7031,7 +7414,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
     os_process_wait_test_expire_deadline_after_ready = false;
 #endif
 
-    if (spawn.handle)
+#if BUSTER_WINDOWS
+    OsWindowsProcessOwner* windows_owner = spawn.handle ? os_windows_owner_claim(spawn, false, 0) : 0;
+    if (spawn.handle && !windows_owner)
+    {
+        result.result = PROCESS_RESULT_FAILED;
+        result.cleanup_error.v = ERROR_INVALID_HANDLE;
+    }
+    bool can_wait = windows_owner != 0;
+#else
+    bool can_wait = spawn.handle != 0;
+#endif
+    if (can_wait)
     {
         u64 deadline = timeout_microseconds ? os_process_deadline_clock_microseconds() + timeout_microseconds : 0;
         bool timed_out = false;
@@ -7060,6 +7454,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         bool child_exit_observed = false;
+        bool wait_failed = false;
         DWORD final_snapshot_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         while (open_pipe_count)
         {
@@ -7151,11 +7546,17 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             // Every ordinary nonterminal pass observes a finite deadline,
             // even when output was readable. After the first signaled poll,
             // freeze the unread bytes once and finish that bounded snapshot.
-            DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
+            DWORD process_wait = os_windows_process_wait((HANDLE)spawn.handle, 0);
 #if BUSTER_INCLUDE_TESTS
             os_process_wait_windows_test_scan_end(made_progress);
             os_process_wait_windows_test_child_poll(process_wait == WAIT_OBJECT_0);
 #endif
+            if (process_wait == WAIT_FAILED)
+            {
+                os_windows_cleanup_error(&result.cleanup_error);
+                wait_failed = true;
+                break;
+            }
             if (process_wait == WAIT_OBJECT_0 && !child_exit_observed)
             {
                 child_exit_observed = true;
@@ -7208,7 +7609,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 // Nothing readable right now: sleep briefly instead of
                 // spinning. The pipes report ERROR_BROKEN_PIPE once the child
                 // exits and the buffered data has been drained.
-                WaitForSingleObject(spawn.handle, 10);
+                os_windows_process_wait((HANDLE)spawn.handle, 10);
             }
         }
 
@@ -7229,25 +7630,24 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         // is where its deadline is enforced. The helper clamps its answer, so
         // one WAIT_TIMEOUT only means this slice elapsed; the deadline itself
         // decides whether to give up.
-        while (!timed_out && WaitForSingleObject(spawn.handle, (DWORD)os_process_deadline_milliseconds(deadline, INFINITE)) == WAIT_TIMEOUT)
+        DWORD wait_result = WAIT_FAILED;
+        while (!timed_out && !wait_failed)
         {
+            wait_result = os_windows_process_wait((HANDLE)spawn.handle, (DWORD)os_process_deadline_milliseconds(deadline, INFINITE));
+            if (wait_result == WAIT_FAILED)
+            {
+                os_windows_cleanup_error(&result.cleanup_error);
+                wait_failed = true;
+            }
+            if (wait_result != WAIT_TIMEOUT) break;
             timed_out = !os_process_deadline_milliseconds(deadline, 1);
         }
-        if (timed_out)
-        {
-            // The exit code below then describes this kill rather than the
-            // child's own progress, which is why `timed_out` is reported
-            // separately.
-            result.termination_requested = 1;
-            result.forcibly_terminated = 1;
-            BOOL terminated = spawn.process_tree ? TerminateJobObject((HANDLE)spawn.process_tree, 1) : TerminateProcess((HANDLE)spawn.handle, 1);
-            if (!terminated)
-            {
-                result.process_tree_cleanup_failed = 1;
-            }
-        }
-
-        DWORD wait_result = WaitForSingleObject(spawn.handle, INFINITE);
+        result.termination_requested = timed_out || wait_failed;
+        if (timed_out) result.forcibly_terminated = 1;
+        bool finalized = os_windows_owner_cleanup(windows_owner, result.termination_requested != 0 || spawn.process_tree != 0,
+            OS_WINDOWS_CLEANUP_OBSERVATION_US, &wait_result, &result.cleanup_error);
+        if (!finalized) result.pending_windows_owner_id = windows_owner->id;
+        result.process_tree_cleanup_failed = !finalized || result.cleanup_error.v != 0;
         if (wait_result == WAIT_OBJECT_0)
         {
             DWORD exit_code;
@@ -7268,18 +7668,6 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 }
             }
         }
-        if (spawn.process_tree)
-        {
-            if (!TerminateJobObject((HANDLE)spawn.process_tree, 1))
-            {
-                result.process_tree_cleanup_failed = 1;
-            }
-            if (!os_windows_job_wait_empty((HANDLE)spawn.process_tree, 5000000))
-            {
-                result.process_tree_cleanup_failed = 1;
-            }
-            CloseHandle((HANDLE)spawn.process_tree);
-        }
         if (spawn.observe_resources && wait_result == WAIT_OBJECT_0)
         {
             FILETIME created, exited, kernel, user;
@@ -7299,7 +7687,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             result.resources.memory_status = os_windows_process_memory_counters((HANDLE)spawn.handle, &counters, &result.resources.memory_error);
             if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)counters.peak_working_set_size; }
         }
-        CloseHandle(spawn.handle);
+        os_windows_owner_finish(windows_owner, finalized, result.cleanup_error);
         if (result.process_tree_cleanup_failed)
         {
             result.result = PROCESS_RESULT_FAILED;
