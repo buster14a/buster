@@ -69382,6 +69382,222 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
     return result;
 }
 
+// The model endpoint and the full semantic endpoint have different authority.
+// Pin the frozen driver diagnostic order, retaining each escape path separately.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_constraint_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 name;
+        String8 source;
+        u32 semantic_count;
+        u32 lower_count;
+        struct
+        {
+            String8 message;
+            u32 column;
+        } expected[3];
+    } const cases[] = {
+        {
+            .name = S8("invalid_label_cast"),
+            .source = S8("int invalid_label_cast(void) { return (int)&&target; target: return 0; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_label_cast': a label address may not escape through a function return"), 46},
+            },
+        },
+        {
+            .name = S8("invalid_label_deref"),
+            .source = S8("int invalid_label_deref(void) { return *&&target; target: return 0; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_label_deref': a label address may not escape through a function return"), 43},
+            },
+        },
+        {
+            .name = S8("invalid_union_overlay"),
+            .source = S8("union label_overlay { void *label; int *data; };int invalid_union_overlay(void) { union label_overlay "
+                        "value = { .label = &&target }; return *value.data; target: return 0; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_union_overlay': a label address may not escape through a function return"), 148},
+            },
+        },
+        {
+            .name = S8("invalid_mixed_label_integer_cast"),
+            .source = S8("unsigned long invalid_mixed_label_integer_cast(int selector) { void *value = selector ? &&target : 0; "
+                        "return (unsigned long)value; target: return 0; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_mixed_label_integer_cast': a label address may not escape through a function return"), 125},
+            },
+        },
+        {
+            .name = S8("invalid_mixed_label_pointer_cast"),
+            .source = S8("int invalid_mixed_label_pointer_cast(int selector) { void *value = selector ? &&target : 0; return *(int "
+                        "*)value; target: return 0; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_mixed_label_pointer_cast': a label address may not escape through a function return"), 108},
+            },
+        },
+        {
+            .name = S8("malformed_recovery"),
+            .source = S8("int malformed_recovery(void) { __asm__ goto(\"\"); return 1; }\nint valid_after_malformed(void) { return 9; "
+                        "}\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'malformed_recovery': asm goto requires four colon sections"), 32},
+            },
+        },
+        {
+            .name = S8("label_escape"),
+            .source = S8("struct label_pair { void *first; void *second; };union label_union { void *pointer; int integer; };extern "
+                        "void take_pair(struct label_pair);extern void take_union(union label_union);extern void take_pointer(void "
+                        "**);int invalid_pair_call(void) { struct label_pair pair = {&&pair_a, &&pair_b}; take_pair(pair); return "
+                        "0; pair_a: return 1; pair_b: return 2; }struct label_pair invalid_pair_return(void) { struct label_pair "
+                        "pair = {&&return_a, &&return_b}; return pair; return_a: return pair; return_b: return pair; }int "
+                        "invalid_pair_address(void) { struct label_pair pair = {&&address_a, &&address_b}; take_pointer((void "
+                        "**)&pair); return 0; address_a: return 1; address_b: return 2; }int invalid_union_call(void) { union "
+                        "label_union value = { .pointer = &&union_a }; take_union(value); return 0; union_a: return 1; }\n"),
+            .semantic_count = 3,
+            .lower_count = 3,
+            .expected = {
+                {S8("in function 'invalid_pair_call': a label address may not escape through a function call"), 294},
+                {S8("in function 'invalid_pair_return': a label address may not escape through a function return"), 462},
+                {S8("in function 'invalid_union_call': a label address may not escape through a function call"), 767},
+            },
+        },
+        {
+            .name = S8("invalid_pair_call"),
+            .source = S8("struct label_pair { void *first; void *second; };union label_union { void *pointer; int integer; };extern "
+                        "void take_pair(struct label_pair);extern void take_union(union label_union);extern void take_pointer(void "
+                        "**);int invalid_pair_call(void) { struct label_pair pair = {&&pair_a, &&pair_b}; take_pair(pair); return "
+                        "0; pair_a: return 1; pair_b: return 2; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_pair_call': a label address may not escape through a function call"), 294},
+            },
+        },
+        {
+            .name = S8("invalid_pair_return"),
+            .source = S8("struct label_pair { void *first; void *second; };union label_union { void *pointer; int integer; };extern "
+                        "void take_pair(struct label_pair);extern void take_union(union label_union);extern void take_pointer(void "
+                        "**);struct label_pair invalid_pair_return(void) { struct label_pair pair = {&&return_a, &&return_b}; "
+                        "return pair; return_a: return pair; return_b: return pair; }\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_pair_return': a label address may not escape through a function return"), 321},
+            },
+        },
+        {
+            .name = S8("invalid_pair_address"),
+            .source = S8("struct label_pair { void *first; void *second; };union label_union { void *pointer; int integer; };extern "
+                        "void take_pair(struct label_pair);extern void take_union(union label_union);extern void take_pointer(void "
+                        "**);int invalid_pair_address(void) { struct label_pair pair = {&&address_a, &&address_b}; "
+                        "take_pointer((void **)&pair); return 0; address_a: return 1; address_b: return 2; }\n"),
+            .semantic_count = 0,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_pair_address': a label-containing aggregate may not escape through an address-taking "
+                    "expression"), 303},
+            },
+        },
+        {
+            .name = S8("invalid_union_call"),
+            .source = S8("struct label_pair { void *first; void *second; };union label_union { void *pointer; int integer; };extern "
+                        "void take_pair(struct label_pair);extern void take_union(union label_union);extern void take_pointer(void "
+                        "**);int invalid_union_call(void) { union label_union value = { .pointer = &&union_a }; take_union(value); "
+                        "return 0; union_a: return 1; }\n\n"),
+            .semantic_count = 1,
+            .lower_count = 1,
+            .expected = {
+                {S8("in function 'invalid_union_call': a label address may not escape through a function call"), 300},
+            },
+        },
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[row].source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+        CParseResult model = c_parse(temporary.arena, preprocess);
+        CParserResult reference_syntax = c_parse_ast_reference(temporary.arena, preprocess);
+        reference_syntax.type_interning = true;
+        CAnalysisResult reference = c_analyze_semantics_only(temporary.arena, preprocess, reference_syntax);
+        CAnalysisResult prepared = c_parse_for_lowering(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("label-authority.c"), preprocess, prepared, target_native);
+        BUSTER_TEST_RAW(arguments, !preprocess.diagnostic_count && !model.diagnostic_count, cases[row].name);
+        BUSTER_TEST_RAW(arguments, reference.analysis_complete && prepared.analysis_complete, cases[row].name);
+        BUSTER_TEST_RAW(arguments, reference.diagnostic_count == cases[row].semantic_count &&
+                                  prepared.diagnostic_count == cases[row].semantic_count, cases[row].name);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == cases[row].lower_count && !lowered.canonical_ir_certified, cases[row].name);
+        if (cases[row].semantic_count) BUSTER_TEST_RAW(arguments, lowered.program == 0, cases[row].name);
+        for (u32 diagnostic = 0; diagnostic < prepared.diagnostic_count && diagnostic < reference.diagnostic_count; diagnostic += 1)
+        {
+            CDiagnostic actual = prepared.diagnostics[diagnostic];
+            CDiagnostic expected = reference.diagnostics[diagnostic];
+            BUSTER_TEST_RAW(arguments, actual.kind == expected.kind && actual.severity == expected.severity &&
+                string_equal(actual.message, expected.message) && actual.location.offset == expected.location.offset &&
+                actual.location.line == expected.location.line && actual.location.column == expected.location.column, cases[row].name);
+        }
+        for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count && diagnostic < cases[row].lower_count; diagnostic += 1)
+        {
+            CDiagnostic actual = lowered.diagnostics[diagnostic];
+            BUSTER_TEST_RAW(arguments, actual.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS && actual.severity == C_DIAGNOSTIC_ERROR &&
+                string_equal(actual.message, cases[row].expected[diagnostic].message) && actual.location.line == 1 &&
+                actual.location.column == cases[row].expected[diagnostic].column &&
+                actual.location.offset + 1 == cases[row].expected[diagnostic].column, cases[row].name);
+        }
+        if (string_equal(cases[row].name, S8("malformed_recovery")))
+        {
+            bool following_model = false;
+            bool following_prepared = false;
+            BUSTER_TEST(arguments, model.declaration_count == 2 && prepared.declaration_count == 2);
+            for (u32 declaration = 0; declaration < model.declaration_count; declaration += 1)
+            {
+                CDeclaration record = model.declarations[declaration];
+                following_model |= string_equal(record.name, S8("valid_after_malformed")) &&
+                                   record.kind == C_DECLARATION_FUNCTION && record.is_definition && record.body_token_count != 0;
+            }
+            for (u32 declaration = 0; declaration < prepared.declaration_count; declaration += 1)
+            {
+                CDeclaration record = prepared.declarations[declaration];
+                following_prepared |= string_equal(record.name, S8("valid_after_malformed")) &&
+                                      record.kind == C_DECLARATION_FUNCTION && record.is_definition && record.body_token_count != 0;
+            }
+            BUSTER_TEST(arguments, following_model && following_prepared);
+            CPreprocessResult valid_preprocess = c_preprocess(temporary.arena,
+                S8("int valid_after_malformed(void) { return 9; }\n"), (CPreprocessOptions){
+                    .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+                });
+            CAnalysisResult valid = c_parse_for_lowering(temporary.arena, valid_preprocess);
+            CIRLowerResult valid_lowered = c_lower_to_ir(temporary.arena, S8("valid-after-malformed.c"), valid_preprocess, valid, target_native);
+            BUSTER_TEST(arguments, !valid_preprocess.diagnostic_count && !valid.diagnostic_count && !valid_lowered.diagnostic_count &&
+                                   valid_lowered.program && valid_lowered.canonical_ir_certified);
+            if (valid_lowered.program)
+            {
+                IrModule* module = valid_lowered.program->modules;
+                IrFunction* function = c_test_find_ir_function(module, S8("valid_after_malformed"));
+                BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED && function->instruction_count != 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(valid_lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -69633,6 +69849,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     C_TEST_FIXTURE(arguments, c_test_lex_row_trim);
     C_TEST_FIXTURE(arguments, c_test_label_address_prefix_indexed_paths);
+    C_TEST_FIXTURE(arguments, c_test_label_constraint_authority);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
@@ -72051,50 +72268,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         c_test_scratch_end(duplicate_labels_temporary);
     }
     {
-        TemporalArena invalid_label_cast_temporary = scratch_begin(0, 0);
-        CPreprocessResult invalid_label_cast_tokens = c_preprocess(invalid_label_cast_temporary.arena,
-                                                                    S8("int invalid_label_cast(void) { return (int)&&target; target: return 0; }\n"),
-                                                                    (CPreprocessOptions){
-                                                                        .target = target_native,
-                                                                        .data_layout = target_data_layout(target_native),
-                                                                        .dialect = C_PREPROCESS_DIALECT_GNU23,
-                                                                    });
-        CParseResult invalid_label_cast_parse = c_parse(invalid_label_cast_temporary.arena, invalid_label_cast_tokens);
-        CIRLowerResult invalid_label_cast_lowered = c_lower_to_ir(invalid_label_cast_temporary.arena, S8("invalid-label-cast.c"), invalid_label_cast_tokens,
-                                                                    c_parse_for_lowering(invalid_label_cast_temporary.arena, invalid_label_cast_tokens), target_native);
-        BUSTER_TEST(arguments, invalid_label_cast_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_label_cast_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_label_cast_lowered.diagnostic_count == 1);
-        if (invalid_label_cast_lowered.diagnostic_count == 1)
-        {
-            BUSTER_STRING_TEST(arguments, invalid_label_cast_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_label_cast': a label-provenance value may only be used with its original void pointer type"));
-        }
-        c_test_scratch_end(invalid_label_cast_temporary);
-    }
-    {
-        TemporalArena invalid_label_deref_temporary = scratch_begin(0, 0);
-        CPreprocessResult invalid_label_deref_tokens = c_preprocess(invalid_label_deref_temporary.arena,
-                                                                     S8("int invalid_label_deref(void) { return *&&target; target: return 0; }\n"),
-                                                                     (CPreprocessOptions){
-                                                                         .target = target_native,
-                                                                         .data_layout = target_data_layout(target_native),
-                                                                         .dialect = C_PREPROCESS_DIALECT_GNU23,
-                                                                     });
-        CParseResult invalid_label_deref_parse = c_parse(invalid_label_deref_temporary.arena, invalid_label_deref_tokens);
-        CIRLowerResult invalid_label_deref_lowered = c_lower_to_ir(invalid_label_deref_temporary.arena, S8("invalid-label-deref.c"), invalid_label_deref_tokens,
-                                                                     c_parse_for_lowering(invalid_label_deref_temporary.arena, invalid_label_deref_tokens), target_native);
-        BUSTER_TEST(arguments, invalid_label_deref_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_label_deref_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_label_deref_lowered.diagnostic_count == 1);
-        if (invalid_label_deref_lowered.diagnostic_count == 1)
-        {
-            BUSTER_STRING_TEST(arguments, invalid_label_deref_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_label_deref': a label-provenance value may not be used as an addressable place"));
-        }
-        c_test_scratch_end(invalid_label_deref_temporary);
-    }
-    {
         TemporalArena invalid_label_address_of_temporary = scratch_begin(0, 0);
         CPreprocessResult invalid_label_address_of_tokens = c_preprocess(
             invalid_label_address_of_temporary.arena,
@@ -72116,78 +72289,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                S8("in function 'invalid_label_address_of': computed goto requires a function-local void pointer label value"));
         }
         c_test_scratch_end(invalid_label_address_of_temporary);
-    }
-    {
-        TemporalArena invalid_union_overlay_temporary = scratch_begin(0, 0);
-        CPreprocessResult invalid_union_overlay_tokens = c_preprocess(
-            invalid_union_overlay_temporary.arena,
-            S8("union label_overlay { void *label; int *data; };"
-               "int invalid_union_overlay(void) { union label_overlay value = { .label = &&target }; return *value.data; target: return 0; }\n"),
-            (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
-                .dialect = C_PREPROCESS_DIALECT_GNU23,
-            });
-        CParseResult invalid_union_overlay_parse = c_parse(invalid_union_overlay_temporary.arena, invalid_union_overlay_tokens);
-        CIRLowerResult invalid_union_overlay_lowered = c_lower_to_ir(invalid_union_overlay_temporary.arena, S8("invalid-union-overlay.c"),
-                                                                      invalid_union_overlay_tokens, c_parse_for_lowering(invalid_union_overlay_temporary.arena, invalid_union_overlay_tokens), target_native);
-        BUSTER_TEST(arguments, invalid_union_overlay_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_union_overlay_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_union_overlay_lowered.diagnostic_count == 1);
-        if (invalid_union_overlay_lowered.diagnostic_count == 1)
-        {
-            BUSTER_STRING_TEST(arguments, invalid_union_overlay_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_union_overlay': a label-provenance value may not be used as an addressable place"));
-        }
-        c_test_scratch_end(invalid_union_overlay_temporary);
-    }
-    {
-        TemporalArena invalid_mixed_label_integer_cast_temporary = scratch_begin(0, 0);
-        CPreprocessResult invalid_mixed_label_integer_cast_tokens = c_preprocess(
-            invalid_mixed_label_integer_cast_temporary.arena,
-            S8("unsigned long invalid_mixed_label_integer_cast(int selector) { void *value = selector ? &&target : 0; return (unsigned long)value; target: return 0; }\n"),
-            (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
-                .dialect = C_PREPROCESS_DIALECT_GNU23,
-            });
-        CParseResult invalid_mixed_label_integer_cast_parse = c_parse(invalid_mixed_label_integer_cast_temporary.arena, invalid_mixed_label_integer_cast_tokens);
-        CIRLowerResult invalid_mixed_label_integer_cast_lowered = c_lower_to_ir(
-            invalid_mixed_label_integer_cast_temporary.arena, S8("invalid-mixed-label-integer-cast.c"), invalid_mixed_label_integer_cast_tokens,
-            c_parse_for_lowering(invalid_mixed_label_integer_cast_temporary.arena, invalid_mixed_label_integer_cast_tokens), target_native);
-        BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_lowered.diagnostic_count == 1);
-        if (invalid_mixed_label_integer_cast_lowered.diagnostic_count == 1)
-        {
-            BUSTER_STRING_TEST(arguments, invalid_mixed_label_integer_cast_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_mixed_label_integer_cast': a label-provenance value may only be used with its original void pointer type"));
-        }
-        c_test_scratch_end(invalid_mixed_label_integer_cast_temporary);
-    }
-    {
-        TemporalArena invalid_mixed_label_pointer_cast_temporary = scratch_begin(0, 0);
-        CPreprocessResult invalid_mixed_label_pointer_cast_tokens = c_preprocess(
-            invalid_mixed_label_pointer_cast_temporary.arena,
-            S8("int invalid_mixed_label_pointer_cast(int selector) { void *value = selector ? &&target : 0; return *(int *)value; target: return 0; }\n"),
-            (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
-                .dialect = C_PREPROCESS_DIALECT_GNU23,
-            });
-        CParseResult invalid_mixed_label_pointer_cast_parse = c_parse(invalid_mixed_label_pointer_cast_temporary.arena, invalid_mixed_label_pointer_cast_tokens);
-        CIRLowerResult invalid_mixed_label_pointer_cast_lowered = c_lower_to_ir(
-            invalid_mixed_label_pointer_cast_temporary.arena, S8("invalid-mixed-label-pointer-cast.c"), invalid_mixed_label_pointer_cast_tokens,
-            c_parse_for_lowering(invalid_mixed_label_pointer_cast_temporary.arena, invalid_mixed_label_pointer_cast_tokens), target_native);
-        BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_lowered.diagnostic_count == 1);
-        if (invalid_mixed_label_pointer_cast_lowered.diagnostic_count == 1)
-        {
-            BUSTER_STRING_TEST(arguments, invalid_mixed_label_pointer_cast_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_mixed_label_pointer_cast': a label-provenance value may only be used with its original void pointer type"));
-        }
-        c_test_scratch_end(invalid_mixed_label_pointer_cast_temporary);
     }
     {
         TemporalArena valid_struct_label_sibling_temporary = scratch_begin(0, 0);
@@ -72581,37 +72682,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                S8("in function 'percent_conflict': asm operand constraint conflicts with its clobber list"));
         }
         c_test_scratch_end(percent_clobber_temporary);
-    }
-    {
-        TemporalArena malformed_recovery_temporary = scratch_begin(0, 0);
-        CPreprocessResult malformed_recovery_tokens = c_preprocess(
-            malformed_recovery_temporary.arena,
-            S8("int malformed_recovery(void) { __asm__ goto(\"\"); return 1; }\n"
-               "int valid_after_malformed(void) { return 9; }\n"),
-            (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
-                .dialect = C_PREPROCESS_DIALECT_GNU23,
-            });
-        CParseResult malformed_recovery_parse = c_parse(malformed_recovery_temporary.arena, malformed_recovery_tokens);
-        CIRLowerResult malformed_recovery_lowered = c_lower_to_ir(malformed_recovery_temporary.arena, S8("malformed-recovery.c"), malformed_recovery_tokens,
-                                                                   c_parse_for_lowering(malformed_recovery_temporary.arena, malformed_recovery_tokens), target_native);
-        BUSTER_TEST(arguments, malformed_recovery_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, malformed_recovery_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, malformed_recovery_lowered.diagnostic_count == 1);
-        bool recovered_function = false;
-        if (malformed_recovery_lowered.program)
-        {
-            IrModule* module = malformed_recovery_lowered.program->modules;
-            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-            {
-                IrFunction* function = module->functions + function_index;
-                recovered_function |= string_equal(function->name, S8("valid_after_malformed")) && function->state == IR_FUNCTION_LOWERED &&
-                                      function->instruction_count != 0;
-            }
-        }
-        BUSTER_TEST(arguments, recovered_function);
-        c_test_scratch_end(malformed_recovery_temporary);
     }
     {
         TemporalArena typedef_shadow_label_temporary = scratch_begin(0, 0);
@@ -73592,31 +73662,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, aarch64_fixed_tie_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_fixed_tie_lowered.diagnostic_count == 1);
         c_test_scratch_end(aarch64_fixed_assembly_temporary);
-    }
-    {
-        TemporalArena label_escape_temporary = scratch_begin(0, 0);
-        CPreprocessResult label_escape_tokens = c_preprocess(
-            label_escape_temporary.arena,
-            S8("struct label_pair { void *first; void *second; };"
-               "union label_union { void *pointer; int integer; };"
-               "extern void take_pair(struct label_pair);"
-               "extern void take_union(union label_union);"
-               "extern void take_pointer(void **);"
-               "int invalid_pair_call(void) { struct label_pair pair = {&&pair_a, &&pair_b}; take_pair(pair); return 0; pair_a: return 1; pair_b: return 2; }"
-               "struct label_pair invalid_pair_return(void) { struct label_pair pair = {&&return_a, &&return_b}; return pair; return_a: return pair; return_b: return pair; }"
-               "int invalid_pair_address(void) { struct label_pair pair = {&&address_a, &&address_b}; take_pointer((void **)&pair); return 0; address_a: return 1; address_b: return 2; }"
-               "int invalid_union_call(void) { union label_union value = { .pointer = &&union_a }; take_union(value); return 0; union_a: return 1; }\n"),
-            (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
-                .dialect = C_PREPROCESS_DIALECT_GNU23,
-            });
-        CParseResult label_escape_parse = c_parse(label_escape_temporary.arena, label_escape_tokens);
-        CIRLowerResult label_escape_lowered = c_lower_to_ir(label_escape_temporary.arena, S8("label-escape.c"), label_escape_tokens, c_parse_for_lowering(label_escape_temporary.arena, label_escape_tokens), target_native);
-        BUSTER_TEST(arguments, label_escape_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, label_escape_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, label_escape_lowered.diagnostic_count >= 4);
-        c_test_scratch_end(label_escape_temporary);
     }
     {
         TemporalArena legal_label_pointer_address_temporary = scratch_begin(0, 0);

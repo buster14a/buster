@@ -467,6 +467,14 @@ once; an earlier semantic diagnostic retains its precedence. The ordinary
 borrowed driver takes no copies or refusal-row reservation. Successful compact
 outputs retain their existing layout and measured copy bytes.
 
+Negative direct-call fixtures preserve the independent model-only assertions,
+then compare required full semantics with the explicit token-reference semantic
+authority. Label return/call refusals precede lowering; each aggregate escape
+is checked separately so an earlier refusal cannot hide a later lowering-only
+address refusal. A malformed assembly body retains the following declaration
+in both models, and its valid neighbor lowers independently; failed full
+semantics never publishes a partial canonical program.
+
 The remaining range boundaries locate one retained node before querying it.
 Operand, prediction, conditional-type and null-constant range frame families
 and the operand precedence/postfix walkers have been removed. Conditional
