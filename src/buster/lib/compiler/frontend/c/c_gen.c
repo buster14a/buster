@@ -3522,17 +3522,14 @@ struct CIrErrorAttributeCall
     u32 attribute_token;
 };
 
-// The unit's index of the bodies lowering enters by brace (GitHub #4060):
-// every FUNCTION_DEFINITION's COMPOUND_STATEMENT and every
-// STATEMENT_EXPRESSION's COMPOUND_STATEMENT, each as a sorted
+// The unit's index of function bodies lowering enters by brace (GitHub #4060):
+// every FUNCTION_DEFINITION's COMPOUND_STATEMENT, each as a sorted
 // (token << 32 | node) key of its `{` (c_ir_body_nodes_build).
 typedef struct CIrBodyNodes CIrBodyNodes;
 struct CIrBodyNodes
 {
     u64* functions;
-    u64* statement_expressions;
     u32 function_count;
-    u32 statement_expression_count;
 };
 
 // What the hoisting walks (c_ir_tree_control_groups, c_ir_tree_calls_discover;
@@ -18761,8 +18758,7 @@ struct CIrLowerFrame
             // that item, lowers after the nested block.
             u32* tail_blocks;
             IrValueId value;
-            u32 open;
-            u32 close;
+            u32 node;
             u32 tail_count;
             u32 tail_index;
             u32 leaf_open;
@@ -20027,14 +20023,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_conditional_value_frame_push(CIntegerIrBuilder
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_statement_expression_frame_push(CIntegerIrBuilder* builder, u32 open, u32 close)
+BUSTER_C_INTERNAL bool c_ir_lower_statement_expression_frame_push(CIntegerIrBuilder* builder, u32 node)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_STATEMENT_EXPRESSION,
                                               .as.statement_expression =
                                                   {
-                                                      .open = open,
-                                                      .close = close,
+                                                      .node = node,
                                                   },
                                           });
 }
@@ -20184,30 +20179,26 @@ BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
 // brace. c_ir_node_statement_first gives a statement's first token from its
 // anchor, and c_ir_node_expression_range gives an expression's extent.
 
-BUSTER_C_INTERNAL u64 c_ir_body_nodes_size(CAst const* ast, u32* function_count_out, u32* statement_expression_count_out)
+BUSTER_C_INTERNAL u64 c_ir_body_nodes_size(CAst const* ast, u32* function_count_out)
 {
     u32 functions = 0;
-    u32 statement_expressions = 0;
     for (u32 node = 1; ast && node < ast->node_count; node += 1)
     {
         u8 kind = ast->kinds[node];
         bool body = ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT;
         functions += kind == C_AST_FUNCTION_DEFINITION && body;
-        statement_expressions += kind == C_AST_STATEMENT_EXPRESSION && body;
     }
     *function_count_out = functions;
-    *statement_expression_count_out = statement_expressions;
-    // Two key arrays and one sort scratch, each with a spare element and
-    // alignment slack.
-    return ((u64)functions + statement_expressions + 3) * sizeof(u64) * 2 + 3 * 16;
+    // The function keys and their sort scratch, each with a spare element
+    // and alignment slack.
+    return ((u64)functions + 1) * sizeof(u64) * 2 + 2 * 16;
 }
 
-BUSTER_C_INTERNAL CIrBodyNodes c_ir_body_nodes_build(Arena* arena, CAst const* ast, u32 function_count, u32 statement_expression_count)
+BUSTER_C_INTERNAL CIrBodyNodes c_ir_body_nodes_build(Arena* arena, CAst const* ast, u32 function_count)
 {
     CIrBodyNodes nodes = {0};
     nodes.functions = arena_allocate(arena, u64, function_count + 1);
-    nodes.statement_expressions = arena_allocate(arena, u64, statement_expression_count + 1);
-    u64* scratch = arena_allocate(arena, u64, BUSTER_MAX(function_count, statement_expression_count) + 1);
+    u64* scratch = arena_allocate(arena, u64, function_count + 1);
     for (u32 node = 1; node < ast->node_count; node += 1)
     {
         u8 kind = ast->kinds[node];
@@ -20218,16 +20209,11 @@ BUSTER_C_INTERNAL CIrBodyNodes c_ir_body_nodes_build(Arena* arena, CAst const* a
             {
                 nodes.functions[nodes.function_count++] = key;
             }
-            else if (kind == C_AST_STATEMENT_EXPRESSION && nodes.statement_expression_count < statement_expression_count)
-            {
-                nodes.statement_expressions[nodes.statement_expression_count++] = key;
-            }
         }
     }
-    // Postorder lists a nested definition or statement expression before the
-    // one that encloses it, so both are sorted by brace.
+    // Postorder lists a nested definition before the one that encloses it,
+    // so the keys are sorted by brace.
     c_ir_tree_sort_keys(nodes.functions, scratch, nodes.function_count);
-    c_ir_tree_sort_keys(nodes.statement_expressions, scratch, nodes.statement_expression_count);
     return nodes;
 }
 
@@ -20735,12 +20721,10 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
         return;
     }
-    // Temporary adapter (#4058): the expression machine names the statement
-    // expression by its braces until step 3 (#4059) hands over its node.
-    u32 block = builder->body_nodes ? c_ir_body_nodes_find(builder->body_nodes->statement_expressions,
-                                                           builder->body_nodes->statement_expression_count, frame->as.statement_expression.open)
-                                    : C_AST_NODE_INVALID;
-    if (block == C_AST_NODE_INVALID)
+    u32 node = frame->as.statement_expression.node;
+    u32 block = node < ast->node_count && ast->kinds[node] == C_AST_STATEMENT_EXPRESSION ? c_ast_child_at(ast, node, 0)
+                                                                                     : C_AST_NODE_INVALID;
+    if (block == C_AST_NODE_INVALID || ast->kinds[block] != C_AST_COMPOUND_STATEMENT)
     {
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         return;
@@ -38446,7 +38430,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
     {
         state->walk_count -= 1;
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT;
-        status = c_ir_lower_statement_expression_frame_push(builder, first + 1, end - 2) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
+        status = c_ir_lower_statement_expression_frame_push(builder, node) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
     }
     break;
     case C_AST_COMPOUND_LITERAL:
@@ -43148,7 +43132,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         if (whole && kind == C_AST_STATEMENT_EXPRESSION)
         {
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VALUE;
-            if (!c_ir_lower_statement_expression_frame_push(builder, start + 1, end - 2))
+            if (!c_ir_lower_statement_expression_frame_push(builder, node))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -62023,8 +62007,7 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
 
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
-                                                             u64 function_reservation_limit, Arena* tree_arena, u32 body_function_count,
-                                                             u32 body_statement_expression_count)
+                                                             u64 function_reservation_limit, Arena* tree_arena, u32 body_function_count)
 {
     CIRLowerResult result = {0};
     u32 type_capacity = plan.type_capacity;
@@ -62044,7 +62027,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
     // The bodies the statement walker enters by brace (GitHub #4060).
-    CIrBodyNodes body_nodes = tree_arena ? c_ir_body_nodes_build(tree_arena, options.syntax_tree, body_function_count, body_statement_expression_count)
+    CIrBodyNodes body_nodes = tree_arena ? c_ir_body_nodes_build(tree_arena, options.syntax_tree, body_function_count)
                                          : (CIrBodyNodes){0};
     CIrQueryMachine queries = {
         .frame_capacity = (u32)query_frame_capacity,
@@ -65389,8 +65372,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             // arena of its own for the call. A unit with no body needs none;
             // when the reservation is refused, no body lowers.
             u32 body_function_count = 0;
-            u32 body_statement_expression_count = 0;
-            u64 tree_size = options.syntax_tree ? c_ir_body_nodes_size(options.syntax_tree, &body_function_count, &body_statement_expression_count) : 0;
+            u64 tree_size = options.syntax_tree ? c_ir_body_nodes_size(options.syntax_tree, &body_function_count) : 0;
             u64 tree_reservation = 0;
             bool tree_sized = body_function_count && align_forward_checked(arena_minimum_position + tree_size, BUSTER_KB(64), &tree_reservation);
             Arena* tree_arena = tree_sized ? arena_create((ArenaCreation){.reserved_size = tree_reservation,
@@ -65398,7 +65380,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                                                                           .flags = {.no_pool = true}})
                                            : 0;
             result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit,
-                                                tree_arena, body_function_count, body_statement_expression_count);
+                                                tree_arena, body_function_count);
             if (tree_arena)
             {
                 arena_destroy(tree_arena, 1);

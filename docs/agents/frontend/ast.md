@@ -1485,8 +1485,9 @@ failed `-fc-ast-pilot` and are closed with it:
   tree's specifier readers leave it to the type machine, as they leave
   `__float128`. The unit's
 body index (`c_ir_body_nodes_build`) maps the `{` of every function
-definition, and of every statement expression, to its COMPOUND_STATEMENT
-node. It lives in the tree arena next to the
+definition to its COMPOUND_STATEMENT node. A statement-expression frame
+takes its STATEMENT_EXPRESSION node and enters its block child directly;
+it needs no brace index. The function index lives in the tree arena next to the
 [root-conditional records](#lowering-from-the-tree).
 
 **Tasks.** The body is a stack of `CIrBodyTask`s, as before. Each task now
@@ -1535,7 +1536,6 @@ marked for step 5 (#4058) to delete:
 - `c_ir_node_expression_range` gives an expression's first and last token
   from its edge children, widened over the parentheses that wrap exactly it;
 - `c_ir_node_declaration_start` steps over a leading attribute run;
-- the statement-expression frame finds its block by its `{`.
 
 `-v` adds three fields to `C_AST_LOWER`: `statement_bodies`, `statements` and
 `range_adapters`, the token ranges the adapter derived.
@@ -2011,7 +2011,7 @@ reductions and the postfix probe are deleted.
   member name. A failed operator reports the token the walk visited last, as
   the token path reported the token whose arrival reduced it.
 - **Still token ranges** (the temporary adapter of part (c) and step 4):
-  - the place machine, the statement-expression and compound-literal
+  - the place machine and compound-literal
     frames, and the `EXPRESSION` frames the walk pushes;
   - the `sizeof` operand's type and value queries;
   - the cast type (`c_ir_group_type_name`);
@@ -2071,7 +2071,7 @@ byte.
   classifier now splits at the tier of the binary operator the tree has at
   the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
 - **Still token ranges.** The place machine, the `sizeof`, compound-literal
-  and statement-expression frames take their subtree's token range, and the
+  frames take their subtree's token range, and the
   prepared control records use structural group identities; the remaining
   prepared call lookup still uses tokens.
 - **A unit the builder rejects.** The tree is mandatory: such a unit fails
