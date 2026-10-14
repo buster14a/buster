@@ -9332,7 +9332,6 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     // releases the unit's tree itself.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = &result.c_ast.lower,
-                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0,
                                                                     .syntax_facts = syntax.ast_facts});
     // Lowering was the facts' last reader.
     if (syntax.ast_facts)
@@ -11795,23 +11794,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.c_ast.specifiers.reason = unit.c_ast.specifiers.reason;
             result.c_ast.specifiers.fallback_token = unit.c_ast.specifiers.fallback_token;
         }
-        result.c_ast.extents.bodies += unit.c_ast.extents.bodies;
-        result.c_ast.extents.entries += unit.c_ast.extents.entries;
-        result.c_ast.extents.entry_declines += unit.c_ast.extents.entry_declines;
-        result.c_ast.extents.answers += unit.c_ast.extents.answers;
-        for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
-        {
-            result.c_ast.extents.walked[reason] += unit.c_ast.extents.walked[reason];
-            result.c_ast.extents.body_fallbacks[reason] += unit.c_ast.extents.body_fallbacks[reason];
-        }
-        if (unit.c_ast.extents.reason)
-        {
-            result.c_ast.extents.reason = unit.c_ast.extents.reason;
-            result.c_ast.extents.fallback_token = unit.c_ast.extents.fallback_token;
-        }
         result.c_ast.lower.steps += unit.c_ast.lower.steps;
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
+        result.c_ast.lower.statement_bodies += unit.c_ast.lower.statement_bodies;
+        result.c_ast.lower.statements += unit.c_ast.lower.statements;
+        result.c_ast.lower.range_adapters += unit.c_ast.lower.range_adapters;
         result.c_ast.lower.trees_built += unit.c_ast.lower.trees_built;
         result.c_ast.lower.tree_rejections += unit.c_ast.lower.tree_rejections;
         result.c_ast.lower.tree_nodes += unit.c_ast.lower.tree_nodes;

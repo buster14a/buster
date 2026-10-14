@@ -172,8 +172,8 @@ path; selected MIR enforces dominance in unreachable code too.
 A GNU statement-expression body retains the complete range of each automatic
 declaration. Its top-level commas separate declarators and reach the existing
 automatic-declaration-list frame; only expression statements use the trailing
-comma split. `declaration_statement` is shared with trailing-value classification
-in the body walker. The embedded driver regression for #1388 checks initialized,
+comma split. The body walker tells the two apart by the statement's node kind
+(#4060). The embedded driver regression for #1388 checks initialized,
 uninitialized, pointer/scalar, discarded and exactly-once call initializers,
 alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
 under both frontend forms and both native allocators at O0/O2. Syntax/object rows

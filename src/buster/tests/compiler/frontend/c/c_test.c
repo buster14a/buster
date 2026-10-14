@@ -32,9 +32,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
     parts[65] = S8("return id(x);}");
     String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
     CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-    // Lowering's: the function arena, the tree's extent table and spans (#3102
+    // Lowering's: the function arena, the tree's spans (#3102
     // step 1), and the arena a 64 KiB first reservation grows into.
-    u32 counts[] = {4, 2, 4};
+    u32 counts[] = {4, 2, 3};
     String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -48,7 +48,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
                 CPreprocessResult preprocess;
                 CAnalysisResult analysis;
                 CIRLowerResult lowered;
-                c_test_lowering_initial_reservation(phase == 2 && ordinal == 4 ? BUSTER_KB(64) : 0);
+                c_test_lowering_initial_reservation(phase == 2 && ordinal == 3 ? BUSTER_KB(64) : 0);
                 c_test_fail_frontend_reservation(phases[phase], ordinal);
                 preprocess = c_preprocess(temporary.arena, source, options);
                 CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
@@ -7623,7 +7623,12 @@ BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* a
     if (parse.diagnostic_count + lowered.diagnostic_count == 1)
     {
         CDiagnostic diagnostic = parse.diagnostic_count ? parse.diagnostics[0] : lowered.diagnostics[0];
-        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        // Lowering reports what it refuses inside a function; a range the
+        // grammar refuses is the syntax tree builder's error, since lowering
+        // reads the body from the tree (#4060).
+        CDiagnosticKind kind = string_starts_with_sequence(message, S8("in function")) ? C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS
+                                                                                     : C_DIAGNOSTIC_EXPECTED_DECLARATION;
+        BUSTER_TEST(arguments, diagnostic.kind == kind);
         BUSTER_STRING_TEST(arguments, diagnostic.message, message);
     }
     outer_result->test_count += result.test_count;
@@ -37398,7 +37403,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                         }
                         BUSTER_TEST(arguments, found == 1);
                     }
-                    if (cases[case_index].semantic_only)
+                    // Lowering reads function bodies from the syntax tree
+                    // (#4060), whose builder needs the symbol table the
+                    // symbol-less rows leave out.
+                    if (cases[case_index].semantic_only || !symbols)
                     {
                         c_test_scratch_end(temporary);
                         continue;
@@ -39996,7 +40004,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     }
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int malformed(int value) { switch (value) { case 1 ... 2 ... 3: return 0; } return 1; }\n"),
-                                       S8("in function 'malformed': malformed GNU case range"));
+                                       S8("expected ':' after the case value, found '...'"));
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int nonconstant_low(int value) { switch (value) { case value ... 2: return 0; } return 1; }\n"),
                                        S8("in function 'nonconstant_low': case range lower bound is not an integer constant expression"));
@@ -45329,14 +45337,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArgum
     return result;
 }
 
-// The statement walker asks whether an unbound first token names a typedef,
-// which costs a scope lookup. A statement keyword never does, so it is gated
-// out before the lookup (#3102): a body whose statements all begin with a
-// statement keyword or a bound name must make none. A label still makes one,
-// and a typedef-led block declaration at most one, and both bodies lower.
-BUSTER_GLOBAL_LOCAL u64 c_test_statement_keyword_typedef_probe_count(String8 source)
+// The statement walker reads each statement's kind from its node (#4060):
+// keyword-led statements, a label, block declarations led by type keywords and
+// one led by a typedef name all lower to certified IR.
+BUSTER_GLOBAL_LOCAL bool c_test_statement_nodes_lower(String8 source)
 {
-    u64 probes = UINT64_MAX;
+    bool lowered_cleanly = false;
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = true}});
     if (arena)
     {
@@ -45346,22 +45352,18 @@ BUSTER_GLOBAL_LOCAL u64 c_test_statement_keyword_typedef_probe_count(String8 sou
         CParseResult parse = c_parse(arena, preprocess);
         if (!preprocess.diagnostic_count && !parse.diagnostic_count)
         {
-            u64 before = c_test_ir_first_token_typedef_probes();
-            CIRLowerResult lowered = c_lower_to_ir(arena, S8("statement-keyword-probes.c"), preprocess, parse, target_native);
-            if (!lowered.diagnostic_count && lowered.canonical_ir_certified)
-            {
-                probes = c_test_ir_first_token_typedef_probes() - before;
-            }
+            CIRLowerResult lowered = c_lower_to_ir(arena, S8("statement-nodes.c"), preprocess, parse, target_native);
+            lowered_cleanly = !lowered.diagnostic_count && lowered.canonical_ir_certified;
         }
         arena_destroy(arena, 1);
     }
-    return probes;
+    return lowered_cleanly;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_nodes_kinds(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u64 keywords = c_test_statement_keyword_typedef_probe_count(S8(
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "int f(int x)\n"
         "{\n"
         "    if (x) x += 1; else x -= 1;\n"
@@ -45372,39 +45374,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
         "    _Static_assert(sizeof(int) >= 2, \"int\");\n"
         "    __asm__ volatile(\"\" ::: \"memory\");\n"
         "    return x;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, keywords == 0, string_format(arguments->arena, S8("keyword-led statements made {u64} typedef probes"), keywords));
-    // A label is an unbound name that is not a keyword: it is probed, once.
-    u64 labelled = c_test_statement_keyword_typedef_probe_count(S8(
+        "}\n")));
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "int h(int x)\n"
         "{\n"
         "    if (x) goto done;\n"
         "    x += 1;\n"
         "done:\n"
         "    return x;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, labelled == 1, string_format(arguments->arena, S8("a labelled body made {u64} typedef probes"), labelled));
-    // A type keyword names no entity, so a declaration it begins is a type
-    // start without the lookup, which climbed every enclosing block (#3894).
-    u64 declarations = c_test_statement_keyword_typedef_probe_count(S8(
+        "}\n")));
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "int k(int x)\n"
         "{\n"
         "    int y = x;\n"
         "    { unsigned z = (unsigned)y; { const int w = (int)z; x += w; } }\n"
         "    return x;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, declarations == 0,
-                    string_format(arguments->arena, S8("keyword-led declarations made {u64} typedef probes"), declarations));
-    u64 typedefs = c_test_statement_keyword_typedef_probe_count(S8(
+        "}\n")));
+    BUSTER_TEST(arguments, c_test_statement_nodes_lower(S8(
         "typedef int T;\n"
         "int g(int x)\n"
         "{\n"
         "    if (x) return 1;\n"
         "    T y = x;\n"
         "    return y;\n"
-        "}\n"));
-    BUSTER_TEST_RAW(arguments, typedefs != UINT64_MAX && typedefs <= 1,
-                    string_format(arguments->arena, S8("a typedef-led declaration made {u64} typedef probes"), typedefs));
+        "}\n")));
+    return result;
+}
+
+// Deep statement nesting lowers without recursion (#4060): the walker keeps
+// its place on the body task stack, so blocks, `if` blocks, an `else if`
+// chain, a braceless loop nest, a run of labels and nested statement
+// expressions each lower at a depth no C stack frame per level could reach
+// on every host.
+BUSTER_GLOBAL_LOCAL String8 c_test_statement_nodes_deep_source(Arena* arena, u32 family, u32 depth)
+{
+    String8 prefix = family == 5 ? S8("int f(int x) { return ") : S8("int f(int x) { ");
+    String8 open = family == 0 ? S8("{ ")
+                   : family == 1 ? S8("if (x > 0) { ")
+                   : family == 2 ? S8("if (x == 1) x = 2; else ")
+                   : family == 3 ? S8("while (x > 0) ")
+                   : family == 4 ? S8("L: ")
+                                 : S8("({ ");
+    String8 core = family == 5 ? S8("x; ") : S8("x -= 1; ");
+    String8 close = family == 0 || family == 1 ? S8("} ") : family == 5 ? S8("}); ") : S8("");
+    String8 suffix = family == 5 ? S8("}\n") : S8("return x; }\n");
+    u64 capacity = prefix.length + (open.length + close.length + 8) * (u64)depth + core.length + suffix.length;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, prefix);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        // Each label needs its own name.
+        String8 piece = family == 4 ? string_format(arena, S8("L{u32}: "), level) : open;
+        c_test_append_source(bytes, capacity, &length, piece);
+    }
+    c_test_append_source(bytes, capacity, &length, core);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, close);
+    }
+    c_test_append_source(bytes, capacity, &length, suffix);
+    return (String8){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_nodes_deep_nesting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { DEPTH = 6000, FAMILIES = 6 };
+    for (u32 family = 0; family < FAMILIES; family += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = family == 5 ? DEPTH / 4 : DEPTH;
+        String8 source = c_test_statement_nodes_deep_source(temporary.arena, family, depth);
+        BUSTER_TEST_RAW(arguments, c_test_statement_nodes_lower(source),
+                        string_format(temporary.arena, S8("deep statement nest family={u32} depth={u32} did not lower"), family, depth));
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
@@ -68576,7 +68621,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
-    C_TEST_FIXTURE(arguments, c_test_statement_keyword_typedef_probes);
+    C_TEST_FIXTURE(arguments, c_test_statement_nodes_kinds);
+    C_TEST_FIXTURE(arguments, c_test_statement_nodes_deep_nesting);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_tag_scan_growth);
