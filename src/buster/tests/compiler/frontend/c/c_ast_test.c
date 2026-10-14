@@ -7171,6 +7171,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_pointer_probe(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_enum_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct { String8 source; u64 offset; } const cases[] = {
+        {S8("enum{Q=1}; int f(void){return __builtin_offsetof(struct{enum{Q=3}e;char c[Q];char d;},d);}"), 7},
+        {S8("enum{Q=1}; int f(void){return __builtin_offsetof(struct{char c[Q];char d;},d);}"), 1},
+        {S8("enum{Q=1}; int f(void){return __builtin_offsetof(struct{struct{enum{Q=4}e;}inner;char c[Q];char d;},d);}"), 8},
+        {S8("enum{Q=1}; int f(void){return __builtin_offsetof(struct{enum{Q=3}e;enum{R=2}r;char c[Q];char d;},d);}"), 11},
+        {S8("enum{Q=1}; int f(void){int n=__builtin_offsetof(struct{char c[Q];char d;},d);enum{Q=7};return n;}"), 1},
+        {S8("enum{Q=1}; int f(void){{enum{Q=6};}return __builtin_offsetof(struct{char c[Q];char d;},d);}"), 1},
+        {S8("enum{Q=1}; int f(void){enum{Q=4,R=sizeof(char[Q])};return __builtin_offsetof(struct{char c[R];char d;},d);}"), 4},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, cases[index].source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.ast_facts = &facts;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 rows = 0;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &analysis, &rows);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !analysis.diagnostic_count && !difference.length, cases[index].source);
+            u32 plans = 0;
+            for (u32 node = 0; node < built.ast.node_count; node += 1)
+            {
+                CAstOffsetofPlan const* plan = c_ast_facts_offsetof(&facts, node);
+                if (plan)
+                {
+                    plans += 1;
+                    BUSTER_TEST_RAW(arguments, plan->valid && plan->step_count == 1 &&
+                        facts.offsetof_steps[plan->first_step].amount == cases[index].offset, cases[index].source);
+                }
+            }
+            BUSTER_TEST(arguments, plans == 1);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("offsetof-enum-scope.c"), preprocess, analysis, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified, cases[index].source);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_object_context(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8820,6 +8871,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_object_context);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_pointer_probe);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_enum_scope);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);

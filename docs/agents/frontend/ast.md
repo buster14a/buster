@@ -3049,6 +3049,13 @@ this is not a claim that every expression in the unit has a fact. The
 lowering consumer migration remains open and this producer checkpoint does
 not claim retirement of the query machine.
 
+Semantic array layout binds each identifier at the bound's own source site.
+Ordinary constants use lexical scope and declaration-point visibility; inline
+enum definitions use their unpublished suffix until the enclosing declaration
+publishes it. Completed nested enum lists can therefore shadow a global enum
+without exposing later declarations or sibling scopes. Retained offsetof paths
+carry the resulting numeric offsets, with no lower-time scope reconstruction.
+
 Exact-node constant tasks distinguish ordinary values from addressed compound
 objects with `C_IR_AST_CONSTANT_LVALUE`. A direct whole initializer's literal
 address route uses `C_IR_AST_CONSTANT_WHOLE_ADDRESS`, preserving the legacy

@@ -4696,6 +4696,9 @@ BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* c
     return constant.valid && !constant.is_negative;
 }
 
+BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResult preprocess, CParseResult* result,
+                                                                  CScopeId scope, u32 token_index);
+
 // The per-type attempts of one solve, in the order c_parse_layout_next hands
 // them out. An attempt that resolves its type publishes the layout; one that
 // cannot yet simply continues, and the driver decides when to retry it. Each
@@ -5278,32 +5281,26 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             bound_index = identity->token_end - bound.token_start - 1;
                             continue;
                         }
-                        CEntity* constant = c_parse_first_constant_entity_token(result, preprocess.spelling_base, token);
+                        u32 reference = bound.token_start + bound_index;
+                        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, reference);
+                        CEntityId entity = c_parse_lookup_entity_at_token(result, preprocess, scope, reference);
+                        CEntity const* constant = entity.value < result->entity_count &&
+                            (result->entities[entity.value].kind == C_ENTITY_ENUMERATOR ||
+                             (result->entities[entity.value].is_constexpr && result->entities[entity.value].has_constant_value))
+                            ? result->entities + entity.value : 0;
+                        CEnumMember const* pending = c_parse_pending_enum_member(preprocess, result, scope, reference);
                         bool constant_is_negative = false;
                         u64 constant_value = 0;
-                        bool folded_constant = constant != 0;
-                        if (constant)
+                        bool folded_constant = pending || constant;
+                        if (pending)
+                        {
+                            constant_is_negative = pending->is_negative;
+                            constant_value = pending->value;
+                        }
+                        else if (constant)
                         {
                             constant_is_negative = constant->constant_is_negative;
                             constant_value = constant->constant_value;
-                        }
-                        else
-                        {
-                            // A member of an enum still being declared is not an
-                            // entity yet; the member table already holds every
-                            // enumerator declared before this bound, so
-                            // `enum { N = 5, E = sizeof(int[N]) }` folds.
-                            String8 name = c_token_spelling(preprocess.spelling_base, token);
-                            for (u32 member_index = 0; member_index < result->enum_member_count && !folded_constant; member_index += 1)
-                            {
-                                CEnumMember* member = &result->enum_members[member_index];
-                                if (token.symbol && member->symbol ? member->symbol == token.symbol : string_equal(member->name, name))
-                                {
-                                    constant_is_negative = member->is_negative;
-                                    constant_value = member->value;
-                                    folded_constant = true;
-                                }
-                            }
                         }
                         if (!folded_constant)
                         {
@@ -7533,7 +7530,7 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
     CEnumMember const* found = 0;
     CToken token = preprocess.tokens[token_index];
     String8 name = c_token_spelling(preprocess.spelling_base, token);
-    CEntityId ordinary = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+    CEntityId ordinary = c_parse_lookup_entity_at_token(result, preprocess, scope, token_index);
     // Published identifiers are the common path. Only the in-progress list
     // can shadow one before entity publication; do not rescan completed enums
     // for every identifier in the translation unit.
@@ -7542,7 +7539,11 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
     if (ordinary.value < result->entity_count)
     {
         first = result->enum_member_count;
-        if (first)
+        // Inline type definitions may have completed several enum lists
+        // before their declaration publishes any of them. Their pending
+        // suffix can shadow an earlier ordinary binding at this source site.
+        while (first && !result->enum_members[first - 1].is_published) first -= 1;
+        if (first == result->enum_member_count && first)
         {
             CTypeId owner = result->enum_members[first - 1].enum_type;
             if (owner.value < result->type_count && !result->types[owner.value].is_complete)
