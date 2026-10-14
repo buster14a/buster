@@ -52,11 +52,11 @@ their sum in `frontend_retained_copy_bytes`. This ownership publication adds no
 syntax or semantic pass. Repeated canonical lowering calls borrow the same
 finished outputs until the unit arena ends. The normal driver supplies its own
 tree and facts, retains those private reservations through lowering and skips
-all publication copies. Model-only `c_parse` retains its syntax but does not
-establish lowering constraints; explicit parse-to-lower callers use
+all publication copies. Model-only `c_parse` keeps its original token declaration
+split and does not establish lowering constraints; explicit parse-to-lower callers use
 `c_parse_for_lowering`.
-The model query keeps its existing method and inventory without reading the
-retained AST or facts; the AST is provenance on that model-only result.
+The model query keeps its existing method and inventory without building or
+reading a retained AST or facts.
 
 **Preprocessing seal.** `c_preprocess` allocates everything in the phase arena,
 above that arena's entry position. Before returning, `c_preprocess_seal` copies

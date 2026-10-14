@@ -8,7 +8,7 @@ that previously depended on lowering. The driver uses its diagnostics and
 `c_analyze_with_options` runs the same validation before canonical lowering, so
 syntax-only and ordinary compilation share diagnostic ownership. The older
 `c_parse` / `c_analyze_semantics` entry points retain their model-building contract
-for callers that explicitly pair them with `c_lower_to_ir`.
+for callers that inspect the semantic model.
 The model-only `c_parse` result cannot now be lowered directly: callers that
 construct canonical IR use `c_parse_for_lowering`, which completes the same
 source constraints once and retains the required syntax and semantic outputs.
@@ -17,8 +17,8 @@ constructs a tree or runs another semantic pass. Explicit historical parser
 controls use `c_parse_ast_reference`; ordinary `c_parse_ast` builds the tree
 once and reads its declaration split. The caller's type-interning policy is
 unchanged.
-The model-only endpoint retains syntax as provenance while its semantic query
-uses the same tree-free method and type inventory as before. Independent model
+The model-only `c_parse` endpoint uses its original token declaration split and
+tree-free semantic query method and type inventory. Independent model
 tests keep that output for inspection and prepare a separate full-authority
 result when they also exercise canonical lowering.
 

@@ -47865,7 +47865,7 @@ CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preproc
 
 CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
 {
-    CParserResult syntax = c_parse_ast(arena, preprocess);
+    CParserResult syntax = c_parse_ast_reference(arena, preprocess);
     return c_analyze_semantics(arena, preprocess, syntax);
 }
 
