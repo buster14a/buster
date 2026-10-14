@@ -15574,9 +15574,9 @@ struct CIrExpressionCoreState
     u32 value_capacity;
     u32 walk_count;
     u32 walk_capacity;
-    // c_ir_core_chain_unit's memo: the first token of the chain it measured
-    // last, and that chain's unit.
-    u32 chain_first;
+    // The last known chain node and its unit. Reuse requires that same node
+    // or its exact unwrapped first child, never a matching source position.
+    u32 chain_node;
     u32 chain_unit;
     // Runtime offsetof keeps only the semantic path's selected step ordinals.
     u32 offsetof_node;
@@ -29960,18 +29960,23 @@ BUSTER_C_INTERNAL bool c_ir_core_spelled_parenthesis(CIntegerIrBuilder* builder,
 // variable-length array dimensions and then its member accesses, all
 // unparenthesized. C_AST_NODE_INVALID when the leftmost descent from `node`
 // through member accesses and subscripts reaches no name; `node` is then an
-// operator. Nodes of one chain share their first token, which keys a one-entry
-// memo, so a chain is measured once however many of its nodes the walk visits.
-BUSTER_C_INTERNAL u32 c_ir_core_chain_unit(CIntegerIrBuilder* builder, CIrExpressionCoreState* state, u32 node)
+// operator. A one-entry memo follows the walk down exact unwrapped first
+// children, so a known chain is measured once however many nodes it visits.
+BUSTER_C_INTERNAL u32 c_ir_core_chain_node_unit(CIntegerIrBuilder* builder, CIrExpressionCoreState* state, u32 node)
 {
     CAst const* ast = builder->syntax_tree;
-    u32 first = builder->syntax_spans->first[node];
+    bool valid = ast && node < ast->node_count;
+    u32 previous = state->chain_node;
+    bool same = valid && previous == node;
+    bool child = valid && previous < ast->node_count &&
+                 (ast->kinds[previous] == C_AST_MEMBER || ast->kinds[previous] == C_AST_MEMBER_ARROW || ast->kinds[previous] == C_AST_INDEX) &&
+                 c_ir_tree_first_child(ast, previous) == node && !c_ir_core_wrapped(builder, node);
     u32 unit = C_AST_NODE_INVALID;
-    if (state->chain_first == first)
+    if (same || child)
     {
         unit = state->chain_unit;
     }
-    else
+    else if (valid)
     {
         u32 depth = 0;
         u32 leaf = node;
@@ -30040,9 +30045,9 @@ BUSTER_C_INTERNAL u32 c_ir_core_chain_unit(CIntegerIrBuilder* builder, CIrExpres
                 unit = leaf;
             }
         }
-        state->chain_first = first;
-        state->chain_unit = unit;
     }
+    state->chain_node = valid ? node : C_AST_NODE_INVALID;
+    state->chain_unit = unit;
     return unit;
 }
 
@@ -30475,7 +30480,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_sizeof(CIntegerIrBuilder* builder, CIr
 }
 
 // A name, and with it the chain of member accesses and VLA subscripts the
-// place machine takes as one place (c_ir_core_chain_unit); the C23 constants;
+// place machine takes as one place (c_ir_core_chain_node_unit); the C23 constants;
 // the function-name words; a call no prepass recorded, which is a source
 // location builtin or a diagnostic. [index, end) is the unit's span;
 // `address_operand` says the unit is the operand of a unary `&`.
@@ -30912,7 +30917,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
             case C_AST_MEMBER_ARROW:
             case C_AST_INDEX:
             {
-                u32 unit = c_ir_core_chain_unit(builder, state, node);
+                u32 unit = c_ir_core_chain_node_unit(builder, state, node);
                 if (unit == node)
                 {
                     state->walk_count -= 1;
@@ -31183,7 +31188,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_begin(CIntegerIrBuild
     u32 start = frame->as.expression_core.start;
     u32 end = frame->as.expression_core.end;
     CIrExpressionCoreState* state = arena_allocate(builder->temporary_arena, CIrExpressionCoreState, 1);
-    *state = (CIrExpressionCoreState){.chain_first = UINT32_MAX, .chain_unit = C_AST_NODE_INVALID};
+    *state = (CIrExpressionCoreState){.chain_node = C_AST_NODE_INVALID, .chain_unit = C_AST_NODE_INVALID};
     frame->as.expression_core.state = state;
     frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     CIrCoreStatus status = C_IR_CORE_NEXT;

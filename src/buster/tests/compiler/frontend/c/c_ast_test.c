@@ -7342,6 +7342,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_lowering_prefix_work(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_lowering_chain_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const forms[] = {
+        S8("struct R {{ struct R *next; int x; }}; int f(struct R *p) {{ return {S8}; }}"),
+        S8("struct R {{ struct R *next; int x; }}; int f(struct R *p) {{ return {S8}; }}"),
+        S8("struct R {{ struct R *next; int x; }}; struct R *get(struct R *p) {{ return p; }} int f(struct R *p) {{ return {S8}; }}"),
+        S8("struct R {{ struct R *next; int x; }}; int f(int n, struct R *p) {{ struct R a[n]; a[0]=*p; return {S8}; }}"),
+    };
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(forms); shape += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            u64 previous = 0;
+            for (u32 sample = 0; sample < 3; sample += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 terms = 128u << sample;
+                char8* expression = arena_allocate(temporary.arena, char8, (u64)terms * 10 + 32);
+                u32 length = 0;
+                if (shape == 1) for (u32 group = 0; group < terms / 16; group += 1) expression[length++] = '(';
+                String8 base = shape == 2 ? S8("get(p)") : shape == 3 ? S8("a") : S8("p");
+                memcpy(expression + length, base.pointer, base.length);
+                length += (u32)base.length;
+                for (u32 term = 0; term < terms; term += 1)
+                {
+                    memcpy(expression + length, "[0].next", 8);
+                    length += 8;
+                    if (shape == 1 && term % 16 == 15) expression[length++] = ')';
+                }
+                memcpy(expression + length, "[0].x", 5);
+                length += 5;
+                String8 source = string_format(temporary.arena, forms[shape], (String8){.pointer = expression, .length = length});
+                CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+                CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+                if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count))
+                {
+                    u32 type_count = analysis.type_count;
+                    CType* original_types = arena_allocate(temporary.arena, CType, type_count);
+                    memcpy(original_types, analysis.types, sizeof(CType) * type_count);
+                    CAstLowerStatistics statistics = {0};
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("lowering-chain-work.c"), preprocess, analysis, target_native,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0, .ast_lower_statistics = &statistics});
+                    BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : source);
+                    BUSTER_TEST(arguments, analysis.type_count == type_count && !memcmp(original_types, analysis.types, sizeof(CType) * type_count));
+                    u64 work = statistics.evaluator_steps;
+                    BUSTER_TEST_RAW(arguments, work >= terms && work <= (u64)terms * 32 && (!previous || work <= previous * 3 + 16),
+                        string_format(temporary.arena, S8("chain work: shape={u32} form={u32} terms={u32} steps={u64} previous={u64}"), shape, form, terms, work, previous));
+                    string_print(string_format(temporary.arena, S8("C_LOWER_CHAIN_WORK shape={u32} form={u32} terms={u32} steps={u64}\n"), shape, form, terms, work));
+                    previous = work;
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_pointer_probe(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9571,6 +9630,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_object_context);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_lowering_prefix_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_lowering_chain_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_pointer_probe);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_array_dependencies);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_enum_scope);

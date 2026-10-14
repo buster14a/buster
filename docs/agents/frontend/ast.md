@@ -2125,7 +2125,7 @@ reductions and the postfix probe are deleted.
   need one:
   - literals;
   - a name, with the member accesses and variable-length array subscripts
-    the place machine takes with it (`c_ir_core_chain_unit`);
+    the place machine takes with it (`c_ir_core_chain_node_unit`);
   - a prepared call, whose record ends where the node does;
   - `sizeof` and `_Alignof`;
   - `__builtin_offsetof`;
@@ -2138,20 +2138,21 @@ reductions and the postfix probe are deleted.
   contributes its value. A group with a root conditional or logical operator
   (innermost group only), a root comma, or an assignment anywhere lowers in
   an `EXPRESSION` frame of its own. Any other group is transparent.
-- **Name chains.** A chain's nodes share their first token, which keys a
-  one-entry memo, so a chain is measured once however many of its nodes the
-  walk visits.
+- **Name chains.** The one-entry memo records the known chain node and its
+  unit. It reuses the unit only for that same node or its exact unwrapped
+  first child, then advances to the child. Source starts never select a
+  cached node. `c_ast_test_lowering_chain_work` counts evaluator steps at
+  128, 256 and 512 terms on member/subscript chains, grouping barriers, call
+  bases and local VLA bases, with both SSA forms and unchanged C type rows.
 - **Source tokens under `-g`.** A unary or binary operator's row takes its
   anchor, the operator token. A cast's takes its `(`. An `INDEX` takes its
   closing `]` (a hoisted or separately lowered subscript, its `[`). A member
   access takes its `.` or `->`, which is the token before its anchor, the
   member name. A failed operator reports the token the walk visited last, as
   the token path reported the token whose arrival reduced it.
-- **Still token ranges** (the temporary adapter of part (c) and step 4):
-  - compound-literal frames;
-  - the `sizeof` operand's type and value queries;
-  - the cast type (`c_ir_group_type_name`);
-  - `__builtin_offsetof`'s designator.
+- **Retained child handoffs.** Compound literals, `sizeof`, casts and
+  `__builtin_offsetof` carry exact child nodes and finished semantic facts.
+  Their temporary token-range query adapters are deleted.
 - **Linear on skewed expressions.** `c_test_tree_evaluator_skew` counts
   `CAstLowerStatistics.evaluator_steps` (walk steps, parenthesis levels and
   name-chain descents) on left- and right-nested arithmetic, prefix chains,
@@ -2159,9 +2160,9 @@ reductions and the postfix probe are deleted.
 
 ### Root splits and operand ends
 
-Part (c) moves the questions the frames around the evaluator asked of token
-ranges onto the range's node (`c_ir_tree_range_node`) and its `CIrHoistFact`
-byte.
+Part (c) moved the questions the frames around the evaluator asked of token
+ranges onto each carried node and its `CIrHoistFact` byte. The temporary
+`c_ir_tree_range_node` recovery facade is deleted.
 
 - **Calls.** A prepared call keeps its `CALL` node
   (`CIrPreparedCall.node`), and `c_ir_call_arguments_counted` splits the

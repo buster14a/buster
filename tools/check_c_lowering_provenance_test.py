@@ -56,6 +56,8 @@ class LoweringProvenanceTests(unittest.TestCase):
             "consume(c_ir_body_nodes_build(arena, ast, function_count));",
             "consume(c_ir_body_nodes_find(keys, count, declaration.body_start - 1));",
             "CIrBodyNodes old_body_index;",
+            "consume(c_ir_core_chain_unit(builder, state, node));",
+            "if (state->chain_first == spans->first[node]) return state->chain_unit;",
             "consume(c_ast_build(arena, preprocess, options));",
             "consume(c_ast_spans_build(ast, preprocess, matches));",
             "consume(c_parse_type_layout(&parse, preprocess, start, end));",
