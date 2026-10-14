@@ -459,7 +459,11 @@ and the operand precedence/postfix walkers have been removed. Conditional
 selection merges its already projected branches in private node-root state;
 it requests only the promoted or null-constant children the merge needs.
 Local identifiers use their retained entity binding and the existing local
-VLA source view, preserving the parameter's adjusted ABI pointer.
+VLA source view, preserving the parameter's adjusted ABI pointer. A bound
+incomplete extern array keeps its bare STRICT/PROMOTED refusal; PREDICTED and
+conditional, arithmetic or subscript value operands use its existing model
+element pointer. That contextual projection does not mint an unsized array row
+or change the retained semantic type.
 
 `c_test_expression_type_projection` checks all three views against verified
 legacy shapes, including qualifiers, nested pointer/function types, bit-field

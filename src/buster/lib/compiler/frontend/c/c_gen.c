@@ -36733,6 +36733,31 @@ struct CIrExpressionProjection
     bool failed;
 };
 
+// An incomplete array has no IR array row. Its existing entity type still
+// names the mapped element, which is enough for a parent value context.
+// Keep this decision outside the strict child task: a bare strict array
+// query must continue to decline for sizeof and source type projections.
+BUSTER_C_INTERNAL IrTypeId c_ir_expression_projection_array_value(CIntegerIrBuilder* builder, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    bool bound = ast && facts && node < ast->node_count && node < facts->node_count && ast->kinds[node] == C_AST_IDENTIFIER &&
+                 (facts->flags[node] & (C_AST_FACT_TYPED | C_AST_FACT_BOUND)) == (C_AST_FACT_TYPED | C_AST_FACT_BOUND);
+    if (bound && facts->payloads[node] < builder->parse.entity_count)
+    {
+        CEntityId entity = {.value = facts->payloads[node]};
+        CTypeId type = builder->parse.entities[entity.value].type;
+        CType const* row = type.value < builder->parse.type_count ? builder->parse.types + type.value : 0;
+        if (row && row->kind == C_TYPE_ARRAY && !row->is_complete &&
+            builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID && !c_ir_find_local_by_entity(builder, entity))
+        {
+            result = c_ir_sizeof_unlowered_array_decay(builder, type);
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_expression_projection_child(CIntegerIrBuilder* builder, CIrExpressionProjection* state,
                                                          u32 node, CIrAstTypeView view, IrTypeId* type)
 {
@@ -36744,6 +36769,22 @@ BUSTER_C_INTERNAL bool c_ir_expression_projection_child(CIntegerIrBuilder* build
         state->failed |= !answer.success;
     }
     return settled && answer.success;
+}
+
+BUSTER_C_INTERNAL bool c_ir_expression_projection_value_child(CIntegerIrBuilder* builder, CIrExpressionProjection* state,
+                                                               u32 node, CIrAstTypeView view, IrTypeId* type)
+{
+    IrTypeId value = c_ir_expression_projection_array_value(builder, node);
+    bool settled = value.value != IR_ID_UNDERLYING_INVALID;
+    if (settled)
+    {
+        *type = value;
+    }
+    else
+    {
+        settled = c_ir_expression_projection_child(builder, state, node, view, type);
+    }
+    return settled;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_expression_projection_decay(CIntegerIrBuilder* builder, IrTypeId type)
@@ -36833,8 +36874,8 @@ BUSTER_C_INTERNAL bool c_ir_expression_projection_conditional(CIntegerIrBuilder*
     u32 first_node = c_ast_child_at(ast, frame->node, omitted ? 0u : 1u);
     u32 second_node = c_ast_child_at(ast, frame->node, omitted ? 1u : 2u);
     CIrAstTypeView view = predicted ? C_IR_AST_TYPE_PREDICTED : C_IR_AST_TYPE_PROMOTED;
-    if (!state->stage && c_ir_expression_projection_child(builder, state, first_node, view, &state->first)) state->stage = 1;
-    if (state->stage == 1 && c_ir_expression_projection_child(builder, state, second_node, view, &state->second)) state->stage = 2;
+    if (!state->stage && c_ir_expression_projection_value_child(builder, state, first_node, view, &state->first)) state->stage = 1;
+    if (state->stage == 1 && c_ir_expression_projection_value_child(builder, state, second_node, view, &state->second)) state->stage = 2;
     if (state->stage == 2)
     {
         IrType const* first = ir_type_from_id(&builder->program->types, state->first);
@@ -36955,6 +36996,8 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
                      kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_COMPOUND_STATEMENT;
         u32 leading = frame->view == C_IR_AST_TYPE_PREDICTED ? c_ir_expression_projection_leading_compound(ast, frame->node) : C_AST_NODE_INVALID;
         u32 selected = c_ast_facts_selection(facts, frame->node);
+        IrTypeId array_value = frame->view == C_IR_AST_TYPE_PREDICTED
+                                   ? c_ir_expression_projection_array_value(builder, frame->node) : IR_TYPE_ID_INVALID;
         CIntegerIrLocal* local = kind == C_AST_IDENTIFIER && (facts->flags[frame->node] & C_AST_FACT_BOUND)
                                     ? c_ir_find_local_by_entity(builder, (CEntityId){.value = facts->payloads[frame->node]}) : 0;
         if (leading != C_AST_NODE_INVALID)
@@ -36976,11 +37019,17 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
         }
         else if (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX)
         {
-            if (!state->stage && c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_STRICT, &state->first)) state->stage = 1;
+            if (!state->stage)
+            {
+                bool settled = kind == C_AST_INDEX
+                                   ? c_ir_expression_projection_value_child(builder, state, first_node, C_IR_AST_TYPE_STRICT, &state->first)
+                                   : c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_STRICT, &state->first);
+                if (settled) state->stage = 1;
+            }
             IrType const* first = ir_type_from_id(&builder->program->types, state->first);
             if (state->stage == 1 && kind == C_AST_INDEX && c_ir_type_is_integer_domain(first))
             {
-                if (c_ir_expression_projection_child(builder, state, c_ast_child_at(ast, frame->node, 1), C_IR_AST_TYPE_STRICT, &state->first)) state->stage = 2;
+                if (c_ir_expression_projection_value_child(builder, state, c_ast_child_at(ast, frame->node, 1), C_IR_AST_TYPE_STRICT, &state->first)) state->stage = 2;
             }
             else if (state->stage == 1) state->stage = 2;
             if (state->stage == 2)
@@ -37004,8 +37053,8 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
         }
         else if (binary)
         {
-            if (!state->stage && c_ir_expression_projection_child(builder, state, first_node, C_IR_AST_TYPE_PROMOTED, &state->first)) state->stage = 1;
-            if (state->stage == 1 && c_ir_expression_projection_child(builder, state, c_ast_child_at(ast, frame->node, 1), C_IR_AST_TYPE_PROMOTED, &state->second)) state->stage = 2;
+            if (!state->stage && c_ir_expression_projection_value_child(builder, state, first_node, C_IR_AST_TYPE_PROMOTED, &state->first)) state->stage = 1;
+            if (state->stage == 1 && c_ir_expression_projection_value_child(builder, state, c_ast_child_at(ast, frame->node, 1), C_IR_AST_TYPE_PROMOTED, &state->second)) state->stage = 2;
             if (state->stage == 2) frame->result_type = c_ir_expression_projection_binary(builder, kind, state->first, state->second);
             admitted = state->stage == 2 && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
         }
@@ -37047,6 +37096,10 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
             frame->result_type = builder->size_type;
         else if (kind == C_AST_LABEL_ADDRESS)
             frame->result_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+        else if (array_value.value != IR_ID_UNDERLYING_INVALID)
+        {
+            frame->result_type = array_value;
+        }
         else if (local)
         {
             // The local owns the source-versus-ABI view of a VLA parameter.

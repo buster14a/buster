@@ -7080,12 +7080,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_type_projection(UnitTestArg
         {S8("choose ? &array[0] : 0"), {{P,I}, {P,I}, {P,I}}},
         {S8("choose ? (void *)0 : &array[0]"), {{P,I}, {P,I}, {P,I}}},
         {S8("__extension__ ({ x; })"), {{V}, {V}, {V}}},
+        {S8("incomplete"), {{NONE}, {NONE}, {P,I}}},
+        {S8("choose ? incomplete : array"), {{P,I}, {P,I}, {P,I}}},
+        {S8("incomplete + 1"), {{P,I}, {P,I}, {P,I}}},
+        {S8("incomplete[1]"), {{I}, {I}, {I}}},
+        {S8("1[incomplete]"), {{I}, {I}, {I}}},
+        {S8("&incomplete[1]"), {{P,I}, {P,I}, {P,I}}},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 source = string_format(temporary.arena,
-            S8("struct S {{ int value; }}; struct Bits {{ unsigned long long narrow : 4; }}; int target(int); "
+            S8("struct S {{ int value; }}; struct Bits {{ unsigned long long narrow : 4; }}; int target(int); extern int incomplete[]; "
                "void projection(volatile int x, volatile struct S object, struct Bits bits, int choose) {{ "
                "int array[3]; (void)({S8}); }}"), cases[index].expression);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
@@ -7128,7 +7134,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_type_projection(UnitTestArg
                     actual.is_atomic == expected.is_atomic && actual.is_volatile == expected.is_volatile, cases[index].expression);
                 expected_depth += 1;
             }
-            BUSTER_TEST_RAW(arguments, projection.success[view] && projection.depth[view] == expected_depth, cases[index].expression);
+            BUSTER_TEST_RAW(arguments, projection.success[view] == (expected_depth != 0) && projection.depth[view] == expected_depth, cases[index].expression);
         }
         c_preprocess_release(&preprocess);
         c_test_scratch_end(temporary);
