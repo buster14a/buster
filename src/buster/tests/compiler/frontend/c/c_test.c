@@ -36134,6 +36134,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             c_test_scratch_end(temporary);
         }
     }
+    // #1247: a constant alignment answer must agree with actual storage.
+    // Escape each address before reading the fixed byte offset, and vary the
+    // caller's stack residue so accidental 32-byte alignment cannot pass.
+    UnitTestResult storage = c_test_run_exit_zero_program(arguments, S8("alignof-scoped-storage"), S8(
+        "enum { REQUEST = 8 };\n"
+        "struct Global { char c; int x __attribute__((aligned(REQUEST))); } global;\n"
+        "static void * volatile escaped;\n"
+        "__attribute__((noinline)) int global_storage(void)\n"
+        "{\n"
+        "    global.x = 77; escaped = &global;\n"
+        "    char *bytes = escaped;\n"
+        "    int failed = (char *)&global.x - bytes != 8 || ((unsigned long long)bytes & 7) != 0;\n"
+        "    if (!failed) failed = *(volatile int *)(bytes + 8) != 77;\n"
+        "    return failed;\n"
+        "}\n"
+        "__attribute__((noinline)) int scoped_storage(void)\n"
+        "{\n"
+        "    enum { REQUEST = 32 };\n"
+        "    struct Local { char c; int x __attribute__((aligned(REQUEST))); } local = {0};\n"
+        "    escaped = &local; local.x = 123;\n"
+        "    char *bytes = escaped;\n"
+        "    int failed = (char *)&local.x - bytes != 32 || ((unsigned long long)bytes & 31) != 0;\n"
+        "    if (!failed) failed = *(volatile int *)(bytes + 32) != 123;\n"
+        "    return failed;\n"
+        "}\n"
+        "__attribute__((noinline)) int neighbouring_storage(int count)\n"
+        "{\n"
+        "    volatile char pad[count]; pad[0] = 7;\n"
+        "    int failed = scoped_storage();\n"
+        "    return failed || pad[0] != 7;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failed = global_storage();\n"
+        "    failed |= 2 * scoped_storage();\n"
+        "    failed |= 4 * neighbouring_storage(16);\n"
+        "    failed |= 8 * neighbouring_storage(32);\n"
+        "    return failed;\n"
+        "}\n"));
+    result.test_count += storage.test_count;
+    result.succeeded_test_count += storage.succeeded_test_count;
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = buster_test_temporary_path(arguments->arena, S8("alignof-member"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
