@@ -49,7 +49,7 @@
 // `machine_fast_close_home_ranges` hand it dense indexes of only the objects
 // that can share storage, the former replaying the slot touches the
 // placement's row census recorded (`MachineFastTouchCensus`) — and
-// `machine_fast_color_homes` and
+// `machine_fast_color_home_pools` and
 // `machine_fast_color_slots` give one storage per simultaneously live object
 // instead of one per object.
 
@@ -4042,7 +4042,8 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
 // interference graph is built and no pair of homes is ever compared.
 // `colors` receives a pool index per selected value and UINT32_MAX elsewhere;
 // the return value is the pool's width.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_color_homes(Arena* arena, MachineFunction const* function, u8 const* slot_needed, u32 const* home_starts,
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u32 machine_fast_color_homes_reference(Arena* arena, MachineFunction const* function, u8 const* slot_needed, u32 const* home_starts,
                                                  u32 const* home_ends, bool vector_pool, u32* colors)
 {
     u32 value_count = function->virtual_register_count;
@@ -4129,6 +4130,173 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_color_homes(Arena* arena, MachineFunction c
     }
     return color_count;
 }
+#endif
+
+typedef struct MachineFastHomePools MachineFastHomePools;
+struct MachineFastHomePools
+{
+    u32 scalar;
+    u32 vector;
+};
+
+// Eligible IDs are already in value order. One stable start-row ordering has
+// exactly the old relative order in each pool, so the two independent heaps
+// retain their colors and free-stack order without scanning unused values or
+// constructing a second row histogram. Empty populations allocate nothing.
+BUSTER_GLOBAL_LOCAL MachineFastHomePools machine_fast_color_home_pools(Arena* arena, MachineFunction const* function,
+                                                                       u32 const* selected_values, u32 selected_count,
+                                                                       u32 const* home_starts, u32 const* home_ends, u32* colors)
+{
+    u32 color_counts[2] = {0};
+    if (selected_count)
+    {
+        u32 row_count = function->instruction_count + 2u;
+        u32* row_offsets = arena_allocate(arena, u32, (u64)row_count + 1u);
+        memset(row_offsets, 0, ((u64)row_count + 1u) * sizeof(*row_offsets));
+        u32 vector_count = 0;
+        for (u32 index = 0; index < selected_count; index += 1)
+        {
+            u32 value = selected_values[index];
+            row_offsets[home_starts[value] + 1u] += 1;
+            vector_count += function->virtual_registers[value].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        }
+        for (u32 row = 0; row < row_count; row += 1)
+        {
+            row_offsets[row + 1u] += row_offsets[row];
+        }
+        u32* order = arena_allocate(arena, u32, selected_count);
+        u64* active = arena_allocate(arena, u64, selected_count);
+        u32* free_colors = arena_allocate(arena, u32, selected_count);
+        for (u32 index = 0; index < selected_count; index += 1)
+        {
+            u32 value = selected_values[index];
+            order[row_offsets[home_starts[value]]++] = value;
+        }
+        u32 pool_offsets[2] = {0, selected_count - vector_count};
+        u32 active_counts[2] = {0};
+        u32 free_counts[2] = {0};
+        for (u32 index = 0; index < selected_count; index += 1)
+        {
+            u32 value = order[index];
+            u32 pool = function->virtual_registers[value].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+            u64* pool_active = active + pool_offsets[pool];
+            u32* pool_free = free_colors + pool_offsets[pool];
+            u32 active_count = active_counts[pool];
+            u32 free_count = free_counts[pool];
+            u32 start = home_starts[value];
+            u32 color;
+            while (active_count && (u32)(pool_active[0] >> 32) < start)
+            {
+                u32 parent = 0;
+                pool_free[free_count++] = (u32)pool_active[0];
+                active_count -= 1;
+                pool_active[0] = pool_active[active_count];
+                while (true)
+                {
+                    u32 left = 2 * parent + 1;
+                    u32 smallest = left < active_count && pool_active[left] < pool_active[parent] ? left : parent;
+                    smallest = left + 1 < active_count && pool_active[left + 1] < pool_active[smallest] ? left + 1 : smallest;
+                    if (smallest == parent)
+                    {
+                        break;
+                    }
+                    u64 swapped = pool_active[parent];
+                    pool_active[parent] = pool_active[smallest];
+                    pool_active[smallest] = swapped;
+                    parent = smallest;
+                }
+            }
+            if (free_count)
+            {
+                color = pool_free[--free_count];
+            }
+            else
+            {
+                color = color_counts[pool]++;
+            }
+            colors[value] = color;
+            pool_active[active_count] = ((u64)home_ends[value] << 32) | color;
+            u32 child = active_count++;
+            while (child && pool_active[(child - 1u) / 2u] > pool_active[child])
+            {
+                u64 swapped = pool_active[(child - 1u) / 2u];
+                pool_active[(child - 1u) / 2u] = pool_active[child];
+                pool_active[child] = swapped;
+                child = (child - 1u) / 2u;
+            }
+            active_counts[pool] = active_count;
+            free_counts[pool] = free_count;
+        }
+    }
+    return (MachineFastHomePools){.scalar = color_counts[0], .vector = color_counts[1]};
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_fast_home_pools_test(Arena* arena)
+{
+    bool result = true;
+    u64 first_bytes[4] = {0};
+    u32 starts[] = {0, 0, 4, 5, 6, 7, UINT32_MAX, 10};
+    u32 ends[] = {4, 4, 9, 8, 7, 9, 0, 10};
+    u32 expected[] = {0, 0, 1, 0, 0, 1, UINT32_MAX, 1};
+    u32 sizes[] = {8, 128, 2048};
+    for (u32 shape = 0; shape < 4; shape += 1)
+    {
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arena, 1);
+            Arena* scratch = temporary.arena;
+            u32 count = sizes[size_index];
+            MachineFunction function = {.instruction_count = 32, .virtual_register_count = count,
+                                          .virtual_registers = arena_allocate(scratch, MachineVirtualRegister, count)};
+            u8* needed = arena_allocate(scratch, u8, count);
+            u32* home_starts = arena_allocate(scratch, u32, count);
+            u32* home_ends = arena_allocate(scratch, u32, count);
+            u32* colors = arena_allocate(scratch, u32, count);
+            u32* reference = arena_allocate(scratch, u32, count);
+            memset(function.virtual_registers, 0, (u64)count * sizeof(*function.virtual_registers));
+            memset(needed, 0, count);
+            memset(home_starts, 0xff, (u64)count * sizeof(*home_starts));
+            memset(home_ends, 0, (u64)count * sizeof(*home_ends));
+            memset(colors, 0xff, (u64)count * sizeof(*colors));
+            memset(reference, 0xff, (u64)count * sizeof(*reference));
+            u32 selected[8];
+            u32 selected_count = 0;
+            for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(starts); value += 1)
+            {
+                bool vector = value == 1 || value == 3 || value == 5;
+                function.virtual_registers[value].register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR
+                                                                     : value == 7 ? MACHINE_REGISTER_CLASS_MASK
+                                                                                  : MACHINE_REGISTER_CLASS_GENERAL;
+                needed[value] = (u8)((shape == 2 || (shape == 1 && !vector) || (shape == 3 && vector)) &&
+                                      starts[value] != UINT32_MAX);
+                home_starts[value] = starts[value];
+                home_ends[value] = ends[value];
+                if (needed[value]) selected[selected_count++] = value;
+            }
+            u64 before = scratch->position;
+            MachineFastHomePools pools = machine_fast_color_home_pools(scratch, &function, selected, selected_count,
+                                                                       home_starts, home_ends, colors);
+            u64 bytes = scratch->position - before;
+            u32 scalar = machine_fast_color_homes_reference(scratch, &function, needed, home_starts, home_ends, false, reference);
+            u32 vector = machine_fast_color_homes_reference(scratch, &function, needed, home_starts, home_ends, true, reference);
+            result = result && pools.scalar == scalar && pools.vector == vector &&
+                     !memcmp(colors, reference, (u64)count * sizeof(*colors));
+            result = result && pools.scalar == (shape == 1 || shape == 2 ? 2u : 0u) &&
+                     pools.vector == (shape >= 2 ? 2u : 0u);
+            for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(expected); value += 1)
+            {
+                result = result && colors[value] == (needed[value] ? expected[value] : UINT32_MAX);
+            }
+            if (!shape) result = result && bytes == 0;
+            if (!size_index) first_bytes[shape] = bytes;
+            else result = result && bytes == first_bytes[shape];
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+#endif
 
 // The same linear scan for the selector's frame objects, whose widths differ:
 // a group's storage is its widest member and its start alignment the strictest
@@ -5356,6 +5524,9 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
             }
         }
+        bool interval_home_pools = block_pool_size == UINT32_MAX || block_vector_pool_size == UINT32_MAX;
+        u32* selected_homes = interval_home_pools ? arena_allocate(arena, u32, home_count ? home_count : 1u) : 0;
+        u32 selected_home_count = 0;
         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
         {
             // A home the edit rows bound is one this function both fills and
@@ -5374,6 +5545,10 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                                    !home_read_first[register_index] && !prepass->escapes[register_index] && inside_block;
             bool colorable = cross_block_colorable || local_colorable;
             home_starts[register_index] = colorable ? home_starts[register_index] : UINT32_MAX;
+            if (interval_home_pools && slot_needed[register_index] && home_starts[register_index] != UINT32_MAX)
+            {
+                selected_homes[selected_home_count++] = register_index;
+            }
         }
         if (reuse_frame_storage && linear_cfg)
         {
@@ -5515,12 +5690,15 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // Two pools, one per home width: the eight-byte scalar homes and the
         // sixty-four-byte vector ones, so a rarely spilled vector never widens
         // the slots the scalar homes share.
-        u32 pool_size = block_pool_size != UINT32_MAX && block_vector_pool_size != UINT32_MAX
-                            ? block_pool_size
-                            : machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, false, pool_indices);
-        u32 vector_pool_size = block_pool_size != UINT32_MAX && block_vector_pool_size != UINT32_MAX
-                                   ? block_vector_pool_size
-                                   : machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, true, pool_indices);
+        // Linear closure only widens the selected ranges; it does not change
+        // eligibility. Branching closure has already produced block colors or
+        // fallen back to the same local eligibility recorded above.
+        MachineFastHomePools home_pools = interval_home_pools
+                                             ? machine_fast_color_home_pools(arena, function, selected_homes, selected_home_count,
+                                                                             home_starts, home_ends, pool_indices)
+                                             : (MachineFastHomePools){.scalar = block_pool_size, .vector = block_vector_pool_size};
+        u32 pool_size = home_pools.scalar;
+        u32 vector_pool_size = home_pools.vector;
         // The pushed callee-saved registers sit between the frame base and the
         // slots, so every offset starts past them, and the stack allocation
         // keeps sixteen-alignment across an odd push count.

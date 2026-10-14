@@ -578,7 +578,12 @@ hosts execute its independent expected-value fixture.
   their path-specific repairs have the same proof. Both object classes are
   assigned by one linear scan in start order with a free-color stack; no
   interference graph is built. Scalar (8-byte) and vector (64-byte, 16-byte
-  aligned) homes keep separate pools. Reuse requires a linear block/row tiling
+  aligned) homes keep separate pools. Their interval colorer consumes the dense
+  eligible home IDs collected during classification, with one stable start-row
+  ordering and independent heaps and free-color stacks. It avoids separate
+  scalar/vector scans over all virtual registers and a second row histogram;
+  an empty selected population does not allocate colorer scratch. Relative
+  ordering, endpoint retirement and pool assignments stay unchanged. Reuse requires a linear block/row tiling
   and
   `MachineFunction.returns_twice_absence_certified`, which the selectors publish
   when no call in the function returns twice: a `longjmp` can re-enter the frame
