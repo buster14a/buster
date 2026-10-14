@@ -38452,10 +38452,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_parameter_address_runtime(UnitTe
         "static int vla_alias(int *a) { typedef int Row[bound()]; const Row *p = (const Row *)a;\n"
         " return sizeof *p != 2 * sizeof(int) || (*p)[1] != 9 || bound_effects != 1; }\n"
         "int main(void) { char *a[2] = {0}; char *b[2] = {0}; int matrix[2][2] = {{1, 2}, {7, 9}};\n"
-        " int *pointers[2] = {&matrix[0][0], &matrix[1][1]};\n"
+        " int *pointers[2] = {&matrix[0][0], &matrix[1][1]}; const A literal = {7, 9};\n"
+        " int generic = _Generic(literal, const int *: 1, default: 0);\n"
         " int failure = probe(a, b) || rows(matrix) || qualified(matrix[0], matrix[1]) || qualified_rows(matrix)\n"
         " || pointer_elements(pointers) || vla_alias(matrix[1]) || volatile_elements(matrix);\n"
-        " return failure || a[0] != 0 || a[1] != 0 || matrix[1][0] != 8 || bound_effects != 1; }\n");
+        " return failure || a[0] != 0 || a[1] != 0 || matrix[1][0] != 8 || bound_effects != 1 || generic != 1; }\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("array-parameter-address"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))

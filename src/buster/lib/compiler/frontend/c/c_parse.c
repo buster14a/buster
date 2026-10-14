@@ -27446,7 +27446,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId 
     {
         return C_TYPE_ID_INVALID;
     }
-    type = c_parse_unqualified_type(result, type);
+    // Array qualifiers belong to the element graph and survive decay.
+    if (result->types[type.value].kind != C_TYPE_ARRAY)
+    {
+        type = c_parse_unqualified_type(result, type);
+    }
     if (type.value >= result->type_count)
     {
         return C_TYPE_ID_INVALID;

@@ -18,7 +18,7 @@ Qualifying an array alias copies its array chain and qualifies the element,
 including nested arrays and pointer elements. `const A a` therefore denotes
 a mutable pointer to const elements; only a bracket `const` makes the adjusted
 pointer read-only. Copies retain their original bound IDs and alignment
-records. Canonical mapping uses the copied element graph as well as the alias
+records; expression decay retains the qualified element graph. Canonical mapping uses the copied element graph as well as the alias
 layout owner, preserving volatile element accesses. Array qualification does
 not fit the member interner's single-row key, so its read-only probe declines
 and the semantic producer constructs the graph without changing original rows.
