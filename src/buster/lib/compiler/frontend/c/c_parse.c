@@ -42553,7 +42553,7 @@ BUSTER_C_INTERNAL void c_parse_token_mask_range(u64* mask, u32 start, u32 end)
 // body. The semantic token proof still covers initializers, specifiers, typeof,
 // bounds and parsed attribute expressions. Bodies and opaque unknown-namespace
 // attribute payloads are excluded contexts; the latter are balanced token
-// sequences, not expressions (C23 6.7.13.2), in the retained syntax contract.
+// sequences, not expressions (WG14 N3096 6.7.12.1), in the syntax contract.
 // A unit without a candidate allocates nothing, and diagnostics stay in source
 // order regardless of declaration/node order.
 BUSTER_C_INTERNAL void c_parse_validate_file_scope_statement_expressions(CParseResult* result, CPreprocessResult preprocess)
