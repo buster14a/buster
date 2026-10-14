@@ -2,7 +2,7 @@
 
 [Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)
 
-Policy hosted-ci-cohort-v1; refresh 2026-10-13T21:52:13Z. Cohort fields and missing values:
+Policy hosted-ci-cohort-v1; refresh 2026-10-14T01:15:19Z. Cohort fields and missing values:
 
 | Field | Value |
 |---|---|
@@ -37,15 +37,15 @@ Context qualification: incomplete-producer-context. Unknown critical context pre
 
 ### Trailing comparison
 
-**insufficient data**. Baseline: n=0; median/dispersion unavailable; p95 unavailable (requires 20). Candidate: n=1; median 55.0 s; MAD 0.0 s; 1 UTC date buckets; p95 unavailable (requires 20). Change unavailable (percent unavailable below two-second baseline). Observed practical floor 2.0 s; candidate variability allowance 2.0 s.
+**insufficient data**. Baseline: n=0; median/dispersion unavailable; p95 unavailable (requires 20). Candidate: n=2; median 58.0 s; MAD 3.0 s; 1 UTC date buckets; p95 unavailable (requires 20). Change unavailable (percent unavailable below two-second baseline). Observed practical floor 2.0 s; candidate variability allowance 9.0 s.
 
 **Trailing baseline observations:** unavailable.
 
-**Candidate observations:** [job 115468466884](https://github.com/buster14a/buster/actions/runs/38436013078/job/115468466884) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38436013078/attempts/1) / [tested 6d4694883990](https://github.com/buster14a/buster/commit/6d4694883990f8043d22794ff38cf070ddbfc134) at 2026-10-13T18:29:33Z.
+**Candidate observations:** [job 115468466884](https://github.com/buster14a/buster/actions/runs/38436013078/job/115468466884) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38436013078/attempts/1) / [tested 6d4694883990](https://github.com/buster14a/buster/commit/6d4694883990f8043d22794ff38cf070ddbfc134) at 2026-10-13T18:29:33Z; [job 115592633496](https://github.com/buster14a/buster/actions/runs/38472855130/job/115592633496) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38472855130/attempts/1) / [tested 42a66b13235e](https://github.com/buster14a/buster/commit/42a66b13235ebe4fa2564175f48b354e2a268303) at 2026-10-13T23:22:32Z.
 
 ### Cumulative change from the fixed initial anchor
 
-**noncomparable/workload-or-environment changed**. Baseline: n=9; median 52.0 s; MAD 3.0 s; 3 UTC date buckets; p95 unavailable (requires 20). Candidate: n=1; median 55.0 s; MAD 0.0 s; 1 UTC date buckets; p95 unavailable (requires 20). Change: +3.0 s (+5.8%). Observed practical floor 9.0 s; candidate variability allowance 2.0 s.
+**noncomparable/workload-or-environment changed**. Baseline: n=9; median 52.0 s; MAD 3.0 s; 3 UTC date buckets; p95 unavailable (requires 20). Candidate: n=2; median 58.0 s; MAD 3.0 s; 1 UTC date buckets; p95 unavailable (requires 20). Change: +6.0 s (+11.5%). Observed practical floor 9.0 s; candidate variability allowance 9.0 s.
 
 Anchor reason: initial observations of this exact policy/cohort. It fills at most twenty points and never slides. Candidate overlap is excluded. Changing an anchor requires a new explicit report/policy and recorded reason; old rows remain.
 
@@ -58,3 +58,4 @@ These are descriptive CI signals, not independent significance tests or paired e
 | Started | Outcome / population | Elapsed s | Source evidence |
 |---|---|---:|---|
 | 2026-10-13T18:29:33Z | success / executed / physical-execution | 55 | [job 115468466884](https://github.com/buster14a/buster/actions/runs/38436013078/job/115468466884) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38436013078/attempts/1) / [tested 6d4694883990](https://github.com/buster14a/buster/commit/6d4694883990f8043d22794ff38cf070ddbfc134) |
+| 2026-10-13T23:22:32Z | success / executed / physical-execution | 61 | [job 115592633496](https://github.com/buster14a/buster/actions/runs/38472855130/job/115592633496) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38472855130/attempts/1) / [tested 42a66b13235e](https://github.com/buster14a/buster/commit/42a66b13235ebe4fa2564175f48b354e2a268303) |
