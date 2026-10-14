@@ -131,6 +131,8 @@
 //   IDENTIFIER   bound through identifier_use_by_token_plus_one to an object,
 //                function, parameter, local or enumerator: the entity's type,
 //                as c_parse_direct_expression_base answers the single token.
+//                An array parameter reads its interned adjusted pointer row;
+//                absent rows decline to the token query without appending.
 //                In an initializer, an unbound name is looked up instead, as
 //                that function falls back to doing.
 //   NUMBER,      c_parse_expression_leaf_without_cast itself, the leaf the
