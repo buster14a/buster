@@ -4153,9 +4153,22 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutC
                 query.worker = true;
                 u64 scratch_mark = context->arena->position;
                 u32 width_count = context->result->deferred_bit_field_width_diagnostic_count;
+                u32 input_members = input.model.member_count;
+                u32 input_widths = input.model.deferred_bit_field_width_diagnostic_count;
+                u32 input_diagnostics = input.model.diagnostic_count;
                 CIntegerConstant answer = c_parse_type_integer_constant(context->arena, context->preprocess,
                     current ? &input.model : context->result, input.scope, input.start, input.end);
                 query.worker = false;
+                // Child readers forward owned width evidence to their captured
+                // view. Publish that evidence through the existing copying
+                // boundary before its model arenas are released. An exhausted
+                // body still forwards nothing.
+                if (current && !c_parse_body_scratch_exhausted() &&
+                    c_parse_forward_type_query_bit_field_width_diagnostics(context->result->arena, context->preprocess,
+                        context->result, &input.model, input_members, input_widths, input_diagnostics))
+                {
+                    answer.valid = false;
+                }
                 // Preserve newly forwarded width diagnostics if the caller's
                 // model and scratch share an arena. Other worker scratch has
                 // no reader after the protected query returned.

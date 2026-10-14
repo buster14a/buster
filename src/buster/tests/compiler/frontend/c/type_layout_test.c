@@ -1243,6 +1243,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_typed_guard_recovery(UnitT
     return result;
 }
 
+// A width diagnosed only by a saved child query must retain its owned
+// source evidence after all private continuation arenas have been released.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_typed_child_diagnostic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("struct A { _Alignas(sizeof(struct {\n"
+                        "_Alignas(sizeof(struct { int x : -1; }) == 1 ? 1 : 1) char c;\n"
+                        "})) char c; };\n");
+    CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, source);
+    BUSTER_TEST(arguments, unit.preprocess.diagnostic_count == 0);
+    u32 width_reports = 0;
+    for (u32 index = 0; index < unit.parse.diagnostic_count; index += 1)
+    {
+        CDiagnostic diagnostic = unit.parse.diagnostics[index];
+        if (diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH)
+        {
+            width_reports += 1;
+            BUSTER_STRING_TEST(arguments, diagnostic.message, S8("bit-field 'x' has negative width (-1)"));
+            BUSTER_TEST(arguments, diagnostic.location.line == 2 && diagnostic.location.column != 0);
+        }
+    }
+    BUSTER_TEST(arguments, width_reports == 1 && c_test_layout_typed_query_idle());
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1273,6 +1300,7 @@ UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_member_replay);
     C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_alignment_controls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_guard_recovery);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_typed_child_diagnostic);
     return result;
 }
 
