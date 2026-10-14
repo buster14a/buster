@@ -3493,14 +3493,7 @@ BUSTER_C_INTERNAL CScopeId c_ir_current_scope(CIntegerIrBuilder* builder)
 // the comparison ignores any other token. `type` is the operand type the
 // resolver sized, when it had one; only an integer type has a signedness to
 // compare.
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 #endif
-
-BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32 expression_start, u32 index)
-{
-    CScopeId scope = c_ir_current_scope(builder);
-    return c_parse_label_address_prefix_with_typedef(&builder->parse, &builder->preprocess, scope, expression_start, index);
-}
 
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, CTypeId type);
@@ -4445,8 +4438,6 @@ BUSTER_C_INTERNAL void c_ir_constant_store_unit_bits(IrProgram* program, u64 siz
 BUSTER_C_INTERNAL void c_ir_constant_deposit_bit_field(IrProgram* program, u8* bytes, u64 offset, u64 unit, u32 bit_offset, u32 bit_width, u64 value,
                                                        bool clear);
 
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
-
 BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
 {
     typedef struct CIrDelimiterStackEntry CIrDelimiterStackEntry;
@@ -4499,44 +4490,6 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
     scratch_end(temporary);
     return valid;
 }
-
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
-{
-    if (builder->stream_matching_delimiters_plus_one)
-    {
-        if (open < builder->preprocess.token_count)
-        {
-            // Both arrays store the match plus one, so an absent match decodes
-            // to UINT32_MAX and the range test below rejects it unchanged.
-            u32 match = builder->stream_matching_delimiters_plus_one[open] - 1;
-            if (match < end && c_token_is_punctuator(&builder->preprocess.tokens[open], opening) &&
-                c_token_is_punctuator(&builder->preprocess.tokens[match], closing))
-            {
-                return match;
-            }
-        }
-        u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
-        IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
-        return scanned;
-    }
-    if (open >= builder->body_token_start)
-    {
-        u32 offset = open - builder->body_token_start;
-        if (offset < builder->body_token_count)
-        {
-            u32 match = builder->matching_delimiters_plus_one[offset] - 1;
-            if (match < end && c_token_is_punctuator(&builder->preprocess.tokens[open], opening) &&
-                c_token_is_punctuator(&builder->preprocess.tokens[match], closing))
-            {
-                return match;
-            }
-        }
-    }
-    u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
-    IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
-    return scanned;
-}
-
 
 BUSTER_C_INTERNAL u32 c_ir_tree_range_node(CIntegerIrBuilder* builder, u32 start, u32 end);
 
@@ -5833,8 +5786,6 @@ BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity_or_lookup(CIntegerIrBuilder* 
     return entity;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
-
 // This compatibility caller still supplies a source opener, whose retained
 // delimiter boundary identifies an exact TYPE_NAME. No token word is tested.
 BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u32 open)
@@ -5848,12 +5799,6 @@ BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u
 BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close)
 {
     return c_ir_type_name_node(builder, c_ir_type_name_node_at(builder, open + 1, close));
-}
-
-BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close, IrTypeId* type_out)
-{
-    *type_out = c_ir_group_type_name(builder, open, close);
-    return type_out->value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_C_INTERNAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)
@@ -11376,8 +11321,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* build
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source);
 
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
-
 BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place_raw(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source)
 {
     if (base.value >= builder->function->value_count || index.value >= builder->function->value_count)
@@ -13605,12 +13548,6 @@ BUSTER_C_INTERNAL void c_ir_ext80_store_bytes(u8* bytes, u64 significand, u16 ex
     }
     bytes[8] = (u8)exponent_sign;
     bytes[9] = (u8)(exponent_sign >> 8);
-}
-
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_initializer(CIntegerIrBuilder* builder, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out)
-{
-    return c_semantic_ext80_fold_initializer(builder->arena, builder->preprocess, start, end, significand_out, exponent_sign_out,
-                                             &builder->failure_message, &builder->failure_token_index);
 }
 
 BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
@@ -16786,7 +16723,6 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
     c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.suffix_cursor);
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 node);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
@@ -18099,10 +18035,6 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
-
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
-
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
 
@@ -21883,41 +21815,12 @@ BUSTER_C_INTERNAL u32 c_ir_tree_range_node(CIntegerIrBuilder* builder, u32 start
 // `first`: the sizeof/_Alignof node at its keyword (`first` == `token`), or the
 // binary operator whose left operand starts at `first`. C_AST_NODE_INVALID when
 // the unit has no spans or no such node.
-BUSTER_C_INTERNAL u32 c_ir_tree_anchored_node(CIntegerIrBuilder* builder, u32 first, u32 token)
-{
-    u32 node = C_AST_NODE_INVALID;
-    CAstSpans const* spans = builder->syntax_spans;
-    u32 hit = spans && spans->start_head && builder->syntax_tree && first < spans->token_total ? spans->start_head[first] : 0;
-    while (hit && node == C_AST_NODE_INVALID)
-    {
-        node = builder->syntax_tree->tokens[hit - 1] == token ? hit - 1 : C_AST_NODE_INVALID;
-        hit = spans->link[hit - 1];
-    }
-    return node;
-}
-
 // Where the operand of the sizeof or _Alignof keyword at `word` ends: the end
 // of the keyword's node, which covers a compound literal's initializer and any
 // postfix suffix on it. `word` itself when the keyword anchors no such node or
 // the node reaches past `end`.
-BUSTER_C_INTERNAL u32 c_ir_tree_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 word, u32 end)
-{
-    u32 node = c_ir_tree_anchored_node(builder, word, word);
-    u32 kind = node != C_AST_NODE_INVALID ? builder->syntax_tree->kinds[node] : C_AST_KIND_COUNT;
-    bool unevaluated = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION ||
-                       kind == C_AST_ALIGNOF_TYPE;
-    u32 node_end = unevaluated ? builder->syntax_spans->end[node] : word;
-    return node_end <= end ? node_end : word;
-}
-
 // Whether [start, end), after balanced outer parentheses, is one cast whose
 // type-name group opens at `open`.
-BUSTER_C_INTERNAL bool c_ir_tree_range_is_cast(CIntegerIrBuilder* builder, u32 start, u32 end, u32 open)
-{
-    u32 node = c_ir_tree_range_node(builder, start, end);
-    return node != C_AST_NODE_INVALID && builder->syntax_tree->kinds[node] == C_AST_CAST && builder->syntax_tree->tokens[node] == open;
-}
-
 // One entry of a hoisting walk: a node, or the delimiter group a node opens.
 typedef enum CIrTreeWalkTag
 {
@@ -22523,8 +22426,6 @@ u64 c_test_logical_call_reference_rows(void)
     return 0;
 }
 #endif
-
-BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
 BUSTER_C_INTERNAL u32 c_ir_core_wraps(CIntegerIrBuilder* builder, u32 node, u32 limit);
 
@@ -28680,12 +28581,6 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_local_query_type(CIntegerIrBuilder* builder,
     return result;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    u32 node = c_ir_type_name_node_at(builder, start, end);
-    return c_ir_type_name_node(builder, node);
-}
-
 BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open, u32 initializer_close)
@@ -29099,8 +28994,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
     }
     return result;
 }
-
-BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
 // Initializer topology and selections are retained by semantic analysis in
 // CInitializerPlan (#4061). The value node, destination path and list markers
@@ -29995,21 +29888,6 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
         }
     }
     return status;
-}
-
-BUSTER_C_INTERNAL bool c_ir_promoted_member_type(CIntegerIrBuilder* builder, IrTypeId root, String8 member, IrTypeId* result)
-{
-    CIrPromotedMemberPath path = {0};
-    if (!c_ir_promoted_member_path(builder, root, member, &path))
-    {
-        if (path.ambiguous)
-        {
-            builder->failure_message = S8("ambiguous promoted member designator");
-        }
-        return false;
-    }
-    *result = path.type;
-    return true;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
@@ -32159,8 +32037,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     }
     return folded.value != IR_ID_UNDERLYING_INVALID ? folded : c_ir_truth_value_rows(builder, value, source);
 }
-
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_core_wrapped(CIntegerIrBuilder* builder, u32 node);
 
@@ -36934,51 +36810,6 @@ BUSTER_C_SHARED u64 c_test_ir_label_find_probes(void)
 }
 #endif
 
-BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
-{
-    // The shape sidecar answers this whole query 64 tokens at a time; the row
-    // scan below stays as the definition for a stream that carries no
-    // sidecar, for a host without the wide compares, and as the reference the
-    // windowed kernel is held to.
-#if BUSTER_C_LEX_COMPACT
-    CTokenShape const* shapes = c_preprocess_token_shapes(&preprocess);
-    if (BUSTER_LIKELY(shapes != 0))
-    {
-        return c_shape_matching_delimiter(shapes, open, end, opening, closing);
-    }
-#endif
-    // The pair is loop-invariant, so it becomes one set the scan tests each
-    // token against: the two chained compares per token were two dependent
-    // branches, and the delimiters themselves are a small minority of the
-    // range being scanned.
-    u64 delimiters = C_PUNCTUATOR_BIT(opening) | C_PUNCTUATOR_BIT(closing);
-    u32 depth = 0;
-    for (u32 index = open; index < end; index += 1)
-    {
-        u8 punctuator = preprocess.tokens[index].punctuator;
-        if (c_punctuator_in_set(punctuator, delimiters))
-        {
-            if (punctuator == opening)
-            {
-                depth += 1;
-            }
-            else
-            {
-                if (!depth)
-                {
-                    return UINT32_MAX;
-                }
-                depth -= 1;
-                if (!depth)
-                {
-                    return index;
-                }
-            }
-        }
-    }
-    return UINT32_MAX;
-}
-
 // The unit's retained span facts (GitHub #3102 step 1), in a private arena:
 // one c_ast_spans_build over the whole tree, before the first function is
 // lowered. Null without a tree or a delimiter index, or when the arena cannot
@@ -37118,8 +36949,6 @@ BUSTER_C_INTERNAL void c_ir_builder_syntax_attach(CIntegerIrBuilder* builder, CI
     builder->syntax_walked = attached ? syntax_spans->walked : 0;
     builder->syntax_walked_bytes = attached ? (ast->node_count + 7) / 8 : 0;
 }
-
-BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
 #define C_IR_SWITCH_CHUNK_VALUE_CAPACITY (UINT16_MAX - 1u)
 
@@ -42121,9 +41950,6 @@ BUSTER_C_INTERNAL bool c_ir_symbol_is_thread_local(CIntegerIrBuilder* builder, I
     return symbol_value && symbol_value->is_thread_local;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId target_type,
-                                                                      u8* bytes, u64 byte_count, bool* handled);
-
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_fail(CIntegerIrBuilder* builder, String8 message, u32 token);
 
 // The construct an element the folder could not reduce is, in the words the
@@ -43789,43 +43615,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator_union_push(CIntegerI
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result);
-
 // `size` bytes of `bits`, least significant first: what
 // c_ir_constant_store_unit_bits writes for a little-endian target and a
 // member no wider than the bits.  Spelled per size so the stores merge.
-BUSTER_C_INTERNAL void c_ir_constant_store_little_endian(u8* bytes, u64 size, u64 bits)
-{
-    switch (size)
-    {
-    case 1:
-        bytes[0] = (u8)bits;
-        break;
-    case 2:
-        bytes[0] = (u8)bits;
-        bytes[1] = (u8)(bits >> 8);
-        break;
-    case 4:
-        bytes[0] = (u8)bits;
-        bytes[1] = (u8)(bits >> 8);
-        bytes[2] = (u8)(bits >> 16);
-        bytes[3] = (u8)(bits >> 24);
-        break;
-    case 8:
-        bytes[0] = (u8)bits;
-        bytes[1] = (u8)(bits >> 8);
-        bytes[2] = (u8)(bits >> 16);
-        bytes[3] = (u8)(bits >> 24);
-        bytes[4] = (u8)(bits >> 32);
-        bytes[5] = (u8)(bits >> 40);
-        bytes[6] = (u8)(bits >> 48);
-        bytes[7] = (u8)(bits >> 56);
-        break;
-    default:
-        BUSTER_TODO();
-    }
-}
-
 // F5's walk order drives static stores. The only stack suspensions materialize
 // a ranged value once, or a compound literal value before its destination copy.
 typedef struct CIrInitializerPlanProjection CIrInitializerPlanProjection;
@@ -45283,93 +45075,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
                 return true;
             }
             return false;
-        }
-    }
-
-    return false;
-}
-
-BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result)
-{
-    CToken token = builder->preprocess.tokens[token_index];
-    if (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__func__")))
-    {
-        *result = c_ir_function_name_object(builder, token);
-        return result->kind == C_IR_CONSTANT_LVALUE;
-    }
-    if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
-    {
-        *result = c_ir_constant_integer(builder->bool_type, string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")));
-        return true;
-    }
-    if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
-    {
-        *result = (CIrConstantValue){.type = builder->nullptr_type, .symbol = IR_SYMBOL_ID_INVALID, .kind = C_IR_CONSTANT_POINTER};
-        return true;
-    }
-    CEntityId entity_id = c_ir_constant_entity_at(builder, token_index);
-    if (entity_id.value < builder->parse.entity_count)
-    {
-        CEntity* entity = builder->parse.entities + entity_id.value;
-        if ((entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value)) &&
-            entity->type.value < builder->parse.type_count &&
-            builder->c_type_ir_map[entity->type.value].value != IR_ID_UNDERLYING_INVALID)
-        {
-            IrTypeId type = builder->c_type_ir_map[entity->type.value];
-            CIrWideInteger bits = {.low = entity->constant_value};
-            if (entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count)
-            {
-                bits.high = builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high;
-            }
-            if (entity->constant_is_negative) bits = c_ir_wide_negate(bits);
-            *result = c_ir_constant_integer(type, bits.low);
-            result->integer_high = bits.high;
-            return true;
-        }
-        // A function-local static is C_ENTITY_LOCAL with a symbol -- the
-        // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
-        // _kwtuple is exactly that -- and it folds like any file-scope
-        // object.  An automatic local has no symbol and stays refused.
-        bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
-        if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
-        {
-            IrSymbolId symbol = builder->entity_symbols[entity_id.value];
-            IrTypeId type = builder->c_type_ir_map[entity->type.value];
-            IrType* type_value = ir_type_from_id(&builder->program->types, type);
-            // An incomplete `extern T a[];` has no IR array type, so it cannot
-            // be an lvalue here; as a value it is only the pointer to its
-            // element, which is what `a + 1`, `&a[1]` and `c ? a : "x"` fold
-            // against (relocation to the symbol, addend in element units).
-            IrTypeId decayed = IR_TYPE_ID_INVALID;
-            if (!type_value && type.value == IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID)
-            {
-                decayed = c_ir_sizeof_unlowered_array_decay(builder, entity->type);
-            }
-            bool lvalue = type_value && type_value->layout.resolved;
-            if (lvalue || decayed.value != IR_ID_UNDERLYING_INVALID)
-            {
-                *result = (CIrConstantValue){
-                    .type = lvalue ? type : decayed,
-                    .symbol = symbol,
-                    .kind = lvalue ? C_IR_CONSTANT_LVALUE : C_IR_CONSTANT_POINTER,
-                };
-                return true;
-            }
-        }
-        if (entity->kind == C_ENTITY_FUNCTION && entity->type.value < builder->parse.type_count)
-        {
-            IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
-            IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
-            if (pointer_type.value != IR_ID_UNDERLYING_INVALID)
-            {
-                *result = (CIrConstantValue){
-                    .type = pointer_type,
-                    .symbol = builder->entity_symbols[entity_id.value],
-                    .kind = C_IR_CONSTANT_POINTER,
-                    .function_designator = true,
-                };
-                return result->symbol.value != IR_ID_UNDERLYING_INVALID;
-            }
         }
     }
 
@@ -47470,275 +47175,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_binary(CIntegerIrBuilde
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_builtin(CIntegerIrBuilder* builder, u32 start, u32 end,
-                                                                  CIrConstantComplexInitializerValue* result)
-{
-    if (end < start + 5 || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER ||
-        !string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("__builtin_complex")) ||
-        !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-        c_ir_matching_delimiter(builder->preprocess, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                C_PUNCTUATOR_RIGHT_PARENTHESIS) != end - 1)
-    {
-        return false;
-    }
-    u32 comma = UINT32_MAX;
-    u32 depth = 0;
-    for (u32 index = start + 2; index + 1 < end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            if (!depth)
-            {
-                return false;
-            }
-            depth -= 1;
-        }
-        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            if (comma != UINT32_MAX)
-            {
-                return false;
-            }
-            comma = index;
-        }
-    }
-    if (comma == UINT32_MAX || comma == start + 2 || comma + 1 == end - 1)
-    {
-        return false;
-    }
-    CIrConstantValue real = {0};
-    CIrConstantValue imaginary = {0};
-    if (!c_ir_constant_evaluate(builder, start + 2, comma, &real) ||
-        !c_ir_constant_evaluate(builder, comma + 1, end - 1, &imaginary))
-    {
-        return false;
-    }
-    IrTypeId element = c_ir_constant_common_type(builder, real.type, imaginary.type);
-    IrType* element_type = ir_type_from_id(&builder->program->types, element);
-    IrTypeId complex_type = element_type && element_type->kind == IR_TYPE_FLOAT
-                                ? c_ir_complex_type_for_element(builder, element)
-                                : IR_TYPE_ID_INVALID;
-    CIrConstantValue converted_real = {0};
-    CIrConstantValue converted_imaginary = {0};
-    if (!element_type || element_type->kind != IR_TYPE_FLOAT ||
-        !c_ir_constant_cast(builder, &real, element, &converted_real) ||
-        !c_ir_constant_cast(builder, &imaginary, element, &converted_imaginary))
-    {
-        return false;
-    }
-    *result = (CIrConstantComplexInitializerValue){
-        .real = converted_real,
-        .imaginary = converted_imaginary,
-        .type = complex_type,
-        .element_type = element,
-        .is_complex = true,
-    };
-    return true;
-}
-
-BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end,
-                                                                   CIrConstantComplexInitializerValue* result)
-{
-    bool trimmed = true;
-    while (trimmed && start < end)
-    {
-        trimmed = false;
-        if (c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[start],
-                                    C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
-        {
-            start += 1;
-            trimmed = true;
-        }
-        else if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                 c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                         C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
-        {
-            start += 1;
-            end -= 1;
-            trimmed = true;
-        }
-    }
-    if (start >= end)
-    {
-        return false;
-    }
-    CIrConstantValue scalar = {0};
-    if (c_ir_constant_evaluate(builder, start, end, &scalar))
-    {
-        *result = (CIrConstantComplexInitializerValue){.real = scalar, .type = scalar.type};
-        return true;
-    }
-    u32 additive = UINT32_MAX;
-    u32 multiplicative = UINT32_MAX;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    bool previous_is_operand = false;
-    for (u32 index = start; index < end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            parentheses += 1;
-            previous_is_operand = false;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            if (!parentheses)
-            {
-                return false;
-            }
-            parentheses -= 1;
-            previous_is_operand = true;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-            previous_is_operand = false;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-        {
-            if (!brackets)
-            {
-                return false;
-            }
-            brackets -= 1;
-            previous_is_operand = true;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            braces += 1;
-            previous_is_operand = false;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            if (!braces)
-            {
-                return false;
-            }
-            braces -= 1;
-            previous_is_operand = true;
-            continue;
-        }
-        if (parentheses || brackets || braces || token.kind == C_TOKEN_INVALID)
-        {
-            continue;
-        }
-        if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
-        {
-            // A diagnostic marker cannot turn the following unary sign
-            // into a binary operator. Its operand position stays unchanged.
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS))
-        {
-            if (previous_is_operand)
-            {
-                additive = index;
-            }
-            previous_is_operand = false;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_SLASH))
-        {
-            if (previous_is_operand)
-            {
-                multiplicative = index;
-            }
-            previous_is_operand = false;
-            continue;
-        }
-        previous_is_operand = token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_IDENTIFIER ||
-                              token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL;
-    }
-    u32 binary = additive != UINT32_MAX ? additive : multiplicative;
-    if (binary != UINT32_MAX)
-    {
-        CIrConstantComplexInitializerValue left = {0};
-        CIrConstantComplexInitializerValue right = {0};
-        CToken token = builder->preprocess.tokens[binary];
-        CConditionalOperator operation = c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS)       ? C_CONDITIONAL_ADD
-                                         : c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS)    ? C_CONDITIONAL_SUBTRACT
-                                         : c_token_is_punctuator(&token, C_PUNCTUATOR_STAR)     ? C_CONDITIONAL_MULTIPLY
-                                                                                                  : C_CONDITIONAL_DIVIDE;
-        return c_ir_constant_complex_initializer_evaluate(builder, start, binary, &left) &&
-               c_ir_constant_complex_initializer_evaluate(builder, binary + 1, end, &right) &&
-               c_ir_constant_complex_initializer_binary(builder, operation, &left, &right, result);
-    }
-    CToken first = builder->preprocess.tokens[start];
-    if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS))
-    {
-        CIrConstantComplexInitializerValue operand = {0};
-        CConditionalOperator operation = c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ? C_CONDITIONAL_UNARY_MINUS
-                                                                                             : C_CONDITIONAL_UNARY_PLUS;
-        return c_ir_constant_complex_initializer_evaluate(builder, start + 1, end, &operand) &&
-               c_ir_constant_complex_initializer_unary(builder, operation, &operand, result);
-    }
-    if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                            C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close > start + 1 && close + 1 < end)
-        {
-            IrTypeId cast_type = c_ir_type_name(builder, start + 1, close);
-            if (cast_type.value != IR_ID_UNDERLYING_INVALID)
-            {
-                CIrConstantComplexInitializerValue operand = {0};
-                return c_ir_constant_complex_initializer_evaluate(builder, close + 1, end, &operand) &&
-                       c_ir_constant_complex_initializer_cast(builder, &operand, cast_type, result);
-            }
-        }
-    }
-    if (c_ir_constant_complex_initializer_builtin(builder, start, end, result))
-    {
-        return true;
-    }
-    if (start + 1 == end && first.kind == C_TOKEN_PREPROCESSING_NUMBER)
-    {
-        String8 real_spelling = {0};
-        if (c_ir_number_imaginary_spelling(builder->arena, c_token_spelling(builder->preprocess.spelling_base, first), &real_spelling))
-        {
-            CIrConstantValue imaginary = {0};
-            if (!c_ir_constant_float_literal(builder, real_spelling, &imaginary))
-            {
-                return false;
-            }
-            IrTypeId complex_type = c_ir_complex_type_for_element(builder, imaginary.type);
-            if (complex_type.value == IR_ID_UNDERLYING_INVALID)
-            {
-                complex_type = imaginary.type;
-            }
-            if (complex_type.value == IR_ID_UNDERLYING_INVALID)
-            {
-                return false;
-            }
-            *result = (CIrConstantComplexInitializerValue){
-                .real = {.type = imaginary.type, .kind = C_IR_CONSTANT_FLOAT},
-                .imaginary = imaginary,
-                .type = complex_type,
-                .element_type = imaginary.type,
-                .is_complex = true,
-            };
-            return true;
-        }
-    }
-    return false;
-}
-
 BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_store_float(CIntegerIrBuilder* builder, IrType* type,
                                                                       CIrConstantValue value, u8* bytes)
 {
@@ -47782,54 +47218,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_store_float(CIntegerIrB
         return true;
     }
     return false;
-}
-
-BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId target_type,
-                                                                u8* bytes, u64 byte_count, bool* handled)
-{
-    if (!handled)
-    {
-        return false;
-    }
-    *handled = false;
-    IrType* target = ir_type_from_id(&builder->program->types, target_type);
-    if (!target || !target->is_complex || !target->layout.resolved || byte_count < target->layout.size || start >= end)
-    {
-        return false;
-    }
-    bool braced = c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
-                  c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
-                  c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE,
-                                          C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
-    u32 compound_open = 0;
-    u32 compound_close = 0;
-    bool compound = c_ir_initializer_compound_literal_info(builder, start, end, &compound_open, &compound_close, 0, 0);
-    if (braced || compound)
-    {
-        return true;
-    }
-    *handled = true;
-    CIrConstantComplexInitializerValue value = {0};
-    CIrConstantComplexInitializerValue converted = {0};
-    if (!c_ir_constant_complex_initializer_evaluate(builder, start, end, &value) ||
-        !c_ir_constant_complex_initializer_cast(builder, &value, target_type, &converted))
-    {
-        if (!builder->failure_message.length)
-        {
-            builder->failure_message = S8("cannot fold complex expression in a static initializer");
-            builder->failure_token_index = start;
-        }
-        return false;
-    }
-    IrType* element = ir_type_from_id(&builder->program->types, target->element_type);
-    if (!element || target->field_count != 2 || target->fields[0].offset > byte_count || target->fields[1].offset > byte_count ||
-        element->layout.size > byte_count - target->fields[0].offset || element->layout.size > byte_count - target->fields[1].offset)
-    {
-        return false;
-    }
-    memset(bytes, 0, target->layout.size);
-    return c_ir_constant_complex_initializer_store_float(builder, element, converted.real, bytes + target->fields[0].offset) &&
-           c_ir_constant_complex_initializer_store_float(builder, element, converted.imaginary, bytes + target->fields[1].offset);
 }
 
 // Runtime mode leaves each subscript that is not a constant expression
@@ -48880,18 +48268,6 @@ bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CA
     return valid;
 }
 #endif
-
-BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out)
-{
-    (void)arena;
-    CIrConstantValue result = {0};
-    if (!c_ir_constant_evaluate(builder, start, end, &result) || result.kind != C_IR_CONSTANT_INTEGER)
-    {
-        return false;
-    }
-    *value_out = result.integer;
-    return true;
-}
 
 // A bit-field's own bits, deposited into the constant bytes its storage unit
 // occupies. One byte at a time rather than through a `u64` round trip, because
