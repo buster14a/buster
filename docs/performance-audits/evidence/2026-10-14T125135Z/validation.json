@@ -1,0 +1,67 @@
+{
+  "implementation": "59b8fb74f351f404eef297d8829cb430d019c60d",
+  "baseline": "69f594c81a52eb3457496d6c12761fda24ffce55",
+  "release_test_all": {
+    "status": "pass",
+    "assertions": 6999459,
+    "modules": 64
+  },
+  "baseline_self_host": {
+    "status": "pass",
+    "fixed_point_bytes": 42809232
+  },
+  "candidate_self_host": {
+    "status": "pass",
+    "fixed_point_bytes": 41909016
+  },
+  "mode_matrix": {
+    "status": "pass",
+    "legs": 12,
+    "executed": 4,
+    "structural": 8,
+    "negative_controls": 2
+  },
+  "asan_ubsan_affected": {
+    "status": "pass",
+    "assertions": 1031,
+    "modules": 4,
+    "cold_fill_lanes": 4
+  },
+  "tsan_affected": {
+    "status": "pass",
+    "assertions": 1031,
+    "modules": 4,
+    "cold_fill_lanes": 4
+  },
+  "tsan_gate": {
+    "status": "pass",
+    "assertions": 91543,
+    "modules": 2
+  },
+  "source_size": {
+    "status": "pass",
+    "production_growth": 21883,
+    "build_growth": 2000,
+    "limit": 32768
+  },
+  "markdown_links": {
+    "status": "pass",
+    "unresolved": 0
+  },
+  "storage_reconstruction": {
+    "status": "pass",
+    "cases": 385,
+    "payloads": 5
+  },
+  "frozen_linked_output": {
+    "status": "identical",
+    "sha256": "7fb7c979bccea30911990b438cea1b4acd64f8c7e95b086d1a326c8804eea2e4"
+  },
+  "platform_scope": "Linux x86_64 7940HS; four executed matrix legs include qemu AArch64, other eight structural; no native Windows or Apple validation yet",
+  "asan_ubsan_test_all": {
+    "status": "pass",
+    "assertions": 6951646,
+    "modules": 64,
+    "configuration": "Clang Debug non-unity; address,undefined,bounds; leak detection on"
+  }
+}
