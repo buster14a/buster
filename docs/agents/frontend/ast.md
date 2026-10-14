@@ -2232,10 +2232,11 @@ base and callee. The existing skew fixture keeps the navigation bound.
 
 ## Initializers, declarations and type queries from the tree
 
-**Status: design only.** This is step 4 of the
+**Status: semantic constant-root publication is implemented; its node
+consumers and the remaining families are still in progress.** This is step 4 of the
 [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
 of 2026-10-13, tracked in [#4061](https://github.com/buster14a/buster/issues/4061).
-Nothing here is implemented. Under that direction, `c_gen.c` lowers from
+Under that direction, `c_gen.c` lowers from
 nodes and retained facts, uses tokens only for provenance (source ranges and
 spellings), keeps no token fallback, and deletes each walker it migrates.
 The plan:
@@ -2254,8 +2255,9 @@ bit-field widths per node, under `-fc-ast-pilot` (the default since
 2026-10-13). Beyond that:
 - under `-fno-c-ast-pilot` lowering builds its own tree
   (`c_lower_to_ir_tree_run`), but the facts are not retained;
-- semantic analysis's initializer and declaration answers (F2 to F6) are not
-  published to lowering yet.
+- semantic analysis's initializer, declaration and `offsetof` answers are
+  not published to lowering yet; F3's existing queried roots now have a
+  separate retained sidecar, with node consumption still pending.
 
 Deleting a walker earlier would break the default path, and keeping one as
 a fallback is what the direction rules out.
@@ -2320,6 +2322,24 @@ them.
 | F4. The entity, storage class and linkage of each declarator | local and file-scope declaration lowering | the binder and the [declaration split](#declaration-split-from-the-tree) |
 | F5. For each initializer element: the subobject it initializes (offset, member and index path, bit-field) and that subobject's type; for an incomplete array, the inferred count | brace, designated and string initializers; compound literals | `c_parse_initializer_designator`, `c_parse_initializer_type_slots`, `c_parse_infer_initializer_array_count_core` |
 | F6. The member path and offset of each `offsetof` designator chain | `__builtin_offsetof` | `c_parse` |
+
+F3's first publication slice retains the roots the existing normal
+`c_parse_typed_constant` has evaluated. `CAstFacts.constant_slots` indexes
+sparse `CAstConstantFact` rows in a separate owned arena; those rows keep
+both integer limbs and the primitive semantic kind. A CTypeId is retained
+only for an existing row of a top-level query. Protected type queries never
+publish a row. The sidecar is released with the facts and its committed
+bytes are included in `CAstFactStatistics.retained_bytes`.
+
+The states are `UNQUERIED`, certified `INTEGER`, proven `NONCONSTANT`,
+`UNSUPPORTED`, and `INVALID`. An existing bound ordinary object can prove a
+nonconstant identifier. A fold that declined a shape is `UNSUPPORTED`,
+including a supported source value outside the integer folder's model;
+`valid == false` alone cannot prove nonconstancy. `INVALID` records an
+evaluated C fault. A lazy operand that is not entered does not fault the
+selected root. This publication slice adds no type inventory and no
+lowering fallback. The constant grammar walker remains until the node
+consumer replaces it in the next slice.
 
 A C type becomes an IR type the way it does today: through
 `builder->c_type_ir_map`, or `c_ir_vla_c_type` for a variably modified type.

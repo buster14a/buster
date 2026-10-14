@@ -2575,6 +2575,7 @@ BUSTER_C_SHARED void c_ast_types_publish(CTypeParseMachine* machine, CParseResul
 #define C_AST_FACT_HEADROOM BUSTER_KB(64)
 // One node's columns: types, payloads and flags.
 #define C_AST_FACT_NODE_BYTES (sizeof(u32) + sizeof(u32) + sizeof(u8))
+#define C_AST_CONSTANT_INITIAL_CAPACITY 64u
 
 BUSTER_GLOBAL_LOCAL String8 const c_ast_fact_gap_names[C_AST_FACT_GAP_COUNT] = {
     [C_AST_FACT_GAP_UNSPANNED] = S8_INITIALIZER("unspanned"),
@@ -2609,7 +2610,15 @@ bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
     u32* types = arena ? arena_allocate(arena, u32, count) : 0;
     u32* payloads = types ? arena_allocate(arena, u32, count) : 0;
     u8* flags = payloads ? arena_allocate(arena, u8, count) : 0;
-    bool created = flags != 0;
+    // Sparse rows double on demand. Their abandoned prefixes sum to less
+    // than twice the previous power of two. The last capacity can be capped
+    // at node_count, so three rows per node also cover that final carve.
+    u64 constant_reservation = (u64)count * (sizeof(u32) + 3 * sizeof(CAstConstantFact)) + C_AST_FACT_HEADROOM;
+    Arena* constants_arena = flags && constant_reservation <= ARENA_MAX_RESERVATION
+        ? c_frontend_arena_create((ArenaCreation){.reserved_size = constant_reservation, .initial_size = C_AST_FACT_HEADROOM,
+                                                 .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+    u32* constant_slots = constants_arena ? arena_allocate_zeroed(constants_arena, u32, count) : 0;
+    bool created = flags && constant_slots;
     if (created)
     {
         memset(types, 0xff, sizeof(*types) * count);
@@ -2617,16 +2626,23 @@ bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
         memset(flags, 0, sizeof(*flags) * count);
         *facts = (CAstFacts){
             .arena = arena,
+            .constants_arena = constants_arena,
+            .constant_slots = constant_slots,
             .types = types,
             .payloads = payloads,
             .flags = flags,
             .node_count = count,
-            .statistics = {.nodes = count, .retained_bytes = arena->position - arena_minimum_position},
+            .statistics = {.nodes = count, .retained_bytes = arena->position - arena_minimum_position +
+                                                           constants_arena->position - arena_minimum_position},
         };
     }
     else if (arena)
     {
         c_ast_facts_retire(arena);
+        if (constants_arena)
+        {
+            arena_destroy(constants_arena, 1);
+        }
     }
     return created;
 }
@@ -2666,6 +2682,65 @@ u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preproce
     return facts && facts->spans ? c_ast_spans_locate(facts->spans, preprocess->tokens, facts->matches, start, end) : C_AST_NODE_INVALID;
 }
 
+CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact result = {.type = C_TYPE_ID_INVALID, .primitive_kind = C_TYPE_INVALID, .status = C_AST_CONSTANT_UNQUERIED};
+    if (facts && facts->constant_slots && node < facts->node_count)
+    {
+        u32 stored = facts->constant_slots[node];
+        if (stored && stored - 1 < facts->constant_count)
+        {
+            result = facts->constants[stored - 1];
+        }
+    }
+    return result;
+}
+
+bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact)
+{
+    bool valid = facts && facts->constant_slots && node < facts->node_count &&
+                 fact.status > C_AST_CONSTANT_UNQUERIED && fact.status < C_AST_CONSTANT_STATUS_COUNT;
+    if (valid)
+    {
+        u32 stored = facts->constant_slots[node];
+        bool present = stored != 0;
+        if (!stored && facts->constant_count == facts->constant_capacity)
+        {
+            u32 capacity = !facts->constant_capacity ? BUSTER_MIN(facts->node_count, C_AST_CONSTANT_INITIAL_CAPACITY)
+                : facts->constant_capacity <= facts->node_count / 2 ? facts->constant_capacity * 2 : facts->node_count;
+            valid = capacity > facts->constant_capacity;
+            if (valid)
+            {
+                CAstConstantFact* rows = arena_allocate(facts->constants_arena, CAstConstantFact, capacity);
+                if (facts->constant_count)
+                {
+                    memcpy(rows, facts->constants, sizeof(*rows) * (u64)facts->constant_count);
+                }
+                facts->constants = rows;
+                facts->constant_capacity = capacity;
+            }
+        }
+        if (valid)
+        {
+            if (!stored)
+            {
+                stored = ++facts->constant_count;
+                facts->constant_slots[node] = stored;
+            }
+            // A later unmodelled probe cannot erase an earlier certified
+            // value at the same source node.
+            if (!present || facts->constants[stored - 1].status != C_AST_CONSTANT_INTEGER || fact.status != C_AST_CONSTANT_UNSUPPORTED)
+            {
+                facts->constants[stored - 1] = fact;
+            }
+            facts->statistics.retained_bytes = facts->arena->position - arena_minimum_position +
+                (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
+                facts->constants_arena->position - arena_minimum_position;
+        }
+    }
+    return valid;
+}
+
 void c_ast_facts_release(CAstFacts* facts)
 {
     if (facts->recipe_arena)
@@ -2676,6 +2751,15 @@ void c_ast_facts_release(CAstFacts* facts)
     facts->recipes = 0;
     facts->recipe_count = 0;
     facts->recipe_failed = false;
+    if (facts->constants_arena)
+    {
+        arena_destroy(facts->constants_arena, 1);
+    }
+    facts->constants_arena = 0;
+    facts->constant_slots = 0;
+    facts->constants = 0;
+    facts->constant_count = 0;
+    facts->constant_capacity = 0;
     if (facts->index_arena)
     {
         arena_destroy(facts->index_arena, 1);
@@ -3110,7 +3194,8 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
         }
         statistics->retained_bytes = (facts->arena ? facts->arena->position - arena_minimum_position : 0) +
                                      (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
-                                     (facts->recipe_arena ? facts->recipe_arena->position - arena_minimum_position : 0);
+                                     (facts->recipe_arena ? facts->recipe_arena->position - arena_minimum_position : 0) +
+                                     (facts->constants_arena ? facts->constants_arena->position - arena_minimum_position : 0);
     }
 }
 

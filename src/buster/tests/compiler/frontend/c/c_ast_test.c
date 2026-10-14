@@ -6461,6 +6461,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments
 // initializer no query typed. `__func__` and a builtin's callee name are
 // gaps: the machine types them to nothing. Every candidate is accounted for
 // once, and no published row is past the type table.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 sources[] = {
+        S8("enum { A = 1 + 2 * 3, B = 0 && (1 / 0), C = 1 ? 9 : (1 / 0) };\n"
+           "static int values[sizeof(unsigned long) + A];\n"
+           "static int object; static int *address = &object;\n"
+           "int f(void) { return values[0] + (address != 0); }\n"),
+        S8("enum { invalid = 1 / 0 };\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.ast_facts = &facts;
+            syntax.type_interning = true;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && (index ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
+            bool seven = false;
+            bool zero = false;
+            bool nine = false;
+            bool fault = false;
+            for (u32 node = 0; node < built.ast.node_count; node += 1)
+            {
+                CAstConstantFact value = c_ast_facts_constant(&facts, node);
+                BUSTER_TEST(arguments, value.type.value == C_ID_UNDERLYING_INVALID || value.type.value < analysis.type_count);
+                if (value.status == C_AST_CONSTANT_INTEGER)
+                {
+                    seven |= value.low == 7 && !value.high;
+                    zero |= value.low == 0 && !value.high;
+                    nine |= value.low == 9 && !value.high;
+                }
+                fault |= value.status == C_AST_CONSTANT_INVALID;
+            }
+            BUSTER_TEST(arguments, index ? fault : seven && zero && nine && !fault);
+            BUSTER_TEST(arguments, facts.constant_count && facts.constant_count <= facts.node_count && facts.constants_arena);
+            BUSTER_TEST(arguments, c_ast_facts_constant(&facts, C_AST_NODE_INVALID).status == C_AST_CONSTANT_UNQUERIED);
+            c_ast_facts_release(&facts);
+            BUSTER_TEST(arguments, !facts.constants_arena && !facts.constant_slots && !facts.constants);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6691,6 +6744,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);

@@ -1809,6 +1809,31 @@ struct CAstFactStatistics
     u64 retained_bytes;
 };
 
+// A semantic constant query has a separate result from the expression's
+// type. A fold that does not model a shape is UNSUPPORTED, not proof that
+// the source is nonconstant; INVALID means an evaluated C operation faulted.
+typedef enum CAstConstantStatus
+{
+    C_AST_CONSTANT_UNQUERIED,
+    C_AST_CONSTANT_INTEGER,
+    C_AST_CONSTANT_NONCONSTANT,
+    C_AST_CONSTANT_UNSUPPORTED,
+    C_AST_CONSTANT_INVALID,
+    C_AST_CONSTANT_STATUS_COUNT,
+} CAstConstantStatus;
+
+typedef struct CAstConstantFact CAstConstantFact;
+struct CAstConstantFact
+{
+    u64 low;
+    u64 high;
+    // An already committed source type, or invalid when the query appended
+    // it. The primitive semantic kind remains stable across a rollback.
+    CTypeId type;
+    CTypeKind primitive_kind;
+    CAstConstantStatus status;
+};
+
 // The retained columns: `types` (a CTypeId value or C_AST_FACT_NONE),
 // `payloads` (an entity id or a bit-field width, per flag, else
 // C_AST_FACT_NONE) and `flags` (CAstFactFlag), each `node_count` long. They
@@ -1822,6 +1847,13 @@ struct CAstFacts
     // The producer range-to-node index, computed before semantic queries and
     // retained with the facts. Its delimiter rows belong to CParseResult.
     Arena* index_arena;
+    // F3's dense node slots and sparse query results have their own lifetime
+    // and reservation; they never repurpose the type/payload/flag columns.
+    Arena* constants_arena;
+    u32* constant_slots;
+    CAstConstantFact* constants;
+    u32 constant_count;
+    u32 constant_capacity;
     CAstSpans* spans;
     u32 const* matches;
     // Sparse completion descriptions, appended in place in their own arena.
@@ -2632,6 +2664,10 @@ BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
 BUSTER_F_DECL bool c_ast_facts_prepare(CAstFacts* facts, CAst const* ast, CPreprocessResult const* preprocess, CParseResult* result);
 // The same span lookup every producer uses; C_AST_NODE_INVALID on a miss.
 BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preprocess, u32 start, u32 end);
+// Sparse semantic constant results. Missing nodes answer UNQUERIED; integer
+// bits and fault status are retained independently of type-query recipes.
+BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

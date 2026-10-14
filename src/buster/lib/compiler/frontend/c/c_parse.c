@@ -35998,9 +35998,53 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_integer_builtin(CParseResult* 
 // The typed-constant task stack starts with this many rows (see below).
 #define C_PARSE_CONSTANT_TASK_INITIAL_CAPACITY 32u
 
+BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                   u32 start, u32 end, u32 committed_types, CParseConstant value)
+{
+    CAstFacts* facts = machine->ast_facts;
+    if (facts && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE && !result->protected_type_constant_query)
+    {
+        u32 node = c_ast_facts_locate(facts, &preprocess, start, end);
+        if (node != C_AST_NODE_INVALID)
+        {
+            CTypeKind kind = value.type.value < result->type_count ? c_parse_expression_value_kind(result, value.type) : C_TYPE_INVALID;
+            CAstConstantFact fact = {
+                .low = value.integer,
+                .high = value.integer_high,
+                .type = !machine->frame_count && value.type.value < committed_types ? value.type : C_TYPE_ID_INVALID,
+                .primitive_kind = kind,
+                .status = C_AST_CONSTANT_UNSUPPORTED,
+            };
+            if (value.faulted)
+            {
+                fact.status = C_AST_CONSTANT_INVALID;
+            }
+            else if (value.valid && !value.is_float && !value.imaginary && c_parse_expression_integer_kind(kind))
+            {
+                fact.status = C_AST_CONSTANT_INTEGER;
+            }
+            else if (!value.valid && machine->syntax_tree->kinds[node] == C_AST_IDENTIFIER && (facts->flags[node] & C_AST_FACT_BOUND))
+            {
+                u32 entity = facts->payloads[node];
+                if (entity < result->entity_count)
+                {
+                    CEntity const* record = result->entities + entity;
+                    bool object = record->kind == C_ENTITY_OBJECT || record->kind == C_ENTITY_LOCAL || record->kind == C_ENTITY_PARAMETER;
+                    if (object && !record->is_constexpr)
+                    {
+                        fact.status = C_AST_CONSTANT_NONCONSTANT;
+                    }
+                }
+            }
+            c_ast_facts_store_constant(facts, node, fact);
+        }
+    }
+}
+
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
+    u32 committed_types = result->type_count;
     IR_SEMANTIC_RANGE(PARSE_TYPED, preprocess.tokens, start, end);
     c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
     CParseConstant last = {.type = C_TYPE_ID_INVALID};
@@ -36490,6 +36534,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             count -= 1;
         }
     }
+    c_parse_ast_constant_publish(machine, preprocess, result, start, end, committed_types, last);
     return last;
 }
 
