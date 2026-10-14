@@ -45513,6 +45513,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
     C_DIAGNOSTIC_RESERVATION_CENSUS(SEMANTIC, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
+    if (machine.ast_facts && !c_ast_facts_prepare(machine.ast_facts, syntax.ast, &preprocess, &result))
+    {
+        c_analysis_failure(&result, S8("could not reserve the retained C semantic node index"));
+        machine.failed = true;
+    }
     BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
         .parent = C_SCOPE_ID_INVALID,

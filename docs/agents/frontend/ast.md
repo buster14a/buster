@@ -241,9 +241,15 @@ each `node_count` long, about 9 bytes per node:
 | `flags` | 1 | `CAstFactFlag`: candidate, typed, from the machine, nonplace, bound, bit-field, string |
 
 The columns are dense because the tree is complete before analysis starts,
-so the node count is known and the record never grows. The tree typer's
-spans and start chains are not retained: lowering will walk nodes, not map
-token ranges to them.
+so the node count is known and the record never grows. Analysis prepares the
+unit's shared `CAstSpans` range-to-node index before its first query
+(`c_ast_facts_prepare`), using the parse result's retained delimiter rows.
+Every semantic producer keys its finished answer through
+`c_ast_facts_locate`; declaration-name leaves are spanned as well as
+expressions. The index lives in `CAstFacts.index_arena`, follows the facts'
+lifetime, and its bytes are included in `retained_bytes`. A required index
+reservation failure produces a structured semantic diagnostic. The tree
+typer's smaller per-region scratch index is still released at its region's end.
 
 **Candidates.** A fact candidate is an expression node (`IDENTIFIER` through
 `COMMA`, without braced lists and `_Generic` associations) of a *typed

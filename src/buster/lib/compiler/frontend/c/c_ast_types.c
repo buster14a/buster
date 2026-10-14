@@ -2631,8 +2631,50 @@ bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
     return created;
 }
 
+// The producer index is prepared once before the first semantic query. It
+// uses the shared span rules, and lowering can borrow it for the whole unit.
+bool c_ast_facts_prepare(CAstFacts* facts, CAst const* ast, CPreprocessResult const* preprocess, CParseResult* result)
+{
+    bool ready = facts && facts->flags && ast && ast->node_count == facts->node_count && preprocess->token_count < UINT32_MAX;
+    if (ready && !facts->spans)
+    {
+        c_parse_position_index_ensure(result, *preprocess);
+        u32 const* matches = result->position_index && result->position_index->built && !result->position_index->delimiter_mismatch_count
+                                 ? result->position_index->matching_delimiters_plus_one : 0;
+        u64 size = (3 * (u64)ast->node_count + preprocess->token_count + 1) * sizeof(u32) + sizeof(CAstSpans) + C_AST_FACT_HEADROOM;
+        Arena* arena = matches ? c_frontend_arena_create((ArenaCreation){.reserved_size = size, .initial_size = C_AST_FACT_HEADROOM,
+                                                                           .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+        CAstSpans* spans = arena ? arena_allocate(arena, CAstSpans, 1) : 0;
+        ready = spans && c_ast_spans_build(arena, ast, preprocess->tokens, (u32)preprocess->token_count, matches, spans);
+        if (ready)
+        {
+            facts->index_arena = arena;
+            facts->spans = spans;
+            facts->matches = matches;
+            facts->statistics.retained_bytes += arena->position - arena_minimum_position;
+        }
+        else if (arena)
+        {
+            arena_destroy(arena, 1);
+        }
+    }
+    return ready;
+}
+
+u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preprocess, u32 start, u32 end)
+{
+    return facts && facts->spans ? c_ast_spans_locate(facts->spans, preprocess->tokens, facts->matches, start, end) : C_AST_NODE_INVALID;
+}
+
 void c_ast_facts_release(CAstFacts* facts)
 {
+    if (facts->index_arena)
+    {
+        arena_destroy(facts->index_arena, 1);
+    }
+    facts->index_arena = 0;
+    facts->spans = 0;
+    facts->matches = 0;
     if (facts->arena)
     {
         c_ast_facts_retire(facts->arena);
@@ -2815,7 +2857,8 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
                 statistics->outside += floor == C_AST_TYPE_NONE;
             }
         }
-        statistics->retained_bytes = facts->arena ? facts->arena->position - arena_minimum_position : 0;
+        statistics->retained_bytes = (facts->arena ? facts->arena->position - arena_minimum_position : 0) +
+                                     (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0);
     }
 }
 
