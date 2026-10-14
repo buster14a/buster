@@ -7,7 +7,11 @@
 #include <buster/lib/compiler/pdb/pdb_internal.h>
 #if BUSTER_WINDOWS
 #include <buster/lib/system_headers.h>
+// The SDK's unused minidump callback enum shares Buster's thread typedef
+// name. Prefix it only while reading this external test header.
+#define ThreadCallback PdbTestSdkThreadCallback
 #include <dbghelp.h>
+#undef ThreadCallback
 #endif
 
 // Reassemble one stream out of the MSF container the way a reader would, so
@@ -1241,7 +1245,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
     String8 debugger_arch = BUSTER_CPU_ARCH_AARCH64 ? S8("arm64") : S8("x64");
     String8 dll_path = string_format(arguments->arena, S8("{S8}\\Windows Kits\\10\\Debuggers\\{S8}\\dbghelp.dll"), kits, debugger_arch);
     String16 dll_wide = string16_from_string8(arguments->arena, dll_path, true);
-    HMODULE library = LoadLibraryW(dll_wide.pointer);
+    HMODULE library = LoadLibraryExW(dll_wide.pointer, 0, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     DWORD provider_error = library ? 0 : GetLastError();
     arguments->show(arguments, S8("PDB_GSI_LOOKUP provider={S8} available={u32} error={u32}\n"), dll_path, (u32)(library != 0), (u32)provider_error);
     // The hosted Windows fixture requires the same installed SDK provider
