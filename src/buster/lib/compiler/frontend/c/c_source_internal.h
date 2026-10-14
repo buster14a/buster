@@ -4,6 +4,22 @@
 // from tests-disabled builds; file identity remains separate from spelling.
 #include <buster/lib/compiler/frontend/c/c.h>
 
+// Lowering sees source bytes, never token grammar. The resolved length keeps
+// oversized spellings exact without exposing the token's sentinel encoding.
+typedef struct CSourceAnchor CSourceAnchor;
+struct CSourceAnchor
+{
+    u32 offset;
+    u32 length;
+};
+
+BUSTER_F_DECL CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index);
+BUSTER_F_DECL CSourceAnchor c_source_anchor_from_name(CPreprocessResult const* preprocess, String8 name);
+BUSTER_F_DECL String8 c_source_anchor_spelling(CPreprocessResult const* preprocess, CSourceAnchor anchor);
+BUSTER_F_DECL u32 c_source_anchor_source_cursor(CPreprocessResult const* preprocess, CSourceAnchor anchor, IrSourceMapCursor* cursor);
+BUSTER_F_DECL CSourceSite c_source_anchor_site_cursor(CPreprocessResult const* preprocess, CSourceAnchor anchor, IrSourceMapCursor* cursor);
+BUSTER_F_DECL CSourceLocation c_source_anchor_location_cursor(CPreprocessResult const* preprocess, CSourceAnchor anchor, IrSourceMapCursor* cursor);
+
 // Required frontend reservations have one failure contract. The calling-thread
 // test seam selects a phase-local creation, then arms the allocator's existing
 // one-shot reserve failure immediately before it (bypassing pool reuse).

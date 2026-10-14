@@ -1926,6 +1926,44 @@ BUSTER_C_SHARED BUSTER_SHARED_INLINE u32 c_preprocess_token_source(CPreprocessRe
     return recovery ? ir_source_map_source(&recovery->map, token.offset, cursor) : 0;
 }
 
+CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index)
+{
+    CSourceAnchor result = {0};
+    if (preprocess && index < preprocess->token_count)
+    {
+        CToken token = preprocess->tokens[index];
+        result = (CSourceAnchor){.offset = token.offset, .length = (u32)c_token_length(preprocess->spelling_base, token)};
+    }
+    return result;
+}
+
+CSourceAnchor c_source_anchor_from_name(CPreprocessResult const* preprocess, String8 name)
+{
+    char8 const* base = preprocess->spelling_base;
+    BUSTER_CHECK(name.pointer >= base && (u64)(name.pointer - base) + name.length <= UINT32_MAX);
+    return (CSourceAnchor){.offset = (u32)(name.pointer - base), .length = (u32)name.length};
+}
+
+String8 c_source_anchor_spelling(CPreprocessResult const* preprocess, CSourceAnchor anchor)
+{
+    return (String8){.pointer = (char8*)preprocess->spelling_base + anchor.offset, .length = anchor.length};
+}
+
+u32 c_source_anchor_source_cursor(CPreprocessResult const* preprocess, CSourceAnchor anchor, IrSourceMapCursor* cursor)
+{
+    return c_preprocess_token_source(preprocess, (CToken){.offset = anchor.offset}, cursor);
+}
+
+CSourceSite c_source_anchor_site_cursor(CPreprocessResult const* preprocess, CSourceAnchor anchor, IrSourceMapCursor* cursor)
+{
+    return c_preprocess_token_site_cursor(preprocess, (CToken){.offset = anchor.offset}, cursor);
+}
+
+CSourceLocation c_source_anchor_location_cursor(CPreprocessResult const* preprocess, CSourceAnchor anchor, IrSourceMapCursor* cursor)
+{
+    return c_preprocess_token_location_cursor(preprocess, (CToken){.offset = anchor.offset}, cursor);
+}
+
 // One finished line, classified by what the lexer saw on it. Branchless: the
 // flags are 0/1 and every bucket is an unconditional add, so a line of code,
 // a line of comment and a blank line all cost the same four adds.

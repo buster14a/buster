@@ -69,6 +69,54 @@ BUSTER_GLOBAL_LOCAL CPreprocessResult c_ast_test_preprocess(Arena* arena, String
                         });
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_source_anchors(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 sources[] = {
+        S8("int name = 1; char const* text = \"abc\";"),
+        S8("#define JOIN(a,b) a##b\n#line 73 \"mapped.c\"\nint JOIN(mapped,_name) = 2;"),
+    };
+    char8* oversized = arena_allocate(temporary.arena, char8, 70004);
+    oversized[0] = '"';
+    memset(oversized + 1, 'a', 70000);
+    oversized[70001] = '"';
+    oversized[70002] = ';';
+    oversized[70003] = 0;
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(sources) + 1; form += 1)
+    {
+        String8 source = form < BUSTER_ARRAY_LENGTH(sources) ? sources[form] : (String8){.pointer = oversized, .length = 70003};
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        BUSTER_TEST(arguments, !preprocess.error_count);
+        IrSourceMapCursor cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+        bool large = false;
+        for (u32 index = 0; index < preprocess.token_count; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            CSourceAnchor anchor = c_source_anchor_at(&preprocess, index);
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            BUSTER_TEST(arguments, anchor.offset == token.offset && anchor.length == spelling.length);
+            BUSTER_TEST(arguments, string_equal(c_source_anchor_spelling(&preprocess, anchor), spelling));
+            CSourceSite old_site = c_preprocess_token_site(&preprocess, token);
+            CSourceSite site = c_source_anchor_site_cursor(&preprocess, anchor, &cursor);
+            BUSTER_TEST(arguments, site.map_offset_plus_one == old_site.map_offset_plus_one && site.file == old_site.file &&
+                                   c_source_anchor_source_cursor(&preprocess, anchor, &cursor) == site.file);
+            CSourceLocation old_location = c_preprocess_token_location(&preprocess, token);
+            CSourceLocation location = c_source_anchor_location_cursor(&preprocess, anchor, &cursor);
+            BUSTER_TEST(arguments, !memcmp(&old_location, &location, sizeof(location)));
+            if (spelling.length)
+            {
+                CSourceAnchor named = c_source_anchor_from_name(&preprocess, spelling);
+                BUSTER_TEST(arguments, named.offset == anchor.offset && named.length == anchor.length);
+            }
+            large |= anchor.length == 70002;
+        }
+        BUSTER_TEST(arguments, form < BUSTER_ARRAY_LENGTH(sources) || large);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // The two trees are one tree: the same kinds, extents, anchors and payloads,
 // where a LIST node's payload is compared through its list count (HYBRID
 // replaces it with a slice offset), and the same children from every
@@ -8230,6 +8278,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
         c_ast_test_preprocess(temporary.arena, S8(""), C_PREPROCESS_DIALECT_GNU17);
         c_test_scratch_end(temporary);
     }
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_source_anchors);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_expressions);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declarations);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_dialects);
