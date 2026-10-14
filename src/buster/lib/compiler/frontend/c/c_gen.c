@@ -53271,6 +53271,7 @@ BUSTER_C_INTERNAL void c_ir_initializer_plan_projection_trim(CIrInitializerPlanC
         else context->projection_heads[(removed->path_plus_one * 2654435761u) % context->projection_capacity] = removed->next_plus_one;
         if (removed->next_plus_one) context->projections[removed->next_plus_one - 1].previous_plus_one = removed->previous_plus_one;
     }
+    return;
 }
 
 BUSTER_C_INTERNAL bool c_ir_initializer_plan_selection(CIntegerIrBuilder* builder, Arena* arena, CIrInitializerPlanContext* context,
@@ -53866,6 +53867,7 @@ BUSTER_C_INTERNAL void c_ir_initializer_plan_node_state_release(CIntegerIrBuilde
             task->context_arena = 0;
         }
     }
+    return;
 }
 
 BUSTER_C_INTERNAL bool c_ir_static_compound_literal_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame, u32 node,

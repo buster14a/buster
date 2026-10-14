@@ -15194,6 +15194,59 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_brace_close(CParseResult* result, CPre
     return close;
 }
 
+// The existing sole-string count shortcut can decline a record or an array
+// of records before visiting its first member. Retain that positional target
+// from the completed type graph, while preserving the shortcut's answer and
+// semantic model. No expression query or array-bound mutation is introduced.
+BUSTER_C_INTERNAL void c_parse_initializer_plan_sole_string(CTypeParseMachine* machine, CParseResult* result,
+                                                           CPreprocessResult const* preprocess, CInitializerPlan* plan,
+                                                           u32 start, u32 end, u32 value_start, u32 value_end, CIrDecodedString decoded)
+{
+    CTypeId selected = plan ? plan->type : C_TYPE_ID_INVALID;
+    u32 path = 0;
+    u32 depth = 0;
+    bool selected_value = false;
+    while (plan && !plan->failed && selected.value < result->type_count && depth++ <= result->type_count && !selected_value)
+    {
+        CType type = result->types[selected.value];
+        bool record = type.kind == C_TYPE_STRUCT || type.kind == C_TYPE_UNION;
+        bool array = type.kind == C_TYPE_ARRAY || type.kind == C_TYPE_VECTOR;
+        bool whole_string = type.kind == C_TYPE_ARRAY &&
+            c_parse_initializer_string_element_compatible(*preprocess, result, type.element_type, decoded);
+        if (whole_string || (!record && !array)) selected_value = true;
+        else if (record)
+        {
+            CMember* member = c_parse_initializer_member_at_walk(result, &type, 0);
+            if (!member) selected = C_TYPE_ID_INVALID;
+            else
+            {
+                u32 member_index = (u32)(member - result->members) - type.member_start;
+                path = c_parse_initializer_plan_path(result, plan, path, selected, member_index, 0, 0, UINT32_MAX, 0);
+                selected = member->type;
+            }
+        }
+        else
+        {
+            path = c_parse_initializer_plan_path(result, plan, path, selected, UINT32_MAX, 0, 0, UINT32_MAX, 0);
+            if (selected.value == plan->type.value) plan->inferred_count = 1;
+            selected = type.element_type;
+        }
+    }
+    if (selected_value && plan && !plan->failed)
+    {
+        u32 begin = c_parse_initializer_plan_item(machine, result, preprocess, plan, plan->type, 0, start, end, start, C_INITIALIZER_ITEM_LIST_BEGIN);
+        c_parse_initializer_plan_item(machine, result, preprocess, plan, selected, path, value_start, value_end, value_start, C_INITIALIZER_ITEM_VALUE);
+        u32 finish = c_parse_initializer_plan_item(machine, result, preprocess, plan, plan->type, 0, start, end, start, C_INITIALIZER_ITEM_LIST_END);
+        if (begin && finish)
+        {
+            plan->items[begin - 1].paired_item_plus_one = finish;
+            plan->items[finish - 1].paired_item_plus_one = begin;
+        }
+        plan->complete = !plan->failed;
+    }
+    return;
+}
+
 BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMachine* machine, Arena* result_arena, Arena* temporary_arena,
                                                                     CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                     CTypeId element_type, u32 start, u32 end, u64* count_out,
@@ -15243,21 +15296,11 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     if (string_start < string_end && c_ir_tokens_are_string_literals(preprocess, string_start, string_end))
     {
         CIrDecodedString decoded = {0};
-        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded) ||
-            decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
+        bool decoded_valid = c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target,
+            string_start, string_end, result->string_literals, &decoded) && decoded.element_count != UINT64_MAX;
+        if (!decoded_valid || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
-            // A braced string is one pointer element, rather than a character
-            // array's whole value. The existing inference refuses this shape
-            // and lowering completed it; publish that already accepted slot
-            // without introducing an extra expression query or model row.
-            if (plan && element_type.value < result->type_count && result->types[element_type.value].kind == C_TYPE_POINTER)
-            {
-                u32 path = c_parse_initializer_plan_path(result, plan, 0, plan->type, UINT32_MAX, 0, 0, UINT32_MAX, 0);
-                c_parse_initializer_plan_item(machine, result, &preprocess, plan, element_type, path,
-                    string_start, string_end, string_start, C_INITIALIZER_ITEM_VALUE);
-                plan->inferred_count = 1;
-                plan->complete = !plan->failed;
-            }
+            if (decoded_valid) c_parse_initializer_plan_sole_string(machine, result, &preprocess, plan, start, end, string_start, string_end, decoded);
             return false;
         }
         *count_out = decoded.element_count + 1;

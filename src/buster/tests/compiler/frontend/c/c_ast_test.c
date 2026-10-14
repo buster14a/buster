@@ -6600,6 +6600,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "int table[] = { [2 ... 4] = 1, [3] = 9, 7 };\n"
                         "int matrix[2][2] = { 1, 2, 3, 4 };\n"
                         "char* names[] = { \"argument\" }; char letters[] = { \"abc\" };\n"
+                        "struct T { char text[4]; }; struct T sole = { \"abc\" }; struct T sole_array[] = { \"abc\" };\n"
                         "double _Complex complex_value = { 1.0, 2.0 };\n"
                         "struct F { int head; char tail[]; }; struct F flex = { 9, { -1, -1, -1 } };\n"
                         "struct F text_flex = { 7, \"abc\" };\n"
@@ -6661,7 +6662,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
             {
                 CType array = analysis.types[plan->type.value];
                 if (array.element_type.value < analysis.type_count && analysis.types[array.element_type.value].kind == C_TYPE_POINTER)
-                    BUSTER_TEST(arguments, plan->item_count == 1 && plan->items[0].path_plus_one != 0 && plan->inferred_count == 1);
+                    BUSTER_TEST(arguments, plan->item_count == 3 && plan->items[1].path_plus_one != 0 && plan->inferred_count == 1);
             }
             for (u32 path = 0; path < plan->path_count; path += 1)
             {
@@ -6715,6 +6716,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_lower_reuse(UnitTestAr
     CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
         S8("static char *names[] = { \"argument\" }; char text[] = { \"abc\" };"
            "struct P { int x, y; }; struct P rows[] = { [1] = { 3, 4 } };"
+           "struct T { char text[4]; }; struct T sole = { \"abc\" }; struct T sole_array[] = { \"abc\" };"
            "int f(void) { static int local[] = { 5, 6 }; return local[1] + rows[1].y + text[0] + names[0][0]; }"),
         C_PREPROCESS_DIALECT_GNU17);
     CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
@@ -6738,6 +6740,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_lower_reuse(UnitTestAr
             {
                 IrGlobal* x = a->globals + index;
                 IrGlobal* y = b->globals + index;
+                IrSymbol* symbol = ir_symbol_from_id(&first.program->symbols, x->symbol);
+                if (symbol && (string_equal(symbol->name, S8("sole")) || string_equal(symbol->name, S8("sole_array"))))
+                    BUSTER_TEST(arguments, x->bytes.pointer && x->bytes.length == 4 && !memcmp(x->bytes.pointer, "abc", 4));
                 BUSTER_TEST(arguments, x->initializer_kind == y->initializer_kind && x->initializer_bits == y->initializer_bits &&
                     x->bytes.length == y->bytes.length && x->relocation_count == y->relocation_count && x->type.value == y->type.value);
                 if (x->bytes.length == y->bytes.length && x->bytes.length)

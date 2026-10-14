@@ -2552,6 +2552,12 @@ the semantic model and debug type inventory. The plan's `source_token`,
 rediscover grammar. `{0}` retains a producer flag because a trailing comma
 changes the existing zero-constructor emission.
 
+The sole-string count shortcut can decline a record or an array of records
+before visiting its first member. Publication retains that positional target
+through the completed type graph, including list markers and any omitted
+outer count, while preserving the original inference answer and model.
+No expression query or shared-bound mutation is added by that publication.
+
 The accepted block-static single-statement-expression shortcut publishes its
 already-selected tail node and exact emission provenance in the scalar item.
 The original initializer node remains the plan key. Lowering does not inspect
