@@ -1,5 +1,7 @@
 // OS tests cover process, filesystem, and synchronization contracts. os_tests
-// registers their focused fixtures; os_test_image_retention exercises the
+// registers their focused fixtures; os_test_windows_handle_observation and
+// os_test_process_shutdown_exit_windows distinguish owned kernel objects from
+// the global handle census. os_test_image_retention exercises the
 // test-only generated-image seam and its deletion/whole-tree behavior.
 #include <buster/tests/os_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -2242,6 +2244,112 @@ BUSTER_GLOBAL_LOCAL u64 os_test_shutdown_output_step(HANDLE pipe, bool* valid, u
     return result;
 }
 
+typedef struct OsTestWindowsHandleCensus OsTestWindowsHandleCensus;
+struct OsTestWindowsHandleCensus
+{
+    u32 count;
+    u32 error;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL OsTestWindowsHandleCensus os_test_windows_handle_census(HANDLE process)
+{
+    OsTestWindowsHandleCensus result = {0};
+    DWORD count = 0;
+    result.valid = GetProcessHandleCount(process, &count) != 0;
+    if (result.valid) result.count = count;
+    else result.error = GetLastError();
+    return result;
+}
+
+typedef struct OsTestWindowsHandleObservation OsTestWindowsHandleObservation;
+struct OsTestWindowsHandleObservation
+{
+    u32 flags;
+    u32 query_error;
+    u32 compare_error;
+    bool valid;
+    bool same_object;
+};
+
+BUSTER_GLOBAL_LOCAL OsTestWindowsHandleObservation os_test_windows_handle_observe(HANDLE original, HANDLE witness)
+{
+    OsTestWindowsHandleObservation result = {0};
+    DWORD flags = 0;
+    result.valid = GetHandleInformation(original, &flags) != 0;
+    if (result.valid)
+    {
+        result.flags = flags;
+        SetLastError(0);
+        result.same_object = CompareObjectHandles(original, witness) != 0;
+        if (!result.same_object) result.compare_error = GetLastError();
+    }
+    else result.query_error = GetLastError();
+    return result;
+}
+
+enum { OS_TEST_WINDOWS_OWNER_DIAGNOSTIC_CAPACITY = 16 };
+
+BUSTER_GLOBAL_LOCAL u64 os_test_windows_owner_diagnostic(UnitTestArguments* arguments, String8 mode, String8 phase)
+{
+    OsProcessCleanupWindowsTestOwner owners[OS_TEST_WINDOWS_OWNER_DIAGNOSTIC_CAPACITY] = {0};
+    u64 count = os_process_cleanup_windows_test_inventory(owners, BUSTER_ARRAY_LENGTH(owners));
+    u64 retained = count < BUSTER_ARRAY_LENGTH(owners) ? count : BUSTER_ARRAY_LENGTH(owners);
+    arguments->show(arguments, S8("WINDOWS_SHUTDOWN_OWNER_INVENTORY_V1 mode={S8} phase={S8} owners={u64} rows={u64} complete={u32}\n"),
+        mode, phase, count, retained, (u32)(count <= BUSTER_ARRAY_LENGTH(owners)));
+    for (u64 index = 0; index < retained; index += 1)
+    {
+        OsProcessCleanupWindowsTestOwner owner = owners[index];
+        arguments->show(arguments, S8("WINDOWS_SHUTDOWN_OWNER_ROW_V1 mode={S8} phase={S8} id={u64} state={u32} pending={u32} "
+            "process={u64} job={u64} stdin={u64} stdout={u64} stderr={u64}\n"),
+            mode, phase, owner.id, owner.state, (u32)owner.pending, (u64)owner.process, (u64)owner.job,
+            (u64)owner.pipes[STANDARD_STREAM_INPUT], (u64)owner.pipes[STANDARD_STREAM_OUTPUT], (u64)owner.pipes[STANDARD_STREAM_ERROR]);
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_windows_handle_observation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    OsTestWindowsHandleCensus entry = os_test_windows_handle_census(GetCurrentProcess());
+    HANDLE owned = CreateEventW(0, TRUE, FALSE, 0);
+    HANDLE unrelated = CreateEventW(0, TRUE, FALSE, 0);
+    HANDLE witness = 0;
+    bool duplicated = owned && DuplicateHandle(GetCurrentProcess(), owned, GetCurrentProcess(), &witness, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    if (BUSTER_REQUIRE(arguments, owned && unrelated && duplicated))
+    {
+        OsTestWindowsHandleCensus before = os_test_windows_handle_census(GetCurrentProcess());
+        // A balanced unrelated replacement leaves the scalar census equal.
+        // The independent duplicate still proves the owned object is live.
+        bool unrelated_closed = CloseHandle(unrelated) != 0;
+        BUSTER_TEST(arguments, unrelated_closed);
+        if (unrelated_closed) unrelated = CreateEventW(0, TRUE, FALSE, 0);
+        OsTestWindowsHandleCensus after = os_test_windows_handle_census(GetCurrentProcess());
+        OsTestWindowsHandleObservation live = os_test_windows_handle_observe(owned, witness);
+        OsTestWindowsHandleObservation different = os_test_windows_handle_observe(unrelated, witness);
+        BUSTER_TEST(arguments, unrelated && before.valid && after.valid && before.count == after.count);
+        BUSTER_TEST(arguments, live.valid && live.same_object && !live.query_error && !live.compare_error);
+        BUSTER_TEST(arguments, different.valid && !different.same_object && !different.query_error);
+        HANDLE closed = owned;
+        bool owned_closed = CloseHandle(owned) != 0;
+        BUSTER_TEST(arguments, owned_closed);
+        if (owned_closed) owned = 0;
+        OsTestWindowsHandleObservation released = os_test_windows_handle_observe(closed, witness);
+        BUSTER_TEST(arguments, !released.valid && !released.same_object && released.query_error == ERROR_INVALID_HANDLE);
+        OsTestWindowsHandleCensus failed = os_test_windows_handle_census(0);
+        BUSTER_TEST(arguments, !failed.valid && failed.error != 0 && failed.count == 0);
+        arguments->show(arguments, S8("WINDOWS_HANDLE_OBSERVATION_CONTROL_V1 count_before={u32} count_after={u32} "
+            "balanced_live_same={u32} different_same={u32} closed_error={u32} failed_census_error={u32}\n"),
+            before.count, after.count, (u32)live.same_object, (u32)different.same_object, released.query_error, failed.error);
+    }
+    if (witness) BUSTER_TEST(arguments, CloseHandle(witness) != 0);
+    if (owned) BUSTER_TEST(arguments, CloseHandle(owned) != 0);
+    if (unrelated) BUSTER_TEST(arguments, CloseHandle(unrelated) != 0);
+    OsTestWindowsHandleCensus end_census = os_test_windows_handle_census(GetCurrentProcess());
+    BUSTER_TEST(arguments, entry.valid && end_census.valid && entry.count == end_census.count);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2266,11 +2374,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
             String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CLEANUP_RELEASE_EVENT"), S8("BUSTER_TEST_JOBS"), S8("BUSTER_OS_PROCESS_READY"), S8("BUSTER_TEST_MODULE_GROUP")};
             String8 values[] = {modes[index], event_name8, S8("1"), ready, S8("")};
             OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
-            u64 resources_before = os_process_spawn_test_resource_count();
+            OsTestWindowsHandleCensus resources_before = os_test_windows_handle_census(GetCurrentProcess());
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
                 (ProcessSpawnOptions){.new_process_group = 1, .capture = ((u64)1 << STANDARD_STREAM_ERROR) | ((u64)1 << STANDARD_STREAM_OUTPUT)});
+            HANDLE originals[] = {(HANDLE)spawn.handle, (HANDLE)spawn.process_tree,
+                (HANDLE)spawn.pipes[STANDARD_STREAM_OUTPUT][0], (HANDLE)spawn.pipes[STANDARD_STREAM_ERROR][0]};
+            HANDLE witnesses[BUSTER_ARRAY_LENGTH(originals)] = {0};
+            String8 roles[] = {S8("process"), S8("job"), S8("stdout"), S8("stderr")};
             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
             {
+                for (u32 handle_index = 0; handle_index < BUSTER_ARRAY_LENGTH(originals); handle_index += 1)
+                {
+                    bool duplicated = originals[handle_index] && DuplicateHandle(GetCurrentProcess(), originals[handle_index],
+                        GetCurrentProcess(), &witnesses[handle_index], 0, FALSE, DUPLICATE_SAME_ACCESS);
+                    u32 error = duplicated ? 0 : GetLastError();
+                    BUSTER_TEST(arguments, duplicated);
+                    arguments->show(arguments, S8("WINDOWS_SHUTDOWN_HANDLE_WITNESS_V1 mode={S8} owner_id={u64} role={S8} "
+                        "original={u64} witness={u64} error={u32}\n"), modes[index], spawn.windows_owner_id, roles[handle_index],
+                        (u64)originals[handle_index], (u64)witnesses[handle_index], error);
+                }
+                (void)os_test_windows_owner_diagnostic(arguments, modes[index], S8("before-wait"));
                 DWORD available = 0;
                 bool output_valid = true;
                 u64 early_stdout_bytes = 0;
@@ -2344,7 +2467,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
                     modes[index], early_stdout_bytes, read_count, (u32)host_alive, active_before,
                     (u32)host_wait, (u32)empty, (u32)waited.timed_out, waited.platform_status);
             }
-            BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+            for (u32 handle_index = 0; handle_index < BUSTER_ARRAY_LENGTH(originals); handle_index += 1)
+            {
+                if (witnesses[handle_index])
+                {
+                    OsTestWindowsHandleObservation observation = os_test_windows_handle_observe(originals[handle_index], witnesses[handle_index]);
+                    arguments->show(arguments, S8("WINDOWS_SHUTDOWN_HANDLE_OBSERVATION_V1 mode={S8} owner_id={u64} role={S8} "
+                        "original={u64} witness={u64} valid={u32} same_object={u32} flags={u32} query_error={u32} compare_error={u32}\n"),
+                        modes[index], spawn.windows_owner_id, roles[handle_index], (u64)originals[handle_index],
+                        (u64)witnesses[handle_index], (u32)observation.valid, (u32)observation.same_object,
+                        observation.flags, observation.query_error, observation.compare_error);
+                    BUSTER_TEST(arguments, !observation.same_object && (observation.valid || observation.query_error == ERROR_INVALID_HANDLE));
+                    BUSTER_TEST(arguments, CloseHandle(witnesses[handle_index]) != 0);
+                }
+            }
+            (void)os_test_windows_owner_diagnostic(arguments, modes[index], S8("after-wait"));
+            OsTestWindowsHandleCensus resources_after = os_test_windows_handle_census(GetCurrentProcess());
+            arguments->show(arguments, S8("WINDOWS_SHUTDOWN_HANDLE_CENSUS_V1 mode={S8} before={u32} before_valid={u32} before_error={u32} "
+                "after={u32} after_valid={u32} after_error={u32}\n"), modes[index], resources_before.count, (u32)resources_before.valid,
+                resources_before.error, resources_after.count, (u32)resources_after.valid, resources_after.error);
+            BUSTER_TEST(arguments, resources_before.valid && resources_after.valid);
+            BUSTER_TEST(arguments, resources_after.count == resources_before.count);
             BUSTER_TEST(arguments, CloseHandle(release) != 0);
         }
         BUSTER_TEST(arguments, os_file_delete(ready));
@@ -3225,6 +3368,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, os_test_process_deadline_windows);
     BUSTER_TEST_FIXTURE(arguments, os_test_process_cleanup_windows);
     BUSTER_TEST_FIXTURE(arguments, os_test_process_shutdown_exit_windows);
+    BUSTER_TEST_FIXTURE(arguments, os_test_windows_handle_observation);
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
