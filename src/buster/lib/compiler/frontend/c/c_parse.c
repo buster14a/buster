@@ -9773,7 +9773,7 @@ BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine
     u32 derived_recipe = C_AST_FACT_NONE;
     // Deep indirection chains already have their completed child
     // fact. Re-reading every nested prefix would be quadratic.
-    bool derived = (compose || machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE) &&
+    bool derived = (compose || machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE || machine->syntax_tree->kinds[node] == C_AST_CAST) &&
                    c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
     bool valid = derived || c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
     if (!valid)

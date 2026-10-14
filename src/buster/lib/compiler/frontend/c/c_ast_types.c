@@ -3434,7 +3434,16 @@ BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParse
     CAst const* ast = machine->syntax_tree;
     CAstFactTypeReference answer = {.index = C_AST_FACT_NONE};
     u32 kind = ast->kinds[node];
-    if (result && kind == C_AST_DEREFERENCE)
+    if (result && kind == C_AST_CAST)
+    {
+        u32 operand = c_ast_child_at(ast, node, 1);
+        if (facts->flags[operand] & C_AST_FACT_TYPED)
+        {
+            answer = c_ast_types_fact_node(facts, result, c_ast_child_at(ast, node, 0));
+            machine->result_nonplace_projection = false;
+        }
+    }
+    else if (result && kind == C_AST_DEREFERENCE)
     {
         CAstFactTypeReference base = c_ast_types_fact_node(facts, result, c_ast_child_at(ast, node, 0));
         if (base.type && (base.type->kind == C_TYPE_POINTER || base.type->kind == C_TYPE_ARRAY))
