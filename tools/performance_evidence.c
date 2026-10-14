@@ -20,7 +20,7 @@
 // leaves the comparison incomplete (exit 2) and never becomes a zero value.
 // Map: pe_claims, pe_sha256_file, pe_which, pe_run, pe_parse_profile,
 //      pe_perf_event, pe_perf_events_valid, pe_parse_perf, pe_valgrind_problem, pe_perf_problem, pe_verdicts,
-//      pe_write_summary, pe_preflight, pe_compare, pe_classify, pe_self_test, main.
+//      pe_write_summary, pe_finish, pe_path_join, pe_remove_tree, pe_preflight, pe_compare, pe_classify, pe_self_test, main.
 #include "ci_metrics_json.h"
 #include <unistd.h>
 #include <fcntl.h>
@@ -638,7 +638,8 @@ BUSTER_GLOBAL_LOCAL void pe_result(PeReport *r)
             m = &r->metrics[i];
         }
     }
-    if (primary_count > 1) pe_problem(r, "multiple primary perf scopes: select one scope for ", primary);
+    if (!primary_count) pe_problem(r, "missing required primary metric: ", primary);
+    else if (primary_count > 1) pe_problem(r, "multiple primary perf scopes: select one scope for ", primary);
     if (m) primary = m->name;
     int work = cm_equal(r->claim->name, "work-reduction");
     const char *verdict = m ? m->verdict : "missing";
@@ -757,6 +758,17 @@ BUSTER_GLOBAL_LOCAL void pe_print(FILE *f, const PeReport *r)
     if (r->problems[0]) fprintf(f, "Problems: %s\n", r->problems);
 }
 
+// Finalize the same completeness, receipt and exit contract for CLI and offline controls.
+BUSTER_GLOBAL_LOCAL int pe_finish(PeReport *r, FILE *summary, const char *const identity[6], char *const *args, unsigned arg_count)
+{
+    pe_verdicts(r);
+    pe_result(r);
+    if (summary) pe_write_summary(summary, r, identity, args, arg_count);
+    pe_print(stdout, r);
+    int result = r->complete ? 0 : 2;
+    return result;
+}
+
 // Sum every per-process profile `<prefix>.<pid>.<suffix>` for one run.
 BUSTER_GLOBAL_LOCAL void pe_collect_profiles(PeReport *r, unsigned arm, unsigned run, const char *directory, const char *prefix,
     const char *suffix)
@@ -831,25 +843,49 @@ BUSTER_GLOBAL_LOCAL int pe_tool_version(PeTool tool, const char *directory, char
     return result;
 }
 
+// Join only complete paths; a refusal clears the output and cannot name another file.
+BUSTER_GLOBAL_LOCAL int pe_path_join(char *out, size_t capacity, const char *parent, const char *name)
+{
+    size_t p = strlen(parent), n = strlen(name);
+    int result = p < capacity && capacity - p > 1 && n < capacity - p - 1;
+    if (result)
+    {
+        memcpy(out, parent, p);
+        out[p] = '/';
+        memcpy(out + p + 1, name, n + 1);
+    }
+    else if (capacity) out[0] = 0;
+    return result;
+}
+
 // Remove a scratch tree at most two levels deep (preflight probes, self-test cases).
-BUSTER_GLOBAL_LOCAL void pe_remove_tree(const char *root)
+BUSTER_GLOBAL_LOCAL int pe_remove_tree(const char *root)
 {
     char path[PE_PATH], file[PE_PATH];
     DIR *top = opendir(root);
+    int result = top != NULL;
     for (struct dirent *entry = top ? readdir(top) : NULL; entry; entry = readdir(top))
     {
-        snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
-        DIR *inner = entry->d_name[0] != '.' ? opendir(path) : NULL;
-        for (struct dirent *item = inner ? readdir(inner) : NULL; item; item = readdir(inner))
+        if (entry->d_name[0] != '.')
         {
-            snprintf(file, sizeof(file), "%s/%s", path, item->d_name);
-            if (item->d_name[0] != '.') unlink(file);
+            int joined = pe_path_join(path, sizeof(path), root, entry->d_name);
+            result = joined && result;
+            DIR *inner = joined ? opendir(path) : NULL;
+            for (struct dirent *item = inner ? readdir(inner) : NULL; item; item = readdir(inner))
+            {
+                if (item->d_name[0] != '.')
+                {
+                    int file_joined = pe_path_join(file, sizeof(file), path, item->d_name);
+                    if (!file_joined || unlink(file) != 0) result = 0;
+                }
+            }
+            if (inner) { closedir(inner); if (rmdir(path) != 0) result = 0; }
+            else if (joined && unlink(path) != 0) result = 0;
         }
-        if (inner) { closedir(inner); rmdir(path); }
-        else if (entry->d_name[0] != '.') unlink(path);
     }
     if (top) closedir(top);
-    rmdir(root);
+    if (rmdir(root) != 0) result = 0;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL int pe_preflight(PeTool tool, char *const *command, unsigned command_count)
@@ -906,7 +942,11 @@ BUSTER_GLOBAL_LOCAL int pe_preflight(PeTool tool, char *const *command, unsigned
         printf("PREFLIGHT tool=%s status=%s version=\"%s\"%s%s%s\n", pe_tool_names[tool], ok ? "available" : "unavailable",
             version, reason[0] ? " reason=\"" : "", reason, reason[0] ? "\"" : "");
     else fputs("usage: performance-evidence preflight --tool callgrind|cachegrind|perf-stat|time [-- COMMAND ...]\n", stderr);
-    pe_remove_tree(directory);
+    if (!pe_remove_tree(directory) && tool != PE_TOOL_NONE)
+    {
+        fputs("PREFLIGHT cleanup=failed: scratch tree could not be completely removed\n", stderr);
+        ok = 0;
+    }
     int result = tool == PE_TOOL_NONE ? 2 : ok ? 0 : 3;
     return result;
 }
@@ -1082,15 +1122,12 @@ BUSTER_GLOBAL_LOCAL int pe_compare(int argc, char **argv)
                 free(log);
             }
         }
-        pe_verdicts(r);
-        pe_result(r);
         const char *identity[6] = {paths[0], sha[0], revisions[0], paths[1], sha[1], revisions[1]};
         snprintf(summary, sizeof(summary), "%s/summary.json", out);
         FILE *f = fopen(summary, "wb");
-        if (f) { pe_write_summary(f, r, identity, args, arg_count); fclose(f); }
-        else pe_problem(r, "cannot write ", summary);
-        pe_print(stdout, r);
-        result = r->complete ? 0 : 2;
+        if (!f) pe_problem(r, "cannot write ", summary);
+        result = pe_finish(r, f, identity, args, arg_count);
+        if (f) fclose(f);
     }
     free(r);
     return result;
