@@ -41993,6 +41993,9 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             // A built name index lives in the caller's arena and an index
             // built here would be left pointing into the model arena.
             query.member_lookup = 0;
+            // Body validation owns this mutable cursor. Private lookups use
+            // the immutable scope buckets instead of seeking its live path.
+            query.scope_cursor = 0;
             query.bfloat16_builtin_call_capacity = query.bfloat16_builtin_call_count;
             query.type_capacity = query.type_count;
             query.array_bound_capacity = query.array_bound_count;
@@ -42272,6 +42275,21 @@ BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena
             c_parse_type_interning(result) ? (u64)c_parse_type_interning(result)->qualified_slot_count * sizeof(u32) : 0},
         {result->binding_by_symbol, 0, (u64)result->binding_capacity * sizeof(CEntityId)},
         {result->binding_undo, 0, (u64)result->binding_undo_capacity * sizeof(CParseBindingUndo)},
+        {result->scope_cursor, 0, result->scope_cursor ? sizeof(CParseScopeCursor) : 0},
+        {result->scope_cursor ? result->scope_cursor->by_symbol : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->symbol_capacity * sizeof(CEntityId) : 0},
+        {result->scope_cursor ? result->scope_cursor->shadowed : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->entity_capacity * sizeof(CEntityId) : 0},
+        {result->scope_cursor ? result->scope_cursor->stack : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->entity_capacity * sizeof(CEntityId) : 0},
+        {result->scope_cursor ? result->scope_cursor->path : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->scope_capacity * sizeof(CScopeId) : 0},
+        {result->scope_cursor ? result->scope_cursor->path_mark : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->scope_capacity * sizeof(u32) : 0},
+        {result->scope_cursor ? result->scope_cursor->position_plus_one : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->scope_capacity * sizeof(u32) : 0},
+        {result->scope_cursor ? result->scope_cursor->pending : 0, 0,
+            result->scope_cursor ? (u64)result->scope_cursor->scope_capacity * sizeof(CScopeId) : 0},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(snapshots); index += 1)
     {
@@ -42319,6 +42337,22 @@ CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessR
                                                    CScopeId scope, u32 start, u32 end)
 {
     return c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, false, false);
+}
+
+CTestTypeConstantCursorQuery c_test_type_integer_constant_cursor(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                                CScopeId prepared_scope, CScopeId scope, u32 start, u32 end)
+{
+    CTestTypeConstantCursorQuery report = {0};
+    CParseScopeCursor* previous = result->scope_cursor;
+    CParseScopeCursor* cursor = c_parse_scope_cursor_create(scratch, result);
+    result->scope_cursor = cursor;
+    report.prepared = cursor && prepared_scope.value && prepared_scope.value < result->scope_count &&
+                      scope.value < result->scope_count && scope.value != prepared_scope.value &&
+                      c_parse_scope_cursor_seek(result, cursor, prepared_scope);
+    if (report.prepared)
+        report.query = c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, false, false);
+    result->scope_cursor = previous;
+    return report;
 }
 
 CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,

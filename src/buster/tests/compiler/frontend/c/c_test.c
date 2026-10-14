@@ -43073,6 +43073,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
         }
         c_test_scratch_end(temporary);
     }
+    // #1247: private TYPE lookups must leave a live validator cursor alone,
+    // including a refused query that reached the nested array dependency.
+    String8 cursor_expressions[] = {
+        S8("sizeof(char[sizeof(char[N])])"),
+        S8("sizeof(char[sizeof(char[N])]) / 0"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cursor_expressions); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 parts[] = {
+            S8("int f(void) { enum {N=3}; unsigned long warm=sizeof(char[sizeof(char[N])]); "
+               "{ enum {N=5}; unsigned long probe="),
+            cursor_expressions[index],
+            S8("; (void)probe; } (void)warm; return 0; }"),
+        };
+        String8 source = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CScopeId prepared_scope = C_SCOPE_ID_INVALID;
+        CScopeId scope = C_SCOPE_ID_INVALID;
+        for (u32 entity = 0; entity < parse.entity_count; entity += 1)
+        {
+            if (string_equal(parse.entities[entity].name, S8("warm"))) prepared_scope = parse.entities[entity].scope;
+            if (string_equal(parse.entities[entity].name, S8("probe"))) scope = parse.entities[entity].scope;
+        }
+        u32 start = UINT32_MAX;
+        u32 end = UINT32_MAX;
+        for (u32 token = 0; token + 1 < preprocess.token_count; token += 1)
+        {
+            if (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]), S8("probe")) &&
+                c_token_is_punctuator(&preprocess.tokens[token + 1], C_PUNCTUATOR_ASSIGN))
+            {
+                start = token + 2;
+                end = start;
+                while (end < preprocess.token_count && !c_token_is_punctuator(&preprocess.tokens[end], C_PUNCTUATOR_SEMICOLON)) end += 1;
+            }
+        }
+        BUSTER_TEST(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count);
+        if (BUSTER_REQUIRE(arguments, start < end && end < preprocess.token_count &&
+                                      prepared_scope.value < parse.scope_count && scope.value < parse.scope_count))
+        {
+            CTestTypeConstantCursorQuery report = c_test_type_integer_constant_cursor(temporary.arena, preprocess, &parse,
+                                                                                     prepared_scope, scope, start, end);
+            BUSTER_TEST(arguments, report.prepared);
+            BUSTER_TEST(arguments, report.query.model_unchanged);
+            BUSTER_TEST(arguments, report.query.constant.valid == (index == 0));
+            if (index == 0) BUSTER_TEST(arguments, !report.query.constant.is_negative &&
+                                                 !report.query.constant.magnitude_high && report.query.constant.magnitude == 5);
+        }
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 

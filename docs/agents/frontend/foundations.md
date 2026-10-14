@@ -632,6 +632,10 @@ without facts for identical bitcode and diagnostics.
   The query accepts no live declaration machine. Its isolation fixture snapshots
   full shared buffers and indexes on successful and refused queries, including
   a shortened checkpoint whose buffers contain later type rows (GitHub #1247).
+  Private queries also omit the body validator's mutable scope cursor and use
+  immutable scope buckets. The snapshot includes the cursor header and all
+  seven backing arrays; successful and refused nested-scope queries preserve
+  a caller cursor prepared in an enclosing scope.
 - Legacy integer constant ranges share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
