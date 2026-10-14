@@ -674,9 +674,17 @@ still an operand, and ordinary conjunctions still bind ordinary identifiers.
 layouts, both canonical forms, and default/pilot verified execution under
 FAST/QUALITY, with undeclared conjunction/sizeof/alignof/typeof neighbors.
 A complete root equality/inequality is a provenance sink: its result is the
-ordinary integer produced by canonical pointer equality. Conditional, comma,
-logical and cast results retain the conservative policy; decorated pointer
-return/call/static-storage and conditional/comma controls remain rejected.
+ordinary integer produced by canonical pointer equality. Logical `&&` and
+`||` compositions preserve that ordinary boolean result only when every
+operand's label provenance is consumed by a comparison. An explicit guarded
+worklist splits top-level logical operands once and uses indexed delimiter
+jumps for nested groups; it never recurses. Direct label-pointer truth
+conversion and conditional, comma and cast transports retain the conservative
+policy; pointer return/call/static-storage and invalid computed targets remain
+rejected. `c_test_label_comparison_logicals` covers the frozen typeof witness,
+a plain reduction, nesting, both logical operators, short circuits and
+exactly-once effects, with independent hosted GCC/Clang expected-value runs and
+tree-free/pilot, SSA/memory and FAST/QUALITY controls.
 Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and
