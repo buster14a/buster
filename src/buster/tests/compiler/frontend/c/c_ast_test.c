@@ -8740,11 +8740,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_cast_prefix_machine_capacity(UnitT
         {
             CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
             syntax.type_interning = true;
+            syntax.reference_tokens = true;
+            syntax.ast = 0;
             u64 before = c_test_assignment_chain_work();
             CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
             u64 plain_work = c_test_assignment_chain_work() - before;
             syntax.ast = &built.ast;
             syntax.ast_facts = &facts;
+            syntax.reference_tokens = false;
             before = c_test_assignment_chain_work();
             CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
             u64 tree_work = c_test_assignment_chain_work() - before;
@@ -8760,6 +8763,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_cast_prefix_machine_capacity(UnitT
         }
         c_ast_facts_release(&facts);
         c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// Required file-scope conditional operands compose immutable integer child
+// authority. Each node owns bounded recipe work, including compact retention
+// in the normal entrypoint's caller arena at the formerly quadratic depth.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_conditional_recipe_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const depths[] = {64, 256, 1024, 8192};
+    u32 previous_depth = 0;
+    u32 previous_recipes = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(depths); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = depths[index];
+        String8 head = S8("int c;char a[sizeof(");
+        String8 open = S8("c?(");
+        String8 close = S8("):2");
+        String8 tail = S8(")];int g(void){return (int)sizeof a;}");
+        u64 bytes = head.length + (u64)depth * (open.length + close.length) + 1 + tail.length;
+        char8* text = arena_allocate(temporary.arena, char8, bytes);
+        u64 cursor = 0;
+        memcpy(text + cursor, head.pointer, head.length);
+        cursor += head.length;
+        for (u32 step = 0; step < depth; step += 1) { memcpy(text + cursor, open.pointer, open.length); cursor += open.length; }
+        text[cursor++] = '1';
+        for (u32 step = 0; step < depth; step += 1) { memcpy(text + cursor, close.pointer, close.length); cursor += close.length; }
+        memcpy(text + cursor, tail.pointer, tail.length);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){.pointer = text, .length = bytes}, C_PREPROCESS_DIALECT_GNU17);
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        // The historical control disables automatic facts preparation while
+        // preserving the same syntax and default type-interning policy.
+        syntax.reference_tokens = true;
+        syntax.ast = analysis.ast;
+        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        if (BUSTER_REQUIRE(arguments, plain.analysis_complete && !plain.diagnostic_count && analysis.analysis_complete && !analysis.diagnostic_count &&
+                                     analysis.ast && analysis.ast_facts))
+        {
+            CAstFacts const* facts = analysis.ast_facts;
+            BUSTER_TEST_RAW(arguments, facts->recipe_count < depth * 4 + 64 && facts->statistics.completion_queries < (u64)depth * 3 + 64,
+                string_format(temporary.arena, S8("conditional depth={u32} recipes={u32} queries={u64}"), depth, facts->recipe_count,
+                    facts->statistics.completion_queries));
+            BUSTER_TEST(arguments, facts->statistics.retained_bytes < (u64)analysis.ast->node_count * 512 + 16384);
+            if (previous_depth) BUSTER_TEST(arguments, facts->recipe_count <= previous_recipes * (depth / previous_depth) + 64);
+            previous_depth = depth;
+            previous_recipes = facts->recipe_count;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("conditional-recipe-growth.c"), preprocess, analysis, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical conditional program"));
+        }
         c_test_scratch_end(temporary);
     }
     return result;
@@ -8979,6 +9039,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_fact_intervals);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_cast_prefix_machine_capacity);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_conditional_recipe_growth);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);

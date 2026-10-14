@@ -3522,7 +3522,20 @@ BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParse
             CAstFactTypeReference b = c_ast_types_fact_nested(facts, result, right, right.type->element_type);
             vector = a.type && b.type && a.index == b.index && a.recipe == b.recipe;
         }
-        if (vector || (kind == C_AST_CONDITIONAL && same && (left.type->kind == C_TYPE_STRUCT || left.type->kind == C_TYPE_UNION)))
+        bool integers = left.type && right.type && left.type->kind != C_TYPE_ENUM && right.type->kind != C_TYPE_ENUM &&
+                        c_parse_expression_integer_kind(left.type->kind) && c_parse_expression_integer_kind(right.type->kind);
+        if (integers)
+        {
+            u32 a = c_ast_child_at(ast, node, children - 2);
+            u32 b = c_ast_child_at(ast, node, children - 1);
+            u32 a_width = (facts->flags[a] & C_AST_FACT_BIT_FIELD) ? facts->payloads[a] : 0;
+            u32 b_width = (facts->flags[b] & C_AST_FACT_BIT_FIELD) ? facts->payloads[b] : 0;
+            CTypeKind promoted_a = c_parse_expression_promoted_kind_with_width(preprocess->target, left.type->kind, a_width);
+            CTypeKind promoted_b = c_parse_expression_promoted_kind_with_width(preprocess->target, right.type->kind, b_width);
+            CTypeKind common = c_semantic_integer_arithmetic_kind(preprocess->target, promoted_a, promoted_b);
+            answer = c_ast_types_fact_reference(facts, result, c_parse_expression_scalar_type(result, common).value, false);
+        }
+        else if (vector || (kind == C_AST_CONDITIONAL && same && (left.type->kind == C_TYPE_STRUCT || left.type->kind == C_TYPE_UNION)))
         {
             answer = left;
         }
