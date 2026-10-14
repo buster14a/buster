@@ -1745,8 +1745,8 @@ struct CIrLabel
     String8 name;
     u32 token_index;
     IrBlockId block;
-    u32 statement_expression_open;
-    u32 statement_expression_close;
+    u32 statement_expression_begin;
+    u32 statement_expression_end;
 };
 
 // Open-addressed index over one CIrLabel array, keyed on the label spelling.
@@ -20331,7 +20331,6 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start,
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, u32 initializer_node, IrType* type, IrGlobal* global);
-BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
 {
@@ -44829,7 +44828,7 @@ BUSTER_C_INTERNAL IrBlockId* c_ir_address_taken_label_blocks(CIntegerIrBuilder* 
         if (ast->kinds[node] == C_AST_LABEL_ADDRESS)
         {
             CIrLabel* label = c_ir_label_find(state->labels, state->label_count, &state->label_index,
-                                              c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[node]]));
+                                              c_ir_source_spelling(&builder->preprocess, ast->tokens[node]));
             bool known = label == 0;
             for (u32 previous = 0; !known && previous < count; previous += 1)
             {
@@ -44902,7 +44901,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, 
             if (kind == C_AST_GOTO)
             {
                 CIrLabel* label = c_ir_label_find(state->labels, label_count, &state->label_index,
-                                                  c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[visited]]));
+                                                  c_ir_source_spelling(&builder->preprocess, ast->tokens[visited]));
                 if (label)
                 {
                     u32 label_index = (u32)(label - state->labels);
@@ -44965,9 +44964,9 @@ BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, 
 }
 
 // Records, for each label of a body, the innermost GNU statement expression
-// that contains it (UINT32_MAX when none does), by the tokens of its braces. A
+// that contains it (UINT32_MAX when none does), by its compound subtree. A
 // goto may not enter a statement expression, so a label is visible to a goto
-// exactly when its recorded range is empty or contains the goto. A walk from
+// exactly when that subtree is absent or contains the known GOTO node. A walk from
 // the span's end visits a node before everything inside it, so the statement
 // expressions open around a node are a stack.
 BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
@@ -44981,19 +44980,18 @@ BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuil
     u32 open_count = 0;
     for (u32 label = 0; label < label_count; label += 1)
     {
-        labels[label].statement_expression_open = UINT32_MAX;
-        labels[label].statement_expression_close = UINT32_MAX;
+        labels[label].statement_expression_begin = UINT32_MAX;
+        labels[label].statement_expression_end = UINT32_MAX;
     }
     for (u32 node = begin; label_count && node < end; node += 1)
     {
         open_count += ast->kinds[node] == C_AST_STATEMENT_EXPRESSION;
     }
-    bool ok = !open_count || c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 3, BUSTER_ALIGN_OF(u32));
+    bool ok = !open_count || c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 2, BUSTER_ALIGN_OF(u32));
     if (ok && open_count)
     {
-        u32* begins = arena_allocate(builder->scratch_arena, u32, open_count * 3);
-        u32* opens = begins + open_count;
-        u32* closes = opens + open_count;
+        u32* begins = arena_allocate(builder->scratch_arena, u32, open_count * 2);
+        u32* context_ends = begins + open_count;
         u32 depth = 0;
         for (u32 node = end; node > begin; node -= 1)
         {
@@ -45005,20 +45003,18 @@ BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuil
             u8 kind = ast->kinds[visited];
             if (kind == C_AST_STATEMENT_EXPRESSION && depth < open_count)
             {
-                u32 open = ast->tokens[visited - 1];
                 begins[depth] = c_ast_subtree_begin(ast, visited - 1);
-                opens[depth] = open;
-                closes[depth] = c_ir_node_owned_close(ast, visited - 1, C_AST_DELIMITER_BLOCK);
+                context_ends[depth] = visited;
                 depth += 1;
             }
             else if (kind == C_AST_LABELED && depth)
             {
                 CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index,
-                                                  c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[visited]]));
+                                                  c_ir_source_spelling(&builder->preprocess, ast->tokens[visited]));
                 if (label && label->token_index == ast->tokens[visited])
                 {
-                    label->statement_expression_open = opens[depth - 1];
-                    label->statement_expression_close = closes[depth - 1];
+                    label->statement_expression_begin = begins[depth - 1];
+                    label->statement_expression_end = context_ends[depth - 1];
                 }
             }
         }
@@ -45086,7 +45082,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         for (u32 key = 0; ok && key < key_count; key += 1)
         {
             u32 index = (u32)(keys[key] >> 32);
-            String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]);
+            String8 name = c_ir_source_spelling(&builder->preprocess, index);
             if (c_ir_label_find(state->labels, state->label_count, &state->label_index, name))
             {
                 builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), name);
@@ -45131,7 +45127,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         // apparatus runs for this function.
         if (!builder->label_metadata_enabled && kind == C_AST_LABEL_ADDRESS)
         {
-            String8 label_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[ast->tokens[node]]);
+            String8 label_name = c_ir_source_spelling(&builder->preprocess, ast->tokens[node]);
             if (c_ir_label_find(state->labels, state->label_count, &state->label_index, label_name) ||
                 c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, label_name))
             {
@@ -46303,8 +46299,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, goto_name);
                 }
-                if (label && label->statement_expression_open != UINT32_MAX &&
-                    (first < label->statement_expression_open || first > label->statement_expression_close))
+                if (label && label->statement_expression_begin != UINT32_MAX &&
+                    (node < label->statement_expression_begin || node >= label->statement_expression_end))
                 {
                     builder->failure_message = string_format(builder->arena, S8("cannot jump into a statement expression: label '{S8}'"), goto_name);
                     builder->failure_token_index = anchor;
@@ -61031,6 +61027,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     memset(entity_destructor, 0, sizeof(*entity_destructor) * parse.entity_count);
     bool* object_referenced = arena_allocate(arena, bool, parse.entity_count);
     memset(object_referenced, 0, sizeof(*object_referenced) * parse.entity_count);
+    bool* function_referenced_outside = arena_allocate_zeroed(arena, bool, parse.entity_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -61109,55 +61106,30 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             object_referenced[entity.value] = true;
         }
     }
-    // A name that appears only in another object's static initializer is a
-    // reference too. DoomGeneric's g_game.c builds `static int* weapon_keys[]
-    // = { &key_weapon1, ... }` out of objects that m_controls.c defines and
-    // that g_game.c names nowhere else; the use table above is built from
-    // expression contexts, so without this pass those entities get no symbol,
-    // the initializer relocates nothing, and the array quietly ends up full of
-    // null pointers that the first weapon-key check dereferences.
+    // The finished initializer's identifier leaves keep object and function
+    // references alive even when no body names them. Member/designator names
+    // have their own kinds, so a same-spelling file entity is never included.
+    CAstFacts const* unit_facts = options.syntax_facts;
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        u32 initializer_start = 0;
-        u32 initializer_end = 0;
-        if (declaration.kind != C_DECLARATION_OBJECT ||
-            !c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end))
+        u32 initializer = declaration.initializer_node_plus_one - 1;
+        if (declaration.kind != C_DECLARATION_OBJECT || initializer >= unit_ast->node_count)
         {
             continue;
         }
-        for (u32 token_index = initializer_start; token_index < initializer_end; token_index += 1)
+        u32 begin = c_ast_subtree_begin(unit_ast, initializer);
+        for (u32 node = begin; node <= initializer; node += 1)
         {
-            if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
+            if (unit_ast->kinds[node] == C_AST_IDENTIFIER && node < unit_facts->node_count &&
+                (unit_facts->flags[node] & C_AST_FACT_BOUND))
             {
-                continue;
-            }
-            // A member name or a designator is not a reference to anything at
-            // file scope, and taking it for one would put an undefined symbol
-            // in the object file whenever a member and a declared-only object
-            // share a name.
-            if (token_index > initializer_start && (c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) ||
-                                                    c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW)))
-            {
-                continue;
-            }
-            CEntityId entity = C_ENTITY_ID_INVALID;
-            u32 use_index = c_parse_identifier_use_index(&parse, token_index);
-            if (use_index != C_ID_UNDERLYING_INVALID)
-            {
-                entity = parse.identifier_uses[use_index].entity;
-            }
-            if (entity.value == C_ID_UNDERLYING_INVALID)
-            {
-                entity = c_parse_lookup_entity_token(&parse, preprocess.spelling_base,
-                                                     (CScopeId){
-                                                         .value = 0,
-                                                     },
-                                                     &preprocess.tokens[token_index]);
-            }
-            if (entity.value < parse.entity_count && parse.entities[entity.value].kind == C_ENTITY_OBJECT)
-            {
-                object_referenced[entity.value] = true;
+                u32 entity = unit_facts->payloads[node];
+                if (entity < parse.entity_count)
+                {
+                    object_referenced[entity] |= parse.entities[entity].kind == C_ENTITY_OBJECT;
+                    function_referenced_outside[entity] |= parse.entities[entity].kind == C_ENTITY_FUNCTION;
+                }
             }
         }
     }
@@ -61291,62 +61263,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             };
         }
     }
-    // One slot per preprocessed token, holding the owning definition's index
-    // plus one so the absent value is zero.  The array is a fresh allocation
-    // in a forward-growing arena, so a zero sentinel is the pages the OS
-    // already cleared and costs nothing to establish, where a UINT32_MAX
-    // sentinel wrote the whole array; every read subtracts one, which returns
-    // the same UINT32_MAX for an unowned token by unsigned wraparound.  This
-    // is the spelling CEntity.declaration_token_plus_one already uses.
-    u32* token_function_declarations_plus_one = arena_allocate_zeroed(arena, u32, preprocess.token_count);
+    // Function ownership is a property of the finished binding scope. The
+    // semantic binder records each definition's parameter bounds in this
+    // same scope before that parameter's name enters it; prototype bounds
+    // have no emitted uses. Child scopes are appended after their parent.
+    u32* scope_function_declarations_plus_one = arena_allocate_zeroed(arena, u32, parse.scope_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition)
+        if (declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition && declaration.scope.value < parse.scope_count)
         {
-            continue;
-        }
-        u64 body_end = (u64)declaration.body_start + declaration.body_token_count;
-        if (body_end > preprocess.token_count)
-        {
-            body_end = preprocess.token_count;
-        }
-        for (u64 token_index = declaration.body_start; token_index < body_end; token_index += 1)
-        {
-            token_function_declarations_plus_one[token_index] = declaration_index + 1;
-        }
-        // A variable-length array parameter's bound is evaluated in the
-        // function entry block, but its tokens precede body_start.  Attribute
-        // those tokens to this definition as well, so a function named only by
-        // a bound is a dependency of the enclosing function rather than an
-        // outside-body reference that keeps it alive unconditionally.
-        for (u32 parameter_index = 0; parameter_index < declaration.parameter_count; parameter_index += 1)
-        {
-            CParameter parameter = parse.parameters[declaration.parameter_start + parameter_index];
-            for (CTypeId type_id = parameter.type;
-                 type_id.value < parse.type_count && parse.types[type_id.value].kind == C_TYPE_ARRAY;
-                 type_id = parse.types[type_id.value].element_type)
-            {
-                CType array_type = parse.types[type_id.value];
-                if (array_type.array_bound >= parse.array_bound_count)
-                {
-                    continue;
-                }
-                CArrayBound bound = parse.array_bounds[array_type.array_bound];
-                u64 bound_end = (u64)bound.token_start + bound.token_count;
-                if (bound_end > preprocess.token_count)
-                {
-                    bound_end = preprocess.token_count;
-                }
-                for (u64 token_index = bound.token_start; token_index < bound_end; token_index += 1)
-                {
-                    token_function_declarations_plus_one[token_index] = declaration_index + 1;
-                }
-            }
+            scope_function_declarations_plus_one[declaration.scope.value] = declaration_index + 1;
         }
     }
-    bool* function_referenced_outside = arena_allocate(arena, bool, parse.entity_count);
-    memset(function_referenced_outside, 0, sizeof(*function_referenced_outside) * parse.entity_count);
+    for (u32 scope = 1; scope < parse.scope_count; scope += 1)
+    {
+        u32 parent = parse.scopes[scope].parent.value;
+        if (!scope_function_declarations_plus_one[scope] && parent < scope)
+        {
+            scope_function_declarations_plus_one[scope] = scope_function_declarations_plus_one[parent];
+        }
+    }
     // An alias names its target in an attribute rather than in an expression,
     // so no identifier use keeps the target alive; a static target would be
     // dropped as unreferenced and the alias would name nothing.
@@ -61362,36 +61299,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     {
         CIdentifierUse use = parse.identifier_uses[use_index];
         if (use.entity.value < parse.entity_count && parse.entities[use.entity.value].kind == C_ENTITY_FUNCTION &&
-            (use.token_index >= preprocess.token_count || !token_function_declarations_plus_one[use.token_index]))
+            (use.scope.value >= parse.scope_count || !scope_function_declarations_plus_one[use.scope.value]))
         {
             function_referenced_outside[use.entity.value] = true;
-        }
-    }
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        CDeclaration declaration = parse.declarations[declaration_index];
-        if (declaration.kind != C_DECLARATION_OBJECT)
-        {
-            continue;
-        }
-        u32 initializer_start = 0;
-        u32 initializer_end = 0;
-        if (!c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end))
-        {
-            continue;
-        }
-        for (u32 token_index = initializer_start; token_index < initializer_end; token_index += 1)
-        {
-            CToken token = preprocess.tokens[token_index];
-            if (token.kind != C_TOKEN_IDENTIFIER || !parse.scope_count)
-            {
-                continue;
-            }
-            CEntityId referenced = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
-            if (referenced.value < parse.entity_count && parse.entities[referenced.value].kind == C_ENTITY_FUNCTION)
-            {
-                function_referenced_outside[referenced.value] = true;
-            }
         }
     }
     // Function symbols must exist before global initializers are lowered. A
@@ -61852,7 +61762,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations_plus_one[use.token_index] - 1 : UINT32_MAX;
+        u32 owner_index = use.scope.value < parse.scope_count ? scope_function_declarations_plus_one[use.scope.value] - 1 : UINT32_MAX;
         if (owner_index == UINT32_MAX)
         {
             if (!function_needed[candidate_index])
@@ -62215,18 +62125,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         u64 prepared_call_capacity = 0;
         u64 prepared_control_expression_capacity = 0;
-        u32 body_end = declaration.body_start + declaration.body_token_count;
-        // A variable-length array parameter's bound is lowered into the entry
-        // block before the body is, and its tokens live in the declarator, not
-        // the body: `void f(int n, int a[g(n)])` prepares a call whose `(` this
-        // scan would never see.  Over-counting a capacity only sizes an arena
-        // block, so the scan just starts at the declaration -- but only for the
-        // declarators that can carry a bound at all: scanning every
-        // definition's specifiers and parameter list unconditionally measured
-        // 0,05% of a self-compile's instructions for nothing, twice what the
-        // gated form costs.  A definition's token_start always precedes its
-        // body_start; the minimum keeps the span below non-negative if one
-        // ever does not.
+        u32 body_compound = c_ir_body_nodes_find(body_nodes.functions, body_nodes.function_count, declaration.body_start - 1);
+        u32 prepared_node_start = body_compound != C_AST_NODE_INVALID ? c_ast_subtree_begin(options.syntax_tree, body_compound + 1) : 0;
+        u32 prepared_node_count = body_compound != C_AST_NODE_INVALID ? body_compound + 2 - prepared_node_start : 0;
+        // The complete definition subtree includes evaluated parameter bounds.
+        // Every CALL has at most one prepared row and one argument-list group;
+        // expression wrappers and index/array groups add their own control row.
         bool array_parameter = false;
         for (u32 parameter_index = 0; parameter_index < signatures[declaration_index].parameter_count && !array_parameter; parameter_index += 1)
         {
@@ -62235,25 +62139,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         bool direct_ssa_enabled = !options.disable_direct_ssa && local_capacity < UINT16_MAX;
         u32 declaration_start = array_parameter ? BUSTER_MIN(declaration.token_start, declaration.body_start) : declaration.body_start;
-        for (u32 token_index = declaration_start; token_index < body_end; token_index += 1)
+        for (u32 node = prepared_node_start; node < prepared_node_start + prepared_node_count; node += 1)
         {
-            CToken token = preprocess.tokens[token_index];
-            bool open_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
-            prepared_call_capacity += open_parenthesis;
-            prepared_control_expression_capacity += open_parenthesis || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
-            if (direct_ssa_enabled)
-            {
-                // Label provenance is checked while lowering, before publication.
-                // Keep its existing memory owner; ordinary logical &&, calls,
-                // field access, arrays and switches are not function barriers.
-                bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                                     token_index + 1 < body_end && preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
-                                     !token_entities_plus_one[token_index + 1];
-                direct_ssa_enabled = !label_address &&
-                                     !(token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("asm")) ||
-                                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm")) ||
-                                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))));
-            }
+            u8 kind = options.syntax_tree->kinds[node];
+            prepared_call_capacity += kind == C_AST_CALL;
+            prepared_control_expression_capacity += kind == C_AST_CALL || kind == C_AST_INDEX || kind == C_AST_DECLARATOR_ARRAY;
+            direct_ssa_enabled &= kind != C_AST_LABEL_ADDRESS && kind != C_AST_ASM;
+        }
+        // Sparse groups are sorted by owner. Select the definition's interval
+        // once instead of searching its group list separately for every node.
+        u32 group_first = 0;
+        u32 group_end = options.syntax_tree->parenthesis_count;
+        while (group_first < group_end)
+        {
+            u32 middle = group_first + (group_end - group_first) / 2;
+            if (options.syntax_tree->parentheses[middle].node < prepared_node_start) group_first = middle + 1;
+            else group_end = middle;
+        }
+        for (u32 group = group_first; group < options.syntax_tree->parenthesis_count &&
+             options.syntax_tree->parentheses[group].node < prepared_node_start + prepared_node_count; group += 1)
+        {
+            prepared_control_expression_capacity += !(options.syntax_tree->parentheses[group].flags & C_AST_DELIMITER_OWNED_MASK);
         }
         CIrVendorFunctionBudget vendor_budget = vendor_budgets[declaration_index];
         u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16 +
@@ -62270,9 +62176,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         u64 local_array_capacity = local_capacity ? local_capacity : 1;
         u64 call_array_capacity = prepared_call_capacity ? prepared_call_capacity : 1;
         u64 body_array_capacity = declaration.body_token_count ? declaration.body_token_count : 1;
-        u32 body_compound = c_ir_body_nodes_find(body_nodes.functions, body_nodes.function_count, declaration.body_start - 1);
-        u32 prepared_node_start = body_compound != C_AST_NODE_INVALID ? c_ast_subtree_begin(options.syntax_tree, body_compound + 1) : 0;
-        u32 prepared_node_count = body_compound != C_AST_NODE_INVALID ? body_compound + 2 - prepared_node_start : 0;
         u64 prepared_node_array_capacity = prepared_node_count ? prepared_node_count : 1;
         u64 cleanup_capacity = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index];
         String8 function_reservation_error = {0};

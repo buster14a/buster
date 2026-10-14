@@ -7077,6 +7077,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_static_assert_authority(UnitTestAr
     return result;
 }
 
+// Function ownership follows finished scopes, including evaluated parameter
+// bounds. Global initializer bindings retain targets while names in member
+// designators and nested prototypes do not create outside-body references.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CAstUnitOwnerCase CAstUnitOwnerCase;
+    struct CAstUnitOwnerCase
+    {
+        String8 source;
+        u32 functions;
+        bool refused;
+    };
+    String8 const names[] = {S8("bound"), S8("owner"), S8("live"), S8("callback")};
+    CAstUnitOwnerCase const cases[] = {
+        {S8("static int bound(int n) { return n + 1; }\n"
+            "static int owner(int n, int a[bound(n)]) { return a[0]; }\n"
+            "int live(void) { return 0; }\n"), 4, false},
+        {S8("static int bound(int n) { return n + 1; }\n"
+            "int owner(int n, int a[bound(n)]) { return a[0]; }\n"
+            "int live(void) { return 0; }\n"), 7, false},
+        {S8("static int callback(void) { return 7; }\n"
+            "int (*table[])(void) = { callback };\n"
+            "extern int key; int *keys[] = { &key };\n"
+            "extern int field; struct Record { int field; };\n"
+            "struct Record record = { .field = 5 };\n"
+            "int live(void) { return 0; }\n"), 12, false},
+        {S8("static int callback(void) { return 7; }\n"
+            "static int owner(void) { int prototype(int a[callback()]); return 0; }\n"
+            "int live(void) { return 0; }\n"), 4, false},
+        {S8("int live(int n) { return ({ if (n) goto in; in: n += 1; n; }); }\n"), 4, false},
+        {S8("int live(int n) { int value = ({ if (n) goto out; 3; }); out: return value; }\n"), 4, false},
+        {S8("int live(int n) { if (n) goto in; return ({ in: 3; }); }\n"), 0, true},
+        {S8("int live(int n) { int a = ({ if (n) goto in; 1; }); int b = ({ in: 2; }); return a + b; }\n"), 0, true},
+        {S8("int live(int n) { void *target = &&out; if (n) goto *target; out: return 3; }\n"), 4, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, cases[index].source, C_PREPROCESS_DIALECT_GNU17);
+            CParseResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !analysis.diagnostic_count,
+                string_format(temporary.arena, S8("unit owner case={u32} form={u32}: {S8}"), index, form,
+                    analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("incomplete semantic analysis")));
+            if (!analysis.diagnostic_count)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("unit-owner-plans.c"), preprocess,
+                    analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, cases[index].refused ? lowered.diagnostic_count == 1 :
+                    lowered.diagnostic_count == 0 && lowered.program && lowered.canonical_ir_certified,
+                    string_format(temporary.arena, S8("unit owner case={u32} form={u32}: {S8}"), index, form,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical program")));
+                if (!cases[index].refused && lowered.program)
+                {
+                    IrModule* module = lowered.program->modules;
+                    u32 mask = 0;
+                    for (u32 function = 0; function < module->function_count; function += 1)
+                        for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                            mask |= string_equal(module->functions[function].name, names[name]) ? 1u << name : 0;
+                    BUSTER_TEST_RAW(arguments, mask == cases[index].functions,
+                        string_format(temporary.arena, S8("unit owner case={u32} form={u32} expected={u32} found={u32}"),
+                            index, form, cases[index].functions, mask));
+                    if (index == 2)
+                    {
+                        u32 key = 0;
+                        u32 field = 0;
+                        for (u32 symbol = 0; symbol < lowered.program->symbols.count; symbol += 1)
+                        {
+                            IrSymbol const* entry = ir_symbol_from_id(&lowered.program->symbols, (IrSymbolId){.value = symbol});
+                            key += string_equal(entry->name, S8("key"));
+                            field += string_equal(entry->name, S8("field"));
+                        }
+                        BUSTER_TEST(arguments, key == 1 && field == 0);
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8173,6 +8257,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);

@@ -277,6 +277,15 @@ accepts only retained `C_STATIC_ASSERT_HOLDS` rows and rejects missing or
 non-passing rows at their recorded declaration location before allocating IR.
 It has no unchecked assertion evaluator or late source-message parser.
 
+Unit lowering assigns each function definition to its finished semantic scope
+and propagates that owner to child scopes. Parameter-bound uses belong to the
+definition; prototype-only uses do not become unconditional external roots.
+Global initializer liveness reads bound identifier leaves in the retained
+initializer subtree, excluding member and designator names by node kind.
+Prepared capacities count call/index/array nodes and sparse expression groups;
+assembly and label-address nodes control SSA barriers. Statement-expression
+jump enclosures are subtree intervals around known label and goto nodes.
+
 Finished symbol properties are sparse `CDeclarationBinding` rows in the
 result's arena. `CDeclaration.binding_plus_one` and a static or extern local's
 `CEntity.binding_plus_one` select them; zero means the empty property set.
