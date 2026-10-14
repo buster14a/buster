@@ -232,10 +232,14 @@ BUSTER_GLOBAL_LOCAL void c_test_body_scratch_refuse_at(UnitTestArguments* argume
         BUSTER_TEST(arguments, target.end > cap);
         CTestBodyScratchRun capped = c_test_body_scratch_run(arguments, source, cap, trace);
         u32 refused = c_test_body_scratch_refused(trace, capped.trace_count);
-        BUSTER_TEST(arguments, !capped.lowered && capped.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &capped, 0, function));
+        BUSTER_TEST_RAW(arguments, !capped.lowered && capped.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &capped, 0, function),
+            string_format(arguments->arena, S8("body scratch cap={u64} target={u32} diagnostics={u32} first='{S8}' next='{S8}'"),
+                          cap, row, capped.diagnostic_count, capped.messages[0], capped.messages[1]));
         if (BUSTER_REQUIRE(arguments, refused < capped.trace_count))
         {
-            BUSTER_TEST(arguments, refused == row && trace[refused].element_size == target.element_size && trace[refused].count == target.count);
+            BUSTER_TEST_RAW(arguments, refused == row && trace[refused].element_size == target.element_size && trace[refused].count == target.count,
+                string_format(arguments->arena, S8("body scratch target={u32} size={u64} count={u64}; refused={u32} size={u64} count={u64}"),
+                              row, target.element_size, target.count, refused, trace[refused].element_size, trace[refused].count));
         }
     }
     outer_result->test_count += result.test_count;
