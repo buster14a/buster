@@ -46,8 +46,9 @@
 // (c_ir_root_first_token, c_ir_range_has_root_assignment, c_ir_root_conditional,
 // from the node and its CIrHoistFact byte), and prepared calls split their
 // arguments from their CALL node (c_ir_call_arguments_counted). What the
-// prepasses record is still keyed by token, and the owner frames (places,
-// sizeof, compound literals) still take their subtree's token range. The step-4
+// control prepass records are keyed by structural group identity (node and
+// wrapping level); call records and owner frames (places, sizeof, compound
+// literals) still take their subtree's token range. The step-4
 // callers that take token ranges (the query machine, the constant evaluator,
 // static initializers, array bounds) read operand extents from the spans
 // through the marked temporary adapters c_ir_tree_unevaluated_operand_end,
@@ -57,10 +58,11 @@
 // (c_ir_build_delimiter_index). The caller may also pass the facts semantic
 // analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062); no
 // lowering consumer reads them yet. No node id reaches the IR. The prepared control
-// expressions of a function are answered by token-indexed tables, not scans of
-// their list: c_ir_prepared_control_expression_find, _contains and
-// _contains_range, kept current by _begin, _end and _rollback (a typeof
-// replay).
+// expressions of a function are answered by node-indexed tables:
+// c_ir_prepared_control_expression_find uses a node and wrapping level,
+// _contains and _contains_group read postorder interior intervals. _begin,
+// _end and _rollback keep the heads, emitted marks and active stack current
+// across a typeof replay; source tokens remain provenance.
 // The range's node and its CIrHoistFact bits let
 // c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_range_may_prepare_control) or a call prepass
@@ -3407,6 +3409,14 @@ typedef struct CIrPreparedControlExpression CIrPreparedControlExpression;
 struct CIrPreparedControlExpression
 {
     IrValueId result;
+    // A structural group identity: wrapping level 1 is the innermost
+    // parenthesis around node; level 0 is the node's bracket or arguments.
+    u32 node;
+    u32 wrapping;
+    u32 first_node;
+    u32 last_node;
+    u32 previous_slot;
+    // Source provenance and the temporary EXPRESSION range adapter.
     u32 open_index;
     u32 close_index;
     bool emitted;
@@ -3863,22 +3873,17 @@ struct CIntegerIrBuilder
     CIrPreparedControlExpression* prepared_control_expressions;
     u32 prepared_control_expression_count;
     u32 prepared_control_expression_capacity;
-    // Indices over prepared_control_expressions, all keyed by token position
-    // over [prepared_control_token_start, + prepared_control_token_count): the
-    // declaration (or body) tokens a group can open in. Nothing here is ever
-    // trusted without checking it against the record it names, so a typeof
-    // replay that releases records (count rolls back) only has to leave its
-    // stale entries behind. A token outside the span answers by the scan.
-    //   open_slots[t]: index + 1 of the record opened at token t, else 0.
-    //   emitted_marks[t]: index + 1 of the first emitted record whose interior
-    //     covers t, else 0.
-    //   lowering_stack: indices of the records being lowered, in creation order.
-    u32* prepared_control_open_slots;
+    // Node indices over the FUNCTION_DEFINITION subtree, including its
+    // parameter bounds. Heads distinguish groups on one node by wrapping;
+    // emitted marks name a record covering the node's postorder position.
+    // Every mark verifies its record after typeof replay; heads are restored
+    // in reverse creation order when records are released.
+    u32* prepared_control_node_heads;
     u32* prepared_control_emitted_marks;
     u32* prepared_control_lowering_stack;
     u32 prepared_control_lowering_count;
-    u32 prepared_control_token_start;
-    u32 prepared_control_token_count;
+    u32 prepared_control_node_start;
+    u32 prepared_control_node_count;
     // The unit's syntax tree, and its index of the bodies lowering enters by
     // brace (c_ir_body_nodes_build): the statement walker reads the body's
     // structure from its statement nodes (GitHub #4060).
@@ -24300,46 +24305,38 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
     return 0;
 }
 
-// The record whose group opens at open_index. Exact: a slot naming a record
-// that a typeof replay released (index at or past the count) or one reused for
-// another group (open_index differs) answers "none", which is what the scan it
-// replaces answered for a record that is gone.
-BUSTER_C_INTERNAL CIrPreparedControlExpression* c_ir_prepared_control_expression_find(CIntegerIrBuilder* builder, u32 open_index)
+// The record with this structural group identity. A node can own both
+// parentheses and its bracket/argument group, so its head links the records
+// at that node. Tokens never select a record.
+BUSTER_C_INTERNAL CIrPreparedControlExpression* c_ir_prepared_control_expression_find(CIntegerIrBuilder* builder, u32 node, u32 wrapping)
 {
     CIrPreparedControlExpression* found = 0;
-    if (open_index >= builder->prepared_control_token_start &&
-        open_index - builder->prepared_control_token_start < builder->prepared_control_token_count)
+    if (node >= builder->prepared_control_node_start && node - builder->prepared_control_node_start < builder->prepared_control_node_count)
     {
-        u32 stored = builder->prepared_control_open_slots[open_index - builder->prepared_control_token_start];
-        if (stored && stored - 1 < builder->prepared_control_expression_count &&
-            builder->prepared_control_expressions[stored - 1].open_index == open_index)
+        u32 slot = builder->prepared_control_node_heads[node - builder->prepared_control_node_start];
+        while (slot && !found)
         {
-            found = builder->prepared_control_expressions + (stored - 1);
-        }
-    }
-    else
-    {
-        for (u32 index = 0; index < builder->prepared_control_expression_count && !found; index += 1)
-        {
-            CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
-            found = expression->open_index == open_index ? expression : 0;
+            BUSTER_CHECK(slot - 1 < builder->prepared_control_expression_count);
+            CIrPreparedControlExpression* expression = builder->prepared_control_expressions + (slot - 1);
+            BUSTER_CHECK(expression->node == node);
+            found = expression->wrapping == wrapping ? expression : 0;
+            slot = expression->previous_slot;
         }
     }
     return found;
 }
 
-// Does an emitted record's interior cover token_index? A mark is only a hint:
-// it names the first record that covered the token, which a typeof replay may
-// have released or replaced, so a mark that does not verify falls back to the
-// scan and the answer is the scan's in every case.
-BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuilder* builder, u32 token_index)
+// Whether an emitted group's interior contains this node. Postorder subtree
+// intervals include a parenthesis's root, but exclude an INDEX's base and a
+// CALL's callee and owner. A replay can leave a stale mark; verify its current
+// interval before trusting it, then use the records when it fails.
+BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuilder* builder, u32 node)
 {
     bool covered = false;
     bool scan = true;
-    if (token_index >= builder->prepared_control_token_start &&
-        token_index - builder->prepared_control_token_start < builder->prepared_control_token_count)
+    if (node >= builder->prepared_control_node_start && node - builder->prepared_control_node_start < builder->prepared_control_node_count)
     {
-        u32 stored = builder->prepared_control_emitted_marks[token_index - builder->prepared_control_token_start];
+        u32 stored = builder->prepared_control_emitted_marks[node - builder->prepared_control_node_start];
         if (!stored)
         {
             scan = false;
@@ -24347,14 +24344,14 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuild
         else if (stored - 1 < builder->prepared_control_expression_count)
         {
             CIrPreparedControlExpression* expression = builder->prepared_control_expressions + (stored - 1);
-            covered = expression->emitted && expression->open_index < token_index && token_index < expression->close_index;
+            covered = expression->emitted && expression->first_node <= node && node <= expression->last_node;
             scan = !covered;
         }
     }
     for (u32 index = 0; scan && index < builder->prepared_control_expression_count && !covered; index += 1)
     {
         CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
-        covered = expression->emitted && expression->open_index < token_index && token_index < expression->close_index;
+        covered = expression->emitted && expression->first_node <= node && node <= expression->last_node;
     }
     return covered;
 }
@@ -24401,10 +24398,11 @@ BUSTER_C_INTERNAL bool c_ir_selection_answer(CIntegerIrBuilder* builder, u32 tok
     return valid;
 }
 
-// Is a record that is still being lowered wrapped around [start, end)? The
-// lowering stack holds exactly those records, so the walk is as deep as the
-// control expressions currently open, not as long as the function's list.
-BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerIrBuilder* builder, u32 start, u32 end)
+// Whether an active group strictly contains this structural group. Two
+// parentheses on the same node order by wrapping level; a parenthesis also
+// contains that node's bracket/arguments. Other owners lie in the recorded
+// interior's node interval. Only the active stack is visited.
+BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_group(CIntegerIrBuilder* builder, u32 node, u32 wrapping)
 {
     bool wrapped = false;
     for (u32 stack_index = builder->prepared_control_lowering_count; stack_index > 0 && !wrapped; stack_index -= 1)
@@ -24413,30 +24411,57 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerI
         if (index < builder->prepared_control_expression_count)
         {
             CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
-            wrapped = expression->lowering && expression->open_index < start && expression->close_index >= end;
+            bool inside = expression->first_node <= node && node <= expression->last_node;
+            if (expression->node == node && wrapping)
+            {
+                inside = expression->wrapping > wrapping;
+            }
+            wrapped = expression->lowering && inside;
         }
     }
     return wrapped;
 }
 
-// A record starts lowering: file it in every index. The caller has already
-// checked the list has room, and the record's own fields are final.
+// A record starts lowering: file its identity and its postorder interval.
 BUSTER_C_INTERNAL void c_ir_prepared_control_expression_begin(CIntegerIrBuilder* builder, u32 expression_index)
 {
-    u32 open_index = builder->prepared_control_expressions[expression_index].open_index;
-    if (open_index >= builder->prepared_control_token_start &&
-        open_index - builder->prepared_control_token_start < builder->prepared_control_token_count)
+    CIrPreparedControlExpression* expression = builder->prepared_control_expressions + expression_index;
+    CAst const* ast = builder->syntax_tree;
+    u32 node = expression->node;
+    u32 first = c_ast_subtree_begin(ast, node);
+    u32 last = node;
+    if (!expression->wrapping)
     {
-        builder->prepared_control_open_slots[open_index - builder->prepared_control_token_start] = expression_index + 1;
+        last = node - 1;
+        if (ast->kinds[node] == C_AST_CALL)
+        {
+            // The oldest child is the callee; all later siblings are args.
+            u32 callee = node - 1;
+            while (c_ast_subtree_begin(ast, callee) > first)
+            {
+                callee = c_ast_subtree_begin(ast, callee) - 1;
+            }
+            first = callee + 1;
+        }
+        else
+        {
+            first = c_ast_subtree_begin(ast, last);
+        }
     }
+    expression->first_node = first;
+    expression->last_node = last;
+    BUSTER_CHECK(node >= builder->prepared_control_node_start && node - builder->prepared_control_node_start < builder->prepared_control_node_count);
+    u32* head = builder->prepared_control_node_heads + (node - builder->prepared_control_node_start);
+    expression->previous_slot = *head;
+    *head = expression_index + 1;
     builder->prepared_control_lowering_stack[builder->prepared_control_lowering_count] = expression_index;
     builder->prepared_control_lowering_count += 1;
 }
 
-// A record finished lowering and was emitted: take it off the lowering stack
-// and mark the tokens its interior covers. Lowering nests strictly, so the
-// record is the top of the stack; a record left behind by a failed child
-// sits below it, and is searched for and dropped in order.
+// An emitted record leaves the lowering stack. Mark new interior nodes and
+// skip a live marked interval as a whole. Replacing its first mark with the
+// enclosing record lets a later parent skip this interval too: a skewed
+// nest does not rewrite every descendant at each wrapping level.
 BUSTER_C_INTERNAL void c_ir_prepared_control_expression_end(CIntegerIrBuilder* builder, u32 expression_index)
 {
     u32* stack = builder->prepared_control_lowering_stack;
@@ -24454,26 +24479,35 @@ BUSTER_C_INTERNAL void c_ir_prepared_control_expression_end(CIntegerIrBuilder* b
         builder->prepared_control_lowering_count -= 1;
     }
     CIrPreparedControlExpression* expression = builder->prepared_control_expressions + expression_index;
-    u32 token_start = builder->prepared_control_token_start;
-    u32 first = BUSTER_MAX(expression->open_index + 1, token_start);
-    u32 last = BUSTER_MIN(expression->close_index, token_start + builder->prepared_control_token_count);
-    for (u32 token_index = first; token_index < last; token_index += 1)
+    u32 node = expression->first_node;
+    while (node <= expression->last_node)
     {
-        u32* mark = builder->prepared_control_emitted_marks + (token_index - token_start);
-        // A mark left by a released record is stale: take it over.
-        *mark = *mark && *mark - 1 < builder->prepared_control_expression_count ? *mark : expression_index + 1;
+        u32* mark = builder->prepared_control_emitted_marks + (node - builder->prepared_control_node_start);
+        CIrPreparedControlExpression* previous = *mark && *mark - 1 < builder->prepared_control_expression_count
+                                                    ? builder->prepared_control_expressions + (*mark - 1) : 0;
+        bool covered = previous && previous->emitted && previous->first_node <= node && node <= previous->last_node;
+        u32 last = covered ? BUSTER_MIN(previous->last_node, expression->last_node) : node;
+        *mark = expression_index + 1;
+        node = last + 1;
     }
 }
 
-// A typeof replay releases every record from count on. The open slots and
-// marks are verified against the records, so only the lowering stack, which
-// is trusted by position, needs its released entries dropped.
+// A typeof replay releases records from count on. Restore per-node heads
+// before their rows can be reused. Marks retain verified hints, and an
+// invalid hint falls back to the kept records.
 BUSTER_C_INTERNAL void c_ir_prepared_control_expression_rollback(CIntegerIrBuilder* builder, u32 count)
 {
     // A walked node may rest on a released record.
     if (builder->syntax_walked && count < builder->prepared_control_expression_count)
     {
         memset(builder->syntax_walked, 0, builder->syntax_walked_bytes);
+    }
+    for (u32 index = builder->prepared_control_expression_count; index > count; index -= 1)
+    {
+        CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index - 1;
+        u32* head = builder->prepared_control_node_heads + (expression->node - builder->prepared_control_node_start);
+        BUSTER_CHECK(*head == index);
+        *head = expression->previous_slot;
     }
     builder->prepared_control_expression_count = count;
     u32 kept = 0;
@@ -24667,11 +24701,11 @@ BUSTER_C_INTERNAL u32 c_ir_tree_children(CAst const* ast, u32 node, u32* childre
 BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 call, u32 start, u32 const* active_calls, u32 active_call_count,
                                               u32* callee_start_out, bool* indexed_out, bool* parenthesized_out);
 
-// Whether a recorded group opens at `open`, or one being lowered wraps
-// (open, close): the control prepass steps over either whole.
-BUSTER_C_INTERNAL bool c_ir_tree_group_taken(CIntegerIrBuilder* builder, u32 open, u32 close)
+// The control prepass steps over a recorded group or one inside an active
+// group's structural interior.
+BUSTER_C_INTERNAL bool c_ir_tree_group_taken(CIntegerIrBuilder* builder, u32 node, u32 wrapping)
 {
-    return c_ir_prepared_control_expression_find(builder, open) || c_ir_prepared_control_expression_contains_range(builder, open, close);
+    return c_ir_prepared_control_expression_find(builder, node, wrapping) || c_ir_prepared_control_expression_contains_group(builder, node, wrapping);
 }
 
 // The groups the control prepass hoists from [start, end), whose node is
@@ -24685,14 +24719,12 @@ BUSTER_C_INTERNAL bool c_ir_tree_group_taken(CIntegerIrBuilder* builder, u32 ope
 // and no _Generic or __builtin_choose_expr, which prepare their own
 // operands. A parenthesis after a name (a call's own, `__extension__ (...)`)
 // opens no group: it holds a call's arguments or a keyword's operand. Writes
-// each group's opening and closing tokens and its call (c_ir_tree_groups_append)
-// into `groups`.
-#define C_IR_TREE_GROUP_STRIDE 3u
+// each group's opening and closing provenance tokens, owner node and wrapping
+// level (c_ir_tree_groups_append) into `groups`.
+#define C_IR_TREE_GROUP_STRIDE 4u
 
-// Appends one group to a doubling buffer in the temporary arena: its opening
-// and closing tokens, and the CALL node whose arguments it is, or
-// C_AST_NODE_INVALID for a parenthesis or bracket group.
-BUSTER_C_INTERNAL bool c_ir_tree_groups_append(CIntegerIrBuilder* builder, u32** found, u32* capacity, u32* count, u32 open, u32 close, u32 call)
+// Appends one group's provenance and structural identity to a doubling buffer.
+BUSTER_C_INTERNAL bool c_ir_tree_groups_append(CIntegerIrBuilder* builder, u32** found, u32* capacity, u32* count, u32 open, u32 close, u32 node, u32 wrapping)
 {
     bool fits = *count < *capacity;
     if (!fits)
@@ -24714,7 +24746,8 @@ BUSTER_C_INTERNAL bool c_ir_tree_groups_append(CIntegerIrBuilder* builder, u32**
     {
         (*found)[C_IR_TREE_GROUP_STRIDE * *count] = open;
         (*found)[C_IR_TREE_GROUP_STRIDE * *count + 1] = close;
-        (*found)[C_IR_TREE_GROUP_STRIDE * *count + 2] = call;
+        (*found)[C_IR_TREE_GROUP_STRIDE * *count + 2] = node;
+        (*found)[C_IR_TREE_GROUP_STRIDE * *count + 3] = wrapping;
         *count += 1;
     }
     return fits;
@@ -24772,7 +24805,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
         // The root starts the leftmost path.
         walk.entries[0].deferred = 1;
     }
-    // The groups found, as (open, close, call) triples, in a buffer that doubles.
+    // The groups found, as (open, close, node, wrapping), in a doubling buffer.
     u32 capacity = 16;
     u64 position = builder->temporary_arena->position;
     valid = valid && c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32),
@@ -24817,13 +24850,13 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
                 u32 open = spans->first[node] - 1;
                 u32 close = spans->end[node];
                 bool after_name = open > start && tokens[open - 1].kind == C_TOKEN_IDENTIFIER;
-                if (c_ir_tree_group_taken(builder, open, close))
+                if (c_ir_tree_group_taken(builder, node, 1))
                 {
                     descend = false;
                 }
                 else if (!after_name && c_ir_hoist_paren_preparable(hoist[node]))
                 {
-                    valid = c_ir_tree_groups_append(builder, &found, &capacity, &count, open, close, C_AST_NODE_INVALID);
+                    valid = c_ir_tree_groups_append(builder, &found, &capacity, &count, open, close, node, 1);
                     descend = false;
                 }
             }
@@ -24934,11 +24967,11 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             {
                 valid = false;
             }
-            else if (!c_ir_tree_group_taken(builder, open, close))
+            else if (!c_ir_tree_group_taken(builder, node, 0))
             {
                 if (!wrapped && c_ir_hoist_bracket_preparable(hoist[inner]))
                 {
-                    valid = c_ir_tree_groups_append(builder, &found, &capacity, &count, open, close, C_AST_NODE_INVALID);
+                    valid = c_ir_tree_groups_append(builder, &found, &capacity, &count, open, close, node, 0);
                 }
                 else if (hoist[inner] & C_IR_HOIST_HOLDS_GROUP)
                 {
@@ -24960,7 +24993,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             {
                 valid = false;
             }
-            else if (c_ir_tree_group_taken(builder, open, close))
+            else if (c_ir_tree_group_taken(builder, node, 0))
             {
                 argument_count = 0;
             }
@@ -24984,7 +25017,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             }
             if (hoisted)
             {
-                valid = c_ir_tree_groups_append(builder, &found, &capacity, &count, open, close, node);
+                valid = c_ir_tree_groups_append(builder, &found, &capacity, &count, open, close, node, 0);
             }
             else if (argument_count)
             {
@@ -24998,7 +25031,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             }
         }
     }
-    // Release the walk and keep the triples and the visited nodes: gathered
+    // Release the walk and keep the groups and the visited nodes: gathered
     // into one block above everything, which then moves down to where the
     // walk began.
     u64 kept = C_IR_TREE_GROUP_STRIDE * (u64)count + visited_count + 1;
@@ -25088,7 +25121,9 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     {
         u32 open = frame->as.prepare_control.groups[C_IR_TREE_GROUP_STRIDE * frame->as.prepare_control.cursor];
         u32 close = frame->as.prepare_control.groups[C_IR_TREE_GROUP_STRIDE * frame->as.prepare_control.cursor + 1];
-        u32 call = frame->as.prepare_control.groups[C_IR_TREE_GROUP_STRIDE * frame->as.prepare_control.cursor + 2];
+        u32 node = frame->as.prepare_control.groups[C_IR_TREE_GROUP_STRIDE * frame->as.prepare_control.cursor + 2];
+        u32 wrapping = frame->as.prepare_control.groups[C_IR_TREE_GROUP_STRIDE * frame->as.prepare_control.cursor + 3];
+        u32 call = !wrapping && builder->syntax_tree->kinds[node] == C_AST_CALL ? node : C_AST_NODE_INVALID;
         // A call's arguments as one group have no node of their own: the
         // expression frame splits them at their commas, as a comma
         // expression, from the bounds the call's node gives.
@@ -25111,6 +25146,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         u32 expression_index = builder->prepared_control_expression_count++;
         builder->prepared_control_expressions[expression_index] = (CIrPreparedControlExpression){
             .result = IR_VALUE_ID_INVALID,
+            .node = node,
+            .wrapping = wrapping,
             .open_index = open,
             .close_index = close,
             .lowering = true,
@@ -25987,7 +26024,7 @@ BUSTER_C_INTERNAL bool c_ir_call_rejected(CIntegerIrBuilder* builder, CIrPrepare
                    call->builtin_sse2_immediate_shift != C_IR_SSE2_IMMEDIATE_SHIFT_NONE;
     return (!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
            (!builtin && !indirect && !c_ir_function_name_resolution_token(builder, token)) ||
-           (!indirect && c_ir_prepared_control_expression_contains(builder, index)) || c_ir_prepared_call_find(builder, callee_start);
+           (!indirect && c_ir_prepared_control_expression_contains(builder, call->node)) || c_ir_prepared_call_find(builder, callee_start);
 }
 
 // Records a classified call whose `(` follows `index` and whose `)` is
@@ -38196,7 +38233,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_enter(CIntegerIrBuilder* builder, CIrL
         u32 open = first - wraps;
         u32 close = end - 1 + wraps;
         builder->failure_token_index = open;
-        CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, open);
+        CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, node, wraps);
         // A group that did not come prepared -- an enclosing prepared group
         // is lowering it -- holds a control, assignment or comma operator the
         // arithmetic walk cannot apply, so it lowers through the full
@@ -38561,7 +38598,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_subscript(CIntegerIrBuilder* builder, 
     IrSourceRange source = c_ir_token_source_range(builder, token);
     builder->failure_token_index = open;
     CIrCoreStatus status = C_IR_CORE_FAILED;
-    CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, open);
+    CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, node, 0);
     u32 facts = builder->syntax_hoist[subscript];
     bool wrapped = c_ir_core_wrapped(builder, subscript);
     bool control = (!wrapped && (facts & C_IR_HOIST_ROOT_CONTROL)) || (facts & (C_IR_HOIST_ANY_ASSIGNMENT | C_IR_HOIST_ROOT_COMMA));
@@ -39815,8 +39852,8 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             bool reused_prepared = false;
             for (u32 level = 0; !reused_prepared && level < wraps; level += 1)
             {
-                CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, task.start + level);
-                if (prepared && prepared->emitted && prepared->close_index == task.end - 1 - level)
+                CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, node, wraps - level);
+                if (prepared && prepared->emitted)
                 {
                     IrValueId condition = c_ir_truth_value(builder, prepared->result, frame->as.condition.source);
                     IrBlockId targets[2] = {task.true_block, task.false_block};
@@ -42987,8 +43024,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         bool reused_prepared = false;
         for (u32 wraps = c_ir_core_wraps(builder, node, start), level = 0; !reused_prepared && level < wraps; level += 1)
         {
-            CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, start + level);
-            if (prepared && prepared->emitted && prepared->close_index == end - 1 - level)
+            CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, node, wraps - level);
+            if (prepared && prepared->emitted)
             {
                 frame->as.expression.value = prepared->result;
                 reused_prepared = true;
@@ -64623,9 +64660,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                        string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))));
             }
         }
-        // The tokens a control group can open in: the span scanned just above.
-        u64 prepared_control_token_span = (u64)body_end - declaration_start;
-        u64 control_token_array_capacity = prepared_control_token_span ? prepared_control_token_span : 1;
         CIrVendorFunctionBudget vendor_budget = vendor_budgets[declaration_index];
         u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16 +
             BUSTER_MAX(vendor_budget.instructions, vendor_budget.values);
@@ -64641,6 +64675,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         u64 local_array_capacity = local_capacity ? local_capacity : 1;
         u64 call_array_capacity = prepared_call_capacity ? prepared_call_capacity : 1;
         u64 body_array_capacity = declaration.body_token_count ? declaration.body_token_count : 1;
+        u32 body_compound = c_ir_body_nodes_find(body_nodes.functions, body_nodes.function_count, declaration.body_start - 1);
+        u32 prepared_node_start = body_compound != C_AST_NODE_INVALID ? c_ast_subtree_begin(options.syntax_tree, body_compound + 1) : 0;
+        u32 prepared_node_count = body_compound != C_AST_NODE_INVALID ? body_compound + 2 - prepared_node_start : 0;
+        u64 prepared_node_array_capacity = prepared_node_count ? prepared_node_count : 1;
         u64 cleanup_capacity = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index];
         String8 function_reservation_error = {0};
         // Match the builder initializer's carve order before allocating its
@@ -64669,8 +64707,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
                                           BUSTER_ALIGN_OF(CIrPreparedControlExpression)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), control_token_array_capacity, BUSTER_ALIGN_OF(u32)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), control_token_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_node_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_node_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
                                           BUSTER_ALIGN_OF(u32));
@@ -64707,7 +64745,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         if (!vendor_budget.valid || block_capacity > UINT32_MAX || lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
             prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX ||
-            prepared_control_token_span > UINT32_MAX || lower_frame_capacity > UINT32_MAX || !scratch_fits)
+            lower_frame_capacity > UINT32_MAX || !scratch_fits)
         {
             scratch_end(lowering_temporary);
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
@@ -64822,8 +64860,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .body_token_start = declaration.body_start,
             .body_token_count = declaration.body_token_count,
             .prepared_control_expression_capacity = prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1,
-            .prepared_control_token_start = declaration_start,
-            .prepared_control_token_count = (u32)prepared_control_token_span,
+            .prepared_control_node_start = prepared_node_start,
+            .prepared_control_node_count = prepared_node_count,
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
             .ast = options.syntax_tree,
@@ -64849,8 +64887,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.matching_delimiters_plus_one = stream_matching_delimiters_plus_one ? 0 : arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         builder.prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
                                                               prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
-        builder.prepared_control_open_slots = arena_allocate(lowering_temporary.arena, u32, control_token_array_capacity);
-        builder.prepared_control_emitted_marks = arena_allocate(lowering_temporary.arena, u32, control_token_array_capacity);
+        builder.prepared_control_node_heads = arena_allocate(lowering_temporary.arena, u32, prepared_node_array_capacity);
+        builder.prepared_control_emitted_marks = arena_allocate(lowering_temporary.arena, u32, prepared_node_array_capacity);
         builder.prepared_control_lowering_stack = arena_allocate(lowering_temporary.arena, u32,
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
 #if BUSTER_REFERENCE_CHECKS
@@ -64859,8 +64897,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // scratch then overflows it (#3467). A grown arena starts elsewhere.
         BUSTER_CHECK(lowering_temporary.arena != carve_arena || lowering_temporary.arena->position == carve_end);
 #endif
-        memset(builder.prepared_control_open_slots, 0, sizeof(u32) * control_token_array_capacity);
-        memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * control_token_array_capacity);
+        memset(builder.prepared_control_node_heads, 0, sizeof(u32) * prepared_node_array_capacity);
+        memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * prepared_node_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
@@ -64999,8 +65037,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         // The error-attribute check reads the CFG the body built, before SSA
         // completion and construction rewrite it.
-        // The body's COMPOUND_STATEMENT, by its `{`.
-        u32 body_compound = c_ir_body_nodes_find(body_nodes.functions, body_nodes.function_count, declaration.body_start - 1);
         if (body_compound == C_AST_NODE_INVALID && !builder.failure_message.length)
         {
             builder.failure_message = S8("function body has no syntax tree node");

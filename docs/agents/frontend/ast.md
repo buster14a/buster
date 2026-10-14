@@ -1932,15 +1932,16 @@ not from a token scan:
   - whether any assignment or control operator appears anywhere in it;
   - whether its subtree holds a call or a hoistable group at all, so the walks
     skip subtrees with neither.
-- **Temporary adapter.** The evaluator still consumes prepared records keyed
-  by token: `CIrPreparedControlExpression.open_index` and
-  `CIrPreparedCall.token_index`, `open_index` and `close_index`. The walks
-  therefore compute those tokens from node spans:
+- **Source provenance.** Prepared control records now carry their structural
+  identity (see [prepared control identities](#prepared-control-identities)).
+  `open_index` and `close_index` supply the temporary expression-frame range
+  and debug locations. Prepared call records still use `token_index`,
+  `open_index` and `close_index`; the walks compute those tokens from spans:
   - the callee's first token (`c_ir_tree_callee_shape`, which follows member
     chains and `[ ]` suffixes to their name);
   - the group's delimiters.
 
-  Part (b) keys the records by node and deletes this adapter.
+  The remaining call-record adapter is retired with prepared call identities.
 - **Work stays linear on skewed expressions** (`c_test_tree_hoisting_skew`
   counts `CAstLowerStatistics.hoist_steps`):
   - A call already emitted is not entered again, so the arguments of
@@ -2071,7 +2072,8 @@ byte.
   the keyword node's end (`c_test_sizeof_type_then_binary_operator`).
 - **Still token ranges.** The place machine, the `sizeof`, compound-literal
   and statement-expression frames take their subtree's token range, and the
-  prepared control and call records are keyed by their opening token.
+  prepared control records use structural group identities; the remaining
+  prepared call lookup still uses tokens.
 - **A unit the builder rejects.** The tree is mandatory: such a unit fails
   with the builder's diagnostics (`tree_rejections`), and lowering does not
   run. These are inputs the parser accepts: invalid `__builtin_offsetof`
@@ -2083,6 +2085,41 @@ byte.
   (`expected ']' after the array range designator`, `expected ')' after the
   assembler text`). `c_test_tree_rejection` checks each. No corpus input is
   rejected.
+
+### Prepared control identities
+
+`CIrPreparedControlExpression` keeps an owner node and a wrapping level.
+Level 1 names the innermost parenthesis around that node, with larger levels
+naming successive outer parentheses. Level 0 names the owner node's bracket
+or whole call argument list. A call argument list has no AST node of its own,
+so its identity is the `CALL` node with level 0. This distinguishes an owned
+delimiter group from parentheses around that same owner.
+
+The control walk records these identities directly. The evaluator and the
+condition and expression frames already hold the node they visit and pass
+its wrapping level to `c_ir_prepared_control_expression_find`; lookup never
+resolves a token to choose a record. Opening and closing tokens remain source
+provenance and the temporary expression-frame range.
+
+Containment reads postorder node intervals. A parenthesis covers its whole
+subtree, a bracket covers only the last child's subtree, and an argument list
+covers the sibling interval after the callee. Consequently emitting arguments
+does not suppress the call itself or its callee. Active-group containment also
+orders redundant parentheses on a shared node by their wrapping levels.
+
+Per-node heads and emitted marks are sized to the function definition's
+subtree, including parameter declarators. A `typeof` replay restores heads in
+reverse creation order before records can be reused; stale emitted marks are
+verified against current node intervals and fall back to the kept records.
+An emitted group marks its new nodes and skips live covered intervals. Its
+first mark then names the enclosing interval, allowing the next parent to
+skip the whole interval without rewriting a skewed nest's descendants.
+
+The runtime cases in `c_test_tree_hoisting_node_identity` exercise redundant
+parentheses,
+subscripts, synthetic argument groups and VLA `typeof` replay through both
+frontend SSA forms at `-g0` and `-g`. The existing skew fixture keeps the
+navigation bound.
 
 ## Initializers, declarations and type queries from the tree
 

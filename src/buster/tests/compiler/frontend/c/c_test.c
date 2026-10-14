@@ -43378,6 +43378,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting(UnitTestArguments* argum
     return result;
 }
 
+// Prepared control identities: redundant wrappers reuse one result, a
+// bracket covers only its subscript, and synthetic CALL argument groups leave
+// their callee and call live. Parameter bounds live before the function body.
+// VLA typeof replays release records, after which later groups reuse their
+// slots without inheriting the old identity or emitted containment marks.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting_node_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_WINDOWS
+    String8 source = S8(
+        "static int ticks;\n"
+        "static int effect(int n) { ticks += 1; return n; }\n"
+        "static int sum(int a, int b) { return a + b; }\n"
+        "static int (*pick(void))(int, int) { ticks += 1; return sum; }\n"
+        "static int bound(int n, int values[effect(n) ? 2 : 3]) { return values[0]; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int a = 0;\n"
+        "    int values[2] = {8, 9};\n"
+        "    int (*fp)(int, int) = sum;\n"
+        "    ticks = 0;\n"
+        "    int x = ((((effect(1) ? effect(2) : effect(3))))) + effect(4);\n"
+        "    if (x != 6 || ticks != 3) return 1;\n"
+        "    ticks = 0;\n"
+        "    x = values[effect(1) ? 1 : 0] + effect(2);\n"
+        "    if (x != 11 || ticks != 2) return 2;\n"
+        "    ticks = 0;\n"
+        "    x = (*fp)(effect(1), a ? effect(2) : effect(3));\n"
+        "    if (x != 4 || ticks != 2) return 3;\n"
+        "    ticks = 0;\n"
+        "    x = pick()(effect(1), a ? effect(2) : effect(3));\n"
+        "    if (x != 4 || ticks != 3) return 4;\n"
+        "    ticks = 0;\n"
+        "    if (!(((((effect(1) ? effect(2) : effect(3))))) && effect(4)) || ticks != 3) return 5;\n"
+        "    ticks = 0;\n"
+        "    x = bound(1, values);\n"
+        "    if (x != 8 || ticks != 1) return 6;\n"
+        "    int n = 2;\n"
+        "    int array[n];\n"
+        "    ticks = 0;\n"
+        "    typeof(*(effect(1) ? &array : &array)) copy;\n"
+        "    copy[1] = 7;\n"
+        "    if (ticks != 1 || copy[1] != 7) return 7;\n"
+        "    typeof(*(effect(1), &array)) copy2;\n"
+        "    copy2[1] = effect(5) ? effect(6) : effect(7);\n"
+        "    if (ticks != 4 || copy2[1] != 6) return 8;\n"
+        "    return 0;\n"
+        "}\n");
+    String8 path = buster_test_temporary_path(arguments->arena, S8("control-node-identity"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 debug = 0; debug < 2; debug += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("control-node-identity-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                                     debug ? S8("-g") : S8("-g0"), S8("-o"), output, path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                string_format(temporary.arena, S8("control identity form={u32} debug={u32}: {S8}"), form, debug, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                        string_format(temporary.arena, S8("control identity form={u32} debug={u32}: failed case {u32}, timed_out={u32}"),
+                                                      form, debug, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // The hoisting walks on deeply skewed expressions: no recursion, and work
 // linear in the depth (CAstLowerStatistics.hoist_steps). Each shape is
 // lowered at depth n and 2n; doubling the depth may at most double the steps,
@@ -68700,6 +68786,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
     C_TEST_FIXTURE(arguments, c_test_tree_hoisting);
+    C_TEST_FIXTURE(arguments, c_test_tree_hoisting_node_identity);
     C_TEST_FIXTURE(arguments, c_test_tree_hoisting_skew);
     C_TEST_FIXTURE(arguments, c_test_tree_evaluator_skew);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
