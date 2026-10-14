@@ -54688,12 +54688,6 @@ BUSTER_C_INTERNAL CAstTypeRecipe const* c_ir_constant_recipe_node(CIntegerIrBuil
     return facts && index < facts->recipe_count ? facts->recipes + index : 0;
 }
 
-BUSTER_C_INTERNAL CSymbolBuiltin c_ir_constant_builtin_node(CIntegerIrBuilder* builder, u32 node)
-{
-    CAstTypeRecipe const* recipe = c_ir_constant_recipe_node(builder, node);
-    return recipe && recipe->form == C_AST_TYPE_RECIPE_BUILTIN ? (CSymbolBuiltin)recipe->builtin : C_SYMBOL_BUILTIN_NONE;
-}
-
 BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_node(CIntegerIrBuilder* builder, u32 node)
 {
     CAstFacts const* facts = builder->syntax_facts;
@@ -55093,11 +55087,28 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         {
             u32 callee = c_ast_child_at(ast, node, 0);
             u32 arguments = c_ast_child_count(ast, node) - 1;
-            CSymbolBuiltin builtin = callee < ast->node_count && ast->kinds[callee] == C_AST_IDENTIFIER
-                                        ? c_ir_constant_builtin_node(builder, callee) : C_SYMBOL_BUILTIN_NONE;
+            u32 builtin_fact = c_ast_facts_call_builtin(ast, builder->syntax_facts, node);
+            CSymbolBuiltin builtin = builtin_fact == C_AST_FACT_NONE ? C_SYMBOL_BUILTIN_NONE : (CSymbolBuiltin)builtin_fact;
             CIrNodeQueryFrame operand = {0};
             bool probe = builtin == C_SYMBOL_BUILTIN_CONSTANT_P && arguments == 1;
             admitted = probe && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &operand);
+            else if (c_semantic_source_location_builtin(builtin) && !arguments)
+            {
+                u32 source_anchor = ast->tokens[callee];
+                value.real = c_ir_constant_integer(builder->s32_type, c_semantic_source_line(&builder->preprocess, source_anchor));
+                admitted = true;
+                if (builtin != C_SYMBOL_BUILTIN_SOURCE_LINE)
+                {
+                    CIrConstantValue object = c_ir_source_name_object(builder, source_anchor, builtin);
+                    admitted = object.kind == C_IR_CONSTANT_LVALUE;
+                    if (admitted)
+                        value.real = (CIrConstantValue){
+                            .type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[C_TYPE_CHAR]),
+                            .symbol = object.symbol, .kind = C_IR_CONSTANT_POINTER,
+                        };
+                }
+                value.type = value.real.type;
+            }
             if (admitted)
             {
                 bool constant = operand.success && operand.constant.real.kind != C_IR_CONSTANT_UNKNOWN && operand.constant.real.kind != C_IR_CONSTANT_INVALID &&

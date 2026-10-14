@@ -3057,6 +3057,10 @@ Static compound objects suspend on retained initializer-plan leaves and are
 published only when their task completes. The scheduler releases any active
 object context arenas on failure, restoring nested guards from the inside out.
 
+Source-location constant CALLs use the normalized retained builtin identity
+and zero-argument child count. Their call anchor supplies the presumed line
+or mapped file name, and function names reuse the existing shared object.
+
 The runtime offsetof core consumes the ordered numeric path and a CONSTANT
 task result. That task evaluates each index once for folding, retaining only
 nonconstant step ordinals in private checked query scratch. The root copies
