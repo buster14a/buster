@@ -32295,24 +32295,6 @@ BUSTER_C_INTERNAL u32 c_ir_sizeof_operand_alignment(IrType* value)
 // An `extern char v[];` some later declaration completes is not one of them:
 // the redeclaration merge adopts the completing type, so it maps and the
 // guard never sees it.
-BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_array(CIntegerIrBuilder* builder, u32 index, bool allow_local)
-{
-    bool result = false;
-    if (builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
-    {
-        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, index);
-        CEntityKind kind = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].kind : C_ENTITY_OBJECT;
-        if (entity.value < builder->parse.entity_count && (kind == C_ENTITY_OBJECT || (allow_local && kind == C_ENTITY_LOCAL)) &&
-            !c_ir_find_local_by_entity(builder, entity))
-        {
-            CTypeId c_type = builder->parse.entities[entity.value].type;
-            CType* record = c_type.value < builder->parse.type_count ? &builder->parse.types[c_type.value] : 0;
-            result = record && record->kind == C_TYPE_ARRAY && builder->c_type_ir_map[c_type.value].value == IR_ID_UNDERLYING_INVALID;
-        }
-    }
-    return result;
-}
-
 // An incomplete `extern T a[];` never maps to an IR array type, and the strict
 // operand walk refuses it bare so that sizeof can diagnose the unsized array.
 // Used as a value -- a conditional arm or an additive operand -- it is only
