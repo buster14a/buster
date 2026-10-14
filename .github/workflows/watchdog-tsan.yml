@@ -64,3 +64,33 @@ jobs:
       - name: ThreadSanitizer run 5 of 5
         shell: bash
         run: '"$RUNNER_TEMP/buster-watchdog-build" build --build-directory build/tsan --config Release -t test_tsan'
+  serial:
+    name: Single-threaded watchdog regression
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Configure the single-threaded tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/buster-watchdog-serial-build"
+          "$RUNNER_TEMP/buster-watchdog-serial-build" generate --cc clang --ci --linker DEFAULT --build-directory build/serial -- -DBUSTER_SINGLE_THREADED=ON
+      - name: Run the single-threaded tests
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-serial-build" build --build-directory build/serial --config Release -t test_all'
