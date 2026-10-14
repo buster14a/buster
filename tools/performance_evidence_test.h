@@ -257,6 +257,68 @@ BUSTER_GLOBAL_LOCAL int pe_self_test(void)
         free(text);
     }
 
+    // Missing claim primaries must fail the same finalizer that writes CLI receipts and returns its status.
+    const char *missing_primary[][3] = {
+        {"work-reduction", "cycles", "instructions"},
+        {"native-runtime", "instructions", "task-clock"},
+    };
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(missing_primary); ++i)
+    {
+        memset(r, 0, sizeof(*r));
+        r->complete = 1;
+        r->a_a = 1;
+        r->runs = 6;
+        r->effect = PE_DEFAULT_EFFECT;
+        r->tool = PE_TOOL_PERF_STAT;
+        r->claim = pe_claim(missing_primary[i][0]);
+        char row[128];
+        snprintf(row, sizeof(row), "1000,,%s,1,100,,\n", missing_primary[i][1]);
+        for (unsigned k = 0; k < r->runs; ++k)
+        {
+            pe_parse_perf(r, 0, row, missing_primary[i][1]);
+            pe_parse_perf(r, 1, row, missing_primary[i][1]);
+        }
+        PE_CHECK(r->complete && r->metric_count == 1 && r->metrics[0].count[0] == 6 && r->metrics[0].count[1] == 6,
+            "the supplied non-primary perf counter is fully observed");
+        f = tmpfile();
+        PE_CHECK(pe_finish(r, f, identity, args, 1) == 2 && !r->complete &&
+            strstr(r->problems, "missing required primary metric: ") && strstr(r->problems, missing_primary[i][2]) &&
+            strstr(r->result, "incomplete"), "missing primary fails completeness, result and CLI exit status");
+        rewind(f);
+        text = calloc(1, 65536);
+        n = fread(text, 1, 65535, f);
+        fclose(f);
+        json = cm_json_parse(text, n);
+        PE_CHECK(json.valid && cm_equal(cm_get(&json, 1, "complete"), "false") &&
+            strstr(cm_get(&json, 1, "problems"), "missing required primary metric: ") &&
+            strstr(cm_get(&json, 1, "problems"), missing_primary[i][2]) &&
+            strstr(cm_get(&json, 1, "result"), "incomplete"), "missing primary JSON agrees with result and failure status");
+        cm_json_free(&json);
+        free(text);
+    }
+
+    // Cleanup joins accept the last fitting byte and clear refusals before any path operation.
+    char joined[PE_PATH], long_parent[PE_PATH];
+    PE_CHECK(pe_path_join(joined, 10, "root", "leaf") && cm_equal(joined, "root/leaf"),
+        "cleanup join fits exactly including the terminator");
+    joined[0] = 'x';
+    PE_CHECK(!pe_path_join(joined, 9, "root", "leaf") && !joined[0], "cleanup join refuses one byte beyond capacity");
+    joined[0] = 'x';
+    PE_CHECK(!pe_path_join(joined, 0, "root", "leaf") && joined[0] == 'x', "zero-capacity join writes nothing");
+    PE_CHECK(!pe_path_join(joined, 1, "", "") && !joined[0], "cleanup join needs room for slash and terminator");
+    memset(long_parent, 'a', sizeof(long_parent) - 1);
+    long_parent[PE_PATH - 3] = 0;
+    PE_CHECK(pe_path_join(joined, sizeof(joined), long_parent, "b") && strlen(joined) == PE_PATH - 1,
+        "cleanup join accepts the full path capacity");
+    long_parent[PE_PATH - 3] = 'a';
+    long_parent[PE_PATH - 2] = 0;
+    PE_CHECK(!pe_path_join(joined, sizeof(joined), long_parent, "b") && !joined[0],
+        "cleanup join rejects an overlong parent and child");
+    long_parent[PE_PATH - 2] = 'a';
+    long_parent[PE_PATH - 1] = 0;
+    PE_CHECK(!pe_path_join(joined, sizeof(joined), "a", long_parent) && !joined[0],
+        "cleanup join rejects an overlong child");
+
     // End to end with the time tool: an A/A control, refusals and an unexpected exit.
     char root[] = "/tmp/performance-evidence-self-test-XXXXXX", truth[PE_PATH], falsity[PE_PATH];
     int have = mkdtemp(root) != NULL && pe_which("true", truth, sizeof(truth)) && pe_which("false", falsity, sizeof(falsity));
@@ -286,7 +348,7 @@ BUSTER_GLOBAL_LOCAL int pe_self_test(void)
             truth, "--candidate", truth, "--out", refused_out, "--runs", "6", "--events", "instructions:uk", "--", NULL};
         PE_CHECK(pe_compare((int)BUSTER_ARRAY_LENGTH(perf_argv) - 1, perf_argv) == 2 && access(refused_out, F_OK) != 0,
             "unsupported modifiers are refused before creating output or running perf");
-        pe_remove_tree(root);
+        PE_CHECK(pe_remove_tree(root) && access(root, F_OK) != 0, "scratch cleanup removes root and nested comparison files");
     }
     free(r);
     printf("PERFORMANCE_EVIDENCE_SELF_TEST %s checks=%u failures=%u\n", failures ? "FAIL" : "PASS", checks, failures);
