@@ -12465,6 +12465,34 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_plan_append(CParseResult* result, CIni
     return item_plus_one;
 }
 
+BUSTER_C_INTERNAL void c_parse_initializer_plan_ext80(CTypeParseMachine* machine, CParseResult* result,
+                                                      CPreprocessResult const* preprocess, CTypeId type, u32 node,
+                                                      u32 start, u32 end, u8 flags)
+{
+    CTypeKind kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
+    if (flags & C_INITIALIZER_ITEM_COMPLEX_COMPONENT) kind = c_type_kind_complex_element(kind);
+    if (kind == C_TYPE_LONG_DOUBLE && target_data_layout(preprocess->target).long_double_type.bit_width == 80 &&
+        !c_ast_facts_ext80_initializer(machine->ast_facts, node))
+    {
+        while (start < end && c_token_is_punctuator(&preprocess->tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+               c_parse_matching_delimiter_indexed(result, *preprocess, start) + 1 == end)
+        {
+            start += 1;
+            end -= 1;
+            if (end > start && c_token_is_punctuator(&preprocess->tokens[end - 1], C_PUNCTUATOR_COMMA)) end -= 1;
+        }
+        u64 mark = machine->scratch_arena->position;
+        u64 significand = 0;
+        u16 exponent_sign = 0;
+        String8 message = {0};
+        u32 token = start;
+        if (c_semantic_ext80_fold_initializer(machine->scratch_arena, *preprocess, start, end,
+                                             &significand, &exponent_sign, &message, &token))
+            c_ast_facts_store_ext80_initializer(machine->ast_facts, node, significand, exponent_sign);
+        arena_set_position(machine->scratch_arena, mark);
+    }
+}
+
 BUSTER_C_INTERNAL u32 c_parse_initializer_plan_item(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                                     CInitializerPlan* plan, CTypeId type, u32 path_plus_one, u32 start, u32 end,
                                                     u32 source_token, u8 flags)
@@ -12498,6 +12526,8 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_plan_item(CTypeParseMachine* machine, 
                         .path_plus_one = child_path, .source_token = cursor, .range_source_token = cursor,
                         .value_start = cursor, .value_end = value_end,
                         .flags = C_INITIALIZER_ITEM_VALUE | C_INITIALIZER_ITEM_COMPLEX_COMPONENT | (flags & C_INITIALIZER_ITEM_DESIGNATED)});
+                    c_parse_initializer_plan_ext80(machine, result, preprocess, type, child_node, cursor, value_end,
+                                                  C_INITIALIZER_ITEM_COMPLEX_COMPONENT);
                     cursor = value_end + 1;
                 }
                 item.flags = C_INITIALIZER_ITEM_LIST_END;
@@ -12505,7 +12535,11 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_plan_item(CTypeParseMachine* machine, 
                 u32 end_plus_one = c_parse_initializer_plan_append(result, plan, item);
                 if (item_plus_one && end_plus_one) plan->items[item_plus_one - 1].paired_item_plus_one = end_plus_one;
             }
-            else item_plus_one = c_parse_initializer_plan_append(result, plan, item);
+            else
+            {
+                item_plus_one = c_parse_initializer_plan_append(result, plan, item);
+                if (flags & C_INITIALIZER_ITEM_VALUE) c_parse_initializer_plan_ext80(machine, result, preprocess, type, node, start, end, flags);
+            }
         }
         else plan->failed = true;
     }

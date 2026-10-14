@@ -6565,6 +6565,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
            "static int object; static int *address = &object;\n"
            "static double real = 1.25 + 2.5;\n"
            "static long double extended = 0x1.8p0L;\n"
+           "static long double extended_array[2] = { 0x1.8p0L, { -0x1.8p0L } };\n"
+           "static struct Extended { long double real; } extended_record = { .real = 0x1.8p0L };\n"
+           "static long double _Complex extended_components = { 0x1.8p0L, -0x1.8p0L };\n"
            "int f(void) { return values[0] + (address != 0) + __builtin_types_compatible_p(int, long); }\n");
     String8 sources[] = {
         valid_source,
@@ -6600,6 +6603,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
             bool thirteen = false;
             bool identity = false;
             u32 selections = 0;
+            u32 extended_initializer_count = 0;
             for (u32 node = 0; node < built.ast.node_count; node += 1)
             {
                 CAstConstantFact value = c_ast_facts_constant(&facts, node);
@@ -6633,6 +6637,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
                 CAstExt80InitializerFact const* initializer = c_ast_facts_ext80_initializer(&facts, node);
                 if (initializer)
                 {
+                    extended_initializer_count += 1;
                     extended |= initializer->significand == UINT64_C(0xc000000000000000) && initializer->exponent_sign == UINT16_C(0x3fff);
                     BUSTER_TEST(arguments, !value.offsetof_plus_one);
                 }
@@ -6642,6 +6647,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
             bool native_float128 = target_data_layout(preprocess.target).long_double_type.bit_width == 128;
             BUSTER_TEST(arguments, invalid ? fault : seven && zero && nine && eleven && thirteen && identity && selections == 2 && real &&
                                                   (!native_float128 || wide) && (!native_ext80 || extended) && !fault);
+            if (!invalid) BUSTER_TEST(arguments, native_ext80 ? extended_initializer_count >= 6 : extended_initializer_count == 0);
             BUSTER_TEST(arguments, facts.constant_count && facts.constant_count <= facts.node_count && facts.constants_arena);
             BUSTER_TEST(arguments, c_ast_facts_constant(&facts, C_AST_NODE_INVALID).status == C_AST_CONSTANT_UNQUERIED);
             BUSTER_TEST(arguments, !c_ast_facts_ext80_initializer(&facts, C_AST_NODE_INVALID));
