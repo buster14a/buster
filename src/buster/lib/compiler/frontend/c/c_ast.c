@@ -1807,9 +1807,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_expr(CAstBuilder* builder, CAstFrame* frame)
                     }
                     else
                     {
+                        CAstOperator const* previous = builder->operator_count ? builder->operators + builder->operator_count - 1 : 0;
+                        bool after_word = previous && previous->token + 1 == position &&
+                                          (previous->kind == C_AST_SIZEOF_EXPRESSION || previous->kind == C_AST_ALIGNOF_EXPRESSION ||
+                                           previous->kind == C_AST_REAL || previous->kind == C_AST_IMAG || previous->kind == C_AST_EXTENSION);
                         c_ast_operator_push(builder, C_AST_OP_PAREN, 0, builder->node_count, position);
                         builder->operators[builder->operator_count - 1].flags =
-                            (u8)(position && builder->source[position - 1].kind == C_TOKEN_IDENTIFIER ? C_AST_PARENTHESIS_AFTER_IDENTIFIER : 0);
+                            (u8)(after_word ? C_AST_PARENTHESIS_AFTER_IDENTIFIER : 0);
                         nest += 1;
                         c_ast_advance(builder);
                     }
