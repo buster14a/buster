@@ -2410,6 +2410,22 @@ tree's retained bytes.
 
 ### Type queries
 
+The node task scheduler checkpoint uses exact `(kind, node, view)` keys for
+`TYPE_NAME`, `COMPOUND_TYPE`, `EXPRESSION_TYPE` and `CONSTANT`. Its explicit
+frames and completed-child index reuse the checked frontend query arena;
+the canonical IR contains none of these identities. A missing child queues
+one task and resumes its parent through the dispatch loop. Private graph
+state belongs to the standalone task root and does not escape its scratch
+lifetime. A settled declined child is distinct from a pending child.
+
+The scalar and complex constant tasks now read numeric, literal and selected
+children from nodes and share the existing arithmetic, cast and byte helpers.
+F2's type attempts are explicit declined placeholders in this checkpoint;
+the type materializer replaces them before the corresponding consumer gates
+are enabled. The token query families and shunting-yard evaluator still
+serve the earlier callers during this staging step and remain scheduled for
+deletion. This checkpoint does not complete F3 or F6.
+
 Each query kind becomes a fact read on the node its owner frame was handed.
 The machine, its keys, its memo and its resumes are deleted:
 

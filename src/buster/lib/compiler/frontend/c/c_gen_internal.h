@@ -40,6 +40,8 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CAstFacts const* facts,
+                                                 u32 node, u64* low, u64* high, f64* floating, bool* is_float);
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
 // Token-free structural groups, replayed row reuse and restored node heads.

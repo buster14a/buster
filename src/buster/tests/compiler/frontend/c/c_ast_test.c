@@ -6602,6 +6602,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
 // initializer no query typed. `__func__` and a builtin's callee name are
 // gaps: the machine types them to nothing. Every candidate is accounted for
 // once, and no published row is past the type table.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_node_tasks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
+    u32 depth = 4096;
+    char8* deep = arena_allocate(source_temporary.arena, char8, depth * 3 + 1);
+    for (u32 index = 0; index < depth; index += 1) { deep[index * 2] = '+'; deep[index * 2 + 1] = '('; }
+    deep[depth * 2] = '1';
+    memset(deep + depth * 2 + 1, ')', depth);
+    struct { String8 expression; u64 integer; f64 floating; bool is_float; } const cases[] = {
+        {S8("(1 + 2) * (3 + 4)"), 21, 0, false},
+        {S8("0 && (1 / 0)"), 0, 0, false},
+        {S8("1 ? 7 : (1 / 0)"), 7, 0, false},
+        {S8("0 ? (1 / 0) : 9"), 9, 0, false},
+        {S8("1.25 + 2.5"), 0, 3.75, true},
+        {S8("5.0 + 7.0i"), 5, 0, false},
+        {S8("__builtin_complex(1.0, 2.0) + 3.0"), 4, 0, false},
+        {S8("_Generic(0, int: 13, default: (1 / 0))"), 13, 0, false},
+        {S8("__builtin_constant_p(__builtin_constant_p(input))"), 1, 0, false},
+        {{.pointer = deep, .length = depth * 3 + 1}, 1, 0, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        Arena* conflicts[] = {arguments->arena, source_temporary.arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        String8 source = string_format(temporary.arena, S8("int f(int input) {{ return {S8}; }}"), cases[index].expression);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.ast_facts = &facts;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+            u32 expression = C_AST_NODE_INVALID;
+            for (u32 node = 0; node < built.ast.node_count; node += 1)
+                if (built.ast.kinds[node] == C_AST_RETURN) expression = c_ast_child_at(&built.ast, node, 0);
+            u64 low = 0;
+            u64 high = 0;
+            f64 floating = 0;
+            bool is_float = false;
+            bool evaluated = c_test_constant_node_numeric(temporary.arena, preprocess, &built.ast, &facts, expression,
+                                                          &low, &high, &floating, &is_float);
+            BUSTER_TEST_RAW(arguments, evaluated && is_float == cases[index].is_float &&
+                                       (is_float ? floating == cases[index].floating : low == cases[index].integer && !high), cases[index].expression);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    c_test_scratch_end(source_temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7328,6 +7384,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);

@@ -2511,6 +2511,45 @@ struct CIrConstantOperator
     IrTypeId cast_type;
 };
 
+typedef struct CIrConstantComplexInitializerValue CIrConstantComplexInitializerValue;
+struct CIrConstantComplexInitializerValue
+{
+    CIrConstantValue real;
+    CIrConstantValue imaginary;
+    IrTypeId type;
+    IrTypeId element_type;
+    bool is_complex;
+};
+
+// Node tasks share the checked frontend query stack during the family
+// migration. Their keys contain no source range; state is private scratch.
+typedef enum CIrAstTypeView
+{
+    C_IR_AST_TYPE_STRICT,
+    C_IR_AST_TYPE_PROMOTED,
+    C_IR_AST_TYPE_PREDICTED,
+} CIrAstTypeView;
+
+typedef enum CIrNodeQueryKind
+{
+    C_IR_NODE_QUERY_TYPE_NAME,
+    C_IR_NODE_QUERY_COMPOUND_TYPE,
+    C_IR_NODE_QUERY_EXPRESSION_TYPE,
+    C_IR_NODE_QUERY_CONSTANT,
+} CIrNodeQueryKind;
+
+typedef struct CIrNodeQueryFrame CIrNodeQueryFrame;
+struct CIrNodeQueryFrame
+{
+    CIrConstantComplexInitializerValue constant;
+    IrTypeId result_type;
+    u32 node;
+    CIrNodeQueryKind kind;
+    CIrAstTypeView view;
+    void* state;
+    bool success;
+};
+
 typedef enum CIrQueryFrameKind
 {
     C_IR_QUERY_FRAME_TYPE_NAME,
@@ -2525,11 +2564,13 @@ typedef enum CIrQueryFrameKind
     C_IR_QUERY_FRAME_CONDITIONAL_TYPE,
     C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT,
     C_IR_QUERY_FRAME_OFFSETOF,
+    C_IR_QUERY_FRAME_NODE_TASK,
 } CIrQueryFrameKind;
 
 typedef struct CIrQueryFrame CIrQueryFrame;
 struct CIrQueryFrame
 {
+    CIrNodeQueryFrame node_task;
     CIrConstantValue constant;
     CArrayBound bound;
     IrTypeId first_type;
@@ -4371,6 +4412,15 @@ BUSTER_C_INTERNAL bool c_ir_range_is_null_pointer_constant_attempt(CIntegerIrBui
 BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime, u32 after, u64* offset_out,
                                                       IrTypeId* runtime_element_out, u32* runtime_open_out);
 
+BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
+BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
+BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* result_out);
+BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate_node(CIntegerIrBuilder* builder, u32 node, u64* value_out);
+BUSTER_C_INTERNAL bool c_ir_global_complex_real_value_node(CIntegerIrBuilder* builder, IrType* type, IrTypeId type_id, u32 node,
+                                                           CIrConstantValue* value);
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_node_bytes(CIntegerIrBuilder* builder, u32 node, IrTypeId target_type,
+                                                                    u8* bytes, u64 byte_count, bool* handled);
+
 BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame right)
 {
     if (left.kind == right.kind)
@@ -4394,6 +4444,9 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
         case C_IR_QUERY_FRAME_CONDITIONAL_TYPE:
             return left.first_type.value == right.first_type.value && left.second_type.value == right.second_type.value && left.start == right.start &&
                    left.end == right.end && left.third == right.third && left.fourth == right.fourth;
+        case C_IR_QUERY_FRAME_NODE_TASK:
+            return left.node_task.node == right.node_task.node && left.node_task.kind == right.node_task.kind &&
+                   left.node_task.view == right.node_task.view;
         case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
             return left.first_type.value == right.first_type.value && left.start == right.start && left.end == right.end;
         }
@@ -4409,6 +4462,10 @@ BUSTER_C_INTERNAL u32 c_ir_query_key_hash(CIrQueryFrame key)
     u64 second = key.end;
     switch (key.kind)
     {
+    case C_IR_QUERY_FRAME_NODE_TASK:
+        first = key.node_task.node;
+        second = ((u32)key.node_task.kind << 8) | (u32)key.node_task.view;
+        break;
     case C_IR_QUERY_FRAME_ARRAY_BOUND:
         first = key.bound.token_start;
         second = key.bound.token_count;
@@ -4469,126 +4526,189 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
 {
     WORK_LEDGER_RECORD(REDERIVE_LOWER_QUERY_ROOTS, 1);
     CIrQueryMachine* machine = builder->queries;
-    if (!machine || machine->frame_count >= machine->frame_capacity)
+    bool ready = machine && machine->frame_count < machine->frame_capacity;
+    bool complete = false;
+    if (!ready)
     {
         builder->failure_message = S8("C query nesting exceeds the query frame capacity");
         builder->failure_token_index = root.kind == C_IR_QUERY_FRAME_ARRAY_BOUND ? root.bound.token_start : root.start;
-        return false;
     }
-    u32 frame_start = machine->frame_count;
-    u32 completed_start = machine->completed_count;
-    u32 value_start = machine->value_count;
-    u32 operator_start = machine->operator_count;
-    machine->resumes[machine->frame_count] = (CIrQueryResume){0};
-    machine->frames[machine->frame_count++] = root;
-    while (machine->frame_count > frame_start)
+    else
     {
-        CIrQueryFrame* frame = machine->frames + machine->frame_count - 1;
-        machine->has_request = false;
-        frame->success = false;
-        switch (frame->kind)
+        u32 frame_start = machine->frame_count;
+        u32 completed_start = machine->completed_count;
+        u32 value_start = machine->value_count;
+        u32 operator_start = machine->operator_count;
+        bool stopped = false;
+        machine->resumes[machine->frame_count] = (CIrQueryResume){0};
+        machine->frames[machine->frame_count++] = root;
+        while (!stopped && machine->frame_count > frame_start)
         {
-        case C_IR_QUERY_FRAME_TYPE_NAME:
-            frame->result_type = c_ir_type_name_internal_attempt(builder, frame->start, frame->end, frame->flag, frame->third != 0);
-            frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
-            break;
-        case C_IR_QUERY_FRAME_ARRAY_BOUND: frame->success = c_ir_array_bound_evaluate_attempt(builder, frame->bound, &frame->integer); break;
-        case C_IR_QUERY_FRAME_CONSTANT: frame->success = c_ir_constant_evaluate_attempt(builder, frame->start, frame->end, &frame->constant); break;
-        case C_IR_QUERY_FRAME_OPERAND_TYPE:
-            frame->success = c_ir_sizeof_operand_type_attempt(builder, frame->start, frame->end, &frame->result_type);
-            break;
-        case C_IR_QUERY_FRAME_VLA_C_TYPE:
-            frame->result_type = c_ir_vla_c_type_attempt(builder, (CTypeId){.value = frame->start});
-            frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
-            break;
-        case C_IR_QUERY_FRAME_SIZEOF:
-#if BUSTER_INCLUDE_TESTS
-            builder->sizeof_handoff_type = IR_TYPE_ID_INVALID;
-#endif
-            frame->success = c_ir_sizeof_expression_attempt(builder, frame->start, frame->end, &frame->integer, &frame->alignment);
-#if BUSTER_INCLUDE_TESTS
-            if (c_sizeof_handoff_enabled() && !machine->has_request)
+            CIrQueryFrame* frame = machine->frames + machine->frame_count - 1;
+            machine->has_request = false;
+            frame->success = false;
+            switch (frame->kind)
             {
-                c_ir_sizeof_handoff_report(builder, frame->start, frame->end, frame->success, frame->integer, builder->sizeof_handoff_type);
+            case C_IR_QUERY_FRAME_NODE_TASK:
+                frame->success = c_ir_node_query_attempt(builder, &frame->node_task);
+                frame->node_task.success = frame->success;
+                break;
+            case C_IR_QUERY_FRAME_TYPE_NAME:
+                frame->result_type = c_ir_type_name_internal_attempt(builder, frame->start, frame->end, frame->flag, frame->third != 0);
+                frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+                break;
+            case C_IR_QUERY_FRAME_ARRAY_BOUND: frame->success = c_ir_array_bound_evaluate_attempt(builder, frame->bound, &frame->integer); break;
+            case C_IR_QUERY_FRAME_CONSTANT: frame->success = c_ir_constant_evaluate_attempt(builder, frame->start, frame->end, &frame->constant); break;
+            case C_IR_QUERY_FRAME_OPERAND_TYPE:
+                frame->success = c_ir_sizeof_operand_type_attempt(builder, frame->start, frame->end, &frame->result_type);
+                break;
+            case C_IR_QUERY_FRAME_VLA_C_TYPE:
+                frame->result_type = c_ir_vla_c_type_attempt(builder, (CTypeId){.value = frame->start});
+                frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+                break;
+            case C_IR_QUERY_FRAME_SIZEOF:
+    #if BUSTER_INCLUDE_TESTS
+                builder->sizeof_handoff_type = IR_TYPE_ID_INVALID;
+    #endif
+                frame->success = c_ir_sizeof_expression_attempt(builder, frame->start, frame->end, &frame->integer, &frame->alignment);
+    #if BUSTER_INCLUDE_TESTS
+                if (c_sizeof_handoff_enabled() && !machine->has_request)
+                {
+                    c_ir_sizeof_handoff_report(builder, frame->start, frame->end, frame->success, frame->integer, builder->sizeof_handoff_type);
+                }
+    #endif
+                break;
+            case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT:
+                frame->success = c_ir_compound_literal_element_count_attempt(builder, frame->start, frame->end, &frame->integer);
+                break;
+            case C_IR_QUERY_FRAME_COMPOUND_TYPE:
+                frame->result_type = c_ir_compound_literal_type_attempt(builder, frame->start, frame->end, frame->third, frame->fourth);
+                frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+                break;
+            case C_IR_QUERY_FRAME_TYPE_PREDICTION:
+                frame->result_type = c_ir_predict_expression_type_attempt(builder, frame->start, frame->end);
+                frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+                break;
+            case C_IR_QUERY_FRAME_CONDITIONAL_TYPE:
+                frame->result_type = c_ir_conditional_result_type_attempt(builder, frame->first_type, frame->second_type, frame->start, frame->end, frame->third,
+                                                                          frame->fourth);
+                frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+                break;
+            case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
+                frame->flag = c_ir_range_is_null_pointer_constant_attempt(builder, frame->first_type, frame->start, frame->end);
+                frame->success = true;
+                break;
+            case C_IR_QUERY_FRAME_OFFSETOF:
+                frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, frame->flag, frame->third, &frame->integer,
+                                                                &frame->result_type, &frame->fourth);
+                break;
             }
-#endif
-            break;
-        case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT:
-            frame->success = c_ir_compound_literal_element_count_attempt(builder, frame->start, frame->end, &frame->integer);
-            break;
-        case C_IR_QUERY_FRAME_COMPOUND_TYPE:
-            frame->result_type = c_ir_compound_literal_type_attempt(builder, frame->start, frame->end, frame->third, frame->fourth);
-            frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
-            break;
-        case C_IR_QUERY_FRAME_TYPE_PREDICTION:
-            frame->result_type = c_ir_predict_expression_type_attempt(builder, frame->start, frame->end);
-            frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
-            break;
-        case C_IR_QUERY_FRAME_CONDITIONAL_TYPE:
-            frame->result_type = c_ir_conditional_result_type_attempt(builder, frame->first_type, frame->second_type, frame->start, frame->end, frame->third,
-                                                                      frame->fourth);
-            frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
-            break;
-        case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
-            frame->flag = c_ir_range_is_null_pointer_constant_attempt(builder, frame->first_type, frame->start, frame->end);
-            frame->success = true;
-            break;
-        case C_IR_QUERY_FRAME_OFFSETOF:
-            frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, frame->flag, frame->third, &frame->integer,
-                                                            &frame->result_type, &frame->fourth);
-            break;
-        }
-        if (machine->has_request)
-        {
-            if (machine->frame_count >= machine->frame_capacity)
+            if (machine->has_request)
             {
-                builder->failure_message = S8("C query nesting exceeds the query frame capacity");
+                if (machine->frame_count >= machine->frame_capacity)
+                {
+                    builder->failure_message = S8("C query nesting exceeds the query frame capacity");
+                    builder->failure_token_index = frame->start;
+                    stopped = true;
+                }
+                else
+                {
+                    machine->resumes[machine->frame_count] = (CIrQueryResume){0};
+                    machine->frames[machine->frame_count++] = machine->request;
+                }
+            }
+            else if (machine->frame_count == frame_start + 1)
+            {
+                *result_out = *frame;
+                complete = true;
+                stopped = true;
+            }
+            else if (machine->completed_count >= machine->completed_capacity)
+            {
+                builder->failure_message = S8("C query result count exceeds the query buffer capacity");
                 builder->failure_token_index = frame->start;
-                machine->frame_count = frame_start;
-                c_ir_query_completed_rewind(machine, completed_start);
-                machine->value_count = value_start;
-                machine->operator_count = operator_start;
-                machine->has_request = false;
-                return false;
+                stopped = true;
             }
-            machine->resumes[machine->frame_count] = (CIrQueryResume){0};
-            machine->frames[machine->frame_count++] = machine->request;
-            continue;
+            else
+            {
+                CIrQueryFrame completed = *frame;
+                machine->frame_count -= 1;
+                u32 bucket = c_ir_query_key_hash(completed) & machine->chain_mask;
+                machine->chain_bucket[machine->completed_count] = bucket;
+                machine->chain_next[machine->completed_count] = machine->chain_heads[bucket];
+                machine->completed[machine->completed_count++] = completed;
+                machine->chain_heads[bucket] = machine->completed_count;
+            }
         }
-        if (machine->frame_count == frame_start + 1)
-        {
-            *result_out = *frame;
-            machine->frame_count = frame_start;
-            c_ir_query_completed_rewind(machine, completed_start);
-            machine->value_count = value_start;
-            machine->operator_count = operator_start;
-            return true;
-        }
-        if (machine->completed_count >= machine->completed_capacity)
-        {
-            builder->failure_message = S8("C query result count exceeds the query buffer capacity");
-            builder->failure_token_index = frame->start;
-            machine->frame_count = frame_start;
-            c_ir_query_completed_rewind(machine, completed_start);
-            machine->value_count = value_start;
-            machine->operator_count = operator_start;
-            return false;
-        }
-        CIrQueryFrame completed = *frame;
-        machine->frame_count -= 1;
-        u32 bucket = c_ir_query_key_hash(completed) & machine->chain_mask;
-        machine->chain_bucket[machine->completed_count] = bucket;
-        machine->chain_next[machine->completed_count] = machine->chain_heads[bucket];
-        machine->completed[machine->completed_count++] = completed;
-        machine->chain_heads[bucket] = machine->completed_count;
+        machine->frame_count = frame_start;
+        c_ir_query_completed_rewind(machine, completed_start);
+        machine->value_count = value_start;
+        machine->operator_count = operator_start;
+        machine->has_request = false;
     }
-    BUSTER_CHECK(machine->completed_count > completed_start);
-    *result_out = machine->completed[machine->completed_count - 1];
-    machine->frame_count = frame_start;
-    c_ir_query_completed_rewind(machine, completed_start);
-    machine->value_count = value_start;
-    machine->operator_count = operator_start;
-    return true;
+    return complete;
+}
+
+// A settled declined child still has an answer. Only a missing child queues
+// a request; the dispatch loop resumes its owner after that child completes.
+BUSTER_C_INTERNAL bool c_ir_node_query_request(CIntegerIrBuilder* builder, CIrNodeQueryFrame key, CIrNodeQueryFrame* answer)
+{
+    CIrQueryFrame result = {0};
+    bool settled = c_ir_query_request(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_NODE_TASK, .node_task = key}, &result);
+    if (settled) *answer = result.node_task;
+    return settled;
+}
+
+BUSTER_C_INTERNAL bool c_ir_node_query_execute(CIntegerIrBuilder* builder, CIrNodeQueryFrame key, CIrNodeQueryFrame* answer)
+{
+    CIrQueryFrame result = {0};
+    u64 state_mark = builder->temporary_arena ? builder->temporary_arena->position : 0;
+    bool complete = builder->queries && !builder->queries->frame_count &&
+                    c_ir_query_execute(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_NODE_TASK, .node_task = key}, &result);
+    if (complete)
+    {
+        *answer = result.node_task;
+        answer->state = 0;
+    }
+    if (builder->temporary_arena && builder->temporary_arena != builder->arena)
+        arena_set_position(builder->temporary_arena, state_mark);
+    return complete;
+}
+
+// F2's materializer replaces these explicit declined attempts in its next
+// checkpoint. The node tasks are not routed to a token query at this stage.
+BUSTER_C_INTERNAL bool c_ir_type_name_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    BUSTER_UNUSED(builder);
+    frame->result_type = IR_TYPE_ID_INVALID;
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_compound_literal_type_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    BUSTER_UNUSED(builder);
+    frame->result_type = IR_TYPE_ID_INVALID;
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_expression_type_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    BUSTER_UNUSED(builder);
+    frame->result_type = IR_TYPE_ID_INVALID;
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    bool success = false;
+    switch (frame->kind)
+    {
+    case C_IR_NODE_QUERY_TYPE_NAME: success = c_ir_type_name_node_attempt(builder, frame); break;
+    case C_IR_NODE_QUERY_COMPOUND_TYPE: success = c_ir_compound_literal_type_node_attempt(builder, frame); break;
+    case C_IR_NODE_QUERY_EXPRESSION_TYPE: success = c_ir_expression_type_node_attempt(builder, frame); break;
+    case C_IR_NODE_QUERY_CONSTANT: success = c_ir_constant_node_attempt(builder, frame); break;
+    }
+    return success;
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_type_name(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer, IrTypeId* type_out)
@@ -56634,16 +56754,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     return success;
 }
 
-typedef struct CIrConstantComplexInitializerValue CIrConstantComplexInitializerValue;
-struct CIrConstantComplexInitializerValue
-{
-    CIrConstantValue real;
-    CIrConstantValue imaginary;
-    IrTypeId type;
-    IrTypeId element_type;
-    bool is_complex;
-};
-
 BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_cast(CIntegerIrBuilder* builder,
                                                                const CIrConstantComplexInitializerValue* source, IrTypeId target_type,
                                                                CIrConstantComplexInitializerValue* result)
@@ -58461,6 +58571,454 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
     *result_out = values[0];
     return result_out->kind != C_IR_CONSTANT_INVALID && result_out->kind != C_IR_CONSTANT_UNKNOWN;
 }
+
+BUSTER_C_INTERNAL CConditionalOperator c_ir_constant_node_operation(u32 kind)
+{
+    CConditionalOperator result = C_CONDITIONAL_OPERATOR_COUNT;
+    switch (kind)
+    {
+    case C_AST_ADDRESS: result = C_CONDITIONAL_ADDRESS_OF; break;
+    case C_AST_DEREFERENCE: result = C_CONDITIONAL_DEREFERENCE; break;
+    case C_AST_PLUS: result = C_CONDITIONAL_UNARY_PLUS; break;
+    case C_AST_NEGATE: result = C_CONDITIONAL_UNARY_MINUS; break;
+    case C_AST_BIT_NOT: result = C_CONDITIONAL_BITWISE_NOT; break;
+    case C_AST_LOGICAL_NOT: result = C_CONDITIONAL_LOGICAL_NOT; break;
+    case C_AST_MULTIPLY: result = C_CONDITIONAL_MULTIPLY; break;
+    case C_AST_DIVIDE: result = C_CONDITIONAL_DIVIDE; break;
+    case C_AST_REMAINDER: result = C_CONDITIONAL_REMAINDER; break;
+    case C_AST_ADD: result = C_CONDITIONAL_ADD; break;
+    case C_AST_SUBTRACT: result = C_CONDITIONAL_SUBTRACT; break;
+    case C_AST_SHIFT_LEFT: result = C_CONDITIONAL_SHIFT_LEFT; break;
+    case C_AST_SHIFT_RIGHT: result = C_CONDITIONAL_SHIFT_RIGHT; break;
+    case C_AST_LESS: result = C_CONDITIONAL_LESS; break;
+    case C_AST_GREATER: result = C_CONDITIONAL_GREATER; break;
+    case C_AST_LESS_EQUAL: result = C_CONDITIONAL_LESS_EQUAL; break;
+    case C_AST_GREATER_EQUAL: result = C_CONDITIONAL_GREATER_EQUAL; break;
+    case C_AST_EQUAL: result = C_CONDITIONAL_EQUAL; break;
+    case C_AST_NOT_EQUAL: result = C_CONDITIONAL_NOT_EQUAL; break;
+    case C_AST_BIT_AND: result = C_CONDITIONAL_BITWISE_AND; break;
+    case C_AST_BIT_XOR: result = C_CONDITIONAL_BITWISE_XOR; break;
+    case C_AST_BIT_OR: result = C_CONDITIONAL_BITWISE_OR; break;
+    case C_AST_LOGICAL_AND: result = C_CONDITIONAL_LOGICAL_AND; break;
+    case C_AST_LOGICAL_OR: result = C_CONDITIONAL_LOGICAL_OR; break;
+    case C_AST_COMMA: result = C_CONDITIONAL_COMMA; break;
+    default: break;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_node_child(CIntegerIrBuilder* builder, u32 node, CIrNodeQueryFrame* answer)
+{
+    return c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_CONSTANT}, answer);
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_node_fact(CIntegerIrBuilder* builder, CAstConstantFact fact, CIrConstantValue* value)
+{
+    bool valid = fact.status == C_AST_CONSTANT_INTEGER || fact.status == C_AST_CONSTANT_FLOAT;
+    IrTypeId type = valid && fact.type.value < builder->parse.type_count && builder->c_type_ir_map
+                        ? builder->c_type_ir_map[fact.type.value] : IR_TYPE_ID_INVALID;
+    if (valid && type.value == IR_ID_UNDERLYING_INVALID) type = c_ir_builder_scalar_type(builder, fact.primitive_kind);
+    valid = valid && type.value != IR_ID_UNDERLYING_INVALID;
+    if (valid)
+    {
+        *value = (CIrConstantValue){.type = type, .integer = fact.low, .integer_high = fact.high, .floating = fact.floating,
+                                    .kind = fact.status == C_AST_CONSTANT_FLOAT ? C_IR_CONSTANT_FLOAT : C_IR_CONSTANT_INTEGER};
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    CAst const* ast = builder->syntax_tree;
+    u32 node = frame->node;
+    bool admitted = ast && node < ast->node_count;
+    CIrConstantComplexInitializerValue value = {0};
+    if (admitted)
+    {
+        u32 kind = ast->kinds[node];
+        u32 anchor = ast->tokens[node];
+        CAstConstantFact fact = c_ast_facts_constant(builder->syntax_facts, node);
+        u32 selected = c_ast_facts_selection(builder->syntax_facts, node);
+        bool fact_leaf = kind == C_AST_CALL || kind == C_AST_NUMBER || kind == C_AST_CHARACTER || kind == C_AST_IDENTIFIER ||
+                         kind == C_AST_BOOLEAN_CONSTANT;
+        if (fact_leaf && c_ir_constant_node_fact(builder, fact, &value.real))
+        {
+            value.type = value.real.type;
+        }
+        else if (selected != C_AST_NODE_INVALID)
+        {
+            CIrNodeQueryFrame child = {0};
+            admitted = c_ir_constant_node_child(builder, selected, &child) && child.success;
+            if (admitted) value = child.constant;
+        }
+        else if (kind == C_AST_NUMBER)
+        {
+            String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[anchor]);
+            String8 real_spelling = {0};
+            if (c_ir_number_imaginary_spelling(builder->arena, spelling, &real_spelling))
+            {
+                admitted = c_ir_constant_float_literal(builder, real_spelling, &value.imaginary);
+                if (admitted)
+                {
+                    value.element_type = value.imaginary.type;
+                    value.type = c_ir_complex_type_for_element(builder, value.element_type);
+                    value.real = (CIrConstantValue){.type = value.element_type, .kind = C_IR_CONSTANT_FLOAT};
+                    value.is_complex = value.type.value != IR_ID_UNDERLYING_INVALID;
+                    admitted = value.is_complex;
+                }
+            }
+            else if (c_number_is_float(spelling))
+            {
+                admitted = c_ir_constant_float_literal(builder, spelling, &value.real);
+                value.type = value.real.type;
+            }
+            else
+            {
+                u64 integer = 0;
+                IrTypeId type = IR_TYPE_ID_INVALID;
+                admitted = c_ir_integer_literal_at(builder, anchor, &integer, &type);
+                value.real = c_ir_constant_integer(type, integer);
+                value.type = type;
+            }
+        }
+        else if (kind == C_AST_CHARACTER)
+        {
+            u64 integer = 0;
+            CTypeKind type = C_TYPE_INT;
+            admitted = c_ir_decode_character_node_for_target(builder->arena, builder->preprocess, builder->target, ast, node, &integer, &type);
+            value.real = c_ir_constant_integer(c_ir_builder_scalar_type(builder, type), integer);
+            value.type = value.real.type;
+        }
+        else if (kind == C_AST_STRING)
+        {
+            CIrDecodedString decoded = {0};
+            admitted = c_ir_decode_string_node_for_target(builder->arena, builder->preprocess, builder->target, ast, node,
+                                                          builder->parse.string_literals, &decoded);
+            if (admitted) value.real = c_ir_string_object(builder, builder->preprocess.tokens[anchor], decoded, IR_TYPE_ID_INVALID);
+            value.type = value.real.type;
+            admitted = admitted && value.real.kind == C_IR_CONSTANT_LVALUE;
+        }
+        else if (kind == C_AST_BOOLEAN_CONSTANT || kind == C_AST_NULLPTR)
+        {
+            value.real = kind == C_AST_BOOLEAN_CONSTANT ? c_ir_constant_integer(builder->bool_type, ast->data[node])
+                : (CIrConstantValue){.type = builder->nullptr_type, .symbol = IR_SYMBOL_ID_INVALID, .kind = C_IR_CONSTANT_POINTER};
+            value.type = value.real.type;
+        }
+        else if (kind == C_AST_IDENTIFIER)
+        {
+            admitted = c_ir_constant_identifier(builder, anchor, &value.real);
+            value.type = value.real.type;
+        }
+        else if (kind == C_AST_COMPOUND_LITERAL || kind == C_AST_CAST)
+        {
+            CIrNodeQueryFrame type = {0};
+            CIrNodeQueryFrame key = {.node = kind == C_AST_CAST ? c_ast_child_at(ast, node, 0) : node,
+                                     .kind = kind == C_AST_CAST ? C_IR_NODE_QUERY_TYPE_NAME : C_IR_NODE_QUERY_COMPOUND_TYPE};
+            admitted = c_ir_node_query_request(builder, key, &type) && type.success;
+            IrType* target = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
+            bool object = target && kind == C_AST_COMPOUND_LITERAL &&
+                          (target->kind == IR_TYPE_ARRAY || ((target->kind == IR_TYPE_STRUCT || target->kind == IR_TYPE_UNION) && !target->is_complex));
+            if (object)
+            {
+                value.real = c_ir_static_compound_literal_object_node(builder, node, type.result_type, builder->function != 0);
+                value.type = value.real.type;
+                admitted = value.real.kind == C_IR_CONSTANT_LVALUE;
+            }
+            else if (admitted)
+            {
+                CIrNodeQueryFrame child = {0};
+                admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &child) && child.success;
+                if (admitted)
+                {
+                    if (child.constant.is_complex || target->is_complex)
+                        admitted = c_ir_constant_complex_initializer_cast(builder, &child.constant, type.result_type, &value);
+                    else
+                    {
+                        admitted = c_ir_constant_cast(builder, &child.constant.real, type.result_type, &value.real);
+                        value.type = value.real.type;
+                    }
+                }
+            }
+        }
+        else if (kind == C_AST_INITIALIZER_LIST || kind == C_AST_EXTENSION || kind == C_AST_EXPRESSION_STATEMENT ||
+                 kind == C_AST_STATEMENT_EXPRESSION || kind == C_AST_COMPOUND_STATEMENT)
+        {
+            u32 count = c_ast_child_count(ast, node);
+            bool tail = kind == C_AST_COMPOUND_STATEMENT;
+            admitted = count && (tail || count == 1);
+            CIrNodeQueryFrame child = {0};
+            admitted = admitted && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, tail ? count - 1 : 0), &child) && child.success;
+            if (admitted) value = child.constant;
+        }
+        else if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE)
+        {
+            bool expression = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION;
+            CIrNodeQueryFrame type = {0};
+            admitted = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = c_ast_child_at(ast, node, 0),
+                .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME, .view = C_IR_AST_TYPE_STRICT}, &type) && type.success;
+            IrType* row = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
+            admitted = admitted && row && row->layout.resolved;
+            if (admitted)
+            {
+                bool alignment = kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE;
+                value.real = c_ir_constant_integer(builder->size_type,
+                    alignment ? c_ir_sizeof_operand_alignment(row) : c_ir_sizeof_operand_size(row));
+                value.type = value.real.type;
+            }
+        }
+        else if (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX)
+        {
+            CIrNodeQueryFrame base = {0};
+            admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 0), &base) && base.success && !base.constant.is_complex;
+            if (admitted)
+            {
+                value = base.constant;
+                if (kind == C_AST_INDEX)
+                {
+                    CIrNodeQueryFrame index = {0};
+                    admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &index) && index.success && !index.constant.is_complex &&
+                               index.constant.real.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_index(builder, &value.real, index.constant.real);
+                }
+                else
+                {
+                    if (kind == C_AST_MEMBER_ARROW) admitted = c_ir_constant_apply_unary(builder, C_CONDITIONAL_DEREFERENCE, IR_TYPE_ID_INVALID, &value.real);
+                    admitted = admitted && c_ir_constant_lvalue_field(builder, &value.real,
+                        c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[anchor]));
+                }
+                value.type = value.real.type;
+            }
+        }
+        else if (kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED)
+        {
+            CIrNodeQueryFrame condition = {0};
+            CIrNodeQueryFrame first = {0};
+            CIrNodeQueryFrame second = {0};
+            bool omitted = kind == C_AST_CONDITIONAL_OMITTED;
+            admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 0), &condition) && condition.success && !condition.constant.is_complex;
+            if (admitted && omitted) first = condition;
+            else if (admitted) admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &first) && first.success && !first.constant.is_complex;
+            admitted = admitted && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, omitted ? 1 : 2), &second) && second.success && !second.constant.is_complex;
+            if (admitted)
+            {
+                CIrConstantValue operands[] = {condition.constant.real, first.constant.real, second.constant.real};
+                u32 count = BUSTER_ARRAY_LENGTH(operands);
+                admitted = c_ir_constant_apply_operator(builder, (CIrConstantOperator){.operation = C_CONDITIONAL_SELECT}, operands, &count) && count == 1;
+                value.real = operands[0];
+                value.type = value.real.type;
+            }
+        }
+        else if (kind == C_AST_CALL)
+        {
+            u32 callee = c_ast_child_at(ast, node, 0);
+            u32 arguments = c_ast_child_count(ast, node) - 1;
+            CSymbolBuiltin builtin = callee < ast->node_count && ast->kinds[callee] == C_AST_IDENTIFIER
+                                        ? c_ir_token_builtin_kind(builder, builder->preprocess.tokens[ast->tokens[callee]]) : C_SYMBOL_BUILTIN_NONE;
+            CIrNodeQueryFrame operand = {0};
+            bool probe = builtin == C_SYMBOL_BUILTIN_CONSTANT_P && arguments == 1;
+            admitted = probe && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &operand);
+            if (admitted)
+            {
+                bool constant = operand.success && !operand.constant.is_complex && operand.constant.real.kind != C_IR_CONSTANT_UNKNOWN &&
+                                operand.constant.real.kind != C_IR_CONSTANT_INVALID;
+                value.real = c_ir_constant_integer(builder->s32_type, constant);
+                value.type = value.real.type;
+            }
+            else if (builtin == C_SYMBOL_BUILTIN_COMPLEX && arguments == 2)
+            {
+                CIrNodeQueryFrame real = {0};
+                CIrNodeQueryFrame imaginary = {0};
+                admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &real) && real.success && !real.constant.is_complex &&
+                           c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 2), &imaginary) && imaginary.success && !imaginary.constant.is_complex;
+                if (admitted)
+                {
+                    value.element_type = c_ir_constant_common_type(builder, real.constant.real.type, imaginary.constant.real.type);
+                    IrType* element = ir_type_from_id(&builder->program->types, value.element_type);
+                    admitted = element && element->kind == IR_TYPE_FLOAT &&
+                               c_ir_constant_cast(builder, &real.constant.real, value.element_type, &value.real) &&
+                               c_ir_constant_cast(builder, &imaginary.constant.real, value.element_type, &value.imaginary);
+                    if (admitted)
+                    {
+                        value.type = c_ir_complex_type_for_element(builder, value.element_type);
+                        value.is_complex = value.type.value != IR_ID_UNDERLYING_INVALID;
+                        admitted = value.is_complex;
+                    }
+                }
+            }
+            else if (!builder->queries->has_request && callee < ast->node_count && ast->kinds[callee] == C_AST_IDENTIFIER)
+            {
+                CEntityId entity = c_ir_constant_entity_at(builder, ast->tokens[callee]);
+                CEntity const* function = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
+                IrTypeId type = function && function->kind == C_ENTITY_FUNCTION && function->type.value < builder->parse.type_count
+                                    ? builder->c_type_ir_map[function->type.value] : IR_TYPE_ID_INVALID;
+                IrType* row = ir_type_from_id(&builder->program->types, type);
+                admitted = row && row->kind == IR_TYPE_FUNCTION && row->return_type.value != IR_ID_UNDERLYING_INVALID;
+                if (admitted)
+                {
+                    value.real = (CIrConstantValue){.type = row->return_type, .kind = C_IR_CONSTANT_UNKNOWN};
+                    value.type = value.real.type;
+                }
+            }
+        }
+        else
+        {
+            CConditionalOperator operation = c_ir_constant_node_operation(kind);
+            u32 count = c_ast_child_count(ast, node);
+            CIrNodeQueryFrame first = {0};
+            CIrNodeQueryFrame second = {0};
+            admitted = operation != C_CONDITIONAL_OPERATOR_COUNT && (count == 1 || count == 2) &&
+                       c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 0), &first) && first.success;
+            if (admitted && count == 1)
+            {
+                value = first.constant;
+                if (value.is_complex)
+                    admitted = c_ir_constant_complex_initializer_unary(builder, operation, &first.constant, &value);
+                else
+                {
+                    admitted = c_ir_constant_apply_unary(builder, operation, IR_TYPE_ID_INVALID, &value.real);
+                    value.real.function_designator = false;
+                    value.type = value.real.type;
+                }
+            }
+            else if (admitted)
+            {
+                admitted = c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &second) && second.success;
+                if (admitted)
+                {
+                    admitted = c_ir_constant_complex_initializer_binary(builder, operation, &first.constant, &second.constant, &value);
+                    value.real.function_designator = false;
+                }
+            }
+        }
+    }
+    if (admitted) frame->constant = value;
+    return admitted;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* result_out)
+{
+    CIrNodeQueryFrame answer = {0};
+    CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_CONSTANT};
+    bool settled = builder->queries && builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+                                                                   : c_ir_node_query_execute(builder, key, &answer);
+    bool valid = settled && answer.success && !answer.constant.is_complex && answer.constant.real.kind != C_IR_CONSTANT_INVALID &&
+                 answer.constant.real.kind != C_IR_CONSTANT_UNKNOWN;
+    if (valid) *result_out = answer.constant.real;
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate_node(CIntegerIrBuilder* builder, u32 node, u64* value_out)
+{
+    CIrConstantValue value = {0};
+    bool valid = c_ir_constant_evaluate_node(builder, node, &value) && value.kind == C_IR_CONSTANT_INTEGER;
+    if (valid) *value_out = !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_global_complex_real_value_node(CIntegerIrBuilder* builder, IrType* type, IrTypeId type_id, u32 node,
+                                                           CIrConstantValue* value)
+{
+    CIrNodeQueryFrame answer = {0};
+    CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_CONSTANT};
+    bool settled = builder->queries && builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+                                                                   : c_ir_node_query_execute(builder, key, &answer);
+    CIrConstantComplexInitializerValue converted = {0};
+    bool valid = settled && answer.success && type && (type->kind == IR_TYPE_FLOAT || c_ir_constant_type_is_integer(type)) &&
+                 !(answer.constant.is_complex && type->kind == IR_TYPE_BOOLEAN) &&
+                 c_ir_constant_complex_initializer_cast(builder, &answer.constant, type_id, &converted);
+    if (valid) *value = converted.real;
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_node_bytes(CIntegerIrBuilder* builder, u32 node, IrTypeId target_type,
+                                                                    u8* bytes, u64 byte_count, bool* handled)
+{
+    IrType* target = ir_type_from_id(&builder->program->types, target_type);
+    CAst const* ast = builder->syntax_tree;
+    bool valid = handled && target && target->is_complex && target->layout.resolved && byte_count >= target->layout.size &&
+                 ast && node < ast->node_count;
+    if (handled) *handled = false;
+    bool structural = valid && (ast->kinds[node] == C_AST_INITIALIZER_LIST || ast->kinds[node] == C_AST_COMPOUND_LITERAL);
+    if (valid && !structural)
+    {
+        *handled = true;
+        CIrNodeQueryFrame answer = {0};
+        CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_CONSTANT};
+        bool settled = builder->queries && builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+                                                                       : c_ir_node_query_execute(builder, key, &answer);
+        CIrConstantComplexInitializerValue converted = {0};
+        valid = settled && answer.success && c_ir_constant_complex_initializer_cast(builder, &answer.constant, target_type, &converted);
+        IrType* element = ir_type_from_id(&builder->program->types, target->element_type);
+        valid = valid && element && target->field_count == 2 && target->fields[0].offset <= byte_count && target->fields[1].offset <= byte_count &&
+                element->layout.size <= byte_count - target->fields[0].offset && element->layout.size <= byte_count - target->fields[1].offset;
+        if (valid)
+        {
+            memset(bytes, 0, target->layout.size);
+            valid = c_ir_constant_complex_initializer_store_float(builder, element, converted.real, bytes + target->fields[0].offset) &&
+                    c_ir_constant_complex_initializer_store_float(builder, element, converted.imaginary, bytes + target->fields[1].offset);
+        }
+    }
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CAstFacts const* facts,
+                                  u32 node, u64* low, u64* high, f64* floating, bool* is_float)
+{
+    u32 capacity = ast->node_count + 16;
+    u32 buckets = 16;
+    while (buckets < capacity) buckets *= 2;
+    IrProgram program = ir_program_initialize(arena, 0, C_TYPE_COUNT + 8, 0, 0);
+    program.data_layout = target_data_layout(preprocess.target);
+    CIrTypeContext types = {.program = &program, .target = preprocess.target};
+    for (u32 kind = 0; kind < C_TYPE_COUNT; kind += 1) types.scalar_types[kind] = IR_TYPE_ID_INVALID;
+    for (u32 kind = 0; kind < C_TYPE_COUNT; kind += 1) c_ir_scalar_type(&types, (CTypeKind)kind);
+    CIrQueryMachine queries = {
+        .frames = arena_allocate(arena, CIrQueryFrame, capacity), .completed = arena_allocate(arena, CIrQueryFrame, capacity),
+        .resumes = arena_allocate(arena, CIrQueryResume, capacity), .chain_heads = arena_allocate_zeroed(arena, u32, buckets),
+        .chain_next = arena_allocate(arena, u32, capacity), .chain_bucket = arena_allocate(arena, u32, capacity),
+        .frame_capacity = capacity, .completed_capacity = capacity, .chain_mask = buckets - 1,
+    };
+    CIntegerIrBuilder builder = {
+        .arena = arena, .temporary_arena = arena, .scratch_arena = arena, .program = &program, .queries = &queries,
+        .type_context = &types, .scalar_types = types.scalar_types, .literal_limits = types.literal_limits,
+        .syntax_tree = ast, .syntax_facts = facts, .preprocess = preprocess, .target = preprocess.target,
+        .s32_type = types.scalar_types[C_TYPE_INT], .bool_type = types.scalar_types[C_TYPE_BOOL],
+        .nullptr_type = types.scalar_types[C_TYPE_NULLPTR],
+        .f16_type = types.scalar_types[C_TYPE_FLOAT16], .f32_type = types.scalar_types[C_TYPE_FLOAT],
+        .f64_type = types.scalar_types[C_TYPE_DOUBLE], .long_double_type = types.scalar_types[C_TYPE_LONG_DOUBLE],
+    };
+    CIrConstantValue value = {0};
+    bool valid = c_ir_constant_evaluate_node(&builder, node, &value);
+    bool converted_complex = false;
+    if (!valid && !queries.has_request)
+    {
+        IrTypeId type_id = types.scalar_types[C_TYPE_INT];
+        valid = c_ir_global_complex_real_value_node(&builder, ir_type_from_id(&program.types, type_id), type_id, node, &value);
+        converted_complex = valid;
+        if (valid)
+        {
+            u8 bytes[16] = {0};
+            bool handled = false;
+            valid = c_ir_constant_complex_initializer_node_bytes(&builder, node, types.scalar_types[C_TYPE_DOUBLE_COMPLEX],
+                                                                 bytes, sizeof(bytes), &handled) && handled;
+        }
+    }
+    if (valid && !converted_complex && value.kind == C_IR_CONSTANT_INTEGER)
+    {
+        u64 truth = 0;
+        valid = c_ir_constant_condition_evaluate_node(&builder, node, &truth) &&
+                truth == !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
+    }
+    if (valid)
+    {
+        *low = value.integer;
+        *high = value.integer_high;
+        *floating = value.floating;
+        *is_float = value.kind == C_IR_CONSTANT_FLOAT;
+    }
+    return valid;
+}
+#endif
 
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out)
 {
