@@ -50228,30 +50228,21 @@ bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_
                  element_count && element_count <= (UINT32_MAX - 2) / 2;
     if (valid)
     {
-        u32 token_count = 10;
-        CToken tokens[10] = {0};
-        u8 kinds[11] = {0};
-        u32 extents[11] = {0};
-        u32 anchors[11] = {0};
-        u32 data[11] = {0};
-        for (u32 digit = 0; digit < 10; digit += 1)
-        {
-            tokens[digit] = (CToken){.kind = C_TOKEN_PREPROCESSING_NUMBER, .offset = digit, .length = 1};
-            kinds[digit] = C_AST_NUMBER;
-            extents[digit] = 1;
-            anchors[digit] = digit;
-        }
-        kinds[10] = C_AST_INITIALIZER_LIST;
-        extents[10] = 11;
-        data[10] = 10;
-        CAst ast = {.kinds = kinds, .extents = extents, .tokens = anchors, .data = data, .node_count = 11, .root = 10,
-            .layout = C_AST_LAYOUT_IMPLICIT};
+        CPreprocessResult preprocess = c_preprocess(arena, S8("unsigned short flat[] = {0,1,2,3,4,5,6,7,8,9};"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+        CAst ast = built.ast;
+        u32 initializer = C_AST_NODE_INVALID;
+        for (u32 node = 0; node < ast.node_count; node += 1)
+            if (ast.kinds[node] == C_AST_INITIALIZER_LIST && c_ast_child_count(&ast, node) == 10) initializer = node;
+        valid = !preprocess.diagnostic_count && built.complete && initializer != C_AST_NODE_INVALID;
         CAstFacts facts = {0};
-        valid = c_ast_facts_create(&facts, &ast);
+        valid = valid && c_ast_facts_create(&facts, &ast);
         for (u32 digit = 0; valid && digit < 10; digit += 1)
-            valid = c_ast_facts_store_constant(&facts, digit, (CAstConstantFact){.status = C_AST_CONSTANT_INTEGER,
+            valid = c_ast_facts_store_constant(&facts, initializer - 10 + digit, (CAstConstantFact){.status = C_AST_CONSTANT_INTEGER,
                 .low = digit, .type = C_TYPE_ID_INVALID, .primitive_kind = C_TYPE_INT});
-        CInitializerPlan plan = {.node = 10, .complete = true, .inferred_count = element_count,
+        CInitializerPlan plan = {.node = initializer, .complete = true, .inferred_count = element_count,
             .path_count = element_count, .item_count = element_count};
         CInitializerPlan* buckets[1] = {&plan};
         u64 position = arena->position;
@@ -50263,9 +50254,11 @@ bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_
         for (u32 element = 0; valid && element < element_count; element += 1)
         {
             plan.paths[element] = (CInitializerPath){.member = UINT32_MAX, .first = element, .last = element, .source_token = UINT32_MAX};
-            plan.items[element] = (CInitializerItem){.node = element % 10, .path_plus_one = element + 1,
-                .flags = C_INITIALIZER_ITEM_VALUE, .source_token = element % 10,
-                .value_start = element % 10, .value_end = element % 10 + 1};
+            u32 node = initializer - 10 + element % 10;
+            u32 token = ast.tokens[node];
+            plan.items[element] = (CInitializerItem){.node = node, .path_plus_one = element + 1,
+                .flags = C_INITIALIZER_ITEM_VALUE, .source_token = token,
+                .value_start = token, .value_end = token + 1};
         }
         IrProgram program = ir_program_initialize(arena, 0, C_TYPE_COUNT + 8, 0, 0);
         program.data_layout = target_data_layout(target_native);
@@ -50296,8 +50289,7 @@ bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_
         };
         CIntegerIrBuilder builder = {
             .arena = arena, .temporary_arena = task_arena, .scratch_arena = task_arena, .program = &program,
-            .preprocess = {.tokens = tokens, .token_count = token_count, .spelling_base = S8("0123456789").pointer,
-                           .target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17},
+            .preprocess = preprocess,
             .target = target_native, .type_context = &type_context, .scalar_types = type_context.scalar_types,
             .literal_limits = type_context.literal_limits, .s32_type = integer, .queries = &queries,
             .syntax_tree = &ast, .syntax_facts = &facts,
@@ -55009,14 +55001,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             bool probe = builtin == C_SYMBOL_BUILTIN_CONSTANT_P && arguments == 1;
             admitted = probe && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &operand);
             if (admitted)
-                        value.real = (CIrConstantValue){
-                            .type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[C_TYPE_CHAR]),
-                            .symbol = object.symbol, .kind = C_IR_CONSTANT_POINTER,
-                        };
-                }
-                value.type = value.real.type;
-            }
-            if (admitted)
             {
                 bool constant = operand.success && operand.constant.real.kind != C_IR_CONSTANT_UNKNOWN && operand.constant.real.kind != C_IR_CONSTANT_INVALID &&
                                 (!operand.constant.is_complex || (operand.constant.imaginary.kind != C_IR_CONSTANT_UNKNOWN &&
@@ -55033,7 +55017,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 {
                     CIrConstantValue object = c_ir_source_name_object(builder, source_anchor, builtin);
                     admitted = object.kind == C_IR_CONSTANT_LVALUE;
-                    else if (builtin == C_SYMBOL_BUILTIN_COMPLEX && arguments == 2)
+                    if (admitted)
+                        value.real = (CIrConstantValue){
+                            .type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[C_TYPE_CHAR]),
+                            .symbol = object.symbol, .kind = C_IR_CONSTANT_POINTER,
+                        };
+                }
+                value.type = value.real.type;
+            }
+            else if (builtin == C_SYMBOL_BUILTIN_COMPLEX && arguments == 2)
             {
                 CIrNodeQueryFrame real = {0};
                 CIrNodeQueryFrame imaginary = {0};
