@@ -48609,6 +48609,27 @@ typedef enum CIrStaticCompoundLiteral
     C_IR_STATIC_COMPOUND_LITERAL_REJECTED,
 } CIrStaticCompoundLiteral;
 
+BUSTER_C_INTERNAL CIrConstantValue c_ir_static_compound_literal_object_node(CIntegerIrBuilder* builder, u32 node,
+                                                                          IrTypeId literal_type, bool guarded)
+{
+    CIrConstantValue result = {.type = IR_TYPE_ID_INVALID, .symbol = IR_SYMBOL_ID_INVALID};
+    CAst const* ast = builder->syntax_tree;
+    if (ast && node < ast->node_count && ast->kinds[node] == C_AST_COMPOUND_LITERAL && builder->syntax_spans)
+    {
+        u32 initializer = node - 1;
+        u32 first = builder->syntax_spans->first[initializer];
+        u32 end = builder->syntax_spans->end[initializer];
+        if (first < end && ast->tokens[node] < UINT32_MAX)
+        {
+            // Staged F5 owner adapter: occurrence/type identity is structural;
+            // the existing byte writer is replaced by the retained executor
+            // in the next consumer slice, before its grammar is retired.
+            result = c_ir_static_compound_literal_object(builder, ast->tokens[node] + 1, first, end - 1, literal_type, guarded);
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(CIntegerIrBuilder* builder, u32 start, u32 end, IrSymbolId* symbol_out,
                                                                                s64* addend_out);
 
