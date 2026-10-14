@@ -2351,6 +2351,10 @@ struct CParseResult
     CAst const* ast;
     CAstFacts const* ast_facts;
     u64 frontend_retained_copy_bytes;
+    // Published by the semantic token census. Lowering uses finished counts
+    // without classifying the final token stream again.
+    u32 identifier_token_count;
+    u32 string_literal_fragment_count;
     bool lowering_validated;
     // Borrowed from the preprocess result (null for hand-built inputs); lets
     // the parse intern names on demand so entity lookups key on symbol ids.

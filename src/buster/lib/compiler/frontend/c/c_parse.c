@@ -36015,6 +36015,7 @@ typedef struct CTokenCensus CTokenCensus;
 struct CTokenCensus
 {
     u32 identifier_count;
+    u32 string_literal_count;
     u32 semicolon_count;
     u32 comma_count;
     u32 declarator_list_comma_count;
@@ -36030,7 +36031,7 @@ struct CTokenCensus
 // neither arm below, hence BUSTER_UNUSED_DECL. c_parse_token_census
 // runs this whenever the 512-bit vocabulary is unavailable, and
 // c_parse_token_census_differential in the tests runs both and compares all
-// nine counters.
+// ten counters.
 BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census,
                                                                         u64* declaration_range_words)
 {
@@ -36045,6 +36046,10 @@ BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPrepro
         {
             census->identifier_count += 1;
             census->for_count += c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_FOR);
+        }
+        else if (token.kind == C_TOKEN_STRING_LITERAL)
+        {
+            census->string_literal_count += 1;
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
         {
@@ -36145,6 +36150,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     if (token_shapes)
     {
         Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+        Simd512 string_shape = simd512_splat((u8)C_TOKEN_STRING_LITERAL);
         Simd512 semicolon = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_SEMICOLON));
         Simd512 comma = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_COMMA));
         Simd512 open_parenthesis = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_PARENTHESIS));
@@ -36212,6 +36218,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 Mask64 closes =
                     mask64_or(mask64_or(simd512_equal_u8(shape_lanes, close_parenthesis), simd512_equal_u8(shape_lanes, close_bracket)), close_braces);
                 census->identifier_count += mask64_count(identifiers);
+                census->string_literal_count += mask64_count(simd512_equal_u8(shape_lanes, string_shape));
                 census->semicolon_count += mask64_count(semicolons);
                 census->comma_count += mask64_count(commas);
                 census->open_parenthesis_count += mask64_count(open_parentheses);
@@ -36288,7 +36295,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     }
 #if BUSTER_REFERENCE_CHECKS
     // The differential gate. Debug and sanitized builds recompute the census the
-    // reference way and require all nine counters to agree, which puts the
+    // reference way and require all ten counters to agree, which puts the
     // check on every translation unit the suite compiles rather than on a
     // hand-written list of token streams -- every fixture, every header of
     // the include closure, and the whole unity unit when a checked tree
@@ -46748,6 +46755,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u64* declaration_range_words = arena_allocate(arena, u64, (token_count + 63) / 64 + 1);
     declaration_range_words[(token_count + 63) / 64] = 0;
     c_parse_token_census(preprocess, token_count, &census, declaration_range_words);
+    result.identifier_token_count = census.identifier_count;
+    result.string_literal_fragment_count = census.string_literal_count;
     u32 identifier_count = census.identifier_count;
     u32 semicolon_count = census.semicolon_count;
     u32 comma_count = census.comma_count;

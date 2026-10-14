@@ -599,6 +599,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArgumen
     CEntity entities[] = {{.kind = C_ENTITY_LOCAL, .has_cleanup = true}, {.kind = C_ENTITY_LOCAL}};
     CPreprocessResult preprocess = {.tokens = tokens, .token_count = BUSTER_ARRAY_LENGTH(tokens)};
     CAnalysisResult parse = {
+        .identifier_token_count = 1,
+        .string_literal_fragment_count = 1,
         .type_count = 3,
         .entity_count = BUSTER_ARRAY_LENGTH(entities),
         .entities = entities,
@@ -615,6 +617,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArgumen
     BUSTER_TEST(arguments, plan.function_capacity == 3);
     BUSTER_TEST(arguments, plan.query_frame_capacity == 106);
     CIrLowerCapacityPlan accepted = plan;
+    // Capacity comes from semantic facts even when source kind bytes are gone.
+    memset(tokens, 0, sizeof(tokens));
+    BUSTER_TEST(arguments, c_ir_lower_capacity_plan(preprocess, parse, &plan));
+    BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);
     preprocess.token_count = (u64)UINT32_MAX + 1;
     BUSTER_TEST(arguments, !c_ir_lower_capacity_plan(preprocess, parse, &plan));
     BUSTER_TEST(arguments, memcmp(&plan, &accepted, sizeof(plan)) == 0);

@@ -61175,20 +61175,14 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
 {
     bool valid = plan_out && !parse.diagnostic_count && preprocess.token_count <= UINT32_MAX;
     u32 token_capacity = valid ? (u32)preprocess.token_count : 0;
-    u32 identifier_token_count = 0;
-    u32 string_literal_count = 0;
+    u32 identifier_token_count = parse.identifier_token_count;
+    u32 string_literal_count = parse.string_literal_fragment_count;
     u64 type_capacity = 0;
     u64 symbol_capacity = 0;
     u64 function_capacity = 0;
     u64 query_frame_capacity = 16;
     if (valid)
     {
-        for (u32 token_index = 0; token_index < token_capacity; token_index += 1)
-        {
-            CTokenKind kind = preprocess.tokens[token_index].kind;
-            identifier_token_count += kind == C_TOKEN_IDENTIFIER;
-            string_literal_count += kind == C_TOKEN_STRING_LITERAL;
-        }
         type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
         symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
         function_capacity = parse.declaration_count;

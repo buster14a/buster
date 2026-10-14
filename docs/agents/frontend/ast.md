@@ -2521,6 +2521,15 @@ token of each store is the anchor of the item's value node. The
 byte-for-byte comparison of `-g` objects must confirm this for every item
 kind. Any kind where it differs is listed here when it is implemented.
 
+### Unit capacity facts
+
+The existing semantic token census publishes `identifier_token_count` and
+`string_literal_fragment_count` in `CParseResult`. The lower-capacity plan
+reads these finished counts, retaining its original allocation bounds without
+classifying source tokens again. The scalar and SIMD census paths publish the
+same ten counters. `c_test_ir_lower_capacity_plan` checks that erasing source
+kind bytes leaves the accepted plan unchanged.
+
 ### Literal contents from owned nodes
 
 `c_ir_decode_string_node_for_target` and `c_ir_count_string_node_for_target`
