@@ -212,6 +212,7 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Force fresh completion queries to exercise row-free capture and rollback.
 BUSTER_F_DECL void c_test_ast_fact_uncached_set(bool enabled);
+BUSTER_F_DECL void c_test_enum_scope_dirty_set(bool enabled);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);

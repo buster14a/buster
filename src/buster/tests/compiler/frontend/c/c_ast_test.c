@@ -7225,6 +7225,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_names(UnitTestArgume
     return result;
 }
 
+// Reused scope bitsets may not turn a file-scope enum in the second comma
+// initializer into a prototype-scoped enum. Actual prototypes stay isolated.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_enum_scope_scratch_reuse(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("unsigned long x=sizeof(enum{A=1}),y=sizeof(enum{B=A+1});int main(void){return A+B-3;}"),
+        S8("unsigned long x=sizeof(enum{A=1}),y=sizeof(enum{B=A+1}),z=sizeof(enum{C=B+1});int main(void){return A+B+C-6;}"),
+        S8("enum{A=1};unsigned long x=sizeof(int(*)(int[sizeof(enum{B=2})]));int main(void){return A-1;}"),
+        S8("enum{A=1};unsigned long x=sizeof(int(*)(int[sizeof(enum{B=2})]));int main(void){return B;}"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[source_index], C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.ast_facts = &facts;
+            syntax.type_interning = true;
+            c_test_enum_scope_dirty_set(true);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            c_test_enum_scope_dirty_set(false);
+            bool accepted = source_index != 3;
+            BUSTER_TEST(arguments, analysis.analysis_complete && (accepted ? analysis.diagnostic_count == 0 : analysis.diagnostic_count != 0));
+            BUSTER_TEST(arguments, analysis.enum_member_count == (source_index == 1 ? 3u : 2u));
+            for (u32 index = 0; index < analysis.enum_member_count; index += 1)
+            {
+                CEnumMember const* member = analysis.enum_members + index;
+                bool prototype = source_index >= 2 && index == 1;
+                BUSTER_TEST(arguments, member->is_prototype_scope == prototype && member->is_published != prototype);
+            }
+            if (!accepted)
+            {
+                u32 undeclared = 0;
+                for (u32 index = 0; index < analysis.diagnostic_count; index += 1)
+                {
+                    undeclared += analysis.diagnostics[index].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER;
+                }
+                BUSTER_TEST(arguments, undeclared == 1);
+            }
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7268,6 +7320,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);

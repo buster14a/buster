@@ -32825,6 +32825,15 @@ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
     return best;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_enum_scope_dirty;
+
+void c_test_enum_scope_dirty_set(bool enabled)
+{
+    c_parse_enum_scope_dirty = enabled;
+}
+#endif
+
 // An aggregate definition that appears inside a parenthesis is a type name,
 // not a declaration: `(union{float _f; uint32_t _i;}){x}` is a compound
 // literal, `(struct S{int x;}*)p` a cast, `sizeof(struct{int x;})` an operand.
@@ -32867,6 +32876,18 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
         u32 word_count = (body_end > start ? (body_end - start) / 64 : 0) + 1;
         parameter_parentheses = arena_allocate(temporary.arena, u64, word_count);
         group_parentheses = arena_allocate(temporary.arena, u64, word_count);
+#if BUSTER_INCLUDE_TESTS
+        // Deterministically model reused scratch pages before initialization.
+        if (c_parse_enum_scope_dirty)
+        {
+            memset(parameter_parentheses, 0xff, sizeof(u64) * word_count);
+            memset(group_parentheses, 0xff, sizeof(u64) * word_count);
+        }
+#endif
+        // These bitsets are updated with OR and cleared on close. Scratch
+        // reuse retains old bytes, so no unmarked parenthesis may read them.
+        memset(parameter_parentheses, 0, sizeof(u64) * word_count);
+        memset(group_parentheses, 0, sizeof(u64) * word_count);
     }
     u32 parenthesis_depth = 0;
     u32 open_lists = 0;
