@@ -578,7 +578,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c_with_options(Arena* arena,
     {
         return 0;
     }
-    CParseResult parse = c_parse(arena, tokens);
+    CParseResult parse = c_parse_for_lowering(arena, tokens);
     if (parse.diagnostic_count)
     {
         return 0;

@@ -194,11 +194,13 @@
 //   c_parse_pointer_sign_warning                 -Wpointer-sign warning class (#4051)
 //   c_parse_region_facts,                        the retained facts' completion
 //   c_parse_region_facts_sound                   run at a typed region's end
-//   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
+//   c_parse_ast, c_parse_ast_reference           ordinary syntax and historical control
+//   c_analyze_semantics, c_parse                 model-only stage entry points
 //   c_parse_ast_from_tree, c_parser_tree_*       the declaration split read from
 //                                                the syntax tree, and its probe
 //                                                and fallbacks to the walker
-//   c_analyze_semantics_only                     complete validation without canonical IR
+//   c_analyze_semantics_only, c_parse_for_lowering complete validation and retained outputs
+//   c_analyze_semantics_retained                 unit publication and temporary ownership
 //   c_analyze_with_options, c_analyze            validation then canonical IR lowering
 //                                                (one definition for unity and split builds)
 
@@ -34130,11 +34132,60 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
     return result;
 }
 
-CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
+CParserResult c_parse_ast_reference(Arena* arena, CPreprocessResult preprocess)
 {
     C_CENSUS_PHASE_BEGIN(PARSE);
     CParserResult result = c_parse_ast_run(arena, preprocess);
+    result.reference_tokens = true;
     C_CENSUS_PHASE_END();
+    return result;
+}
+
+CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
+{
+    CParserResult result;
+    if (!arena || !preprocess.tokens || !preprocess.token_count)
+    {
+        result = c_parse_ast_reference(arena, preprocess);
+        result.reference_tokens = false;
+    }
+    else
+    {
+        CAstResult tree = c_ast_build(arena, preprocess, (CAstOptions){0});
+        if (tree.complete)
+        {
+            result = c_parse_ast_from_tree(arena, preprocess, &tree.ast, 0);
+            if (!result.diagnostic_count)
+            {
+                result.ast_retained_copy_bytes = c_ast_retain_in_arena(arena, &tree.ast);
+                CAst* retained = arena_allocate(arena, CAst, 1);
+                *retained = tree.ast;
+                result.ast = retained;
+            }
+            else
+            {
+                c_ast_release(&tree.ast);
+            }
+        }
+        else
+        {
+            // Keep the parser/semantic diagnostic precedence for syntax the
+            // tree rejects. A resource failure has no successful model authority.
+            result = c_parse_ast_reference(arena, preprocess);
+            result.reference_tokens = false;
+            bool exhausted = tree.diagnostic_count && tree.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
+            if (exhausted)
+            {
+                result.diagnostics = tree.diagnostics;
+                result.diagnostic_count = tree.diagnostic_count;
+            }
+            else
+            {
+                result.ast_diagnostics = tree.diagnostics;
+                result.ast_diagnostic_count = tree.diagnostic_count;
+            }
+        }
+    }
     return result;
 }
 
@@ -35280,6 +35331,7 @@ CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, 
         statistics->reason = fell_back ? split.fallback : statistics->reason;
         statistics->fallback_token = fell_back ? split.fallback_token : statistics->fallback_token;
     }
+    result.ast = usable && !result.diagnostic_count ? ast : 0;
     C_CENSUS_PHASE_END();
     return result;
 }
@@ -45921,6 +45973,10 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
 {
     CParseResult result = {
         .arena = arena,
+        .ast = syntax.ast,
+        .ast_facts = syntax.ast_facts,
+        .frontend_retained_copy_bytes = syntax.ast_retained_copy_bytes,
+        .lowering_validated = validate_lowering_constraints,
         .symbols = preprocess.symbols,
         .number_facts = syntax.number_facts,
     };
@@ -46166,7 +46222,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     if (machine.ast_facts && !c_ast_facts_prepare(machine.ast_facts, syntax.ast, &preprocess, &result))
     {
-        c_analysis_failure(&result, S8("could not reserve the retained C semantic node index"));
+        c_analysis_failure(&result, S8("could not reserve the retained C semantic analysis node index"));
         machine.failed = true;
     }
     BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
@@ -46962,10 +47018,66 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     return result;
 }
 
+// A direct syntax/model caller owns only its unit arena. Build missing syntax
+// before semantic queries, publish the completed facts into that arena, and
+// retire the temporary private reservations once. Driver-owned inputs already
+// supply both records and take no publication copies.
+BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
+{
+    bool owned_facts = false;
+    bool setup_failed = syntax.diagnostics && syntax.diagnostic_count && syntax.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
+    if (arena && !syntax.diagnostic_count && !syntax.reference_tokens && !syntax.ast && !syntax.ast_diagnostic_count)
+    {
+        CParserResult prepared = c_parse_ast(arena, preprocess);
+        syntax.ast = prepared.ast;
+        syntax.ast_diagnostics = prepared.ast_diagnostics;
+        syntax.ast_diagnostic_count = prepared.ast_diagnostic_count;
+        syntax.ast_retained_copy_bytes += prepared.ast_retained_copy_bytes;
+        if (prepared.diagnostic_count)
+        {
+            syntax.diagnostics = prepared.diagnostics;
+            syntax.diagnostic_count = prepared.diagnostic_count;
+            setup_failed = prepared.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
+        }
+    }
+    if (arena && !syntax.diagnostic_count && !syntax.reference_tokens && syntax.ast && !syntax.ast_facts && !syntax.string_literal_lengths_only)
+    {
+        syntax.ast_facts = arena_allocate(arena, CAstFacts, 1);
+        owned_facts = c_ast_facts_create(syntax.ast_facts, syntax.ast);
+        if (!owned_facts)
+        {
+            setup_failed = true;
+            syntax.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+            *syntax.diagnostics = (CDiagnostic){
+                .message = S8("could not reserve the retained C semantic analysis node facts"),
+                .location = {.line = 1, .column = 1},
+                .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+            };
+            syntax.diagnostic_count = 1;
+        }
+    }
+    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, true);
+    if (setup_failed)
+    {
+        result.analysis_complete = false;
+    }
+    if (!result.diagnostic_count && syntax.ast_diagnostic_count)
+    {
+        result.diagnostics = syntax.ast_diagnostics;
+        result.diagnostic_count = syntax.ast_diagnostic_count;
+    }
+    if (owned_facts)
+    {
+        result.analysis_complete = result.analysis_complete && syntax.ast_facts->spans != 0;
+        result.frontend_retained_copy_bytes += c_ast_facts_retain_in_arena(arena, syntax.ast_facts);
+    }
+    return result;
+}
+
 CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
     C_CENSUS_PHASE_BEGIN(SEMANTIC);
-    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, true);
+    CAnalysisResult result = c_analyze_semantics_retained(arena, preprocess, syntax);
     C_CENSUS_PHASE_END();
     return result;
 }
@@ -46974,6 +47086,12 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
 {
     CParserResult syntax = c_parse_ast(arena, preprocess);
     return c_analyze_semantics(arena, preprocess, syntax);
+}
+
+CAnalysisResult c_parse_for_lowering(Arena* arena, CPreprocessResult preprocess)
+{
+    CParserResult syntax = c_parse_ast(arena, preprocess);
+    return c_analyze_semantics_only(arena, preprocess, syntax);
 }
 
 CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
@@ -46988,6 +47106,8 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
     }
     else
     {
+        options.syntax_tree = options.syntax_tree ? options.syntax_tree : analysis.ast;
+        options.syntax_facts = options.syntax_facts ? options.syntax_facts : analysis.ast_facts;
         WORK_LEDGER_PHASE(LOWER);
         result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
     }

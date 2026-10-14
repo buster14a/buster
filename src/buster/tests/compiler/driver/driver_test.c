@@ -50398,7 +50398,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 indirect_source = S8("struct Pair { double first, second; }; double tail(struct Pair value) { return value.second; }");
         CPreprocessResult indirect_tokens = c_preprocess(arguments->arena, indirect_source,
             (CPreprocessOptions){.target = indirect_target, .data_layout = target_data_layout(indirect_target)});
-        CParseResult indirect_parsed = c_parse(arguments->arena, indirect_tokens);
+        CParseResult indirect_parsed = c_parse_for_lowering(arguments->arena, indirect_tokens);
         CIRLowerResult indirect_lowered = c_lower_to_ir(arguments->arena, S8("win64-indirect-pair.c"), indirect_tokens, indirect_parsed, indirect_target);
         bool indirect_complete = false;
         if (!indirect_tokens.error_count && !indirect_parsed.diagnostic_count && !indirect_lowered.diagnostic_count &&

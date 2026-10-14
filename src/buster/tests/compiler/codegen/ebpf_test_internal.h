@@ -343,7 +343,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_global_symbols(UnitTestArgu
         "long entry(void) { return sub() + helper() + *hidden_address + *exported_address; }");
     Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
     CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
-    CParseResult parsed = c_parse(arena, tokens);
+    CParseResult parsed = c_parse_for_lowering(arena, tokens);
     CIRLowerResult lowered = c_lower_to_ir(arena, S8("ebpf-symbols.c"), tokens, parsed, target);
     BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
     if (lowered.program && lowered.diagnostic_count == 0)
@@ -498,7 +498,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
     {
         u64 mark = arguments->arena->position;
         CPreprocessResult tokens = c_preprocess(arguments->arena, ebpf_sources[fixture], (CPreprocessOptions){0});
-        CParseResult parse = c_parse(arguments->arena, tokens);
+        CParseResult parse = c_parse_for_lowering(arguments->arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("ebpf-scalar.c"), tokens, parse, ebpf_target);
         BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
         if (lowered.program && lowered.diagnostic_count == 0)
@@ -582,7 +582,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_argument_images(UnitTestArg
                     types[type_index], types[type_index], expressions[operation]);
                 CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                     (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CParseResult parsed = c_parse_for_lowering(temporary.arena, tokens);
                 CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("ebpf-argument-images.c"), tokens, parsed, target,
                     (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
                 if (BUSTER_REQUIRE(arguments, !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
@@ -646,7 +646,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_integer_images(UnitTestArgu
     String8 switch_source = S8("long probe(int a, int b) { (void)b; switch (a) { case -1: return 7; case -2147483647 - 1: return 8; "
                                "case 5: return 9; default: return 3; } }");
     CPreprocessResult switch_tokens = c_preprocess(arena, switch_source, (CPreprocessOptions){0});
-    CParseResult switch_parse = c_parse(arena, switch_tokens);
+    CParseResult switch_parse = c_parse_for_lowering(arena, switch_tokens);
     CIRLowerResult switch_lowered = c_lower_to_ir(arena, S8("ebpf-switch.c"), switch_tokens, switch_parse, target);
     BUSTER_TEST(arguments, switch_lowered.program && switch_lowered.diagnostic_count == 0);
     if (switch_lowered.program && switch_lowered.diagnostic_count == 0)
@@ -676,7 +676,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_integer_images(UnitTestArgu
     }
     String8 data_source = S8("int g = -1; long h = -2; short s = -3; unsigned char u = 200; long probe(long a, long b) { return a + b; }");
     CPreprocessResult data_tokens = c_preprocess(arena, data_source, (CPreprocessOptions){0});
-    CParseResult data_parse = c_parse(arena, data_tokens);
+    CParseResult data_parse = c_parse_for_lowering(arena, data_tokens);
     CIRLowerResult data_lowered = c_lower_to_ir(arena, S8("ebpf-data.c"), data_tokens, data_parse, target);
     BUSTER_TEST(arguments, data_lowered.program && data_lowered.diagnostic_count == 0);
     if (data_lowered.program && data_lowered.diagnostic_count == 0)
@@ -717,7 +717,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
             String8 source = string_format(arguments->arena, S8("#define LOCAL_AGGREGATE_CASE {u32}\n{S8}"), test_case,
                                            (String8){.pointer = (char8*)fixture.pointer, .length = fixture.length});
             CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
-            CParseResult parse = c_parse(arguments->arena, tokens);
+            CParseResult parse = c_parse_for_lowering(arguments->arena, tokens);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("local-aggregate.c"), tokens, parse, target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
             BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
@@ -774,7 +774,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
     {
         u64 mark = arguments->arena->position;
         CPreprocessResult tokens = c_preprocess(arguments->arena, refused[test_case], (CPreprocessOptions){0});
-        CParseResult parse = c_parse(arguments->arena, tokens);
+        CParseResult parse = c_parse_for_lowering(arguments->arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("local-aggregate-refusal.c"), tokens, parse, target);
         BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
         if (lowered.program && lowered.diagnostic_count == 0)
@@ -809,7 +809,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
             parts[count + 1] = S8("return x; }\n");
             String8 source = string_join_arena(arena, (SliceString8){parts, count + 2}, false);
             CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
-            CParseResult parse = c_parse(arena, tokens);
+            CParseResult parse = c_parse_for_lowering(arena, tokens);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-chain.c"), tokens, parse, target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
             BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
@@ -874,7 +874,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
             CPreprocessResult tokens = c_preprocess(arena, sources[sample], (CPreprocessOptions){0});
-            CParseResult parse = c_parse(arena, tokens);
+            CParseResult parse = c_parse_for_lowering(arena, tokens);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-liveness.c"), tokens, parse, target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
             BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
@@ -920,7 +920,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
             String8 source = string_format(arena, S8("#define EBPF_DEAD_BRANCH {u32}\n{S8}"), dead,
                                            (String8){(char8*)fixture.pointer, fixture.length});
             CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
-            CParseResult parse = c_parse(arena, tokens);
+            CParseResult parse = c_parse_for_lowering(arena, tokens);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-metamorphic-stack.c"), tokens, parse, target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
             BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
@@ -961,7 +961,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
             source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
         }
         CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
-        CParseResult parse = c_parse(arena, tokens);
+        CParseResult parse = c_parse_for_lowering(arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arena, S8("ebpf-pressure.c"), tokens, parse, target);
         BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
         if (lowered.program && lowered.diagnostic_count == 0)
@@ -1044,7 +1044,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
             CPreprocessResult tokens = c_preprocess(arena, sources[fixture], (CPreprocessOptions){0});
-            CParseResult parse = c_parse(arena, tokens);
+            CParseResult parse = c_parse_for_lowering(arena, tokens);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-kernel-regression.c"), tokens, parse, target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
             BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
@@ -1079,7 +1079,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         CPreprocessResult tokens = c_preprocess(arena, refused[fixture], (CPreprocessOptions){0});
-        CParseResult parse = c_parse(arena, tokens);
+        CParseResult parse = c_parse_for_lowering(arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arena, S8("ebpf-vm-refusal.c"), tokens, parse, target);
         BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
         if (lowered.program && lowered.diagnostic_count == 0)
@@ -1201,7 +1201,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_rejections(UnitTestArgument
         Arena* arena = temporary.arena;
         CPreprocessResult tokens = c_preprocess(arena, rejection->source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-        CParseResult parsed = c_parse(arena, tokens);
+        CParseResult parsed = c_parse_for_lowering(arena, tokens);
         CIRLowerResult lowered = {0};
         if (!tokens.error_count && !parsed.diagnostic_count)
         {

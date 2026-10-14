@@ -257,6 +257,7 @@
 //   c_ast_types_lookups_settled
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_facts_create, c_ast_facts_release,     the retained facts (#4062):
+//   c_ast_facts_retain_in_arena                  direct-call unit publication
 //   c_ast_types_facts_begin, _next, _record,     publication at a region's end,
 //   c_ast_types_facts_answer,                    a top-level query's answer,
 //   c_ast_types_facts_finish                     and the unit's counts
@@ -2908,6 +2909,43 @@ void c_ast_facts_release(CAstFacts* facts)
     facts->payloads = 0;
     facts->flags = 0;
     facts->node_count = 0;
+}
+
+u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
+{
+    u64 copied = 0;
+    if (arena && facts && facts->flags && facts->arena)
+    {
+        u64 start = arena->position;
+        CAstFacts retained = *facts;
+        retained.arena = 0;
+        retained.index_arena = 0;
+        retained.types = arena_allocate(arena, u32, facts->node_count);
+        retained.payloads = arena_allocate(arena, u32, facts->node_count);
+        retained.flags = arena_allocate(arena, u8, facts->node_count);
+        memcpy(retained.types, facts->types, sizeof(*facts->types) * facts->node_count);
+        memcpy(retained.payloads, facts->payloads, sizeof(*facts->payloads) * facts->node_count);
+        memcpy(retained.flags, facts->flags, sizeof(*facts->flags) * facts->node_count);
+        if (facts->spans)
+        {
+            CAstSpans const* source = facts->spans;
+            retained.spans = arena_allocate(arena, CAstSpans, 1);
+            *retained.spans = *source;
+            retained.spans->first = arena_allocate(arena, u32, source->node_count);
+            retained.spans->end = arena_allocate(arena, u32, source->node_count);
+            retained.spans->link = arena_allocate(arena, u32, source->node_count);
+            retained.spans->start_head = arena_allocate(arena, u32, (u64)source->token_total + 1);
+            memcpy(retained.spans->first, source->first, sizeof(u32) * source->node_count);
+            memcpy(retained.spans->end, source->end, sizeof(u32) * source->node_count);
+            memcpy(retained.spans->link, source->link, sizeof(u32) * source->node_count);
+            memcpy(retained.spans->start_head, source->start_head, sizeof(u32) * ((u64)source->token_total + 1));
+        }
+        c_ast_facts_release(facts);
+        *facts = retained;
+        copied = arena->position - start;
+        facts->statistics.retained_bytes = copied;
+    }
+    return copied;
 }
 
 // A fact candidate's kind: an expression kind the eager pass spans, but not a

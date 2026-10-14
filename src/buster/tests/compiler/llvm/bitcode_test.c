@@ -586,7 +586,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
                         CPreprocessResult tokens = c_preprocess(arena, fixture->sources[unit], (CPreprocessOptions){
                             .target = target.target, .data_layout = target_data_layout(target.target),
                             .dialect = C_PREPROCESS_DIALECT_GNU17});
-                        CParseResult parse = c_parse(arena, tokens);
+                        CParseResult parse = c_parse_for_lowering(arena, tokens);
                         if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
                         {
                             CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("llvm-lifecycle.c"), tokens, parse,

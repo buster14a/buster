@@ -38,6 +38,23 @@ through lowering, code generation, object construction and emission.
 
 ## Boundaries
 
+**Direct frontend output publication.** Ordinary `c_parse_ast` retains its
+finished syntax tree in the caller's unit arena: it copies the four compact
+columns (13 bytes per node) and any explicit child slices, then retires the
+builder's private column arenas once. Full semantic entrypoints create missing
+node facts before their first semantic query. When those entrypoints own the
+facts, they copy the finished 9-byte-per-node fact columns and the span index
+(12 bytes per node and 4 bytes per token, plus its header) into the unit arena,
+then retire the private fact and index arenas once. The publication functions
+return exact allocation bytes, including alignment; the analyzed model records
+their sum in `frontend_retained_copy_bytes`. This ownership publication adds no
+syntax or semantic pass. Repeated canonical lowering calls borrow the same
+finished outputs until the unit arena ends. The normal driver supplies its own
+tree and facts, retains those private reservations through lowering and skips
+all publication copies. Model-only `c_parse` retains its syntax but does not
+establish lowering constraints; explicit parse-to-lower callers use
+`c_parse_for_lowering`.
+
 **Preprocessing seal.** `c_preprocess` allocates everything in the phase arena,
 above that arena's entry position. Before returning, `c_preprocess_seal` copies
 the graph a later phase can reach from `CPreprocessResult` into the caller's

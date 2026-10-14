@@ -9239,6 +9239,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // function-body expression types from it where it can (c_ast_types.c) and
     // runs the type machine for the rest, and adds its counts to result.c_ast.
     bool pilot_tree_built = false;
+    CDiagnostic* pilot_tree_diagnostics = 0;
+    u32 pilot_tree_diagnostic_count = 0;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
         // A unit the builder rejects on syntax passes no tree, so lowering
@@ -9257,6 +9259,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
         result.c_ast.rejections += !tree.complete;
+        pilot_tree_diagnostics = tree.complete ? 0 : tree.diagnostics;
+        pilot_tree_diagnostic_count = tree.complete ? 0 : tree.diagnostic_count;
         if (tree.complete)
         {
             pilot_tree = tree.ast;
@@ -9266,7 +9270,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // Under the pilot the declaration split is read from the tree; it falls
     // back to c_parse_ast's token walker for any unit the walker would read
     // differently or diagnose, so the records are the walker's either way.
-    CParserResult syntax = pilot_tree_built ? c_parse_ast_from_tree(arena, preprocess, &pilot_tree, &result.c_ast.split) : c_parse_ast(arena, preprocess);
+    CParserResult syntax = pilot_tree_built ? c_parse_ast_from_tree(arena, preprocess, &pilot_tree, &result.c_ast.split) : c_parse_ast_reference(arena, preprocess);
+    syntax.reference_tokens = invocation.c_ast_pilot == COMPILER_DRIVER_C_AST_PILOT_OFF && invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY;
+    syntax.ast_diagnostics = pilot_tree_diagnostics;
+    syntax.ast_diagnostic_count = pilot_tree_diagnostic_count;
     if (pilot_tree_built)
     {
         syntax.ast = &pilot_tree;
@@ -9275,9 +9282,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
         // Nothing lowers a -fsyntax-only unit, so it retains no facts.
-        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY && c_ast_facts_create(&pilot_facts, &pilot_tree))
+        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
         {
-            syntax.ast_facts = &pilot_facts;
+            if (c_ast_facts_create(&pilot_facts, &pilot_tree))
+            {
+                syntax.ast_facts = &pilot_facts;
+            }
+            else
+            {
+                syntax.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+                *syntax.diagnostics = (CDiagnostic){
+                    .message = S8("could not reserve the retained C semantic analysis node facts"),
+                    .location = {.line = 1, .column = 1},
+                    .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                };
+                syntax.diagnostic_count = 1;
+            }
         }
     }
     // Nothing lowers a -fsyntax-only unit, so its string literals are counted,

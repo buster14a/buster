@@ -24,14 +24,12 @@
 // budget. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // Lowering always has the unit's implicit postorder syntax tree (GitHub
-// #3102 step 1): the caller passes it in CIRLowerOptions.syntax_tree (the
-// driver's -fc-ast-pilot, its default since the 2026-10-13 switch), or
-// c_lower_to_ir_tree_run builds it from the final token stream and releases
-// it after the call (-fno-c-ast-pilot, the tree-free reference path, and
-// callers outside the driver). The tree is mandatory: a unit whose tree
-// cannot be reserved, or whose syntax the builder rejects
-// (CAstLowerStatistics.tree_rejections), fails with the builder's
-// diagnostics. The statement walker, c_ir_lower_body_advance, reads every
+// #3102 step 1): the caller supplies an override or lowering borrows the
+// analyzed model's retained AST and semantic facts. c_parse_for_lowering and
+// c_analyze_semantics_only establish them before semantic queries; the driver
+// lends its private context, direct callers own published copies in the unit
+// arena. c_lower_to_ir_tree_run validates this boundary and never rebuilds
+// syntax or semantics. The statement walker, c_ir_lower_body_advance, reads every
 // body's statements from their statement nodes (#4060; "statement nodes"
 // below), and reads expression source provenance from retained semantic spans
 // (c_ir_node_expression_provenance). Header and block boundaries read syntax-
@@ -65128,57 +65126,34 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     return result;
 }
 
-// Lowering reads the unit's syntax tree (GitHub #3102 step 1). A caller that
-// built one passes it; otherwise this builds it from the final token stream,
-// keeps it for the whole lowering call and releases it on this thread before
-// returning. A tree the builder cannot reserve (C_DIAGNOSTIC_SOURCE_TOO_LARGE)
-// fails the unit with the builder's diagnostic, and so does a unit whose
-// syntax the builder rejects (CAstLowerStatistics.tree_rejections; GitHub
-// #3102 step 3): lowering does not run without the tree, and the statement
-// walker has no token path (#4060). Those are inputs the parser accepts,
-// such as `[1 ... 2 ... 3]` designators, empty initializer elements and a
-// second global assembly string; the driver's analysis reports the first two
-// before lowering.
+// Canonical lowering consumes the syntax and finished semantic outputs the
+// analyzed model retains. Direct callers use c_parse_for_lowering; a model-only
+// c_parse result has not established the required semantic authority. No tree
+// or semantic pass is built late here, and repeated lowers share immutable
+// outputs whose owner outlives all of them.
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse,
                                                         Target target, CIRLowerOptions options, u64 query_reservation_limit,
                                                         u64 function_reservation_limit)
 {
     CIRLowerResult result = {0};
-    CAst owned = {0};
+    options.syntax_tree = options.syntax_tree ? options.syntax_tree : parse.ast;
+    options.syntax_facts = options.syntax_facts ? options.syntax_facts : parse.ast_facts;
     bool lower = true;
-    if (!options.syntax_tree && arena && !parse.diagnostic_count && parse.analysis_complete)
+    if (arena && !parse.diagnostic_count && parse.analysis_complete &&
+        (!parse.lowering_validated || !options.syntax_tree || !options.syntax_facts))
     {
-        CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
-        CAstLowerStatistics* statistics = options.ast_lower_statistics;
-        if (built.complete)
-        {
-            owned = built.ast;
-            options.syntax_tree = &owned;
-            if (statistics)
-            {
-                statistics->trees_built += 1;
-                statistics->tree_nodes += built.statistics.node_count;
-                statistics->tree_bytes += built.statistics.retained_bytes;
-            }
-        }
-        else if (built.diagnostic_count)
-        {
-            // The tree is mandatory: a unit the builder cannot reserve, or
-            // whose syntax it rejects, fails with the builder's diagnostics.
-            result.diagnostics = built.diagnostics;
-            result.diagnostic_count = built.diagnostic_count;
-            lower = false;
-            if (statistics && built.diagnostics[0].kind != C_DIAGNOSTIC_SOURCE_TOO_LARGE)
-            {
-                statistics->tree_rejections += 1;
-            }
-        }
+        *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
+            .message = !parse.lowering_validated ? S8("C IR lowering requires completed source constraints; use c_parse_for_lowering") :
+                                                 S8("C IR lowering requires retained syntax and semantic outputs"),
+            .location = {.line = 1, .column = 1},
+            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        };
+        lower = false;
     }
     if (lower)
     {
         result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
     }
-    c_ast_release(&owned);
     return result;
 }
 

@@ -1926,12 +1926,9 @@ struct CParserResult
     // once here and read by semantic analysis and lowering (c_number_fact).
     // Null for hand-built inputs, whose consumers convert the spelling.
     CNumberFacts const* number_facts;
-    // The unit's complete syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot): semantic analysis answers function-body expression type
-    // queries from it where it can, and falls back to the type machine for
-    // everything else. Null means no tree, and analysis behaves exactly as it
-    // always has. The tree and the preprocessing result must outlive the
-    // analysis.
+    // The unit's complete syntax tree. c_parse_ast retains it in the unit
+    // arena; a driver or explicit tree caller may lend its own tree instead.
+    // The preprocessing result and borrowed tree outlive analysis and lowering.
     CAst const* ast;
     // Optional: receives the typer's counts, added to what it already holds.
     CAstTypeStatistics* ast_type_statistics;
@@ -1941,10 +1938,15 @@ struct CParserResult
     // Optional: receives the declaration specifier read's counts, added to
     // what it already holds. The read runs whenever `ast` is set.
     CAstSpecifierStatistics* ast_specifier_statistics;
-    // Optional, with `ast`: the facts record semantic analysis publishes into
-    // (c_ast_facts_create over the same tree). It must outlive lowering, which
-    // reads it through CIRLowerOptions.syntax_facts.
+    // Optional supplied storage over `ast`; ordinary full semantic analysis
+    // creates missing facts before queries and retains them in the unit arena.
+    // Borrowed facts must outlive every lowering reader.
     CAstFacts* ast_facts;
+    // Syntax-builder rejection retained until semantic diagnostics have had
+    // their existing precedence. Resource failures are immediate diagnostics.
+    CDiagnostic* ast_diagnostics;
+    u32 ast_diagnostic_count;
+    u64 ast_retained_copy_bytes;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -1960,6 +1962,9 @@ struct CParserResult
     // a narrow fragment's length alone, counted, not decoded. Without it each
     // first sight decodes and records the bytes lowering reuses.
     bool string_literal_lengths_only;
+    // Explicit historical parser/semantic control; ordinary callers prepare
+    // their retained syntax and semantic outputs before analysis.
+    bool reference_tokens;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -2294,6 +2299,12 @@ struct CParseResult
     // Borrowed owner of the result arrays.  It must outlive this result and is
     // never destroyed or rewound by the parser.
     Arena* arena;
+    // Retained frontend outputs, borrowed from a driver context or owned by
+    // this unit arena. They outlive every repeated canonical lowering call.
+    CAst const* ast;
+    CAstFacts const* ast_facts;
+    u64 frontend_retained_copy_bytes;
+    bool lowering_validated;
     // Borrowed from the preprocess result (null for hand-built inputs); lets
     // the parse intern names on demand so entity lookups key on symbol ids.
     CSymbolTable* symbols;
@@ -2531,18 +2542,14 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
-    // The unit's syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot, GitHub #3102). Lowering always reads a tree: when this is
-    // null it builds one from `preprocess` itself (c_lower_to_ir_tree_run) and
-    // releases it before returning, and a unit whose tree cannot be built
-    // fails with the builder's diagnostic. Read only during the call; a
-    // caller's tree and the preprocessing result must outlive it.
+    // Optional tree override. Otherwise lowering borrows CParseResult.ast,
+    // prepared before semantic analysis; it never builds or reparses syntax.
+    // The override must use the retained facts' node identity and outlive it.
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;
-    // The facts semantic analysis published over `syntax_tree`
-    // (CParserResult.ast_facts), or null. Step 1 of #3102's lowering plan
-    // retains them; no lowering consumer reads them yet.
+    // Optional facts override over `syntax_tree`; otherwise lowering borrows
+    // CParseResult.ast_facts. Required semantic outputs must exist before lower.
     CAstFacts const* syntax_facts;
 };
 
@@ -2716,6 +2723,8 @@ BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult con
 // translation unit, so the scan is a count test in the common case.
 BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
+// Historical token-parser control, with no implicit tree or fact creation.
+BUSTER_F_DECL CParserResult c_parse_ast_reference(Arena* arena, CPreprocessResult preprocess);
 
 // Why c_parse_ast_from_tree handed a unit to the token walker (GitHub #3102).
 typedef enum CParserTreeFallback
@@ -2783,6 +2792,10 @@ BUSTER_F_DECL bool c_ast_facts_create(CAstFacts* facts, CAst const* ast);
 // Retires the facts' arena and clears the columns; the statistics stay.
 // Idempotent.
 BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
+// Publishes complete facts into the unit arena and retires private arenas
+// once. The delimiter rows are borrowed from the same unit's semantic model.
+// Returns the exact bytes allocated for this publication.
+BUSTER_F_DECL u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts);
 // Prepare the unit's exact range-to-node index once, before semantic fact
 // producers run. The parse result's delimiter rows outlive the facts. False
 // means the required index could not be reserved or the input is incomplete.
@@ -2804,6 +2817,9 @@ BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPrepr
 BUSTER_F_DECL CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
                                                   CIRLowerOptions options);
 BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
+// Builds the same model and completes its source constraints and retained
+// semantic outputs once, before canonical lowering. `c_parse` remains model-only.
+BUSTER_F_DECL CAnalysisResult c_parse_for_lowering(Arena* arena, CPreprocessResult preprocess);
 // Compatibility entry point for tests and callers that already own an analyzed model.
 BUSTER_F_DECL CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult analysis, Target target);
 BUSTER_F_DECL CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult analysis,

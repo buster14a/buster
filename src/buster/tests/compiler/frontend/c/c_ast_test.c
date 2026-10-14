@@ -2171,7 +2171,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_fixture_sweep(UnitTestArguments* a
                                                         });
             if (preprocess.error_count == 0)
             {
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
                 CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
                 if (!syntax.diagnostic_count && !analysis.diagnostic_count && analysis.analysis_complete)
@@ -2951,13 +2951,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
     Arena* arena = arena_create(creation);
     if (BUSTER_REQUIRE(arguments, arena != 0))
     {
-        CParserResult plain_syntax = c_parse_ast(arena, preprocess);
+        CParserResult plain_syntax = c_parse_ast_reference(arena, preprocess);
         plain_syntax.type_interning = true;
         CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, plain_syntax);
         CAstTypeStatistics statistics = {0};
         CAstStatementStatistics statements = {0};
         CAstSpecifierStatistics specifiers = {0};
-        CParserResult typed_syntax = c_parse_ast(arena, preprocess);
+        CParserResult typed_syntax = c_parse_ast_reference(arena, preprocess);
         typed_syntax.ast = ast;
         typed_syntax.ast_type_statistics = &statistics;
         typed_syntax.ast_statement_statistics = &statements;
@@ -3014,7 +3014,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         arena = arena_create(creation);
         if (BUSTER_REQUIRE(arguments, arena != 0))
         {
-            CParserResult verified_syntax = c_parse_ast(arena, preprocess);
+            CParserResult verified_syntax = c_parse_ast_reference(arena, preprocess);
             verified_syntax.ast = ast;
             verified_syntax.type_interning = true;
             c_test_ast_type_verify_take();
@@ -3100,7 +3100,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
     }
     else
     {
-        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
         bool pinned = c_ast_corpus_pinned(label);
         BUSTER_TEST_RAW(arguments, built.complete != pinned,
@@ -3355,7 +3355,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_known_run(UnitTestArguments* arg
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, known->source, known->dialect);
         if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0))
         {
-            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
             CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
             BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0 && syntax.first_declaration, label);
             if (known->side == C_AST_CORPUS_KNOWN_OLD_WRONG)
@@ -5007,7 +5007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
         // The rows the probes' casts and `&` read are interned, as under the
         // pilot (CParserResult.type_interning).
-        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
         syntax.type_interning = true;
         CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         u32 start = c_ast_test_token_index(preprocess, type_case->first, type_case->occurrence);
@@ -5038,7 +5038,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(void); int g(void) { return f(); }"), C_PREPROCESS_DIALECT_GNU17);
     CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
-    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
     if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count))
     {
         u32 start = c_ast_test_token_index(preprocess, S8("f"), 1);
@@ -5054,7 +5054,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     // are back where they started once it is released.
     temporary = scratch_begin(&arguments->arena, 1);
     preprocess = c_ast_test_preprocess(temporary.arena, S8("int* f(int a) { return &a; }"), C_PREPROCESS_DIALECT_GNU17);
-    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
     u64 reserved = arena_test_live_reserved_bytes();
     built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     u32 address = c_ast_test_token_index(preprocess, S8("&"), 0);
@@ -5074,7 +5074,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     // the ordinary token query still accepts this valid pointer return.
     temporary = scratch_begin(&arguments->arena, 1);
     preprocess = c_ast_test_preprocess(temporary.arena, S8("char*** f(char* a[]) { return &a; }"), C_PREPROCESS_DIALECT_GNU17);
-    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
     built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     address = c_ast_test_token_index(preprocess, S8("&"), 0);
     if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && address != UINT32_MAX))
@@ -5095,7 +5095,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     temporary = scratch_begin(&arguments->arena, 1);
     preprocess = c_ast_test_preprocess(temporary.arena, S8("struct S { int a; }; int f(struct S const* p) { return p->a + 1; }"),
                                        C_PREPROCESS_DIALECT_GNU17);
-    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
     built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     u32 member = c_ast_test_token_index(preprocess, S8("p"), 1);
     if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && member != UINT32_MAX))
@@ -5121,7 +5121,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                                        C_PREPROCESS_DIALECT_GNU17);
     c_test_ast_type_verify_take();
     c_test_ast_type_verify_set(true);
-    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
     c_test_ast_type_verify_set(false);
     CTestAstTypeVerify verify = c_test_ast_type_verify_take();
     BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.probes == 4 && verify.probe_mismatches == 0);
@@ -5139,7 +5139,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
         built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
         if (BUSTER_REQUIRE(arguments, built.complete))
         {
-            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
             syntax.ast = &built.ast;
             syntax.type_interning = true;
             c_test_ast_type_verify_take();
@@ -5217,7 +5217,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_lookups(UnitTestArguments* ar
         if (BUSTER_REQUIRE(arguments, built.complete))
         {
             CAstTypeStatistics statistics = {0};
-            CParserResult typed_syntax = c_parse_ast(temporary.arena, preprocess);
+            CParserResult typed_syntax = c_parse_ast_reference(temporary.arena, preprocess);
             typed_syntax.ast = &built.ast;
             typed_syntax.ast_type_statistics = &statistics;
             typed_syntax.type_interning = true;
@@ -5228,7 +5228,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_lookups(UnitTestArguments* ar
                             string_format(temporary.arena, S8("{S8}: {u64} settled, {u64} walked, {u64} answers, {u64} declines, {u32} diagnostics"),
                                           lookup_case->source, statistics.lookups_settled, statistics.lookups_walked, statistics.answers,
                                           statistics.declines, typed.diagnostic_count));
-            CParserResult verified_syntax = c_parse_ast(temporary.arena, preprocess);
+            CParserResult verified_syntax = c_parse_ast_reference(temporary.arena, preprocess);
             verified_syntax.ast = &built.ast;
             verified_syntax.type_interning = true;
             c_test_ast_type_verify_take();
@@ -5338,7 +5338,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments
             CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
             if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
             {
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 CParserTreeStatistics statistics = {0};
                 CParserResult derived = c_parse_ast_from_tree(temporary.arena, preprocess, &built.ast, &statistics);
                 String8 difference = c_ast_corpus_split_differ(temporary.arena, &syntax, &derived);
@@ -5367,7 +5367,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int a;"), C_PREPROCESS_DIALECT_GNU17);
         CParserTreeStatistics statistics = {0};
-        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
         CParserResult derived = c_parse_ast_from_tree(temporary.arena, preprocess, 0, &statistics);
         BUSTER_TEST(arguments, c_ast_corpus_split_differ(temporary.arena, &syntax, &derived).length == 0);
         CAst empty = {0};
@@ -5550,9 +5550,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
                         tree.tokens[c_ast_subtree_begin(&tree, declarators[4])] = tree.tokens[c_ast_subtree_begin(&tree, declarators[3])];
                     }
                 }
-                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
                 CAstStatementStatistics statistics = {0};
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 syntax.ast = &tree;
                 syntax.ast_statement_statistics = &statistics;
                 CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -5587,10 +5587,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(int a) { return a; } int g(void) { return 1; }"),
                                                              C_PREPROCESS_DIALECT_GNU17);
-        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
         CAst empty = {0};
         CAstStatementStatistics statistics = {0};
-        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
         syntax.ast = &empty;
         syntax.ast_statement_statistics = &statistics;
         CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -5686,10 +5686,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments*
                 {
                     tree.tokens[header] += 1;
                 }
-                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
                 if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0))
                 {
-                    // No tree passed: lowering builds the implicit one itself.
+                    // No tree passed: lowering reuses the retained unit tree.
                     CIRLowerResult own = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native, (CIRLowerOptions){0});
                     CIRLowerResult passed = c_lower_to_ir_with_options(temporary.arena, label, preprocess, analysis, target_native,
                                                                        (CIRLowerOptions){.syntax_tree = &tree});
@@ -5716,18 +5716,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments*
             c_test_scratch_end(temporary);
         }
     }
-    // Without a caller's tree lowering builds the unit's own (GitHub #3102
-    // step 1), and the statement walker reads its body from it.
+    // Without a caller override lowering reuses the analyzed unit's tree.
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(int a) { if (a) return 1; return 0; }"), C_PREPROCESS_DIALECT_GNU17);
-        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
         CAstLowerStatistics lower = {0};
         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("statement nodes, no tree"), preprocess, analysis, target_native,
                                                             (CIRLowerOptions){.ast_lower_statistics = &lower});
         BUSTER_TEST_RAW(arguments,
-                        lowered.program && lower.statement_bodies == 1 && lower.trees_built == 1 && lower.tree_rejections == 0 && lower.tree_nodes != 0 &&
-                            lower.tree_bytes != 0 && lower.span_nodes != 0 && lower.span_bytes != 0,
+                        lowered.program && lower.statement_bodies == 1 && lower.trees_built == 0 && lower.tree_rejections == 0 && analysis.ast &&
+                            analysis.ast->node_count != 0 && analysis.frontend_retained_copy_bytes != 0 && lower.span_nodes != 0 && lower.span_bytes != 0,
                         string_format(temporary.arena, S8("statement nodes, no tree: program={u32} bodies={u64} trees={u64} rejections={u64} nodes={u64} spans={u64}"),
                                       (u32)(lowered.program != 0), lower.statement_bodies, lower.trees_built, lower.tree_rejections, lower.tree_nodes,
                                       lower.span_nodes));
@@ -5818,9 +5817,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_specifiers(UnitTestArguments* argu
                 {
                     tree.data[word] = C_AST_WORD_INT;
                 }
-                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
                 CAstSpecifierStatistics statistics = {0};
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 syntax.ast = &tree;
                 syntax.ast_specifier_statistics = &statistics;
                 CAnalysisResult read = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -5855,7 +5854,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_specifiers(UnitTestArguments* argu
         if (BUSTER_REQUIRE(arguments, built.complete))
         {
             CAstSpecifierStatistics statistics = {0};
-            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
             syntax.ast = &built.ast;
             syntax.ast_specifier_statistics = &statistics;
             c_test_ast_specifiers_set(false);
@@ -5904,9 +5903,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_specifiers(UnitTestArguments* argu
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
         if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
         {
-            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
             CAstSpecifierStatistics statistics = {0};
-            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
             syntax.ast = &built.ast;
             syntax.ast_specifier_statistics = &statistics;
             CAnalysisResult read = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -6036,9 +6035,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_names(UnitTestArguments* argu
                         tree.data[specifiers - 1] = C_AST_WORD_INT;
                     }
                 }
-                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
                 CAstSpecifierStatistics statistics = {0};
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 syntax.ast = &tree;
                 syntax.ast_specifier_statistics = &statistics;
                 CAnalysisResult read = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -6057,7 +6056,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_names(UnitTestArguments* argu
                                               S8("{S8}: {u64} skips ({u64} retried), {u64} primitive and {u64} typedef answers, {u64} fallbacks"), label,
                                               statistics.type_name_skips, statistics.type_name_retries, statistics.type_name_primitive_answers,
                                               statistics.type_name_typedef_answers, statistics.type_name_fallbacks));
-                CParserResult verified = c_parse_ast(temporary.arena, preprocess);
+                CParserResult verified = c_parse_ast_reference(temporary.arena, preprocess);
                 verified.ast = &tree;
                 c_test_ast_type_names_verify_take();
                 c_test_ast_type_names_verify_set(true);
@@ -6119,9 +6118,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArgument
             CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
             if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
             {
-                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
                 CAstStatementStatistics statistics = {0};
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 syntax.ast = &built.ast;
                 syntax.ast_statement_statistics = &statistics;
                 CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -6144,7 +6143,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArgument
                                                              S8("enum E { A = 1, B = -2 };\n"
                                                                 "__attribute__((always_inline)) inline int f(void) { return A + B; }\n"),
                                                              C_PREPROCESS_DIALECT_GNU17);
-        CAnalysisResult left = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        CAnalysisResult left = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
         u32 hinted = left.entity_count;
         for (u32 index = 0; index < left.entity_count; index += 1)
         {
@@ -6310,9 +6309,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_members(UnitTestArguments* argumen
                 {
                     tree.data[word] = member_case->tamper == C_AST_MEMBER_TAMPER_INT ? C_AST_WORD_INT : C_AST_WORD_VOLATILE;
                 }
-                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast_reference(temporary.arena, preprocess));
                 CAstSpecifierStatistics statistics = {0};
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserResult syntax = c_parse_ast_reference(temporary.arena, preprocess);
                 syntax.ast = &tree;
                 syntax.ast_specifier_statistics = &statistics;
                 CAnalysisResult read = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -6335,7 +6334,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_members(UnitTestArguments* argumen
                                 string_format(temporary.arena, S8("{S8}: {u64} primitive and {u64} typedef member answers, {u64} fallbacks"), label,
                                               statistics.member_primitive_answers, statistics.member_typedef_answers, statistics.member_fallbacks));
                 CAstSpecifierStatistics verified_statistics = {0};
-                CParserResult verified = c_parse_ast(temporary.arena, preprocess);
+                CParserResult verified = c_parse_ast_reference(temporary.arena, preprocess);
                 verified.ast = &tree;
                 verified.ast_specifier_statistics = &verified_statistics;
                 c_test_ast_members_verify_take();
@@ -6477,7 +6476,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                  BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast));
     if (ready)
     {
-        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CParserResult syntax = c_parse_ast_reference(arena, preprocess);
         syntax.ast = &built.ast;
         syntax.ast_facts = &facts;
         syntax.type_interning = true;
@@ -6663,11 +6662,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
     {
         CAst const* ast = &built.ast;
         BUSTER_TEST(arguments, facts.node_count == ast->node_count && facts.statistics.retained_bytes >= (u64)ast->node_count * 9);
-        CParserResult plain_syntax = c_parse_ast(arena, preprocess);
+        CParserResult plain_syntax = c_parse_ast_reference(arena, preprocess);
         plain_syntax.ast = ast;
         plain_syntax.type_interning = true;
         CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, plain_syntax);
-        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CParserResult syntax = c_parse_ast_reference(arena, preprocess);
         syntax.ast = ast;
         syntax.type_interning = true;
         syntax.ast_facts = &facts;
@@ -6842,6 +6841,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_recipes(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_entrypoints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("int f(int a) { int values[2] = {a, a + 1}; int b = values[1]; return b; }"), C_PREPROCESS_DIALECT_GNU17);
+    CParseResult model = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, model.analysis_complete && !model.diagnostic_count && !model.lowering_validated);
+    CIRLowerResult incomplete = c_lower_to_ir(temporary.arena, S8("model only"), preprocess, model, target_native);
+    BUSTER_TEST(arguments, !incomplete.program && incomplete.diagnostic_count == 1);
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+    if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count && analysis.ast && analysis.ast_facts))
+    {
+        BUSTER_TEST(arguments, analysis.lowering_validated && analysis.ast == syntax.ast && analysis.frontend_retained_copy_bytes > syntax.ast_retained_copy_bytes);
+        BUSTER_TEST(arguments, !analysis.ast_facts->arena && !analysis.ast_facts->index_arena && analysis.ast_facts->spans && analysis.ast_facts->matches);
+        BUSTER_TEST(arguments, analysis.initializer_plan_count != 0);
+        u32 type_count = analysis.type_count;
+        CIRLowerResult first = c_lower_to_ir(temporary.arena, S8("retained first"), preprocess, analysis, target_native);
+        CIRLowerResult second = c_lower_to_ir(temporary.arena, S8("retained second"), preprocess, analysis, target_native);
+        BUSTER_TEST(arguments, first.program && second.program && !first.diagnostic_count && !second.diagnostic_count);
+        BUSTER_TEST(arguments, first.canonical_ir_certified && second.canonical_ir_certified);
+        BUSTER_TEST(arguments, c_ast_test_instruction_total(&first) == c_ast_test_instruction_total(&second) && analysis.type_count == type_count);
+    }
+    CAstResult tree = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    if (BUSTER_REQUIRE(arguments, tree.complete && c_ast_facts_create(&facts, &tree.ast)))
+    {
+        CParserResult borrowed = c_parse_ast_from_tree(temporary.arena, preprocess, &tree.ast, 0);
+        borrowed.ast = &tree.ast;
+        borrowed.ast_facts = &facts;
+        CAnalysisResult analyzed = c_analyze_semantics_only(temporary.arena, preprocess, borrowed);
+        BUSTER_TEST(arguments, analyzed.analysis_complete && !analyzed.diagnostic_count && analyzed.frontend_retained_copy_bytes == 0);
+        BUSTER_TEST(arguments, analyzed.ast == &tree.ast && analyzed.ast_facts == &facts && facts.arena && facts.index_arena);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("borrowed"), preprocess, analyzed, target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&tree.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6881,6 +6923,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);

@@ -72,7 +72,8 @@
 // that reserves address space and commits it as the builder appends, so no
 // node is staged and copied. Sparse expression groups use an independent
 // retained arena, append-built in node order at each grammar commitment.
-// The tree owns those arenas until c_ast_release;
+// The tree owns those arenas until c_ast_release; c_ast_retain_in_arena can
+// publish a unit-owned compact copy and retire every private arena.
 // the storage record, the diagnostics and the HYBRID/EXPLICIT slices live in
 // the caller's arena. Builder frames, stacks and bindings live in the phase
 // arena (CAstOptions.phase_arena, else a private one created and retired by
@@ -86,7 +87,7 @@
 // visibility (a declarator's name is visible from the end of its declarator).
 // It decides no types and binds no other uses; semantic completion owns that.
 //
-// Entry points: c_ast_build, c_ast_release, c_ast_validate, c_ast_dump,
+// Entry points: c_ast_build, c_ast_release, c_ast_retain_in_arena, c_ast_validate, c_ast_dump,
 // c_ast_child_count, c_ast_list_count, c_ast_child_at, c_ast_children,
 // c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name,
 // c_ast_span_rule, c_ast_spans_build, c_ast_spans_locate.
@@ -487,6 +488,10 @@ BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess,
 // record and any HYBRID/EXPLICIT slices. Idempotent through any copy, and a
 // no-op for an empty tree.
 BUSTER_F_DECL void c_ast_release(CAst* ast);
+// Copies the complete published tree into `arena`, then retires its private
+// storage once. The retained tree belongs to the caller's unit arena; release
+// only clears that view. Returns the exact bytes allocated for publication.
+BUSTER_F_DECL u64 c_ast_retain_in_arena(Arena* arena, CAst* ast);
 
 // The sparse slice belonging to a node, and a level in that slice (1 is the
 // innermost group). An absent level returns null. No tokens are inspected.

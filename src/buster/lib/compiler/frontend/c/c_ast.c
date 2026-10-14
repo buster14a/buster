@@ -6525,6 +6525,39 @@ CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level
     return level && level <= slice.count ? ast->parentheses + slice.first + level - 1 : 0;
 }
 
+u64 c_ast_retain_in_arena(Arena* arena, CAst* ast)
+{
+    u64 copied = 0;
+    if (arena && ast && ast->storage && ast->storage->columns[0])
+    {
+        u64 start = arena->position;
+        CAst retained = *ast;
+        retained.storage = arena_allocate_zeroed(arena, CAstStorage, 1);
+        retained.kinds = arena_allocate(arena, u8, ast->node_count);
+        retained.extents = arena_allocate(arena, u32, ast->node_count);
+        retained.tokens = arena_allocate(arena, u32, ast->node_count);
+        retained.data = arena_allocate(arena, u32, ast->node_count);
+        memcpy(retained.kinds, ast->kinds, sizeof(*ast->kinds) * ast->node_count);
+        memcpy(retained.extents, ast->extents, sizeof(*ast->extents) * ast->node_count);
+        memcpy(retained.tokens, ast->tokens, sizeof(*ast->tokens) * ast->node_count);
+        memcpy(retained.data, ast->data, sizeof(*ast->data) * ast->node_count);
+        if (ast->children)
+        {
+            retained.children = arena_allocate(arena, u32, ast->children_count);
+            memcpy(retained.children, ast->children, sizeof(*ast->children) * ast->children_count);
+        }
+        if (ast->slices)
+        {
+            retained.slices = arena_allocate(arena, u32, ast->node_count);
+            memcpy(retained.slices, ast->slices, sizeof(*ast->slices) * ast->node_count);
+        }
+        c_ast_release(ast);
+        *ast = retained;
+        copied = arena->position - start;
+    }
+    return copied;
+}
+
 // ---- names, accessors and traversal ---------------------------------------
 
 String8 c_ast_kind_name(CAstKind kind)
