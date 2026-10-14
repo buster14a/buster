@@ -1816,6 +1816,7 @@ typedef enum CAstConstantStatus
 {
     C_AST_CONSTANT_UNQUERIED,
     C_AST_CONSTANT_INTEGER,
+    C_AST_CONSTANT_FLOAT,
     C_AST_CONSTANT_NONCONSTANT,
     C_AST_CONSTANT_UNSUPPORTED,
     C_AST_CONSTANT_INVALID,
@@ -1827,11 +1828,45 @@ struct CAstConstantFact
 {
     u64 low;
     u64 high;
+    f64 floating;
     // An already committed source type, or invalid when the query appended
     // it. The primitive semantic kind remains stable across a rollback.
     CTypeId type;
     CTypeKind primitive_kind;
     CAstConstantStatus status;
+    // Narrow floats use `floating`, wide floats retain their target image in
+    // low/high. Initializer destination conversions have separate records.
+    u8 float_width;
+    u8 reserved[3];
+    u32 offsetof_plus_one;
+    u32 ext80_initializer_plus_one;
+};
+
+typedef struct CAstOffsetofStep CAstOffsetofStep;
+struct CAstOffsetofStep
+{
+    u32 node;
+    // Invalid for a member (amount is its semantic offset); otherwise this
+    // is the index operand node and amount is its element byte size.
+    u32 index_node;
+    u64 amount;
+};
+
+typedef struct CAstOffsetofPlan CAstOffsetofPlan;
+struct CAstOffsetofPlan
+{
+    u32 first_step;
+    u32 step_count;
+    bool valid;
+    u8 reserved[3];
+};
+
+typedef struct CAstExt80InitializerFact CAstExt80InitializerFact;
+struct CAstExt80InitializerFact
+{
+    u64 significand;
+    u16 exponent_sign;
+    u8 reserved[6];
 };
 
 // The retained columns: `types` (a CTypeId value or C_AST_FACT_NONE),
@@ -1854,6 +1889,15 @@ struct CAstFacts
     CAstConstantFact* constants;
     u32 constant_count;
     u32 constant_capacity;
+    CAstOffsetofPlan* offsetof_plans;
+    CAstOffsetofStep* offsetof_steps;
+    CAstExt80InitializerFact* ext80_initializers;
+    u32 offsetof_plan_count;
+    u32 offsetof_plan_capacity;
+    u32 offsetof_step_count;
+    u32 offsetof_step_capacity;
+    u32 ext80_initializer_count;
+    u32 ext80_initializer_capacity;
     CAstSpans* spans;
     u32 const* matches;
     // Sparse completion descriptions, appended in place in their own arena.
@@ -2668,6 +2712,10 @@ BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult c
 // bits and fault status are retained independently of type-query recipes.
 BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
 BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
+BUSTER_F_DECL CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid);
+BUSTER_F_DECL CAstExt80InitializerFact const* c_ast_facts_ext80_initializer(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_ext80_initializer(CAstFacts* facts, u32 node, u64 significand, u16 exponent_sign);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

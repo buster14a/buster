@@ -36011,9 +36011,11 @@ BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, 
             CAstConstantFact fact = {
                 .low = value.integer,
                 .high = value.integer_high,
+                .floating = value.floating,
                 .type = !machine->frame_count && value.type.value < committed_types ? value.type : C_TYPE_ID_INVALID,
                 .primitive_kind = kind,
                 .status = C_AST_CONSTANT_UNSUPPORTED,
+                .float_width = value.float_width,
             };
             if (value.faulted)
             {
@@ -36022,6 +36024,10 @@ BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, 
             else if (value.valid && !value.is_float && !value.imaginary && c_parse_expression_integer_kind(kind))
             {
                 fact.status = C_AST_CONSTANT_INTEGER;
+            }
+            else if (value.valid && value.is_float && !value.imaginary)
+            {
+                fact.status = C_AST_CONSTANT_FLOAT;
             }
             else if (!value.valid && machine->syntax_tree->kinds[node] == C_AST_IDENTIFIER && (facts->flags[node] & C_AST_FACT_BOUND))
             {
@@ -39321,6 +39327,12 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
         u16 exponent_sign = 0;
         folded_constant = c_semantic_ext80_fold_initializer(result->arena, preprocess, start, end, &significand, &exponent_sign,
                                                                      &diagnostic.message, &diagnostic.token);
+        if (folded_constant && !diagnostic.message.length && machine->ast_facts &&
+            machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE && !result->protected_type_constant_query)
+        {
+            u32 node = c_ast_facts_locate(machine->ast_facts, &preprocess, start, end);
+            c_ast_facts_store_ext80_initializer(machine->ast_facts, node, significand, exponent_sign);
+        }
     }
     else if (numeric || unknown)
     {

@@ -2326,20 +2326,30 @@ them.
 F3's first publication slice retains the roots the existing normal
 `c_parse_typed_constant` has evaluated. `CAstFacts.constant_slots` indexes
 sparse `CAstConstantFact` rows in a separate owned arena; those rows keep
-both integer limbs and the primitive semantic kind. A CTypeId is retained
+both integer limbs, narrow float values or wide float target images, and
+the primitive semantic kind. A CTypeId is retained
 only for an existing row of a top-level query. Protected type queries never
 publish a row. The sidecar is released with the facts and its committed
 bytes are included in `CAstFactStatistics.retained_bytes`.
 
-The states are `UNQUERIED`, certified `INTEGER`, proven `NONCONSTANT`,
+The states are `UNQUERIED`, certified `INTEGER` or `FLOAT`, proven `NONCONSTANT`,
 `UNSUPPORTED`, and `INVALID`. An existing bound ordinary object can prove a
 nonconstant identifier. A fold that declined a shape is `UNSUPPORTED`,
-including a supported source value outside the integer folder's model;
+including a supported source value outside the folder's model;
 `valid == false` alone cannot prove nonconstancy. `INVALID` records an
 evaluated C fault. A lazy operand that is not entered does not fault the
 selected root. This publication slice adds no type inventory and no
 lowering fallback. The constant grammar walker remains until the node
 consumer replaces it in the next slice.
+
+Sparse annotations share a constant root's slot. An `offsetof` plan records
+ordered member offsets and index operand nodes with their element sizes;
+an absent plan differs from a recorded invalid designator. Its semantic
+producer is the next F6 slice. An x87 initializer annotation retains the
+semantic destination significand and exponent independently of the source
+arithmetic fact. `c_parse_validate_static_scalar` publishes that annotation
+after its existing successful fold; aggregate leaf producers can publish
+the same annotation. Neither annotation adds a dense node column.
 
 A C type becomes an IR type the way it does today: through
 `builder->c_type_ir_map`, or `c_ir_vla_c_type` for a variably modified type.

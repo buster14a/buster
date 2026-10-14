@@ -2613,7 +2613,8 @@ bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
     // Sparse rows double on demand. Their abandoned prefixes sum to less
     // than twice the previous power of two. The last capacity can be capped
     // at node_count, so three rows per node also cover that final carve.
-    u64 constant_reservation = (u64)count * (sizeof(u32) + 3 * sizeof(CAstConstantFact)) + C_AST_FACT_HEADROOM;
+    u64 constant_reservation = (u64)count * (sizeof(u32) + 3 * (sizeof(CAstConstantFact) + sizeof(CAstOffsetofPlan) +
+                                                               sizeof(CAstOffsetofStep) + sizeof(CAstExt80InitializerFact))) + C_AST_FACT_HEADROOM;
     Arena* constants_arena = flags && constant_reservation <= ARENA_MAX_RESERVATION
         ? c_frontend_arena_create((ArenaCreation){.reserved_size = constant_reservation, .initial_size = C_AST_FACT_HEADROOM,
                                                  .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
@@ -2696,49 +2697,171 @@ CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node)
     return result;
 }
 
-bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact)
+// A homogeneous sparse buffer, bounded by the unit's node count. The final
+// capacity may stop between powers of two; its reservation includes all
+// abandoned prefixes as well as that last carve.
+BUSTER_GLOBAL_LOCAL void* c_ast_facts_sparse_reserve(CAstFacts* facts, void* rows, u32 count, u32 capacity, u32 required,
+                                                   u64 size, u64 alignment, u32* capacity_out)
 {
-    bool valid = facts && facts->constant_slots && node < facts->node_count &&
-                 fact.status > C_AST_CONSTANT_UNQUERIED && fact.status < C_AST_CONSTANT_STATUS_COUNT;
-    if (valid)
+    void* result = rows;
+    u32 grown_capacity = capacity;
+    if (required <= facts->node_count && required > capacity)
     {
-        u32 stored = facts->constant_slots[node];
-        bool present = stored != 0;
-        if (!stored && facts->constant_count == facts->constant_capacity)
+        grown_capacity = capacity ? capacity : BUSTER_MIN(facts->node_count, C_AST_CONSTANT_INITIAL_CAPACITY);
+        while (grown_capacity < required)
         {
-            u32 capacity = !facts->constant_capacity ? BUSTER_MIN(facts->node_count, C_AST_CONSTANT_INITIAL_CAPACITY)
-                : facts->constant_capacity <= facts->node_count / 2 ? facts->constant_capacity * 2 : facts->node_count;
-            valid = capacity > facts->constant_capacity;
-            if (valid)
-            {
-                CAstConstantFact* rows = arena_allocate(facts->constants_arena, CAstConstantFact, capacity);
-                if (facts->constant_count)
-                {
-                    memcpy(rows, facts->constants, sizeof(*rows) * (u64)facts->constant_count);
-                }
-                facts->constants = rows;
-                facts->constant_capacity = capacity;
-            }
+            grown_capacity = grown_capacity <= facts->node_count / 2 ? grown_capacity * 2 : facts->node_count;
         }
-        if (valid)
+        result = arena_allocate_bytes(facts->constants_arena, size * grown_capacity, alignment);
+        if (count)
         {
-            if (!stored)
+            memcpy(result, rows, size * count);
+        }
+    }
+    *capacity_out = grown_capacity;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 c_ast_facts_retained_size(CAstFacts const* facts)
+{
+    return (facts->arena ? facts->arena->position - arena_minimum_position : 0) +
+           (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
+           (facts->recipe_arena ? facts->recipe_arena->position - arena_minimum_position : 0) +
+           (facts->constants_arena ? facts->constants_arena->position - arena_minimum_position : 0);
+}
+
+// Metadata-only roots remain UNQUERIED until a semantic scalar query runs.
+BUSTER_GLOBAL_LOCAL u32 c_ast_facts_constant_slot(CAstFacts* facts, u32 node)
+{
+    u32 stored = 0;
+    if (facts && facts->constant_slots && facts->constants_arena && node < facts->node_count)
+    {
+        stored = facts->constant_slots[node];
+        if (!stored)
+        {
+            facts->constants = (CAstConstantFact*)c_ast_facts_sparse_reserve(facts, facts->constants, facts->constant_count,
+                facts->constant_capacity, facts->constant_count + 1, sizeof(*facts->constants), BUSTER_ALIGN_OF(CAstConstantFact),
+                &facts->constant_capacity);
+            if (facts->constant_count < facts->constant_capacity)
             {
                 stored = ++facts->constant_count;
                 facts->constant_slots[node] = stored;
+                facts->constants[stored - 1] = (CAstConstantFact){.type = C_TYPE_ID_INVALID, .primitive_kind = C_TYPE_INVALID};
             }
-            // A later unmodelled probe cannot erase an earlier certified
-            // value at the same source node.
-            if (!present || facts->constants[stored - 1].status != C_AST_CONSTANT_INTEGER || fact.status != C_AST_CONSTANT_UNSUPPORTED)
-            {
-                facts->constants[stored - 1] = fact;
-            }
-            facts->statistics.retained_bytes = facts->arena->position - arena_minimum_position +
-                (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
-                facts->constants_arena->position - arena_minimum_position;
         }
     }
+    return stored;
+}
+
+bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact)
+{
+    u32 stored = fact.status > C_AST_CONSTANT_UNQUERIED && fact.status < C_AST_CONSTANT_STATUS_COUNT
+        ? c_ast_facts_constant_slot(facts, node) : 0;
+    bool valid = stored != 0;
+    if (valid)
+    {
+        CAstConstantFact* previous = facts->constants + stored - 1;
+        fact.offsetof_plus_one = fact.offsetof_plus_one ? fact.offsetof_plus_one : previous->offsetof_plus_one;
+        fact.ext80_initializer_plus_one = fact.ext80_initializer_plus_one ? fact.ext80_initializer_plus_one : previous->ext80_initializer_plus_one;
+        // A later unmodelled probe cannot erase an earlier certified scalar
+        // result; destination initializer and path annotations remain separate.
+        bool certified = previous->status == C_AST_CONSTANT_INTEGER || previous->status == C_AST_CONSTANT_FLOAT;
+        if (!certified || fact.status != C_AST_CONSTANT_UNSUPPORTED)
+        {
+            *previous = fact;
+        }
+        else
+        {
+            previous->offsetof_plus_one = fact.offsetof_plus_one;
+            previous->ext80_initializer_plus_one = fact.ext80_initializer_plus_one;
+        }
+        facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+    }
     return valid;
+}
+
+CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact fact = c_ast_facts_constant(facts, node);
+    CAstOffsetofPlan const* result = 0;
+    if (fact.offsetof_plus_one && fact.offsetof_plus_one - 1 < facts->offsetof_plan_count)
+    {
+        result = facts->offsetof_plans + fact.offsetof_plus_one - 1;
+    }
+    return result;
+}
+
+bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid)
+{
+    u32 stored = (!count || steps) && facts && count <= facts->node_count ? c_ast_facts_constant_slot(facts, node) : 0;
+    bool recorded = stored != 0;
+    if (recorded && !facts->constants[stored - 1].offsetof_plus_one)
+    {
+        recorded = count <= facts->node_count - facts->offsetof_step_count && facts->offsetof_plan_count < facts->node_count;
+        if (recorded)
+        {
+            facts->offsetof_plans = (CAstOffsetofPlan*)c_ast_facts_sparse_reserve(facts, facts->offsetof_plans, facts->offsetof_plan_count,
+                facts->offsetof_plan_capacity, facts->offsetof_plan_count + 1, sizeof(*facts->offsetof_plans), BUSTER_ALIGN_OF(CAstOffsetofPlan),
+                &facts->offsetof_plan_capacity);
+            facts->offsetof_steps = (CAstOffsetofStep*)c_ast_facts_sparse_reserve(facts, facts->offsetof_steps, facts->offsetof_step_count,
+                facts->offsetof_step_capacity, facts->offsetof_step_count + count, sizeof(*facts->offsetof_steps), BUSTER_ALIGN_OF(CAstOffsetofStep),
+                &facts->offsetof_step_capacity);
+            recorded = facts->offsetof_plan_count < facts->offsetof_plan_capacity &&
+                       count <= facts->offsetof_step_capacity - facts->offsetof_step_count;
+        }
+        if (recorded)
+        {
+            u32 plan = facts->offsetof_plan_count++;
+            facts->offsetof_plans[plan] = (CAstOffsetofPlan){.first_step = facts->offsetof_step_count, .step_count = count, .valid = valid};
+            if (count)
+            {
+                memcpy(facts->offsetof_steps + facts->offsetof_step_count, steps, sizeof(*steps) * (u64)count);
+            }
+            facts->offsetof_step_count += count;
+            facts->constants[stored - 1].offsetof_plus_one = plan + 1;
+            facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+        }
+    }
+    return recorded;
+}
+
+CAstExt80InitializerFact const* c_ast_facts_ext80_initializer(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact fact = c_ast_facts_constant(facts, node);
+    CAstExt80InitializerFact const* result = 0;
+    if (fact.ext80_initializer_plus_one && fact.ext80_initializer_plus_one - 1 < facts->ext80_initializer_count)
+    {
+        result = facts->ext80_initializers + fact.ext80_initializer_plus_one - 1;
+    }
+    return result;
+}
+
+bool c_ast_facts_store_ext80_initializer(CAstFacts* facts, u32 node, u64 significand, u16 exponent_sign)
+{
+    u32 stored = c_ast_facts_constant_slot(facts, node);
+    bool recorded = stored != 0;
+    if (recorded)
+    {
+        u32 initializer = facts->constants[stored - 1].ext80_initializer_plus_one;
+        if (!initializer)
+        {
+            facts->ext80_initializers = (CAstExt80InitializerFact*)c_ast_facts_sparse_reserve(facts, facts->ext80_initializers,
+                facts->ext80_initializer_count, facts->ext80_initializer_capacity, facts->ext80_initializer_count + 1,
+                sizeof(*facts->ext80_initializers), BUSTER_ALIGN_OF(CAstExt80InitializerFact), &facts->ext80_initializer_capacity);
+            recorded = facts->ext80_initializer_count < facts->ext80_initializer_capacity;
+            if (recorded)
+            {
+                initializer = ++facts->ext80_initializer_count;
+                facts->constants[stored - 1].ext80_initializer_plus_one = initializer;
+            }
+        }
+        if (recorded)
+        {
+            facts->ext80_initializers[initializer - 1] = (CAstExt80InitializerFact){.significand = significand, .exponent_sign = exponent_sign};
+            facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+        }
+    }
+    return recorded;
 }
 
 void c_ast_facts_release(CAstFacts* facts)
@@ -2760,6 +2883,15 @@ void c_ast_facts_release(CAstFacts* facts)
     facts->constants = 0;
     facts->constant_count = 0;
     facts->constant_capacity = 0;
+    facts->offsetof_plans = 0;
+    facts->offsetof_steps = 0;
+    facts->ext80_initializers = 0;
+    facts->offsetof_plan_count = 0;
+    facts->offsetof_plan_capacity = 0;
+    facts->offsetof_step_count = 0;
+    facts->offsetof_step_capacity = 0;
+    facts->ext80_initializer_count = 0;
+    facts->ext80_initializer_capacity = 0;
     if (facts->index_arena)
     {
         arena_destroy(facts->index_arena, 1);
@@ -3192,10 +3324,7 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
                 statistics->outside += floor == C_AST_TYPE_NONE;
             }
         }
-        statistics->retained_bytes = (facts->arena ? facts->arena->position - arena_minimum_position : 0) +
-                                     (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
-                                     (facts->recipe_arena ? facts->recipe_arena->position - arena_minimum_position : 0) +
-                                     (facts->constants_arena ? facts->constants_arena->position - arena_minimum_position : 0);
+        statistics->retained_bytes = c_ast_facts_retained_size(facts);
     }
 }
 

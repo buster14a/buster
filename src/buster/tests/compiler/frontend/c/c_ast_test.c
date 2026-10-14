@@ -6465,16 +6465,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-    String8 sources[] = {
-        S8("enum { A = 1 + 2 * 3, B = 0 && (1 / 0), C = 1 ? 9 : (1 / 0) };\n"
+    String8 valid_source = S8("enum { A = 1 + 2 * 3, B = 0 && (1 / 0), C = 1 ? 9 : (1 / 0) };\n"
            "static int values[sizeof(unsigned long) + A];\n"
            "static int object; static int *address = &object;\n"
-           "int f(void) { return values[0] + (address != 0); }\n"),
+           "static double real = 1.25 + 2.5;\n"
+           "static long double extended = 0x1.8p0L;\n"
+           "int f(void) { return values[0] + (address != 0); }\n");
+    String8 sources[] = {
+        valid_source,
+        valid_source,
         S8("enum { invalid = 1 / 0 };\n"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
     {
-        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+        Target target = target_native;
+        if (index == 1) target.cpu_arch = CPU_ARCH_AARCH64;
+        bool invalid = index + 1 == BUSTER_ARRAY_LENGTH(sources);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){
+            .source_path = S8("ast-test.c"), .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
         CAstFacts facts = {0};
         if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
@@ -6484,11 +6493,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
             syntax.ast_facts = &facts;
             syntax.type_interning = true;
             CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
-            BUSTER_TEST(arguments, analysis.analysis_complete && (index ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
+            BUSTER_TEST(arguments, analysis.analysis_complete && (invalid ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
             bool seven = false;
             bool zero = false;
             bool nine = false;
             bool fault = false;
+            bool real = false;
+            bool wide = false;
+            bool extended = false;
             for (u32 node = 0; node < built.ast.node_count; node += 1)
             {
                 CAstConstantFact value = c_ast_facts_constant(&facts, node);
@@ -6499,13 +6511,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
                     zero |= value.low == 0 && !value.high;
                     nine |= value.low == 9 && !value.high;
                 }
+                if (value.status == C_AST_CONSTANT_FLOAT)
+                {
+                    real |= value.float_width == 64 && value.floating == 3.75;
+                    wide |= value.float_width == 128 && !value.low && value.high == UINT64_C(0x3fff800000000000);
+                }
+                CAstExt80InitializerFact const* initializer = c_ast_facts_ext80_initializer(&facts, node);
+                if (initializer)
+                {
+                    extended |= initializer->significand == UINT64_C(0xc000000000000000) && initializer->exponent_sign == UINT16_C(0x3fff);
+                    BUSTER_TEST(arguments, !value.offsetof_plus_one);
+                }
                 fault |= value.status == C_AST_CONSTANT_INVALID;
             }
-            BUSTER_TEST(arguments, index ? fault : seven && zero && nine && !fault);
+            bool native_ext80 = target_data_layout(preprocess.target).long_double_type.bit_width == 80;
+            bool native_float128 = target_data_layout(preprocess.target).long_double_type.bit_width == 128;
+            BUSTER_TEST(arguments, invalid ? fault : seven && zero && nine && real && (!native_float128 || wide) && (!native_ext80 || extended) && !fault);
             BUSTER_TEST(arguments, facts.constant_count && facts.constant_count <= facts.node_count && facts.constants_arena);
             BUSTER_TEST(arguments, c_ast_facts_constant(&facts, C_AST_NODE_INVALID).status == C_AST_CONSTANT_UNQUERIED);
+            BUSTER_TEST(arguments, !c_ast_facts_ext80_initializer(&facts, C_AST_NODE_INVALID));
+            BUSTER_TEST(arguments, !c_ast_facts_offsetof(&facts, C_AST_NODE_INVALID));
             c_ast_facts_release(&facts);
-            BUSTER_TEST(arguments, !facts.constants_arena && !facts.constant_slots && !facts.constants);
+            BUSTER_TEST(arguments, !facts.constants_arena && !facts.constant_slots && !facts.constants &&
+                                   !facts.offsetof_plans && !facts.offsetof_steps && !facts.ext80_initializers);
         }
         c_ast_facts_release(&facts);
         c_ast_release(&built.ast);
