@@ -11809,18 +11809,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.c_ast.extents.reason = unit.c_ast.extents.reason;
             result.c_ast.extents.fallback_token = unit.c_ast.extents.fallback_token;
         }
-        result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
-        result.c_ast.lower.conditionals += unit.c_ast.lower.conditionals;
         result.c_ast.lower.steps += unit.c_ast.lower.steps;
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
-        result.c_ast.lower.fallbacks += unit.c_ast.lower.fallbacks;
         result.c_ast.lower.trees_built += unit.c_ast.lower.trees_built;
         result.c_ast.lower.tree_rejections += unit.c_ast.lower.tree_rejections;
         result.c_ast.lower.tree_nodes += unit.c_ast.lower.tree_nodes;
         result.c_ast.lower.tree_bytes += unit.c_ast.lower.tree_bytes;
         result.c_ast.lower.span_nodes += unit.c_ast.lower.span_nodes;
         result.c_ast.lower.span_bytes += unit.c_ast.lower.span_bytes;
+        result.c_ast.lower.hoist_steps += unit.c_ast.lower.hoist_steps;
+        result.c_ast.lower.evaluator_steps += unit.c_ast.lower.evaluator_steps;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

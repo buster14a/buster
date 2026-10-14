@@ -16439,6 +16439,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_logical_chain_order_runt
     return result;
 }
 
+// A condition whose root is an assignment of a `||` or `&&` -- `if (x = a ||
+// b)` -- stores the logical value and tests it; the condition step split the
+// range at the logical operator and lowered `x = a` as its left operand (#4162).
+// Covers if, while and for, a compound assignment, a negated and a
+// parenthesized assignment.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_condition_assignment_of_logical(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("condition-assignment-of-logical"), S8(
+        "int zero(void) { return 0; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int a = zero();\n"
+        "    int b = zero() + 2;\n"
+        "    int x = 7;\n"
+        "    int n = 0;\n"
+        "    int i = 0;\n"
+        "    int failures = 0;\n"
+        "    if (x = a || b)\n"
+        "        n += 1;\n"
+        "    failures |= (x != 1 || n != 1) << 0;\n"
+        "    if (x = a && b)\n"
+        "        n += 4;\n"
+        "    failures |= (x != 0 || n != 1) << 1;\n"
+        "    x = 3;\n"
+        "    while (x = x - 1 && b)\n"
+        "        n += 1;\n"
+        "    failures |= (x != 0 || n != 2) << 2;\n"
+        "    for (x = 2; x = i < 3 || a; i += 1)\n"
+        "        n += 1;\n"
+        "    failures |= (x != 0 || n != 5 || i != 3) << 3;\n"
+        "    if ((x = a) || b)\n"
+        "        n += 1;\n"
+        "    failures |= (x != 0 || n != 6) << 4;\n"
+        "    if (!(x = a || b))\n"
+        "        n += 100;\n"
+        "    failures |= (x != 1 || n != 6) << 5;\n"
+        "    x += a || b ? 1 : 0;\n"
+        "    if (x |= a && b)\n"
+        "        n += 1;\n"
+        "    failures |= (x != 2 || n != 7) << 6;\n"
+        "    return failures;\n"
+        "}\n"));
+}
+
+// A binary operator right after `sizeof (T)` -- `sizeof (int) + 1.0f` -- has
+// sizeof as its left operand, not a cast of `+1.0f`: the operand type query
+// read the whole range as one sizeof and typed it size_t (#3102 step 3).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_type_then_binary_operator(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("sizeof-type-then-binary-operator"), S8(
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    int n = 3;\n"
+        "    failures |= (sizeof(sizeof(int) + 1.0f) != sizeof(float)) << 0;\n"
+        "    failures |= (sizeof(sizeof (int) * 2) != sizeof(sizeof(int))) << 1;\n"
+        "    failures |= (sizeof (char) * n != sizeof(char) * 3) << 2;\n"
+        "    failures |= (sizeof (short) + 1 != 3) << 3;\n"
+        "    failures |= (sizeof(sizeof (int) - 1.0) != sizeof(double)) << 4;\n"
+        "    return failures;\n"
+        "}\n"));
+}
+
 // An abstract declarator whose pointer group holds array suffixes -- `int
 // (*[3])()` -- is an array of pointers, not the base type: sizeof and _Alignof
 // over it folded the base type's 4 (#2850). Expected sizes are Clang's on LP64.
@@ -42986,15 +43049,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
     return result;
 }
 
-// Lowering's root-conditional splits read from the tree (-fc-ast-pilot,
-// GitHub #3102): every shape compiles to the same object as the token scan
-// gives, at `-g0` and `-g`. Debug and sanitized builds also check each tree
-// answer against the scan (BUSTER_REFERENCE_CHECKS). The shapes cover
+// Lowering's root-conditional splits read from the range's node (GitHub
+// #3102): every shape compiles to the same object with the driver's tree and
+// with the one lowering builds itself (-fno-c-ast-pilot), at `-g0` and `-g`,
+// and the object differential holds both to the token scan they replaced.
+// The shapes cover
 // conditions widened over parentheses, casts, prefix operators, calls and
 // label addresses; `:` before a parenthesized or cast else operand; chains in
 // either arm; GNU `?:`; and conditionals in calls, returns, initializers,
-// subscripts, statement expressions and `if` conditions. A conditional after a
-// root assignment or comma goes to the scan. The pilot's retained facts
+// subscripts, statement expressions and `if` conditions; a conditional after
+// a root assignment is not the root, one after a root comma is. The pilot's retained facts
 // (GitHub #4062) reach the driver's counts and change neither object.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
 {
@@ -43054,13 +43118,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         CAstLowerStatistics lower = compiled[1].c_ast.lower;
         CAstLowerStatistics own = compiled[0].c_ast.lower;
         BUSTER_TEST(arguments, own.trees_built == 1 && lower.trees_built == 0);
-        BUSTER_TEST(arguments, own.bodies == lower.bodies && own.conditionals == lower.conditionals && own.answers == lower.answers &&
-                                   own.negatives == lower.negatives && own.fallbacks == lower.fallbacks && own.span_nodes == lower.span_nodes);
-        BUSTER_TEST(arguments, lower.bodies == 3);
-        BUSTER_TEST(arguments, lower.conditionals >= 30);
+        BUSTER_TEST(arguments, own.steps == lower.steps && own.answers == lower.answers && own.negatives == lower.negatives &&
+                                   own.span_nodes == lower.span_nodes);
         BUSTER_TEST(arguments, lower.answers >= 20);
         BUSTER_TEST(arguments, lower.negatives > 0);
-        BUSTER_TEST(arguments, lower.fallbacks > 0);
         // The pilot also retains analysis's facts through lowering (GitHub
         // #4062), which leaves the object as it was (above).
         CAstFactStatistics facts = compiled[1].c_ast.facts;
@@ -43079,14 +43140,250 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
     return result;
 }
 
-// The root-conditional index build's walks and widening stay linear in the
-// input (CAstLowerStatistics.steps, which leaves out the memo's binary-search
-// comparisons; GitHub #3102). Each chain shape is compiled at
-// depth n and 2n, with and without -fc-ast-pilot. The objects must match, and
+// Hoisting from the tree (c_ir_tree_control_groups, c_ir_tree_calls_discover;
+// GitHub #3102 step 3), run: every call records its letter, and each case
+// checks what ran and in what order. An operand behind && or || or in a
+// conditional's arm runs only when taken, and a call or a parenthesized
+// assignment there is not hoisted; a sizeof operand runs nothing, except a
+// variably modified type's bound; a comma's left operand runs before its
+// right; nested calls run inside out, siblings left to right; parenthesized,
+// member, indexed and chained callees are hoisted like named ones; control
+// groups are hoisted before calls (case 3: C leaves the order unspecified);
+// a statement expression runs once; __builtin_choose_expr and _Generic run
+// only the chosen operand. The evaluator's walk (GitHub #3102 step 3b) runs
+// operands left to right and applies casts, unary and binary operators after
+// them; a subscript under sizeof whose type is fixed runs nothing, even in a
+// variable-length array; prefix and postfix updates, `++*q++` among them,
+// update their places once.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_WINDOWS
+    String8 source = S8(
+        "static char trace[64];\n"
+        "static int n;\n"
+        "static int t(int c, int v) { trace[n++] = (char)c; return v; }\n"
+        "static int g;\n"
+        "static int (*fp)(int, int) = t;\n"
+        "struct S { int (*fn)(int, int); };\n"
+        "static struct S s = {t};\n"
+        "static int (*table[2])(int, int) = {t, t};\n"
+        "static int (*pick(int c))(int, int) { t('p', c); return t; }\n"
+        "static int same(const char* expected)\n"
+        "{\n"
+        "    int equal = 1;\n"
+        "    for (int i = 0; i < 64 && (expected[i] || trace[i]); i += 1) equal &= expected[i] == trace[i];\n"
+        "    return equal;\n"
+        "}\n"
+        "static void reset(void) { for (int i = 0; i < 64; i += 1) trace[i] = 0; n = 0; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int a = 0, b = 1, r;\n"
+        "    reset(); r = a && (g = t('x', 1)); if (r || g || !same(\"\")) return 1;\n"
+        "    reset(); r = b || t('y', 1); if (!r || !same(\"\")) return 2;\n"
+        "    reset(); r = t('a', 1) + (b ? t('b', 2) : t('c', 3)); if (r != 3 || !same(\"ba\")) return 3;\n"
+        "    reset(); a = 0; r = t('f', b || (a = 1)); if (r != 1 || a != 0 || !same(\"f\")) return 4;\n"
+        "    reset(); r = (int)sizeof(t('z', 1)); if (r != (int)sizeof(int) || !same(\"\")) return 5;\n"
+        "    reset(); r = (int)sizeof(char[t('v', 3)]); if (r != 3 || !same(\"v\")) return 6;\n"
+        "    reset(); r = (t('1', 0), t('2', 5)); if (r != 5 || !same(\"12\")) return 7;\n"
+        "    reset(); r = t('o', (t('i', 0), t('j', 4))); if (r != 4 || !same(\"ijo\")) return 8;\n"
+        "    reset(); r = t('m', t('k', 1) + t('l', 2)); if (r != 3 || !same(\"klm\")) return 9;\n"
+        "    reset(); r = (*fp)('q', b ? 1 : 2) + s.fn('r', 2) + table[b]('s', 3) + pick(0)('u', 4); if (r != 10 || !same(\"qrspu\")) return 10;\n"
+        "    reset(); if ((r = t('e', 7)) != 7 || !same(\"e\")) return 11;\n"
+        "    reset(); r = (a = 2, b = 3) + (a ? t('w', a) : 0); if (r != 5 || !same(\"w\")) return 12;\n"
+        "    reset(); r = ({ int q = t('h', 6); q; }) + 1; if (r != 7 || !same(\"h\")) return 13;\n"
+        "    reset(); r = __builtin_choose_expr(1, t('C', 1), t('D', 2)) + _Generic(r, int: t('G', 1), default: t('H', 2)); if (r != 2 || !same(\"CG\")) return 14;\n"
+        "    reset(); r = t('A', 1) ? t('B', 2) ? t('E', 3) : t('F', 4) : t('I', 5); if (r != 3 || !same(\"ABE\")) return 15;\n"
+        "    reset(); r = t('K', 0) || (t('L', 1) && (g = t('M', 9))); if (r != 1 || g != 9 || !same(\"KLM\")) return 16;\n"
+        "    reset(); r = -(int)(short)t('N', 70000) + ~t('O', 0); if (r != -4465 || !same(\"NO\")) return 17;\n"
+        "    reset(); r = ((t('P', 1) + t('Q', 2)) * t('R', 3)) - (t('S', 4)); if (r != 5 || !same(\"PQRS\")) return 18;\n"
+        "    { int m = t('V', 2); int vv[m][3]; reset(); r = (int)sizeof(vv[t('T', 1)]) + (int)sizeof vv; if (r != 36 || !same(\"\")) return 19; }\n"
+        "    { int arr[2] = {5, 6}; int* p = arr; r = *p++; r += ++*p; if (r != 12 || p != arr + 1) return 20; }\n"
+        "    { char buf[2] = {'0', '5'}; char* q = buf; ++*q++; if (buf[0] != '1' || *q != '5') return 21; }\n"
+        "    return 0;\n"
+        "}\n");
+    String8 path = buster_test_temporary_path(arguments->arena, S8("tree-hoisting"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("tree-hoisting-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, path};
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("tree hoisting form={u32}: {S8}"), form, compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("tree hoisting form={u32}: failed case {u32}, timed_out={u32}"), form,
+                                                  execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// The hoisting walks on deeply skewed expressions: no recursion, and work
+// linear in the depth (CAstLowerStatistics.hoist_steps). Each shape is
+// lowered at depth n and 2n; doubling the depth may at most double the steps,
+// plus a constant for the function around it.
+//   calls:       id(id(... (b = a + 1) ...))   each argument is a call's
+//   groups:      (a = (a = ... (a = 1)))       each group holds the next
+//   left:        ((((a = 1) + a) + a) ...)     each group opens the next one
+//   logical:     a && (g = 1) && ...           a lazy operand per level
+//   conditional: a ? (b = 1) : a ? ...         a lazy arm per level
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting_skew(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 heads[] = {S8("id("), S8("(a = "), S8("("), S8("a && (g = 1) && "), S8("a ? (b = 1) : ")};
+    String8 leaves[] = {S8("(b = a + 1)"), S8("(a = 1)"), S8("(a = 1)"), S8("a"), S8("b")};
+    String8 closes[] = {S8(")"), S8(")"), S8(" + a)"), S8(""), S8("")};
+    String8 names[] = {S8("calls"), S8("groups"), S8("left"), S8("logical"), S8("conditional")};
+    u32 depths[] = {512, 1024};
+    String8 prefix = S8("static int g; static int id(int x) { return x; }\nint f(int a, int b) { int s = ");
+    String8 suffix = S8("; return s + b + g; }\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(names); shape += 1)
+    {
+        u64 steps[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            u32 depth = depths[depth_index];
+            u64 length = prefix.length + leaves[shape].length + suffix.length + (u64)depth * (heads[shape].length + closes[shape].length);
+            char8* bytes = arena_allocate(arena, char8, length);
+            u64 cursor = 0;
+            c_test_append_source(bytes, length, &cursor, prefix);
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(bytes, length, &cursor, heads[shape]);
+            }
+            c_test_append_source(bytes, length, &cursor, leaves[shape]);
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(bytes, length, &cursor, closes[shape]);
+            }
+            c_test_append_source(bytes, length, &cursor, suffix);
+            CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = bytes, .length = length},
+                                                        (CPreprocessOptions){.source_path = S8("hoisting-skew.c"), .target = target_native,
+                                                                             .data_layout = target_data_layout(target_native)});
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            CAstLowerStatistics statistics = {0};
+            CIRLowerResult lowered = c_analyze_with_options(arena, S8("hoisting-skew.c"), preprocess, syntax, target_native,
+                                                            (CIRLowerOptions){.ast_lower_statistics = &statistics});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0 && lowered.canonical_ir_certified,
+                            string_format(arena, S8("hoisting skew {S8} depth {u32}: {S8}"), names[shape], depth,
+                                          lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("no program")));
+            // The root splits own assignments, logical operators and
+            // conditionals at the top of an expression; only the shapes that
+            // reach the evaluator walk at all.
+            bool walks = shape == 0 || shape == 2;
+            BUSTER_TEST_RAW(arguments, statistics.trees_built == 1 && (!walks || statistics.hoist_steps != 0),
+                            string_format(arena, S8("hoisting skew {S8} depth {u32}: no hoisting walk"), names[shape], depth));
+            steps[depth_index] = statistics.hoist_steps;
+        }
+        BUSTER_TEST_RAW(arguments, steps[1] <= 2 * steps[0] + 64,
+                        string_format(arena, S8("hoisting skew {S8}: {u64} steps at depth {u32}, {u64} at {u32}"), names[shape], steps[0], depths[0],
+                                      steps[1], depths[1]));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The evaluator's walk on deeply skewed expressions: no recursion, and work
+// linear in the depth (CAstLowerStatistics.evaluator_steps, which counts walk
+// steps and name-chain descents). Each shape is lowered at depth n and 2n;
 // doubling the depth may at most double the steps, plus a constant for the
-// function around the chain. Without the memo, a left-nested chain walked its
-// shared leftmost paths and parentheses again for every level, and its steps
-// quadrupled.
+// function around it.
+//   left:        ((a + 1) + 1) ...      every left operand holds the next
+//   right:       a + (a + (... a))      every right operand holds the next
+//   unary:       - - ... a              a prefix operator per level
+//   casts:       (int)(int) ... a       a cast per level, at the depth semantic
+//                                       analysis's type machine accepts (#3717)
+//   members:     p->n->n ... ->v        one name chain
+//   subscripts:  q[q[... 0]]            every subscript holds the next
+//   groups:      a + ((... a))          parentheses only, around an operand
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_evaluator_skew(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 heads[] = {S8("("), S8("a + ("), S8("- "), S8("(int)"), S8(""), S8("q["), S8("(")};
+    String8 leaves[] = {S8("a"), S8("a"), S8("a"), S8("a"), S8("p"), S8("0"), S8("a")};
+    String8 closes[] = {S8(" + 1)"), S8(")"), S8(""), S8(""), S8("->n"), S8("]"), S8(")")};
+    String8 leads[] = {S8(""), S8(""), S8(""), S8(""), S8(""), S8(""), S8("a + ")};
+    String8 tails[] = {S8(""), S8(""), S8(""), S8(""), S8("->v"), S8(""), S8("")};
+    String8 names[] = {S8("left"), S8("right"), S8("unary"), S8("casts"), S8("members"), S8("subscripts"), S8("groups")};
+    u32 depths[] = {512, 1024};
+    u32 cast_depths[] = {8, 16};
+    String8 prefix = S8("struct N { struct N* n; int v; };\nstatic int q[1];\nint f(int a, struct N* p) { int s = ");
+    String8 suffix = S8("; return s; }\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(names); shape += 1)
+    {
+        u64 steps[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            u32 depth = shape == 3 ? cast_depths[depth_index] : depths[depth_index];
+            u64 length = prefix.length + leads[shape].length + leaves[shape].length + tails[shape].length + suffix.length +
+                         (u64)depth * (heads[shape].length + closes[shape].length);
+            char8* bytes = arena_allocate(arena, char8, length);
+            u64 cursor = 0;
+            c_test_append_source(bytes, length, &cursor, prefix);
+            c_test_append_source(bytes, length, &cursor, leads[shape]);
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(bytes, length, &cursor, heads[shape]);
+            }
+            c_test_append_source(bytes, length, &cursor, leaves[shape]);
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(bytes, length, &cursor, closes[shape]);
+            }
+            c_test_append_source(bytes, length, &cursor, tails[shape]);
+            c_test_append_source(bytes, length, &cursor, suffix);
+            CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = bytes, .length = length},
+                                                        (CPreprocessOptions){.source_path = S8("evaluator-skew.c"), .target = target_native,
+                                                                             .data_layout = target_data_layout(target_native)});
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            CAstLowerStatistics statistics = {0};
+            CIRLowerResult lowered = c_analyze_with_options(arena, S8("evaluator-skew.c"), preprocess, syntax, target_native,
+                                                            (CIRLowerOptions){.ast_lower_statistics = &statistics});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0 && lowered.canonical_ir_certified,
+                            string_format(arena, S8("evaluator skew {S8} depth {u32}: {S8}"), names[shape], depth,
+                                          lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("no program")));
+            BUSTER_TEST_RAW(arguments, statistics.trees_built == 1 && statistics.evaluator_steps >= depth,
+                            string_format(arena, S8("evaluator skew {S8} depth {u32}: {u64} walk steps"), names[shape], depth,
+                                          statistics.evaluator_steps));
+            steps[depth_index] = statistics.evaluator_steps;
+        }
+        u32 shallow = shape == 3 ? cast_depths[0] : depths[0];
+        u32 deep = shape == 3 ? cast_depths[1] : depths[1];
+        BUSTER_TEST_RAW(arguments, steps[1] <= 2 * steps[0] + 64,
+                        string_format(arena, S8("evaluator skew {S8}: {u64} steps at depth {u32}, {u64} at {u32}"), names[shape], steps[0],
+                                      shallow, steps[1], deep));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The root-conditional queries' descents (c_ir_root_conditional) stay linear
+// in the input (CAstLowerStatistics.steps; GitHub #3102). Each chain shape is
+// compiled at depth n and 2n, with and without -fc-ast-pilot. The objects must
+// match, and doubling the depth may at most double the steps, plus a constant
+// for the function around the chain; every level answers a query.
 //   left:   ((a ? b : c) ? b : c) ...    every condition holds the previous one
 //   prefix: (-(-a ? b : c) ? b : c) ...  the same under a prefix operator
 //   right:  a ? b : a ? b : ... c        every else operand holds the next one
@@ -43145,8 +43442,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditional_chains(UnitTestA
                 if (pilot)
                 {
                     steps[depth_index] = compiled.c_ast.lower.steps;
-                    BUSTER_TEST(arguments, compiled.c_ast.lower.conditionals == depth);
-                    BUSTER_TEST(arguments, compiled.c_ast.lower.answers > 0);
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.answers >= depth);
                 }
             }
             BUSTER_TEST_RAW(arguments,
@@ -43155,7 +43451,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditional_chains(UnitTestA
                             string_format(arena, S8("{S8} chain of {u32}: the pilot's object differs from the default's"), shape_names[shape], depth));
         }
         BUSTER_TEST_RAW(arguments, steps[0] > 0 && steps[1] <= 2 * steps[0] + 64,
-                        string_format(arena, S8("{S8} chain: {u64} index steps at depth {u32}, {u64} at depth {u32}"), shape_names[shape], steps[0],
+                        string_format(arena, S8("{S8} chain: {u64} descent steps at depth {u32}, {u64} at depth {u32}"), shape_names[shape], steps[0],
                                       depths[0], steps[1], depths[1]));
     }
     scratch_end(temporary);
@@ -67990,6 +68286,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     // its sorted position, not after the newest one, so independent
     // additions land at different anchors; see docs/agents/testing.md.
     C_TEST_FIXTURE(arguments, c_test_abstract_pointer_array_sizeof);
+    C_TEST_FIXTURE(arguments, c_test_condition_assignment_of_logical);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_type_then_binary_operator);
     C_TEST_FIXTURE(arguments, c_test_cast_pointer_to_array_postfix_operand);
     C_TEST_FIXTURE(arguments, c_test_aggregate_array_element_initializers);
     C_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
@@ -68235,6 +68533,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_qualified_member_sharing);
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
+    C_TEST_FIXTURE(arguments, c_test_tree_hoisting);
+    C_TEST_FIXTURE(arguments, c_test_tree_hoisting_skew);
+    C_TEST_FIXTURE(arguments, c_test_tree_evaluator_skew);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_braceless_case_bodies);
