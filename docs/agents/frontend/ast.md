@@ -3012,6 +3012,16 @@ runtime core, and the private node metadata never reaches canonical IR. The
 old constant range evaluator and its offsetof query family remain migration
 residuals until their remaining callers move.
 
+The scalar node API reads a certified literal/enumerator leaf directly when
+it has no constructor effects. A pointer-valued scalar place can read its
+matching read-only global initializer; array/string places stay addresses.
+A half-complex arithmetic carrier keeps its valid component type until the
+destination cast, following the legacy path without creating a new aggregate
+IR type. Math-special CALLs inspect their known payload child without emitting
+a string object. The sizeof/alignof STRING case counts its retained literal run
+and terminator directly, creating no array or pointer constructor.
+
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.

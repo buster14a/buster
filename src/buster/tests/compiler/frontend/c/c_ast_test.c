@@ -6797,6 +6797,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_node_tasks(UnitTestArgume
         {S8("__builtin_classify_type(1.0)"), 8, 0, false},
         {S8("__builtin_bswap32(0x12345678)"), 0x78563412, 0, false},
         {S8("__builtin_popcount(0xf0)"), 4, 0, false},
+        {S8("__builtin_nanf(\"\") != __builtin_nanf(\"\")"), 1, 0, false},
+        {S8("__builtin_huge_val() > 0.0"), 1, 0, false},
+        {S8("sizeof(\"ab\" \"cd\") + 1"), 6, 0, false},
+        {S8("sizeof(u\"ab\")"), 6, 0, false},
+        {S8("__real__ (1.5f16 - 2.0f16i)"), 0, 1.5, true},
+        {S8("__imag__ (1.5f16 - 2.0f16i)"), 0, -2.0, true},
         {{.pointer = deep, .length = depth * 3 + 1}, 1, 0, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
