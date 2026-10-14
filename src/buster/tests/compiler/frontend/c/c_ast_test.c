@@ -6785,6 +6785,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
 
 // Completion descriptions remain independent of the type table they were
 // queried against, including a qualified element and an array-decay pointer.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("struct Leaf { char c; int b[4]; };\n"
+           "struct S { char pad; struct Leaf a[3]; union { struct { int promoted; }; }; };\n"
+           "enum { inline_offset = __builtin_offsetof(struct Inline { char c; int value; }, value) };\n"
+           "enum { constant_offset = __builtin_offsetof(struct S, a[1].b[2]) };\n"
+           "int f(int i, int j) { return __builtin_offsetof(struct S, a[i].b[j]) +\n"
+           " __builtin_offsetof(struct S, promoted) +\n"
+           " __builtin_offsetof(struct S, a[__builtin_offsetof(struct Leaf, b) / sizeof(int)].b[1]); }\n"),
+        S8("struct Bad { int bit : 3; }; unsigned long value = __builtin_offsetof(struct Bad, bit);\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            CAstFacts facts = {0};
+            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &built.ast;
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                syntax.ast_facts = &facts;
+                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                BUSTER_TEST(arguments, analysis.analysis_complete && (index ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+                u64 rows = 0;
+                difference = difference.length ? difference : c_ast_corpus_models_differ(temporary.arena, &plain, &analysis, &rows);
+                BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+                u32 plans = 0;
+                u32 indexed = 0;
+                bool promoted = false;
+                bool inline_member = false;
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    CAstOffsetofPlan const* plan = c_ast_facts_offsetof(&facts, node);
+                    if (plan)
+                    {
+                        plans += 1;
+                        BUSTER_TEST(arguments, built.ast.kinds[node] == C_AST_CALL && plan->valid == !index);
+                        BUSTER_TEST(arguments, plan->first_step <= facts.offsetof_step_count &&
+                                               plan->step_count <= facts.offsetof_step_count - plan->first_step);
+                        if (plan->valid && plan->step_count == 4)
+                        {
+                            CAstOffsetofStep const* steps = facts.offsetof_steps + plan->first_step;
+                            BUSTER_TEST(arguments, steps[0].amount == 4 && steps[0].index_node == C_AST_NODE_INVALID &&
+                                                   steps[1].amount == 20 && steps[1].index_node != C_AST_NODE_INVALID &&
+                                                   steps[2].amount == 4 && steps[2].index_node == C_AST_NODE_INVALID &&
+                                                   steps[3].amount == 4 && steps[3].index_node != C_AST_NODE_INVALID);
+                            for (u32 part = 0; part < plan->step_count; part += 1)
+                            {
+                                if (steps[part].index_node != C_AST_NODE_INVALID)
+                                {
+                                    BUSTER_TEST(arguments, built.ast.kinds[steps[part].node] == C_AST_INDEX &&
+                                                           c_ast_child_at(&built.ast, steps[part].node, 1) == steps[part].index_node);
+                                }
+                            }
+                            indexed += 1;
+                        }
+                        else if (plan->valid && plan->step_count == 1)
+                        {
+                            CAstOffsetofStep const* step = facts.offsetof_steps + plan->first_step;
+                            String8 member = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[step->node]]);
+                            promoted |= string_equal(member, S8("promoted")) && step->amount == 64;
+                            inline_member |= string_equal(member, S8("value")) && step->amount == 4;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, index ? plans == 1 : plans == 6 && indexed == 3 && promoted && inline_member);
+                BUSTER_TEST(arguments, facts.offsetof_plan_count == plans && facts.offsetof_step_count <= facts.node_count);
+            }
+            c_ast_facts_release(&facts);
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_recipes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6921,6 +7004,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);

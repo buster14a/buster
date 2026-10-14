@@ -2357,8 +2357,11 @@ consumer replaces it in the next slice.
 
 Sparse annotations share a constant root's slot. An `offsetof` plan records
 ordered member offsets and index operand nodes with their element sizes;
-an absent plan differs from a recorded invalid designator. Its semantic
-producer is the next F6 slice. An x87 initializer annotation retains the
+an absent plan differs from a recorded invalid designator. The semantic
+validator publishes the path from its already parsed type, including runtime
+index operands, anonymous promoted members and the one parse of an inline
+type definition. F6 lowering still consumes the legacy walker until its node
+consumer replaces it. An x87 initializer annotation retains the
 semantic destination significand and exponent independently of the source
 arithmetic fact. `c_parse_validate_static_scalar` publishes that annotation
 after its existing successful fold; aggregate leaf producers can publish

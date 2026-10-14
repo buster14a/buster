@@ -11552,6 +11552,8 @@ BUSTER_C_INTERNAL bool c_parse_type_name_trailer_invalid(CPreprocessResult prepr
 BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                         CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
                                                         u64* offset_out, bool* bit_field_out);
+BUSTER_C_INTERNAL void c_parse_ast_offsetof_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                    u32 start, u32 end, CTypeId type);
 
 // One diagnostic for an offsetof designator that names a bit-field, in every
 // context (#1570), worded and placed as Clang does: at the member. The
@@ -11583,6 +11585,10 @@ BUSTER_C_INTERNAL String8 c_parse_offsetof_bit_field(CTypeParseMachine* machine,
         ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, open + 1, comma, &cursor) : C_TYPE_ID_INVALID;
     valid = valid && type.value < result->type_count && cursor == comma &&
             (result->types[type.value].kind == C_TYPE_STRUCT || result->types[type.value].kind == C_TYPE_UNION);
+    if (valid)
+    {
+        c_parse_ast_offsetof_publish(machine, preprocess, result, open - 1, close + 1, type);
+    }
     CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
     COffsetofWalk walk = c_offsetof_walk_begin(preprocess.target, comma + 1, close, 0, true, valid);
     COffsetofStep step = c_offsetof_walk_next(&walk, preprocess.tokens);
@@ -36234,6 +36240,70 @@ bool c_test_member_offset(Arena* arena, CPreprocessResult preprocess, CParseResu
 }
 #endif
 
+// The validator already owns the parsed type. Retain only its semantic
+// numeric path and the AST index operands; no queried CType row escapes.
+BUSTER_C_INTERNAL void c_parse_ast_offsetof_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                    u32 start, u32 end, CTypeId type)
+{
+    CAstFacts* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    bool publish = facts && ast && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE && !result->protected_type_constant_query;
+    u32 node = publish ? c_ast_facts_locate(facts, &preprocess, start, end) : C_AST_NODE_INVALID;
+    publish = node != C_AST_NODE_INVALID && ast->kinds[node] == C_AST_CALL && c_ast_child_count(ast, node) == 3 &&
+              !c_ast_facts_offsetof(facts, node);
+    if (publish)
+    {
+        u32 designator = c_ast_child_at(ast, node, 2);
+        u32 capacity = designator - c_ast_subtree_begin(ast, designator) + 1;
+        u64 mark = machine->scratch_arena->position;
+        u32* path = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, capacity);
+        CAstOffsetofStep* steps = path ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CAstOffsetofStep, capacity) : 0;
+        bool allocated = path && steps;
+        bool valid = allocated && type.value < result->type_count &&
+                     (result->types[type.value].kind == C_TYPE_STRUCT || result->types[type.value].kind == C_TYPE_UNION);
+        u32 count = 0;
+        u32 cursor = designator;
+        while (valid && cursor < ast->node_count && (ast->kinds[cursor] == C_AST_MEMBER || ast->kinds[cursor] == C_AST_INDEX))
+        {
+            valid = count < capacity;
+            if (valid)
+            {
+                path[count++] = cursor;
+                cursor = c_ast_child_at(ast, cursor, 0);
+            }
+        }
+        valid = valid && cursor < ast->node_count && ast->kinds[cursor] == C_AST_IDENTIFIER && count < capacity;
+        if (valid) path[count++] = cursor;
+        u32 stored = 0;
+        for (u32 remaining = count; valid && remaining; remaining -= 1)
+        {
+            u32 part = path[remaining - 1];
+            CAstOffsetofStep step = {.node = part, .index_node = C_AST_NODE_INVALID};
+            if (ast->kinds[part] == C_AST_INDEX)
+            {
+                bool array = type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY;
+                type = array ? result->types[type.value].element_type : C_TYPE_ID_INVALID;
+                u32 alignment = 0;
+                step.index_node = c_ast_child_at(ast, part, 1);
+                valid = array && step.index_node != C_AST_NODE_INVALID &&
+                        c_parse_type_layout(0, machine->scratch_arena, preprocess, result, type, &step.amount, &alignment);
+            }
+            else
+            {
+                u32 anchor = ast->tokens[part];
+                bool bit_field = false;
+                valid = anchor < preprocess.token_count && c_parse_constant_member_offset(0, machine->scratch_arena, preprocess, result,
+                    type, ast->data[part], c_token_spelling(preprocess.spelling_base, preprocess.tokens[anchor]), &type, &step.amount, &bit_field) &&
+                    !bit_field;
+            }
+            if (valid) steps[stored++] = step;
+        }
+        if (allocated) c_ast_facts_store_offsetof(facts, node, steps, stored, valid);
+        arena_set_position(machine->scratch_arena, mark);
+    }
+    return;
+}
+
 // State 8 starts the designator; state 9 resumes after a typed index child.
 // Retain type ids and token cursors across child queries, which can grow tables.
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
@@ -36272,6 +36342,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
             ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, cursor, comma, &cursor) : C_TYPE_ID_INVALID;
         value.valid = value.valid && type.value < result->type_count && cursor == comma &&
                       (result->types[type.value].kind == C_TYPE_STRUCT || result->types[type.value].kind == C_TYPE_UNION);
+        if (value.valid)
+        {
+            c_parse_ast_offsetof_publish(machine, preprocess, result, task->start, task->end, type);
+        }
         cursor = comma + 1;
     }
     COffsetofWalk walk = c_offsetof_walk_begin(preprocess.target, cursor, task->colon, value.integer, member, value.valid);
@@ -36673,6 +36747,7 @@ BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, 
             c_ast_facts_store_constant(facts, node, fact);
         }
     }
+    return;
 }
 
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
