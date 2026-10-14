@@ -1819,6 +1819,7 @@ typedef enum CIrNodeQueryKind
     C_IR_NODE_QUERY_EXPRESSION_TYPE,
     C_IR_NODE_QUERY_CONSTANT,
     C_IR_NODE_QUERY_CONSTANT_SHAPE,
+    C_IR_NODE_QUERY_POINTER_CAST_PROBE,
 } CIrNodeQueryKind;
 
 typedef struct CIrNodeQueryFrame CIrNodeQueryFrame;
@@ -1828,11 +1829,13 @@ struct CIrNodeQueryFrame
     u32* offsetof_runtime_steps;
     u32 offsetof_runtime_count;
     IrTypeId result_type;
+    IrTypeId context_type;
     u32 node;
     CIrNodeQueryKind kind;
     CIrAstTypeView view;
     void* state;
     bool success;
+    bool probe_context;
 };
 
 typedef enum CIrQueryFrameKind
@@ -3587,8 +3590,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
+BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL void c_ir_initializer_plan_node_state_release(CIntegerIrBuilder* builder, void* state);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* result_out);
+BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_probe_node(CIntegerIrBuilder* builder, u32 node, IrTypeId destination,
+                                                            CIrConstantValue* value, bool* handled);
 BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate_node(CIntegerIrBuilder* builder, u32 node, u64* value_out);
 BUSTER_C_INTERNAL bool c_ir_global_complex_real_value_node(CIntegerIrBuilder* builder, IrType* type, IrTypeId type_id, u32 node,
                                                            CIrConstantValue* value);
@@ -3607,7 +3613,8 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
         case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third;
         case C_IR_QUERY_FRAME_NODE_TASK:
             return left.node_task.node == right.node_task.node && left.node_task.kind == right.node_task.kind &&
-                   left.node_task.view == right.node_task.view;
+                   left.node_task.view == right.node_task.view && left.node_task.probe_context == right.node_task.probe_context &&
+                   (left.node_task.kind != C_IR_NODE_QUERY_POINTER_CAST_PROBE || left.node_task.context_type.value == right.node_task.context_type.value);
         }
     }
 
@@ -3624,6 +3631,8 @@ BUSTER_C_INTERNAL u32 c_ir_query_key_hash(CIrQueryFrame key)
     case C_IR_QUERY_FRAME_NODE_TASK:
         first = key.node_task.node;
         second = ((u32)key.node_task.kind << 8) | (u32)key.node_task.view;
+        second ^= (u64)key.node_task.probe_context << 31;
+        if (key.node_task.kind == C_IR_NODE_QUERY_POINTER_CAST_PROBE) hash ^= (u64)key.node_task.context_type.value * 0x9e3779b97f4a7c15ull;
         break;
     default: break;
     }
@@ -3797,6 +3806,11 @@ BUSTER_C_INTERNAL bool c_ir_node_query_request(CIntegerIrBuilder* builder, CIrNo
 {
     CIrQueryFrame result = {0};
     CIrQueryMachine* machine = builder->queries;
+    if (machine && machine->frame_count && key.kind != C_IR_NODE_QUERY_CONSTANT_SHAPE)
+    {
+        CIrQueryFrame const* parent = machine->frames + machine->frame_count - 1;
+        key.probe_context |= parent->kind == C_IR_QUERY_FRAME_NODE_TASK && parent->node_task.probe_context;
+    }
     u32 status = key.kind == C_IR_NODE_QUERY_CONSTANT_SHAPE && machine && machine->constant_shape_status && key.node < machine->constant_shape_nodes
         ? (machine->constant_shape_status[key.node / 4] >> ((key.node & 3) * 2)) & 3 : 0;
     bool settled = status != 0;
@@ -4357,7 +4371,7 @@ BUSTER_C_INTERNAL bool c_ir_type_name_node_attempt(CIntegerIrBuilder* builder, C
     bool admitted = facts && ast && frame->node < facts->node_count && ast->kinds[frame->node] == C_AST_TYPE_NAME &&
                     (facts->flags[frame->node] & C_AST_FACT_TYPED);
     frame->result_type = IR_TYPE_ID_INVALID;
-    u32* slot = admitted ? c_ir_source_type_projection_slot(builder, frame->node) : 0;
+    u32* slot = admitted && !frame->probe_context ? c_ir_source_type_projection_slot(builder, frame->node) : 0;
     if (slot && *slot)
     {
         frame->result_type = *slot == 1 ? IR_TYPE_ID_INVALID : (IrTypeId){.value = *slot - 2};
@@ -4510,6 +4524,7 @@ BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNo
     case C_IR_NODE_QUERY_EXPRESSION_TYPE: success = c_ir_expression_type_node_attempt(builder, frame); break;
     case C_IR_NODE_QUERY_CONSTANT: success = c_ir_constant_node_attempt(builder, frame); break;
     case C_IR_NODE_QUERY_CONSTANT_SHAPE: success = c_ir_constant_node_shape_attempt(builder, frame); break;
+    case C_IR_NODE_QUERY_POINTER_CAST_PROBE: success = c_ir_pointer_integer_cast_node_attempt(builder, frame); break;
     }
     return success;
 }
@@ -49455,10 +49470,18 @@ BUSTER_C_INTERNAL bool c_ir_initializer_plan_scalar(CIntegerIrBuilder* builder, 
     if (valid && !empty && !label_handled && !ext80_handled && !complex_handled)
     {
         bool function = direct_symbol && type->kind == IR_TYPE_POINTER && c_ir_initializer_function_symbol_node(builder, node, type_id, &value);
-        valid = function || (!builder->queries->has_request && c_ir_constant_evaluate_node(builder, node, &value));
-        if (!valid && !builder->queries->has_request)
-            valid = c_ir_global_complex_real_value_node(builder, type, type_id, node, &value);
-        valid = valid && c_ir_constant_cast(builder, &value, type_id, &converted);
+        bool pointer_handled = false;
+        if (!function && !builder->queries->has_request && type->kind == IR_TYPE_POINTER)
+            valid = c_ir_pointer_integer_cast_probe_node(builder, node, type_id, &converted, &pointer_handled);
+        else
+            valid = function || !builder->queries->has_request;
+        if (valid && !pointer_handled)
+        {
+            valid = function || c_ir_constant_evaluate_node(builder, node, &value);
+            if (!valid && !builder->queries->has_request)
+                valid = c_ir_global_complex_real_value_node(builder, type, type_id, node, &value);
+            valid = valid && c_ir_constant_cast(builder, &value, type_id, &converted);
+        }
     }
     type = ir_type_from_id(&builder->program->types, type_id);
     if (valid && (label_handled || ext80_handled || complex_handled))
@@ -54650,6 +54673,66 @@ u64 c_test_constant_shape_work_take(void)
 }
 #endif
 
+BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    CAst const* ast = builder->syntax_tree;
+    bool valid = ast && frame->node < ast->node_count && ast->kinds[frame->node] == C_AST_CAST;
+    CIrNodeQueryFrame cast = {0};
+    valid = valid && c_ir_node_query_request(builder,
+        (CIrNodeQueryFrame){.node = c_ast_child_at(ast, frame->node, 0), .kind = C_IR_NODE_QUERY_TYPE_NAME, .probe_context = true}, &cast) && cast.success;
+    IrType const* source_pointer = valid ? ir_type_from_id(&builder->program->types, cast.result_type) : 0;
+    IrType const* destination = valid ? ir_type_from_id(&builder->program->types, frame->context_type) : 0;
+    valid = source_pointer && destination && source_pointer->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_POINTER;
+    IrTypeId source_element = valid ? source_pointer->element_type : IR_TYPE_ID_INVALID;
+    IrTypeId destination_element = valid ? destination->element_type : IR_TYPE_ID_INVALID;
+    IrType const* source_row = valid ? ir_type_from_id(&builder->program->types, source_element) : 0;
+    IrType const* destination_row = valid ? ir_type_from_id(&builder->program->types, destination_element) : 0;
+    valid = source_row && destination_row && (source_row->kind == IR_TYPE_VOID || destination_row->kind == IR_TYPE_VOID ||
+        c_ir_representation_types_compatible(builder, source_element, destination_element));
+    CIrNodeQueryFrame operand = {0};
+    valid = valid && c_ir_node_query_request(builder,
+        (CIrNodeQueryFrame){.node = c_ast_child_at(ast, frame->node, 1), .kind = C_IR_NODE_QUERY_CONSTANT, .probe_context = true}, &operand) &&
+        operand.success && !operand.constant.is_complex && operand.constant.real.kind == C_IR_CONSTANT_INTEGER;
+    IrType const* integer = valid ? ir_type_from_id(&builder->program->types, operand.constant.real.type) : 0;
+    u32 width = integer ? ir_integer_type_width(integer) : 0;
+    u32 pointer_width = builder->program->data_layout.pointer.size * 8;
+    valid = valid && width && pointer_width && pointer_width <= 64;
+    if (valid)
+    {
+        IrConversionOperation operation = width > pointer_width ? IR_CONVERSION_INTEGER_TRUNCATE
+            : width == pointer_width ? IR_CONVERSION_INTEGER_REINTERPRET
+            : integer->is_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND;
+        IrIntegerResult converted = ir_integer_convert(operation,
+            (IrInteger){.low = operand.constant.real.integer, .high = operand.constant.real.integer_high}, width, pointer_width);
+        valid = !(converted.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+        if (valid)
+        {
+            CIrConstantValue value = {.type = frame->context_type, .symbol = IR_SYMBOL_ID_INVALID,
+                .addend = (s64)converted.bits.low, .kind = C_IR_CONSTANT_POINTER};
+            frame->constant = (CIrConstantComplexInitializerValue){.real = value, .type = value.type};
+        }
+    }
+    return valid;
+}
+
+// The legacy scalar initializer first tried an integer pointer cast. Its
+// abandoned string/object and type constructors still belong to that attempt.
+BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_probe_node(CIntegerIrBuilder* builder, u32 node, IrTypeId destination,
+                                                            CIrConstantValue* value, bool* handled)
+{
+    CIrNodeQueryFrame answer = {0};
+    CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_POINTER_CAST_PROBE,
+        .context_type = destination, .probe_context = true};
+    bool settled = builder->queries && builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+        : c_ir_node_query_execute(builder, key, &answer);
+    if (settled)
+    {
+        *handled = answer.success;
+        if (answer.success) *value = answer.constant.real;
+    }
+    return settled;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
 {
 #if BUSTER_INCLUDE_TESTS
@@ -54878,6 +54961,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 admitted = c_ir_static_compound_literal_node_attempt(builder, frame, node, type.result_type, builder->function != 0 || frame->view != C_IR_AST_CONSTANT_WHOLE_ADDRESS, &value.real);
                 value.type = value.real.type;
                 admitted = admitted && value.real.kind == C_IR_CONSTANT_LVALUE;
+            }
+            else if (admitted && kind == C_AST_COMPOUND_LITERAL &&
+                     ast->kinds[c_ast_child_at(ast, node, 1)] == C_AST_INITIALIZER_LIST &&
+                     !c_ast_child_count(ast, c_ast_child_at(ast, node, 1)))
+            {
+                CIrConstantComplexInitializerValue zero = {.real = c_ir_constant_integer(builder->s32_type, 0), .type = builder->s32_type};
+                if (target->is_complex)
+                    admitted = c_ir_constant_complex_initializer_cast(builder, &zero, type.result_type, &value);
+                else
+                {
+                    admitted = c_ir_constant_cast(builder, &zero.real, type.result_type, &value.real);
+                    value.type = value.real.type;
+                }
             }
             else if (admitted && kind == C_AST_COMPOUND_LITERAL && target->is_complex &&
                      ast->kinds[c_ast_child_at(ast, node, 1)] == C_AST_INITIALIZER_LIST &&

@@ -7125,6 +7125,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_shape_work(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_pointer_probe(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("typedef unsigned char byte; struct Name { byte *text; unsigned long length; };"
+        "static struct Name names[] = {{(byte*)\"rax\",sizeof(\"rax\")-1},{(byte*)\"rcx\",sizeof(\"rcx\")-1}};"
+        "static void *addresses[] = {(void*)-1, (void*)((unsigned __int128)1 << 64 | 7)};"
+        "static int zero_integer = (int){}; static double zero_float = (double){};"
+        "int f(void) { return names[0].length + names[1].length + zero_integer + (int)zero_float; }");
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("pointer-probe.c"), preprocess, analysis, target_native);
+    if (BUSTER_REQUIRE(arguments, !analysis.diagnostic_count && lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified))
+    {
+        IrModule const* module = lowered.program->modules;
+        u32 strings = 0;
+        u32 addresses = 0;
+        u32 zeros = 0;
+        for (u32 index = 0; index < module->global_count; index += 1)
+        {
+            IrGlobal const* global = module->globals + index;
+            IrSymbol const* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            if (symbol && string_starts_with_sequence(symbol->name, S8(".L.cstr"))) strings += 1;
+            if (symbol && string_equal(symbol->name, S8("addresses")))
+            {
+                addresses += 1;
+                u64 width = lowered.program->data_layout.pointer.size;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.length == width * 2 && !global->relocation_count);
+                for (u64 byte = 0; byte < width && global->bytes.length == width * 2; byte += 1)
+                {
+                    BUSTER_TEST(arguments, global->bytes.pointer[byte] == 255);
+                    BUSTER_TEST(arguments, global->bytes.pointer[width + byte] == (byte ? 0 : 7));
+                }
+            }
+            if (symbol && (string_equal(symbol->name, S8("zero_integer")) || string_equal(symbol->name, S8("zero_float"))))
+            {
+                zeros += 1;
+                BUSTER_TEST(arguments, global->initializer_bits == 0);
+            }
+        }
+        BUSTER_TEST(arguments, strings == 4 && addresses == 1 && zeros == 2);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_object_context(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8773,6 +8819,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_bound_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_object_context);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_pointer_probe);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);

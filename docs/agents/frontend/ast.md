@@ -3071,6 +3071,15 @@ query-root rewinds because it depends only on immutable node kinds. A geometric
 array-bound regression checks the actual task attempts for 128, 256 and 512
 terms, including a nested cast whose constructor must still be materialized.
 
+Scalar pointer-plan leaves retain the legacy integer-cast probe as a distinct
+node task keyed by the destination IR type. Its child queries carry a private
+probe context, separate from normal value queries and source-type projection
+memoization. A settled noninteger result keeps the constructors and string
+object produced by that abandoned attempt; the ordinary value fold then runs
+once in its own context. Integer results use the shared signedness and pointer
+width conversion. Empty numeric scalar compound literals produce typed zero;
+addressed empty scalar objects keep their existing refusal.
+
 Source-location constant CALLs use the normalized retained builtin identity
 and zero-argument child count. Their call anchor supplies the presumed line
 or mapped file name, and function names reuse the existing shared object.
