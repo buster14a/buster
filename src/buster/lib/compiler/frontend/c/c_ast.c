@@ -6649,6 +6649,42 @@ u32 c_ast_child_at(CAst const* ast, u32 node, u32 index)
     return result;
 }
 
+// The declared name follows the declarator's inner-child chain. Parameter
+// names are siblings of that chain and cannot substitute for the owner.
+u32 c_ast_declarator_name(CAst const* ast, u32 node)
+{
+    u32 result = C_AST_NODE_INVALID;
+    while (node != C_AST_NODE_INVALID && node < ast->node_count && result == C_AST_NODE_INVALID)
+    {
+        u32 kind = ast->kinds[node];
+        if (kind == C_AST_DECLARATOR_NAME)
+        {
+            result = node;
+        }
+        else if (kind == C_AST_INIT_DECLARATOR)
+        {
+            node = c_ast_child_at(ast, node, (ast->data[node] & (1u << 3)) != 0);
+        }
+        else if (kind == C_AST_DECLARATOR_ATTRIBUTED)
+        {
+            node = c_ast_child_at(ast, node, 1);
+        }
+        else if (kind == C_AST_DECLARATOR_POINTER && (ast->data[node] & 2u))
+        {
+            node = c_ast_child_at(ast, node, (ast->data[node] & 1u) != 0);
+        }
+        else if ((kind == C_AST_DECLARATOR_ARRAY || kind == C_AST_DECLARATOR_FUNCTION) && (ast->data[node] & 1u))
+        {
+            node = c_ast_child_at(ast, node, 0);
+        }
+        else
+        {
+            node = C_AST_NODE_INVALID;
+        }
+    }
+    return result;
+}
+
 u32 c_ast_children(CAst const* ast, u32 node, u32* roots, u32 capacity)
 {
     u32 count = c_ast_child_count(ast, node);

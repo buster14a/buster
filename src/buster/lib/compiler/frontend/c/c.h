@@ -1278,6 +1278,9 @@ struct CEntity
     u32 declaration_token_count;
     // The initializer assignment anchor, published by the declarator binder.
     u32 initializer_token_plus_one;
+    // Retained INIT_DECLARATOR owner of the current declaration anchor, plus
+    // one; zero for entities whose declaration is not an init-declarator.
+    u32 init_declarator_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
@@ -1395,6 +1398,11 @@ struct CDeclaration
     CEntityId entity;
     CScopeId scope;
     CParserDeclaration* syntax_declaration;
+    // Finished syntax owners, plus one; zero denotes an absent child. Source
+    // ranges above remain provenance and do not select lowering structure.
+    u32 declaration_node_plus_one;
+    u32 init_declarator_plus_one;
+    u32 initializer_node_plus_one;
     CDeclarationKind kind;
     bool is_definition;
     bool is_variadic;

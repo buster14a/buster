@@ -9896,7 +9896,7 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
 // Compatible declarations can share an entity; later local entities at the
 // same anchor intentionally replace an earlier function-linkage row, as the
 // lowering entity index does. This publishes no type, scope or diagnostic.
-BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* machine, CParseResult const* result, CPreprocessResult preprocess)
+BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
 {
     CAstFacts* facts = machine->ast_facts;
     CAst const* ast = machine->syntax_tree;
@@ -9915,6 +9915,108 @@ BUSTER_C_INTERNAL void c_parse_publish_declaration_facts(CTypeParseMachine* mach
                     facts->flags[node] |= C_AST_FACT_BOUND;
                 }
             }
+        }
+    }
+    if (ast && ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT)
+    {
+        // Fresh block-scope function declarations append linkage rows after
+        // the original syntax declarations. Keep their source cursor separate
+        // from the translation-unit rows; both sequences are source ordered.
+        u32 syntax_count = 0;
+        while (syntax_count < result->declaration_count && result->declarations[syntax_count].syntax_declaration)
+        {
+            syntax_count += 1;
+        }
+        u32 synthetic = syntax_count;
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            // Each init-declarator owns one disjoint inner-child chain. The
+            // final name fact selects the entity at this declaration anchor.
+            if (ast->kinds[node] == C_AST_INIT_DECLARATOR && facts && facts->node_count == ast->node_count)
+            {
+                u32 name = c_ast_declarator_name(ast, node);
+                if (name != C_AST_NODE_INVALID && (facts->flags[name] & C_AST_FACT_BOUND))
+                {
+                    u32 entity = facts->payloads[name];
+                    if (entity < result->entity_count && result->entities[entity].declaration_token_plus_one == ast->tokens[name] + 1)
+                    {
+                        result->entities[entity].init_declarator_plus_one = node + 1;
+                    }
+                }
+            }
+            if (ast->kinds[node] == C_AST_DECLARATION && synthetic < result->declaration_count && c_ast_list_count(ast, node))
+            {
+                u32 init = node - 1;
+                u32 name = c_ast_declarator_name(ast, init);
+                u32 last_anchor = name < ast->node_count ? ast->tokens[name] + 1 : 0;
+                u32 synthetic_end = synthetic;
+                while (synthetic_end < result->declaration_count &&
+                       result->declarations[synthetic_end].entity.value < result->entity_count &&
+                       result->entities[result->declarations[synthetic_end].entity.value].declaration_token_plus_one <= last_anchor)
+                {
+                    synthetic_end += 1;
+                }
+                u32 declaration = synthetic_end;
+                u32 init_count = c_ast_list_count(ast, node);
+                for (u32 item = 0; item < init_count && declaration > synthetic; item += 1)
+                {
+                    name = c_ast_declarator_name(ast, init);
+                    CDeclaration* owner = result->declarations + declaration - 1;
+                    CEntity const* entity = result->entities + owner->entity.value;
+                    if (name < ast->node_count && entity->declaration_token_plus_one == ast->tokens[name] + 1)
+                    {
+                        owner->declaration_node_plus_one = node + 1;
+                        owner->init_declarator_plus_one = init + 1;
+                        owner->initializer_node_plus_one = (ast->data[init] & 4u) ? init : 0;
+                        declaration -= 1;
+                    }
+                    init -= ast->extents[init];
+                }
+                synthetic = synthetic_end;
+            }
+        }
+        // Both published declarations and the unit's direct children are in
+        // source order. Reverse extent cursors match them without a parent
+        // table, a child buffer, or a source-grammar read. A split declaration
+        // shares its external owner and names its own direct init-declarator.
+        u32 declaration_end = syntax_count;
+        u32 external = ast->root - 1;
+        u32 external_count = c_ast_list_count(ast, ast->root);
+        for (u32 index = 0; index < external_count; index += 1)
+        {
+            u32 first = ast->tokens[external];
+            u32 declaration_begin = declaration_end;
+            while (declaration_begin && result->declarations[declaration_begin - 1].token_start >= first)
+            {
+                declaration_begin -= 1;
+                result->declarations[declaration_begin].declaration_node_plus_one = external + 1;
+            }
+            if (ast->kinds[external] == C_AST_DECLARATION)
+            {
+                u32 init = external - 1;
+                u32 init_count = c_ast_list_count(ast, external);
+                u32 declaration = declaration_end;
+                for (u32 item = 0; item < init_count; item += 1)
+                {
+                    u32 name = c_ast_declarator_name(ast, init);
+                    if (name != C_AST_NODE_INVALID && declaration > declaration_begin)
+                    {
+                        CDeclaration* owner = result->declarations + declaration - 1;
+                        CParserDeclaration const* syntax = owner->syntax_declaration;
+                        u32 anchor = syntax && owner->kind == C_DECLARATION_FUNCTION && syntax->function_name_token < preprocess.token_count
+                                         ? syntax->function_name_token : syntax ? syntax->name_token : UINT32_MAX;
+                        if (anchor == ast->tokens[name])
+                        {
+                            owner->init_declarator_plus_one = init + 1;
+                            owner->initializer_node_plus_one = (ast->data[init] & 4u) ? init : 0;
+                            declaration -= 1;
+                        }
+                    }
+                    init -= ast->extents[init];
+                }
+            }
+            declaration_end = declaration_begin;
+            external -= ast->extents[external];
         }
     }
 }

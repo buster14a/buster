@@ -255,6 +255,19 @@ lifetime, and its bytes are included in `retained_bytes`. A required index
 reservation failure produces a structured semantic diagnostic. The tree
 typer's smaller per-region scratch index is still released at its region's end.
 
+Declaration owners are published with the final semantic arrays by
+`c_parse_publish_declaration_facts`: `CDeclaration.declaration_node_plus_one`
+selects the translation-unit child, `init_declarator_plus_one` selects its
+own declarator, and `initializer_node_plus_one` selects its optional last
+child. Zero denotes absence. `CEntity.init_declarator_plus_one` keeps the
+init-declarator at its finalized declaration anchor, including a local's
+`ASM_LABEL`; compatible earlier declarations do not replace it. Source-order
+extent cursors publish these links without a parent table or punctuation
+classification. `c_ast_declarator_name` follows only the inner-child chain,
+so function parameter names cannot substitute for a declaration's owner.
+The token-reference semantic model has no node provenance; independent owner
+fixtures check these links while model comparisons check the existing fields.
+
 **Candidates.** A fact candidate is an expression node (`IDENTIFIER` through
 `COMMA`, without braced lists and `_Generic` associations) of a *typed
 region*: a function body or a file-scope object's initializer that the

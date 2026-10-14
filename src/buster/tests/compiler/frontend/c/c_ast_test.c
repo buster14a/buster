@@ -2044,6 +2044,35 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisRes
     return difference;
 }
 
+// AST provenance is absent from the token-reference model above. Every named
+// file-scope declaration nevertheless needs one independently checked owner
+// before lowering can consume these links without reconstructing source.
+BUSTER_GLOBAL_LOCAL bool c_ast_test_declaration_owners_consistent(CAnalysisResult const* analysis, CAst const* ast)
+{
+    bool valid = true;
+    for (u32 index = 0; index < analysis->declaration_count && valid; index += 1)
+    {
+        CDeclaration const* declaration = analysis->declarations + index;
+        u32 owner = declaration->declaration_node_plus_one - 1;
+        u32 init = declaration->init_declarator_plus_one - 1;
+        u32 initializer = declaration->initializer_node_plus_one - 1;
+        valid = owner < ast->node_count && ast->tokens[owner] <= declaration->token_start;
+        bool named = declaration->name.length && declaration->kind != C_DECLARATION_TYPE && declaration->kind != C_DECLARATION_ASSEMBLY;
+        bool definition = declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition;
+        if (valid && named && !definition && ast->kinds[owner] == C_AST_DECLARATION && c_ast_list_count(ast, owner))
+        {
+            valid = init < ast->node_count && ast->kinds[init] == C_AST_INIT_DECLARATOR &&
+                    c_ast_subtree_begin(ast, owner) <= c_ast_subtree_begin(ast, init) && init < owner;
+        }
+        if (valid && init < ast->node_count)
+        {
+            valid = ((ast->data[init] & 4u) != 0) == (initializer < ast->node_count) &&
+                    (initializer == C_AST_NODE_INVALID || initializer + 1 == init);
+        }
+    }
+    return valid;
+}
+
 // The matching-delimiter index c_ast_spans_build reads (closer + 1 at each
 // opener, 0 elsewhere), built with a stack as CPositionIndex builds it. A
 // stream whose delimiters do not match has none.
@@ -2968,6 +2997,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         CAstFacts facts = {0};
         typed_syntax.ast_facts = c_ast_facts_create(&facts, ast) ? &facts : 0;
         CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
+        BUSTER_TEST_RAW(arguments, c_ast_test_declaration_owners_consistent(&typed, ast),
+                        string_format(arguments->arena, S8("{S8}: retained declaration owners"), label));
         CAstFactStatistics fact_counts = facts.statistics;
         c_ast_facts_release(&facts);
         u64 fact_gaps = 0;
@@ -6669,6 +6700,102 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
     return result;
 }
 
+// Explicit owner expectations stay separate from the token-reference model,
+// whose declarations have source anchors but no syntax-node identities.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_owners(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct T { int member; };\n"
+                        "extern int shared;\n"
+                        "int shared = 3, array[] = { 4, 5 };\n"
+                        "int (*callback)(int parameter);\n"
+                        "int named(int named_parameter);\n"
+                        "int named(int named_parameter) {\n"
+                        "  static int local[] = { 6, 7 };\n"
+                        "  register int reg asm(\"r12\");\n"
+                        "  int (*fn)(int shadow) = callback;\n"
+                        "  return shared + local[0];\n"
+                        "}\n"
+                        "int oldstyle(a) int a; { return a; }\n"
+                        "asm(\"\");\n");
+    String8 const names[] = {S8("T"), S8("shared"), S8("shared"), S8("array"), S8("callback"), S8("named"), S8("named"), S8("oldstyle"), S8("")};
+    u32 const owner_kinds[] = {C_AST_DECLARATION, C_AST_DECLARATION, C_AST_DECLARATION, C_AST_DECLARATION, C_AST_DECLARATION,
+                              C_AST_DECLARATION, C_AST_FUNCTION_DEFINITION, C_AST_FUNCTION_DEFINITION, C_AST_ASM_TOP_LEVEL};
+    u32 const initializer_kinds[] = {C_AST_KIND_COUNT, C_AST_KIND_COUNT, C_AST_NUMBER, C_AST_INITIALIZER_LIST, C_AST_KIND_COUNT,
+                                    C_AST_KIND_COUNT, C_AST_KIND_COUNT, C_AST_KIND_COUNT, C_AST_KIND_COUNT};
+    for (u32 layout = 0; layout <= C_AST_LAYOUT_EXPLICIT; layout += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){.layout = (CAstLayout)layout, .refill_batch = layout + 1});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CAst const* ast = &built.ast;
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            syntax.ast = ast;
+            syntax.ast_facts = &facts;
+            syntax.type_interning = true;
+            CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+            BUSTER_TEST(arguments, analysis.declaration_count == BUSTER_ARRAY_LENGTH(names));
+            for (u32 index = 0; index < analysis.declaration_count && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+            {
+                CDeclaration const* declaration = analysis.declarations + index;
+                u32 owner = declaration->declaration_node_plus_one - 1;
+                u32 init = declaration->init_declarator_plus_one - 1;
+                u32 initializer = declaration->initializer_node_plus_one - 1;
+                BUSTER_TEST(arguments, string_equal(declaration->name, names[index]));
+                bool retained = owner < ast->node_count;
+                BUSTER_TEST(arguments, retained && ast->kinds[owner] == owner_kinds[index] && ast->tokens[owner] == declaration->token_start);
+                bool has_init = index >= 1 && index <= 5;
+                BUSTER_TEST(arguments, has_init == (init < ast->node_count));
+                if (init < ast->node_count)
+                {
+                    u32 name = c_ast_declarator_name(ast, init);
+                    BUSTER_TEST(arguments, ast->kinds[init] == C_AST_INIT_DECLARATOR && name < ast->node_count &&
+                                               string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[name]]), names[index]));
+                    BUSTER_TEST(arguments, owner >= init && c_ast_subtree_begin(ast, owner) <= c_ast_subtree_begin(ast, init));
+                }
+                bool initialized = initializer_kinds[index] != C_AST_KIND_COUNT;
+                BUSTER_TEST(arguments, initialized == (initializer < ast->node_count));
+                if (initializer < ast->node_count)
+                {
+                    BUSTER_TEST(arguments, ast->kinds[initializer] == initializer_kinds[index] && initializer + 1 == init);
+                }
+            }
+            u32 locals = 0;
+            for (u32 entity = 0; entity < analysis.entity_count; entity += 1)
+            {
+                CEntity const* binding = analysis.entities + entity;
+                u32 init = binding->init_declarator_plus_one - 1;
+                if (init < ast->node_count)
+                {
+                    u32 name = c_ast_declarator_name(ast, init);
+                    BUSTER_TEST(arguments, ast->kinds[init] == C_AST_INIT_DECLARATOR && name < ast->node_count &&
+                                               (facts.flags[name] & C_AST_FACT_BOUND) && facts.payloads[name] == entity &&
+                                               ast->tokens[name] + 1 == binding->declaration_token_plus_one);
+                }
+                if (binding->kind == C_ENTITY_LOCAL)
+                {
+                    locals += 1;
+                    BUSTER_TEST(arguments, init < ast->node_count);
+                    if (string_equal(binding->name, S8("reg")) && init < ast->node_count)
+                    {
+                        BUSTER_TEST(arguments, (ast->data[init] & 1u) && ast->kinds[c_ast_child_at(ast, init, 1)] == C_AST_ASM_LABEL);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, locals == 3);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7134,6 +7261,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);

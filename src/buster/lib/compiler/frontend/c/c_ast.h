@@ -542,6 +542,8 @@ BUSTER_F_DECL u32 c_ast_child_count(CAst const* ast, u32 node);
 BUSTER_F_DECL u32 c_ast_list_count(CAst const* ast, u32 node);
 // The index-th child in source order, or C_AST_NODE_INVALID.
 BUSTER_F_DECL u32 c_ast_child_at(CAst const* ast, u32 node, u32 index);
+// The declared name on the inner-child chain, excluding parameter names.
+BUSTER_F_DECL u32 c_ast_declarator_name(CAst const* ast, u32 node);
 // Writes up to `capacity` child roots in source order; returns the child
 // count (which may exceed capacity).
 BUSTER_F_DECL u32 c_ast_children(CAst const* ast, u32 node, u32* roots, u32 capacity);

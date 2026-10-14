@@ -62,7 +62,7 @@
 // Local declarations read their DECLARATOR_NAME bindings from these facts;
 // their storage and assignment provenance come from CEntity. Declarator lists,
 // initializer presence and labeled-local predeclaration use node topology
-// (c_ir_declarator_name, c_parse_publish_declaration_facts; GitHub #4061 F4).
+// (c_ast_declarator_name, c_parse_publish_declaration_facts; GitHub #4061 F4).
 // Initializer-layout, attributes and VLA queries retain marked owner adapters.
 // No node id reaches the IR. Prepared control
 // expressions of a function are answered by node-indexed tables:
@@ -18425,7 +18425,6 @@ struct CIrLowerVlaLayoutState
 typedef struct CIrBodyTask CIrBodyTask;
 typedef struct CIrSwitchCase CIrSwitchCase;
 typedef struct CIrNodeList CIrNodeList;
-BUSTER_C_INTERNAL u32 c_ir_declarator_name(CAst const* ast, u32 node);
 BUSTER_C_INTERNAL CEntityId c_ir_declarator_entity(CIntegerIrBuilder* builder, u32 name);
 // A function containing labels may re-enter its token stream after jumping
 // over one or more declarations. Reserve fixed-size automatic objects in the
@@ -43702,42 +43701,6 @@ BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaL
     return emitted;
 }
 
-// The declared name follows the declarator's inner-child chain. Parameter
-// names are siblings of that chain and cannot substitute for the owner.
-BUSTER_C_INTERNAL u32 c_ir_declarator_name(CAst const* ast, u32 node)
-{
-    u32 result = C_AST_NODE_INVALID;
-    while (node != C_AST_NODE_INVALID && node < ast->node_count && result == C_AST_NODE_INVALID)
-    {
-        u32 kind = ast->kinds[node];
-        if (kind == C_AST_DECLARATOR_NAME)
-        {
-            result = node;
-        }
-        else if (kind == C_AST_INIT_DECLARATOR)
-        {
-            node = c_ast_child_at(ast, node, (ast->data[node] & (1u << 3)) != 0);
-        }
-        else if (kind == C_AST_DECLARATOR_ATTRIBUTED)
-        {
-            node = c_ast_child_at(ast, node, 1);
-        }
-        else if (kind == C_AST_DECLARATOR_POINTER && (ast->data[node] & 2u))
-        {
-            node = c_ast_child_at(ast, node, (ast->data[node] & 1u) != 0);
-        }
-        else if ((kind == C_AST_DECLARATOR_ARRAY || kind == C_AST_DECLARATOR_FUNCTION) && (ast->data[node] & 1u))
-        {
-            node = c_ast_child_at(ast, node, 0);
-        }
-        else
-        {
-            node = C_AST_NODE_INVALID;
-        }
-    }
-    return result;
-}
-
 BUSTER_C_INTERNAL CEntityId c_ir_declarator_entity(CIntegerIrBuilder* builder, u32 name)
 {
     CAstFacts const* facts = builder->syntax_facts;
@@ -43777,7 +43740,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     u32 end = state->end;
     *expression_pending_out = false;
     state->initializer_node = c_ir_init_declarator_initializer(builder->ast, state->node);
-    u32 name_node = c_ir_declarator_name(builder->ast, state->node);
+    u32 name_node = c_ast_declarator_name(builder->ast, state->node);
     CEntityId entity = c_ir_declarator_entity(builder, name_node);
     u32 name_index = name_node != C_AST_NODE_INVALID ? builder->ast->tokens[name_node] : end;
     if (name_index >= end || entity.value >= builder->parse.entity_count)
@@ -44131,7 +44094,7 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
     if (success && state->item < state->declarators->count)
     {
         u32 node = state->declarators->items[state->item];
-        u32 name = c_ir_declarator_name(builder->ast, node);
+        u32 name = c_ast_declarator_name(builder->ast, node);
         CEntityId entity = c_ir_declarator_entity(builder, name);
         success = entity.value < builder->parse.entity_count;
         if (success)
@@ -46531,7 +46494,7 @@ BUSTER_C_INTERNAL bool c_ir_declaration_declares_vla(CIntegerIrBuilder* builder,
     u32 floor = c_ast_subtree_begin(builder->ast, node);
     while (!result && cursor > floor && builder->ast->kinds[cursor] == C_AST_INIT_DECLARATOR)
     {
-        CEntityId entity = c_ir_declarator_entity(builder, c_ir_declarator_name(builder->ast, cursor));
+        CEntityId entity = c_ir_declarator_entity(builder, c_ast_declarator_name(builder->ast, cursor));
         if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL)
         {
             CTypeId type = builder->parse.entities[entity.value].type;
@@ -47675,7 +47638,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         declarators->items[item - 1] = cursor;
                         cursor = c_ast_subtree_begin(ast, cursor) - 1;
                     }
-                    CEntityId first_entity = c_ir_declarator_entity(builder, c_ir_declarator_name(ast, declarators->items[0]));
+                    CEntityId first_entity = c_ir_declarator_entity(builder, c_ast_declarator_name(ast, declarators->items[0]));
                     if (first_entity.value >= builder->parse.entity_count)
                     {
                         return false;
@@ -47697,7 +47660,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     return false;
                 }
                 u32 init_declarator = c_ast_list_count(ast, node) ? node - 1 : C_AST_NODE_INVALID;
-                u32 name_node = c_ir_declarator_name(ast, init_declarator);
+                u32 name_node = c_ast_declarator_name(ast, init_declarator);
                 CEntityId entity = c_ir_declarator_entity(builder, name_node);
                 u32 name_index = name_node != C_AST_NODE_INVALID ? ast->tokens[name_node] : end;
                 u32 initializer_node = c_ir_init_declarator_initializer(ast, init_declarator);
