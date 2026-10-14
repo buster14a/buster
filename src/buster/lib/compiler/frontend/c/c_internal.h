@@ -241,7 +241,6 @@ BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 // the literal; see the definition.
 BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                  u32 start, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
-BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
                                                    u32* invalid_specifier);
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
@@ -702,7 +701,7 @@ BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* res
 // The cold half of c_parse_label_address_prefix: the full proof, reached only
 // for a token that is actually the `&&` a label address is spelled with.
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
-// Whether `index` is the `&&` of a GNU label address. c_ir_unsupported_gnu_construct
+// Whether `index` is the `&&` of a GNU label address. c_parse_unsupported_gnu_construct
 // asks this of every token it scans, so the necessary condition is inline for
 // the same reason as c_parse_named_label_at above.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start,

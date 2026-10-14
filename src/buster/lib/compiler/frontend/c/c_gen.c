@@ -74,6 +74,12 @@
 // c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_node_may_prepare_control) or a call prepass
 // (c_ir_range_may_prepare_calls) that cannot find anything.
+// Assembly reads ASM/ASM_TOP_LEVEL, ordered operand section children and
+// label/clobber lists directly (c_ir_lower_inline_assembly_step). STRING
+// nodes retain each template run; token anchors fetch spelling/source only.
+// Dialect extension policy belongs to c_parse_unsupported_gnu_construct.
+// Local register bindings still have a marked declaration-link adapter until
+// the global declaration publication contract supplies INIT_DECLARATOR ids.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -4183,6 +4189,13 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
         .offset = token.offset,
         .length = (u32)c_token_length(builder->preprocess.spelling_base, token),
     };
+}
+
+// Token access at lowering's source boundary returns spelling only. The
+// anchor is retained provenance; callers cannot inspect grammar through it.
+BUSTER_C_INTERNAL String8 c_ir_source_spelling(CPreprocessResult const* preprocess, u32 token_index)
+{
+    return token_index < preprocess->token_count ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]) : (String8){0};
 }
 
 // Source extent of a block scope: from its first token to the token that
@@ -18577,20 +18590,20 @@ struct CIrLowerInlineAssemblyState
     String8* operand_names;
     String8* clobbers;
     String8 operand_name;
-    u32 separators[4];
+    u32* operand_nodes;
+    u32 node;
     u32 start;
     u32 end;
-    u32 open;
-    u32 close;
-    u32 template_end;
+    u32 template_node;
+    u32 labels_node;
     u32 separator_count;
     u32 operand_count;
     u32 output_count;
     u32 clobber_count;
-    u32 segment_index;
-    u32 segment_end;
+    u32 operand_cursor;
+    u32 operand_total;
+    u32 expression_node;
     u32 constraint_index;
-    u32 operand_close;
     u32 label_count;
     u64 temporary_mark;
     bool output;
@@ -44430,16 +44443,14 @@ BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, u3
 // expression -- leaves the class alone.
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u64* constraint_out)
 {
-    if (state->operand_close != state->constraint_index + 3 ||
+    u32 node = state->expression_node;
+    CAst const* ast = builder->syntax_tree;
+    if (node >= ast->node_count || ast->kinds[node] != C_AST_IDENTIFIER || c_ir_core_wrapped(builder, node) ||
         (!cpu_arch_is_x86(builder->target.cpu_arch) && builder->target.cpu_arch != CPU_ARCH_AARCH64))
     {
         return false;
     }
-    u32 identifier_index = state->constraint_index + 2;
-    if (builder->preprocess.tokens[identifier_index].kind != C_TOKEN_IDENTIFIER)
-    {
-        return false;
-    }
+    u32 identifier_index = ast->tokens[node];
     CEntityId entity_id = c_ir_identifier_entity(builder, identifier_index);
     if (entity_id.value >= builder->parse.entity_count)
     {
@@ -44489,7 +44500,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuild
 {
     ByteSlice bytes = {0};
     if (constraint_index >= builder->preprocess.token_count ||
-        !c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[constraint_index]), '"', &bytes))
+        !c_ir_decode_quoted(builder->arena, c_ir_source_spelling(&builder->preprocess, constraint_index), '"', &bytes))
     {
         return false;
     }
@@ -44498,11 +44509,11 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuild
            string_equal(text, S8("=&m")) || string_equal(text, S8("+&m"));
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, CToken token, bool output,
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 token_index, bool output,
                                                          u64* constraint_out)
 {
     ByteSlice bytes = {0};
-    if (!builder || !state || !constraint_out || !c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, token), '"', &bytes))
+    if (!builder || !state || !constraint_out || !c_ir_decode_quoted(builder->arena, c_ir_source_spelling(&builder->preprocess, token_index), '"', &bytes))
     {
         return false;
     }
@@ -44864,54 +44875,52 @@ BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_assembly_string(Arena* arena, CPreprocessResult const* preprocess, CAst const* ast, u32 node, ByteSlice* bytes_out)
 {
-    if (start != end)
+    bool valid = ast && node < ast->node_count && ast->kinds[node] == C_AST_STRING && ast->data[node] != 0;
+    u32 count = valid ? ast->data[node] : 0;
+    ByteSlice* fragments = arena_allocate(arena, ByteSlice, count);
+    u64 length = 0;
+    for (u32 index = 0; index < count && valid; index += 1)
     {
-        state->clobbers = arena_allocate(builder->arena, String8, end - start);
-        u32 index = start;
-        while (index < end)
-        {
-            if (builder->preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL)
-            {
-                return false;
-            }
-            ByteSlice name = {0};
-            if (!c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), '"', &name))
-            {
-                return false;
-            }
-            String8 clobber = {
-                .pointer = (char8*)name.pointer,
-                .length = name.length,
-            };
-            clobber = c_semantic_asm_clobber_name(builder->target, clobber);
-            if (!c_semantic_asm_clobber_valid(builder->target, clobber))
-            {
-                return false;
-            }
-            for (u32 previous = 0; previous < state->clobber_count; previous += 1)
-            {
-                if (string_equal(state->clobbers[previous], clobber))
-                {
-                    return false;
-                }
-            }
-            state->clobbers[state->clobber_count++] = clobber;
-            index += 1;
-            if (index == end)
-            {
-                break;
-            }
-            if (!c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_COMMA))
-            {
-                return false;
-            }
-            index += 1;
-        }
+        valid = c_ir_decode_quoted(arena, c_ir_source_spelling(preprocess, ast->tokens[node] + index), '"', fragments + index);
+        if (valid) length += fragments[index].length;
     }
+    if (valid)
+    {
+        u8* bytes = arena_allocate(arena, u8, length);
+        u64 offset = 0;
+        for (u32 index = 0; index < count; index += 1)
+        {
+            memcpy(bytes + offset, fragments[index].pointer, fragments[index].length);
+            offset += fragments[index].length;
+        }
+        *bytes_out = (ByteSlice){.pointer = bytes, .length = length};
+    }
+    return valid;
+}
 
-    return true;
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 node)
+{
+    CAst const* ast = builder->syntax_tree;
+    bool valid = node < ast->node_count && ast->kinds[node] == C_AST_ASM_CLOBBERS;
+    u32 count = valid ? c_ast_child_count(ast, node) : 0;
+    state->clobbers = arena_allocate(builder->arena, String8, count);
+    u32* children = arena_allocate(builder->temporary_arena, u32, count);
+    if (valid) c_ast_children(ast, node, children, count);
+    for (u32 index = 0; index < count && valid; index += 1)
+    {
+        ByteSlice name = {0};
+        valid = c_ir_assembly_string(builder->arena, &builder->preprocess, ast, children[index], &name);
+        String8 clobber = c_semantic_asm_clobber_name(builder->target, (String8){.pointer = (char8*)name.pointer, .length = name.length});
+        valid = valid && c_semantic_asm_clobber_valid(builder->target, clobber);
+        for (u32 previous = 0; previous < state->clobber_count && valid; previous += 1)
+        {
+            valid = !string_equal(state->clobbers[previous], clobber);
+        }
+        if (valid) state->clobbers[state->clobber_count++] = clobber;
+    }
+    return valid;
 }
 
 BUSTER_C_SHARED bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint)
@@ -45103,64 +45112,52 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operands_valid(CIntegerIrBuilder
     return !message.length;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 node)
 {
-    if (start >= end)
+    CAst const* ast = builder->syntax_tree;
+    bool valid = node < ast->node_count && ast->kinds[node] == C_AST_ASM_LABELS;
+    u32 count = valid ? c_ast_child_count(ast, node) : 0;
+    valid = valid && count != 0;
+    state->label_blocks = arena_allocate(builder->arena, IrBlockId, count);
+    state->label_names = arena_allocate(builder->arena, String8, count);
+    u32* children = arena_allocate(builder->temporary_arena, u32, count);
+    if (valid) c_ast_children(ast, node, children, count);
+    for (u32 index = 0; index < count && valid; index += 1)
     {
-        return false;
-    }
-    state->label_blocks = arena_allocate(builder->arena, IrBlockId, end - start);
-    state->label_names = arena_allocate(builder->arena, String8, end - start);
-    state->label_count = 0;
-    u32 index = start;
-    while (index < end)
-    {
-        if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+        u32 child = children[index];
+        valid = ast->kinds[child] == C_AST_IDENTIFIER;
+        u32 token = ast->tokens[child];
+        String8 name = c_ir_source_spelling(&builder->preprocess, token);
+        for (u32 operand = 0; operand < state->operand_count && valid; operand += 1)
         {
-            return false;
-        }
-        for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
-        {
-            if (state->operand_names[operand_index].length && string_equal(state->operand_names[operand_index], c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index])))
+            if (state->operand_names[operand].length && string_equal(state->operand_names[operand], name))
             {
-                builder->failure_message = string_format(builder->arena, S8("asm operand and label name '{S8}' conflict"),
-                                                         c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
-                builder->failure_token_index = index;
-                return false;
+                builder->failure_message = string_format(builder->arena, S8("asm operand and label name '{S8}' conflict"), name);
+                valid = false;
             }
         }
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
-        if (!label)
+        CIrLabel* label = valid ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, name) : 0;
+        if (valid && !label)
         {
-            builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"),
-                                                     c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
-            builder->failure_token_index = index;
-            return false;
+            builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"), name);
+            valid = false;
         }
-        for (u32 previous = 0; previous < state->label_count; previous += 1)
+        for (u32 previous = 0; previous < state->label_count && valid; previous += 1)
         {
             if (state->label_blocks[previous].value == label->block.value)
             {
-                builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is listed more than once"),
-                                                         c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
-                builder->failure_token_index = index;
-                return false;
+                builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is listed more than once"), name);
+                valid = false;
             }
         }
-        state->label_blocks[state->label_count++] = label->block;
-        state->label_names[state->label_count - 1] = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]);
-        index += 1;
-        if (index == end)
+        if (valid)
         {
-            break;
+            state->label_blocks[state->label_count] = label->block;
+            state->label_names[state->label_count++] = name;
         }
-        if (!c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_COMMA))
-        {
-            return false;
-        }
-        index += 1;
+        else builder->failure_token_index = token;
     }
-    return state->label_count != 0;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_template_names_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, String8 assembly)
@@ -45451,29 +45448,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_special_literal_operands_valid(CInte
 
 BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
 {
-    u64 assembly_length = 0;
-    ByteSlice* fragments = arena_allocate(builder->arena, ByteSlice, state->template_end - (state->open + 1));
-    u32 fragment_count = 0;
-    for (u32 template_index = state->open + 1; template_index < state->template_end; template_index += 1)
-    {
-        if (!c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[template_index]), '"', &fragments[fragment_count]))
-        {
-            return false;
-        }
-        assembly_length += fragments[fragment_count++].length;
-    }
-    u8* assembly_bytes = arena_allocate(builder->arena, u8, assembly_length);
-    u64 assembly_offset = 0;
-    for (u32 fragment_index = 0; fragment_index < fragment_count; fragment_index += 1)
-    {
-        memcpy(assembly_bytes + assembly_offset, fragments[fragment_index].pointer, fragments[fragment_index].length);
-        assembly_offset += fragments[fragment_index].length;
-    }
-    ByteSlice assembly = {
-        .pointer = assembly_bytes,
-        .length = assembly_length,
-    };
-    if (!fragment_count)
+    ByteSlice assembly = {0};
+    if (!c_ir_assembly_string(builder->arena, &builder->preprocess, builder->syntax_tree, state->template_node, &assembly))
     {
         return false;
     }
@@ -45635,116 +45611,47 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
     BUSTER_CHECK(state);
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        state->open = state->start + 1;
-        while (state->open < state->end && builder->preprocess.tokens[state->open].kind == C_TOKEN_IDENTIFIER &&
-               // GNU spells the volatile qualifier three ways and the inline
-               // one three. The declaration-specifier scan already accepts all
-               // of them; the statement had been missing `__volatile`, which is
-               // what musl's 64-bit atomic bit operations happen to use.
-               (string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("volatile")) ||
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__volatile")) ||
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__volatile__")) ||
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("inline")) ||
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__inline")) ||
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__inline__")) ||
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("goto"))))
-        {
-            String8 qualifier = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]);
-            state->goto_qualifier |= string_equal(qualifier, S8("goto"));
-            state->volatile_qualifier |= string_equal(qualifier, S8("volatile")) || string_equal(qualifier, S8("__volatile")) ||
-                                         string_equal(qualifier, S8("__volatile__"));
-            state->open += 1;
-        }
-        if (state->open + 2 >= state->end || !c_token_is_punctuator(&builder->preprocess.tokens[state->open], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-            builder->preprocess.tokens[state->open + 1].kind != C_TOKEN_STRING_LITERAL)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        state->close = c_ir_matching_delimiter_cached(builder, state->open, state->end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (state->close != state->end - 1)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        state->template_end = state->open + 1;
-        while (state->template_end < state->close && builder->preprocess.tokens[state->template_end].kind == C_TOKEN_STRING_LITERAL)
-        {
-            state->template_end += 1;
-        }
-        memset(state->separators, 0xff, sizeof(state->separators));
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        for (u32 index = state->template_end; index < state->close; index += 1)
-        {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-            {
-                if (state->separator_count >= BUSTER_ARRAY_LENGTH(state->separators))
-                {
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    return;
-                }
-                state->separators[state->separator_count++] = index;
-            }
-        }
+        CAst const* ast = builder->syntax_tree;
+        bool valid = state->node < ast->node_count && ast->kinds[state->node] == C_AST_ASM;
+        u32 count = valid ? c_ast_child_count(ast, state->node) : 0;
+        u32 children[5] = {0};
+        valid = valid && count >= 1 && count <= BUSTER_ARRAY_LENGTH(children);
+        if (valid) c_ast_children(ast, state->node, children, count);
+        state->separator_count = count ? count - 1 : 0;
+        state->template_node = children[0];
+        state->goto_qualifier = valid && (ast->data[state->node] & C_AST_ASM_GOTO) != 0;
+        state->volatile_qualifier = valid && (ast->data[state->node] & C_AST_ASM_VOLATILE) != 0;
         state->asm_goto = state->goto_qualifier;
         if (state->separator_count == 4 && !state->goto_qualifier)
         {
             builder->failure_message = S8("four asm colon sections require the goto qualifier");
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            valid = false;
         }
         if (state->goto_qualifier && state->separator_count != 4)
         {
             builder->failure_message = S8("asm goto requires four colon sections");
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            valid = false;
         }
-        u32 clobber_start = state->separator_count >= 3 ? state->separators[2] + 1 : state->close;
-        u32 clobber_end = state->separator_count == 4 ? state->separators[3] : state->close;
-        if (state->separator_count >= 3 && !c_ir_inline_assembly_clobbers_parse(builder, state, clobber_start, clobber_end))
+        if (valid && state->separator_count >= 3 && !c_ir_inline_assembly_clobbers_parse(builder, state, children[3]))
         {
             builder->failure_message = S8("unsupported GNU inline assembly clobber");
+            valid = false;
+        }
+        state->labels_node = state->separator_count == 4 ? children[4] : C_AST_NODE_INVALID;
+        state->output_count = valid && count > 1 ? c_ast_child_count(ast, children[1]) : 0;
+        state->operand_total = state->output_count + (valid && count > 2 ? c_ast_child_count(ast, children[2]) : 0);
+        valid = valid && c_ir_lower_scratch_reservation(builder, sizeof(u32), state->operand_total, sizeof(u32));
+        state->operand_nodes = valid ? arena_allocate(builder->scratch_arena, u32, state->operand_total) : 0;
+        if (valid && count > 1) c_ast_children(ast, children[1], state->operand_nodes, state->output_count);
+        if (valid && count > 2) c_ast_children(ast, children[2], state->operand_nodes + state->output_count, state->operand_total - state->output_count);
+        state->operands = arena_allocate(builder->arena, IrValueId, state->operand_total);
+        state->constraints = arena_allocate(builder->arena, u64, state->operand_total);
+        state->operand_names = arena_allocate(builder->arena, String8, state->operand_total);
+        if (!valid)
+        {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        state->operands = arena_allocate(builder->arena, IrValueId, state->end - state->start);
-        state->constraints = arena_allocate(builder->arena, u64, state->end - state->start);
-        state->operand_names = arena_allocate(builder->arena, String8, state->end - state->start);
-        if (!state->separator_count)
-        {
-            c_ir_lower_frame_finish(builder, c_ir_finish_inline_assembly(builder, state), IR_VALUE_ID_INVALID);
-            return;
-        }
-        state->segment_index = state->separators[0] + 1;
-        state->segment_end = state->separator_count >= 2 ? state->separators[1] : state->close;
-        state->output = true;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
@@ -45819,7 +45726,7 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
             }
             state->operands[state->operand_count] = value;
         }
-        if (!c_ir_inline_assembly_constraint(builder, state, builder->preprocess.tokens[state->constraint_index], state->output,
+        if (!c_ir_inline_assembly_constraint(builder, state, state->constraint_index, state->output,
                                              state->constraints + state->operand_count))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -45827,213 +45734,58 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
         }
         state->operand_names[state->operand_count] = state->operand_name;
         state->operand_count += 1;
-        state->segment_index = state->operand_close + 1;
-        if (state->segment_index < state->segment_end)
-        {
-            if (!c_token_is_punctuator(&builder->preprocess.tokens[state->segment_index], C_PUNCTUATOR_COMMA))
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
-            }
-            state->segment_index += 1;
-        }
+        state->operand_cursor += 1;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
-    for (;;)
+    if (state->operand_cursor == state->operand_total)
     {
-        if (state->segment_index >= state->segment_end)
-        {
-            if (state->output)
-            {
-                state->output = false;
-                state->output_count = state->operand_count;
-                state->segment_index = state->separator_count >= 2 ? state->separators[1] + 1 : state->close;
-                state->segment_end = state->separator_count >= 3 ? state->separators[2] : state->close;
-                continue;
-            }
-            if (state->asm_goto && !c_ir_inline_assembly_labels_parse(builder, state, state->separators[3] + 1, state->close))
-            {
-                if (!builder->failure_message.length)
-                {
-                    builder->failure_message = S8("malformed asm goto label list");
-                }
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
-            }
-            bool success = c_ir_finish_inline_assembly(builder, state);
-            if (!success && !builder->failure_message.length)
-            {
-                builder->failure_message = S8("unsupported GNU inline assembly constraint or operand");
-            }
-            c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 index = state->segment_index;
-        state->operand_name = (String8){0};
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            if (index + 3 >= state->segment_end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER ||
-                !c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
-            }
-            state->operand_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
-            for (u32 previous = 0; previous < state->operand_count; previous += 1)
-            {
-                if (string_equal(state->operand_names[previous], state->operand_name))
-                {
-                    builder->failure_message = string_format(builder->arena, S8("asm operand name '{S8}' is declared more than once"), state->operand_name);
-                    builder->failure_token_index = index + 1;
-                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    return;
-                }
-            }
-            index += 3;
-        }
-        if (builder->preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL || index + 2 >= state->segment_end ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        u32 close = c_ir_matching_delimiter_cached(builder, index + 1, state->segment_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close == UINT32_MAX || close == index + 2)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        state->constraint_index = index;
-        state->operand_close = close;
-        state->temporary_mark = builder->temporary_arena->position;
-        frame->stage = C_IR_LOWER_STAGE_CHILD;
-        c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                           .as.expression =
-                                               {
-                                                   .start = index + 2,
-                                                   .end = close,
-                                               },
-                                       });
+        bool success = !state->asm_goto || c_ir_inline_assembly_labels_parse(builder, state, state->labels_node);
+        if (!success && !builder->failure_message.length) builder->failure_message = S8("malformed asm goto label list");
+        success = success && c_ir_finish_inline_assembly(builder, state);
+        if (!success && !builder->failure_message.length) builder->failure_message = S8("unsupported GNU inline assembly constraint or operand");
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
         return;
     }
-}
-
-// The punctuators c_ir_unsupported_gnu_construct's bracket ladder reacts to:
-// the two nesting pairs it counts plus the ELLIPSIS that a GNU initializer
-// range is spelled with.
-#define C_IR_GNU_INITIALIZER_SCAN_PUNCTUATORS                                                                                                  \
-    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |                                      \
-     C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_ELLIPSIS))
-
-BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out)
-{
-    u32 initializer_parentheses = 0;
-    u32 initializer_brackets = 0;
-    // Every diagnostic this scan can produce -- initializer ranges, asm goto,
-    // case ranges -- is refused only outside the GNU dialects, so under one of
-    // them the walk over every token of every definition can only ever answer
-    // "nothing", and it answers that without walking.  The token index it
-    // would have left behind is read only beside a non-empty message.
-    // Measured on the stage-1 self-host: the unconditional walk was 0,9% of
-    // the compile's instructions.
-    u32 first = c_preprocess_dialect_is_gnu(preprocess.dialect) ? end : start;
-    for (u32 index = first; index < end; index += 1)
+    CAst const* ast = builder->syntax_tree;
+    u32 operand = state->operand_nodes[state->operand_cursor];
+    u32 count = c_ast_child_count(ast, operand);
+    u32 children[3] = {0};
+    bool valid = ast->kinds[operand] == C_AST_ASM_OPERAND && count >= 2 && count <= BUSTER_ARRAY_LENGTH(children);
+    if (valid) c_ast_children(ast, operand, children, count);
+    state->operand_name = (String8){0};
+    if (valid && count == 3)
     {
-        CToken token = preprocess.tokens[index];
-        // One set test stands in front of the bracket ladder: most scanned
-        // tokens are none of these five, and the ones that are pay the same
-        // chain they always did.
-        if (c_punctuator_in_set(token.punctuator, C_IR_GNU_INITIALIZER_SCAN_PUNCTUATORS))
+        valid = ast->kinds[children[0]] == C_AST_ASM_SYMBOLIC_NAME;
+        state->operand_name = c_ir_source_spelling(&builder->preprocess, ast->tokens[children[0]]);
+        for (u32 previous = 0; previous < state->operand_count && valid; previous += 1)
         {
-            if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+            if (string_equal(state->operand_names[previous], state->operand_name))
             {
-                initializer_parentheses += 1;
-            }
-            else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
-            {
-                initializer_parentheses -= initializer_parentheses != 0;
-            }
-            else if (token.punctuator == C_PUNCTUATOR_LEFT_BRACKET)
-            {
-                initializer_brackets += 1;
-            }
-            else if (token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET)
-            {
-                initializer_brackets -= initializer_brackets != 0;
-            }
-            else if (!initializer_parentheses && initializer_brackets == 1)
-            {
-                *token_index_out = index;
-                return c_preprocess_dialect_is_gnu(preprocess.dialect)
-                           ? (String8){0}
-                           : S8("GNU initializer ranges are only available in GNU dialects");
-            }
-        }
-        // Computed goto and the label addresses it consumes are implemented
-        // extensions, not dialect grammar: GCC and Clang accept `goto *p` and
-        // `&&label` under -std=c11 (only -pedantic remarks), and both
-        // spellings are invalid C otherwise, so no conforming program changes
-        // meaning.  CPython's ceval.c is the load-bearing case -- upstream
-        // builds it -std=c11 with the computed-goto dispatch on.  This is the
-        // same principle that put __GNUC__ in every dialect: the dialect
-        // decides which *spellings* are keywords, not which extensions exist.
-        if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO) && index + 1 < end &&
-            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
-        {
-            continue;
-        }
-        if (token.kind == C_TOKEN_IDENTIFIER &&
-            c_token_in_well_known_set(preprocess.spelling_base, token,
-                                      C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)))
-        {
-            if (c_parse_asm_goto_qualifier(preprocess, index, end) && !c_preprocess_dialect_is_gnu(preprocess.dialect))
-            {
-                *token_index_out = index;
-                return S8("GNU extended asm goto is only available in GNU dialects");
-            }
-        }
-        if (token.kind != C_TOKEN_IDENTIFIER || !c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE))
-        {
-            continue;
-        }
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        for (u32 scan = index + 1; scan < end; scan += 1)
-        {
-            CToken case_token = preprocess.tokens[scan];
-            if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_ELLIPSIS))
-            {
-                *token_index_out = index;
-                return c_preprocess_dialect_is_gnu(preprocess.dialect) ? (String8){0} : S8("GNU case ranges are only available in GNU dialects");
-            }
-            // The label constant may itself be a conditional expression, so a
-            // ':' claimed by an unmatched '?' does not end the label.
-            else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_COLON) &&
-                     c_parse_label_colon_at(preprocess.tokens, index, scan))
-            {
-                break;
+                builder->failure_message = string_format(builder->arena, S8("asm operand name '{S8}' is declared more than once"), state->operand_name);
+                builder->failure_token_index = ast->tokens[children[0]];
+                valid = false;
             }
         }
     }
-    *token_index_out = UINT32_MAX;
-    return (String8){0};
+    u32 constraint = children[count == 3 ? 1 : 0];
+    state->expression_node = children[count == 3 ? 2 : 1];
+    valid = valid && ast->kinds[constraint] == C_AST_STRING;
+    state->constraint_index = ast->tokens[constraint];
+    state->output = state->operand_cursor < state->output_count;
+    u32 first = 0;
+    u32 last = 0;
+    valid = valid && c_ir_node_expression_provenance(builder, state->expression_node, &first, &last);
+    if (!valid)
+    {
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        return;
+    }
+    state->temporary_mark = builder->temporary_arena->position;
+    frame->stage = C_IR_LOWER_STAGE_CHILD;
+    c_ir_lower_frame_push(builder, (CIrLowerFrame){
+        .kind = C_IR_LOWER_FRAME_EXPRESSION,
+        .as.expression = {.node_plus_one = state->expression_node + 1, .start = first, .end = last + 1},
+    });
 }
 
 // The nodes a body's tables are built from: the subtrees of its items from
@@ -47458,6 +47210,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 CIrLowerInlineAssemblyState* inline_state = arena_allocate(builder->scratch_arena, CIrLowerInlineAssemblyState, 1);
                 *inline_state = (CIrLowerInlineAssemblyState){
+                    .node = node,
                     .start = first,
                     .end = semicolon,
                 };
@@ -60965,6 +60718,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                        .path = source_path,
                                                    });
     }
+    u32 assembly_cursor = 0;
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -60972,37 +60726,18 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        ByteSlice* fragments = arena_allocate(arena, ByteSlice, declaration.token_count);
-        u32 fragment_count = 0;
-        u64 source_length = 0;
-        u32 declaration_end = declaration.token_start + declaration.token_count;
-        u32 token_index = declaration.token_start + 1;
-        while (
-            token_index < declaration_end && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
-            (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("volatile")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__volatile")) ||
-             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__volatile__")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("inline")) ||
-             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__inline")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__inline__"))))
+        CAst const* ast = options.syntax_tree;
+        while (assembly_cursor < ast->node_count && ast->kinds[assembly_cursor] != C_AST_ASM_TOP_LEVEL)
         {
-            token_index += 1;
+            assembly_cursor += 1;
         }
-        bool valid_assembly = token_index < declaration_end && c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
-        token_index += valid_assembly;
-        while (valid_assembly && token_index < declaration_end && preprocess.tokens[token_index].kind == C_TOKEN_STRING_LITERAL)
+        bool valid_assembly = assembly_cursor < ast->node_count && ast->tokens[assembly_cursor] == declaration.token_start;
+        ByteSlice assembly = {0};
+        if (valid_assembly)
         {
-            if (!c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), '"', &fragments[fragment_count]))
-            {
-                valid_assembly = false;
-                break;
-            }
-            source_length += fragments[fragment_count++].length;
-            token_index += 1;
+            valid_assembly = c_ir_assembly_string(arena, &preprocess, ast, c_ast_child_at(ast, assembly_cursor, 0), &assembly);
+            assembly_cursor += 1;
         }
-        valid_assembly &=
-            fragment_count != 0 && token_index < declaration_end && c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        token_index += valid_assembly;
-        valid_assembly &= token_index < declaration_end && c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_SEMICOLON);
-        token_index += valid_assembly;
-        valid_assembly &= token_index == declaration_end;
         if (!valid_assembly)
         {
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
@@ -61012,18 +60747,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             };
             continue;
         }
-        char8* source = arena_allocate(arena, char8, source_length);
-        u64 source_offset = 0;
-        for (u32 fragment_index = 0; fragment_index < fragment_count; fragment_index += 1)
-        {
-            memcpy(source + source_offset, fragments[fragment_index].pointer, fragments[fragment_index].length);
-            source_offset += fragments[fragment_index].length;
-        }
         module->assemblies[module->assembly_count++] = (IrModuleAssembly){
             .source =
                 {
-                    .pointer = source,
-                    .length = source_length,
+                    .pointer = (char8*)assembly.pointer,
+                    .length = assembly.length,
                 },
             .source_range = c_ir_site_source_range(declaration.location, declaration.token_count),
         };
@@ -63341,20 +63069,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        u32 unsupported_token_index = UINT32_MAX;
-        String8 unsupported_construct = c_ir_unsupported_gnu_construct(
-            preprocess, declaration.token_start, declaration.body_start + declaration.body_token_count, &unsupported_token_index);
-        if (unsupported_construct.length)
-        {
-            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = string_format(arena, S8("in function '{S8}': {S8}"), declaration.name, unsupported_construct),
-                .location = unsupported_token_index < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[unsupported_token_index]) : c_preprocess_site_location(&preprocess, declaration.location),
-                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-            };
-            module->rejected_function_count += 1;
-            program->rejected_function_count += 1;
-            continue;
-        }
+        // Semantic analysis has already enforced dialect extension policy.
         if (!signatures[declaration_index].body_supported)
         {
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){

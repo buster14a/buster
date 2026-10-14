@@ -35807,7 +35807,122 @@ CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, 
     C_CENSUS_PHASE_END();
     return result;
 }
-BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
+// The punctuators c_parse_unsupported_gnu_construct's bracket ladder reacts to:
+// the two nesting pairs it counts plus the ELLIPSIS that a GNU initializer
+// range is spelled with.
+#define C_PARSE_GNU_INITIALIZER_SCAN_PUNCTUATORS                                                                                                  \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |                                      \
+     C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_ELLIPSIS))
+
+BUSTER_GLOBAL_LOCAL String8 c_parse_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out)
+{
+    u32 initializer_parentheses = 0;
+    u32 initializer_brackets = 0;
+    // Every diagnostic this scan can produce -- initializer ranges, asm goto,
+    // case ranges -- is refused only outside the GNU dialects, so under one of
+    // them the walk over every token of every definition can only ever answer
+    // "nothing", and it answers that without walking.  The token index it
+    // would have left behind is read only beside a non-empty message.
+    // Measured on the stage-1 self-host: the unconditional walk was 0,9% of
+    // the compile's instructions.
+    u32 first = c_preprocess_dialect_is_gnu(preprocess.dialect) ? end : start;
+    for (u32 index = first; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        // One set test stands in front of the bracket ladder: most scanned
+        // tokens are none of these five, and the ones that are pay the same
+        // chain they always did.
+        if (c_punctuator_in_set(token.punctuator, C_PARSE_GNU_INITIALIZER_SCAN_PUNCTUATORS))
+        {
+            if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+            {
+                initializer_parentheses += 1;
+            }
+            else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
+            {
+                initializer_parentheses -= initializer_parentheses != 0;
+            }
+            else if (token.punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+            {
+                initializer_brackets += 1;
+            }
+            else if (token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET)
+            {
+                initializer_brackets -= initializer_brackets != 0;
+            }
+            else if (!initializer_parentheses && initializer_brackets == 1)
+            {
+                *token_index_out = index;
+                return c_preprocess_dialect_is_gnu(preprocess.dialect)
+                           ? (String8){0}
+                           : S8("GNU initializer ranges are only available in GNU dialects");
+            }
+        }
+        // Computed goto and the label addresses it consumes are implemented
+        // extensions, not dialect grammar: GCC and Clang accept `goto *p` and
+        // `&&label` under -std=c11 (only -pedantic remarks), and both
+        // spellings are invalid C otherwise, so no conforming program changes
+        // meaning.  CPython's ceval.c is the load-bearing case -- upstream
+        // builds it -std=c11 with the computed-goto dispatch on.  This is the
+        // same principle that put __GNUC__ in every dialect: the dialect
+        // decides which *spellings* are keywords, not which extensions exist.
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO) && index + 1 < end &&
+            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
+        {
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(preprocess.spelling_base, token,
+                                      C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)))
+        {
+            if (c_parse_asm_goto_qualifier(preprocess, index, end) && !c_preprocess_dialect_is_gnu(preprocess.dialect))
+            {
+                *token_index_out = index;
+                return S8("GNU extended asm goto is only available in GNU dialects");
+            }
+        }
+        if (token.kind != C_TOKEN_IDENTIFIER || !c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE))
+        {
+            continue;
+        }
+        u32 parentheses = 0;
+        u32 brackets = 0;
+        for (u32 scan = index + 1; scan < end; scan += 1)
+        {
+            CToken case_token = preprocess.tokens[scan];
+            if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                parentheses += 1;
+            }
+            else if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+            {
+                parentheses -= 1;
+            }
+            else if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                brackets += 1;
+            }
+            else if (c_token_is_punctuator(&case_token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+            {
+                brackets -= 1;
+            }
+            else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_ELLIPSIS))
+            {
+                *token_index_out = index;
+                return c_preprocess_dialect_is_gnu(preprocess.dialect) ? (String8){0} : S8("GNU case ranges are only available in GNU dialects");
+            }
+            // The label constant may itself be a conditional expression, so a
+            // ':' claimed by an unmatched '?' does not end the label.
+            else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_COLON) &&
+                     c_parse_label_colon_at(preprocess.tokens, index, scan))
+            {
+                break;
+            }
+        }
+    }
+    *token_index_out = UINT32_MAX;
+    return (String8){0};
+}
 
 // The census of token shapes that sizes every table c_analyze_semantics
 // allocates: each counter below becomes one array's capacity, so all nine are
@@ -47516,7 +47631,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             c_parse_scope_add_entity(&result, scope, entity, parameter->symbol);
         }
         u32 unsupported_token_index = UINT32_MAX;
-        String8 unsupported_construct = c_ir_unsupported_gnu_construct(
+        String8 unsupported_construct = c_parse_unsupported_gnu_construct(
             preprocess, declaration->body_start, declaration->body_start + declaration->body_token_count, &unsupported_token_index);
         if (unsupported_construct.length)
         {

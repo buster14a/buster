@@ -5684,3 +5684,18 @@ diagnostic only:
 - Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+## Assembly lowering from nodes
+
+Inline assembly lowering consumes its `ASM` root, qualifier flags, ordered
+`ASM_OUTPUTS`/`ASM_INPUTS` children, `ASM_OPERAND` expression roots and symbolic
+names, and `ASM_CLOBBERS`/`ASM_LABELS` lists. A `STRING` node's retained run count
+selects template fragments; lowering only fetches their spelling. The same
+codec reads the `ASM_TOP_LEVEL` string child. The assembly template language
+and constraint/register validation retain their existing implementation.
+
+Operand continuations carry the exact expression node and retained source
+provenance, preserving evaluation order and memory-place recovery. Semantic
+analysis owns the token-based GNU dialect preflight; lowering no longer
+repeats it. The remaining local register-label adapter is retired with the
+published entity-to-`INIT_DECLARATOR` link in the global declaration migration.
