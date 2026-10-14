@@ -44010,6 +44010,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
     Arena* arena = temporary.arena;
     String8 input = buster_test_temporary_path(arena, S8("buster-tree-root-conditionals"), S8(".c"));
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    CPreprocessResult model_tokens = c_preprocess(arena, source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult model = c_parse(arena, model_tokens);
+    BUSTER_TEST(arguments, !model_tokens.diagnostic_count && model.analysis_complete && !model.diagnostic_count &&
+                           !model.lowering_validated && !model.ast_facts);
     for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
     {
         ByteSlice objects[2] = {0};
@@ -44039,7 +44044,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
         // The pilot also retains analysis's facts through lowering (GitHub
         // #4062), which leaves the object as it was (above).
         CAstFactStatistics facts = compiled[1].c_ast.facts;
-        BUSTER_TEST(arguments, compiled[0].c_ast.facts.nodes == 0 && compiled[0].c_ast.facts.retained_bytes == 0);
+        CAstFactStatistics own_facts = compiled[0].c_ast.facts;
+        BUSTER_TEST(arguments, own_facts.nodes == facts.nodes && own_facts.retained_bytes == facts.retained_bytes &&
+                               own_facts.regions == facts.regions && own_facts.candidates == facts.candidates && own_facts.stale == 0);
         BUSTER_TEST(arguments, facts.nodes && facts.retained_bytes && facts.regions == 3 && facts.candidates && facts.stale == 0);
     }
     // Nothing lowers a -fsyntax-only unit, so it retains no facts.
