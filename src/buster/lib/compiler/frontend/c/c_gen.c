@@ -25933,18 +25933,17 @@ BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 ca
                                               u32* callee_start_out, bool* indexed_out, bool* parenthesized_out)
 {
     CAst const* ast = builder->syntax_tree;
-    CToken const* tokens = builder->preprocess.tokens;
     u32 index = ast->tokens[call] - 1;
     u32 callee = c_ir_tree_first_child(ast, call);
+    u32 kind = ast->kinds[callee];
     u32 callee_start = index;
     bool indexed = false;
     bool parenthesized = false;
     u32 current = C_AST_NODE_INVALID;
-    CToken token = tokens[index];
-    if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    u32 open = c_ir_tree_closing_group_open(builder, callee);
+    if (open != C_AST_NODE_INVALID)
     {
-        u32 open = c_ir_tree_closing_group_open(builder, callee);
-        if (open != C_AST_NODE_INVALID && open >= start)
+        if (open >= start)
         {
             callee_start = open;
             parenthesized = true;
@@ -25958,7 +25957,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 ca
             parenthesized = false;
         }
     }
-    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+    else if (kind == C_AST_INDEX)
     {
         u32 base = c_ir_tree_subscript_base(builder, callee, start);
         if (base != C_AST_NODE_INVALID)
@@ -25973,36 +25972,31 @@ BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 ca
             current = base;
         }
     }
-    else if (token.kind == C_TOKEN_IDENTIFIER)
+    else if (kind == C_AST_IDENTIFIER || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW)
     {
         current = callee;
     }
-    // The member chain that leads to the callee: `a.b`, `a[i].b`, `(p)->b`,
-    // `f().b`.
+    // Follow the member's exact base. Its retained parentheses and kind say
+    // whether provenance begins at a name, a producing call's argument list,
+    // a group, or the base of an indexed designator.
     while (current != C_AST_NODE_INVALID)
     {
-        u32 kind = ast->kinds[current];
+        kind = ast->kinds[current];
         bool member = (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW) && ast->tokens[current] == callee_start && callee_start >= start + 2;
         u32 next = C_AST_NODE_INVALID;
         if (member)
         {
-            u32 base = current - 1;
-            u32 base_last = callee_start - 2;
-            CToken last = tokens[base_last];
-            if (last.kind == C_TOKEN_IDENTIFIER)
+            u32 base = c_ast_child_at(ast, current, 0);
+            u32 base_kind = ast->kinds[base];
+            open = c_ir_tree_closing_group_open(builder, base);
+            if (open != C_AST_NODE_INVALID)
             {
-                callee_start = base_last;
-                next = base;
-            }
-            else if (c_token_is_punctuator(&last, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                u32 open = c_ir_tree_closing_group_open(builder, base);
-                if (open != C_AST_NODE_INVALID && open >= start)
+                if (open >= start)
                 {
                     callee_start = open;
                 }
             }
-            else if (c_token_is_punctuator(&last, C_PUNCTUATOR_RIGHT_BRACKET))
+            else if (base_kind == C_AST_INDEX)
             {
                 u32 named = c_ir_tree_subscript_base(builder, base, start);
                 if (named != C_AST_NODE_INVALID)
@@ -26010,6 +26004,11 @@ BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 ca
                     callee_start = ast->tokens[named];
                     next = named;
                 }
+            }
+            else if (base_kind == C_AST_IDENTIFIER || base_kind == C_AST_MEMBER || base_kind == C_AST_MEMBER_ARROW)
+            {
+                callee_start = ast->tokens[base];
+                next = base;
             }
         }
         current = next;
@@ -26456,8 +26455,8 @@ BUSTER_C_INTERNAL void c_ir_prepared_call_suspend_preparation(CIntegerIrBuilder*
     }
 }
 
-BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
-                                                                                    CIrPreparedCallContinuation continuation, u32 start, u32 end,
+BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression_node(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                                    CIrPreparedCallContinuation continuation, u32 node, u32 start, u32 end,
                                                                                     bool va_list_operand)
 {
     frame->as.prepared_call.state->continuation = (u32)continuation;
@@ -26468,10 +26467,12 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expressio
         frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
         builder->va_list_builtin_operand = true;
     }
+    CIrPreparedCallStepResult result = C_IR_PREPARED_CALL_STEP_SUSPENDED;
     if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                             .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                             .as.expression =
                                                 {
+                                                    .node_plus_one = node + 1,
                                                     .start = start,
                                                     .end = end,
                                                 },
@@ -26482,30 +26483,45 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expressio
             builder->va_list_builtin_operand = frame->as.prepared_call.state->previous_va_list_operand;
         }
         builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
-        return C_IR_PREPARED_CALL_STEP_FAILED;
+        result = C_IR_PREPARED_CALL_STEP_FAILED;
     }
-    return C_IR_PREPARED_CALL_STEP_SUSPENDED;
+    return result;
 }
 
-BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
-                                                                               CIrPreparedCallContinuation continuation, u32 start, u32 end)
+BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                                    CIrPreparedCallContinuation continuation, u32 start, u32 end,
+                                                                                    bool va_list_operand)
+{
+    return c_ir_prepared_call_request_expression_node(builder, frame, continuation, C_AST_NODE_INVALID, start, end, va_list_operand);
+}
+
+BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place_node(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                               CIrPreparedCallContinuation continuation, u32 node, u32 start, u32 end)
 {
     frame->as.prepared_call.state->continuation = (u32)continuation;
     frame->stage = C_IR_LOWER_STAGE_CHILD;
     c_ir_prepared_call_suspend_preparation(builder, frame);
+    CIrPreparedCallStepResult result = C_IR_PREPARED_CALL_STEP_SUSPENDED;
     if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                             .kind = C_IR_LOWER_FRAME_PLACE,
                                             .as.place =
                                                 {
+                                                    .node_plus_one = node + 1,
                                                     .start = start,
                                                     .end = end,
                                                 },
                                         }))
     {
         builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
-        return C_IR_PREPARED_CALL_STEP_FAILED;
+        result = C_IR_PREPARED_CALL_STEP_FAILED;
     }
-    return C_IR_PREPARED_CALL_STEP_SUSPENDED;
+    return result;
+}
+
+BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                               CIrPreparedCallContinuation continuation, u32 start, u32 end)
+{
+    return c_ir_prepared_call_request_place_node(builder, frame, continuation, C_AST_NODE_INVALID, start, end);
 }
 
 // Aggregate exchanges compare the promoted object's representation. Keep the
@@ -29073,60 +29089,28 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
+                    CAst const* ast = builder->syntax_tree;
+                    CAstSpans const* spans = builder->syntax_spans;
+                    u32 callee_node = c_ast_child_at(ast, selected->node, 0);
                     u32 callee_start = selected->parenthesized_callee ? selected->token_index + 1 : selected->token_index;
                     u32 callee_end = selected->parenthesized_callee ? selected->open_index - 1 : selected->open_index;
                     if (selected->parenthesized_callee)
                     {
-                        // The "callee group" may be an inner call's argument
-                        // list rather than a parenthesized designator:
-                        // `pick(0)(5)` classifies with its group at `(0)`,
-                        // whose contents lower to an int, not a callable.
-                        // The same discovery link as the member-chain case
-                        // identifies it -- a prepared call's open_index at
-                        // this call's first token -- so hop to the chain
-                        // root and lower the whole inner call as the callee
-                        // value.
-                        u32 chained_root = selected->token_index;
-                        while (c_token_is_punctuator(&builder->preprocess.tokens[chained_root], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                        {
-                            u32 widened = chained_root;
-                            for (u32 inner_index = 0; inner_index < builder->prepared_call_count; inner_index += 1)
-                            {
-                                if (builder->prepared_calls[inner_index].open_index == chained_root)
-                                {
-                                    widened = builder->prepared_calls[inner_index].token_index;
-                                    break;
-                                }
-                            }
-                            if (widened == chained_root)
-                            {
-                                break;
-                            }
-                            chained_root = widened;
-                        }
-                        if (chained_root != selected->token_index)
+                        // A producing CALL's argument parentheses used to
+                        // stand in for the callee group. Its exact node now
+                        // owns the whole producing call, before this call's
+                        // arguments. Retain the old emission/provenance order.
+                        if (ast->kinds[callee_node] == C_AST_CALL && !c_ir_core_wraps(builder, callee_node, selected->token_index))
                         {
                             selected->emitting = true;
-                            return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, chained_root,
-                                                                         selected->open_index, false);
+                            return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
+                                                                              callee_node, spans->first[callee_node], selected->open_index, false);
                         }
-                        // A function designator written as `(*fp)(args)` is
-                        // the same callable value as `fp` after the C
-                        // function-to-pointer conversion.  Lower the value
-                        // expression without the redundant dereference: the
-                        // place machine intentionally only accepts a simple
-                        // identifier/field chain and cannot form a place for
-                        // a parenthesized field designator.  The dereference
-                        // is only redundant when the operand is a pointer to
-                        // a function: `(*q)(args)` through a pointer to a
-                        // function pointer -- SQLite reads a virtual-table
-                        // method that way -- really does read q first.
-                        if (callee_start < callee_end &&
-                            c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_STAR))
+                        // A grouped dereference is redundant only for a
+                        // pointer to a function. A pointer to a function
+                        // pointer must still be read before the call.
+                        if (ast->kinds[callee_node] == C_AST_DEREFERENCE && spans->first[callee_node] == callee_start)
                         {
-                            // Without the operand's type the dereference
-                            // cannot be judged redundant, and stripping it
-                            // could call q where (*q) was written.
                             IrTypeId operand_type = c_ir_predict_expression_type(builder, callee_start + 1, callee_end);
                             if (operand_type.value == IR_ID_UNDERLYING_INVALID)
                             {
@@ -29138,60 +29122,32 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                             if (!pointee || pointee->kind == IR_TYPE_FUNCTION)
                             {
                                 callee_start += 1;
+                                callee_node = c_ast_child_at(ast, callee_node, 0);
                             }
                         }
-                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
-                                                                     callee_end, false);
+                        return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
+                                                                          callee_node, callee_start, callee_end, false);
                     }
-                    // A callee chain rooted in a parenthesized base is not a
-                    // place the place machine can form -- that machine takes
-                    // identifier/field chains -- but its value is all the call
-                    // needs, and the expression machine produces it. Both
-                    // shapes appear: sed's `(pc - 1)->fninfo->getarg(...)`,
-                    // and SQLite's memdb VFS calling through `ORIGVFS(pVfs)
-                    // ->xDlOpen`, which expands to a cast over a postfix
-                    // chain. The group's first token is also this call's own
-                    // first token, so mark the call while the child runs: a
-                    // walk that reaches that token is walking inside the call
-                    // rather than arriving at one to consume.
-                    if (callee_start < callee_end && c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    u32 base = callee_node;
+                    while (c_ir_place_postfix_kind(ast->kinds[base]) && !c_ir_core_wrapped(builder, base))
                     {
-                        // The parenthesis may not be a grouped expression: a
-                        // chain rooted in a call keeps its callee record at
-                        // the inner call's argument list, because two calls
-                        // cannot share one first token in the token->call
-                        // index.  `Py_TYPE(self)->tp_free(self)` is the
-                        // shape, and it is how CPython frees every object.
-                        // Widen the expression to the inner call's own chain
-                        // root so the member is read off the call's result
-                        // rather than off `(self)` alone; the inner call is
-                        // not marked emitting, so the expression machine
-                        // consumes it as a value the way it consumes any
-                        // other prepared call.
-                        u32 expression_start = callee_start;
-                        while (expression_start < callee_end &&
-                               c_token_is_punctuator(&builder->preprocess.tokens[expression_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                        {
-                            u32 widened = expression_start;
-                            for (u32 inner_index = 0; inner_index < builder->prepared_call_count; inner_index += 1)
-                            {
-                                if (builder->prepared_calls[inner_index].open_index == expression_start)
-                                {
-                                    widened = builder->prepared_calls[inner_index].token_index;
-                                    break;
-                                }
-                            }
-                            if (widened == expression_start)
-                            {
-                                break;
-                            }
-                            expression_start = widened;
-                        }
-                        selected->emitting = true;
-                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, expression_start,
-                                                                     callee_end, false);
+                        base = c_ast_child_at(ast, base, 0);
                     }
-                    return c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start, callee_end);
+                    u32 group_open = c_ir_tree_closing_group_open(builder, base);
+                    bool grouped_base = group_open == callee_start ||
+                                        (ast->kinds[base] == C_AST_CAST && ast->tokens[base] == callee_start);
+                    if (grouped_base && callee_start < callee_end)
+                    {
+                        // The semantic span includes a producing call's own
+                        // callee, unlike its argument-list provenance anchor.
+                        // No token->call search or delimiter classification is
+                        // needed to recover that exact subtree.
+                        selected->emitting = true;
+                        return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
+                                                                          callee_node, spans->first[callee_node], callee_end, false);
+                    }
+                    return c_ir_prepared_call_request_place_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
+                                                                callee_node, callee_start, callee_end);
                 }
                 if (callee.value >= builder->function->value_count)
                 {

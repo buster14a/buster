@@ -2122,7 +2122,11 @@ byte.
   (`get_table()[index_once()](argument_once())`, #4195) keeps its producing
   CALL as the indexed base, including a grouped producer. The regression
   checks that the factory, index, argument and callback each execute once,
-  and that a short-circuit branch skips all four.
+  and that a short-circuit branch skips all four. Callee preparation reads
+  node kinds and retained parentheses; member bases use exact children.
+  Indirect callee requests carry the callee node (or a redundant function
+  dereference's operand) without a chained token-to-call search. Their
+  provenance ranges preserve the previous debug anchors.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment
