@@ -341,6 +341,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_blob_byte(BusterA64SemanticGeneratedB
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_blob_fill(BusterA64SemanticGeneratedBlob const* blob, u8* bytes, u32 blob_size)
 {
     bool valid = blob && blob->data && blob->blocks && blob->record_bytes &&
@@ -353,6 +354,7 @@ BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_blob_fill(BusterA64SemanticGenerate
     }
     return valid;
 }
+#endif
 
 // Decode every semantic blob on the calling thread and publish the ready flag
 // last. Complete prewarm remains a serial phase before `lane_run`; cold
