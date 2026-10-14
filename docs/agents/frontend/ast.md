@@ -2143,7 +2143,15 @@ byte.
   node kinds and retained parentheses; member bases use exact children.
   Indirect callee requests carry the callee node (or a redundant function
   dereference's operand) without a chained token-to-call search. Their
-  provenance ranges preserve the previous debug anchors.
+  provenance ranges preserve the previous debug anchors. Ordinary and builtin
+  argument requests take the exact CALL child at their retained ordinal;
+  _Generic and choose-expression continuations use the retained selected node.
+  The range-only request wrappers are deleted, and a missing node fails the
+  handoff. Argument counts own iteration; ranges preserve source provenance.
+  The existing per-call end cache also keeps one node word per actual
+  argument, so the default implicit tree needs one sibling walk per call.
+  This adds 4 bytes per cached argument, removes the temporary start cache
+  used to create the ends, and sizes prediction scratch by actual arguments.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment

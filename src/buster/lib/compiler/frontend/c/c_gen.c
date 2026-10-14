@@ -2859,8 +2859,8 @@ struct CIrPreparedCall
     bool parenthesized_callee;
     bool argument_ends_built;
     // The call's CALL or GENERIC_SELECTION node, lowering's
-    // private reference; and its arguments' ends once split
-    // (c_ir_call_argument_end).
+    // private reference; and cached argument ends followed by exact roots
+    // (c_ir_call_argument_end, c_ir_call_argument_node).
     u32 node;
     u32 argument_total;
     u32* argument_ends;
@@ -25234,22 +25234,47 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
     return c_ir_call_arguments_counted(builder, call, starts, ends, capacity, count_out, false);
 }
 
-// The token past argument `ordinal` of a prepared call: its `,`, or the
-// call's `)`. The bounds are split once per call and kept with it.
+// Cached source ends and exact roots of a prepared call's arguments. One
+// node word beside each existing end keeps wide implicit-layout CALLs linear;
+// child_at would otherwise rediscover a sibling suffix at every continuation.
 BUSTER_C_INTERNAL u32 c_ir_call_argument_end(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 ordinal)
 {
     if (!call->argument_ends_built)
     {
-        u32 count = 0;
-        c_ir_call_arguments_counted(builder, call, 0, 0, 0, &count, true);
-        call->argument_ends = arena_allocate(builder->arena, u32, count ? count : 1);
-        TemporalArena scratch = arena_begin_temporal(builder->temporary_arena);
-        u32* starts = arena_allocate(builder->temporary_arena, u32, count ? count : 1);
-        c_ir_call_arguments_counted(builder, call, starts, call->argument_ends, count, &call->argument_total, true);
-        scratch_end(scratch);
+        CAst const* ast = builder->syntax_tree;
+        CAstSpans const* spans = builder->syntax_spans;
+        bool callee = ast->kinds[call->node] == C_AST_CALL;
+        u32 count = c_ast_child_count(ast, call->node) - callee;
+        call->argument_ends = arena_allocate(builder->arena, u32, count ? (u64)count * 2 : 1);
+        call->argument_total = count;
+        u32 next = call->close_index + 1;
+        u32 position = count;
+        u32 begin = c_ast_subtree_begin(ast, call->node);
+        for (u32 cursor = call->node; cursor > begin && position; cursor = c_ast_subtree_begin(ast, cursor - 1))
+        {
+            u32 node = cursor - 1;
+            u32 first = spans->first[node];
+            if (first != C_AST_SPAN_NONE)
+            {
+                first -= c_ir_core_wraps(builder, node, call->open_index + 1);
+            }
+            first = first != C_AST_SPAN_NONE ? first : ast->tokens[node];
+            position -= 1;
+            call->argument_ends[position] = next - 1;
+            call->argument_ends[count + position] = node;
+            next = first;
+        }
         call->argument_ends_built = true;
     }
     return ordinal < call->argument_total ? call->argument_ends[ordinal] : call->close_index;
+}
+
+// Exact argument identity, read from the same sparse per-call cache as its
+// provenance. No source range can stand in for a missing argument root.
+BUSTER_C_INTERNAL u32 c_ir_call_argument_node(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 ordinal)
+{
+    c_ir_call_argument_end(builder, call, ordinal);
+    return ordinal < call->argument_total ? call->argument_ends[call->argument_total + ordinal] : C_AST_NODE_INVALID;
 }
 
 #define C_IR_CALL_SEPARATORS_CAPACITY 4u
@@ -25274,9 +25299,8 @@ BUSTER_C_INTERNAL void c_ir_call_separators(CIntegerIrBuilder* builder, u32 call
 
 BUSTER_C_INTERNAL u32 c_ir_call_argument_count(CIntegerIrBuilder* builder, CIrPreparedCall* call)
 {
-    u32 count = 0;
-    c_ir_call_arguments_counted(builder, call, 0, 0, 0, &count, true);
-    return count;
+    c_ir_call_argument_end(builder, call, 0);
+    return call->argument_total;
 }
 
 typedef struct CIrTypeCompatibilityTask CIrTypeCompatibilityTask;
@@ -26592,7 +26616,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expressio
         builder->va_list_builtin_operand = true;
     }
     CIrPreparedCallStepResult result = C_IR_PREPARED_CALL_STEP_SUSPENDED;
-    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+    if (node == C_AST_NODE_INVALID || !c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                             .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                             .as.expression =
                                                 {
@@ -26612,13 +26636,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expressio
     return result;
 }
 
-BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
-                                                                                    CIrPreparedCallContinuation continuation, u32 start, u32 end,
-                                                                                    bool va_list_operand)
-{
-    return c_ir_prepared_call_request_expression_node(builder, frame, continuation, C_AST_NODE_INVALID, start, end, va_list_operand);
-}
-
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place_node(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                                CIrPreparedCallContinuation continuation, u32 node, u32 start, u32 end)
 {
@@ -26626,7 +26643,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place_nod
     frame->stage = C_IR_LOWER_STAGE_CHILD;
     c_ir_prepared_call_suspend_preparation(builder, frame);
     CIrPreparedCallStepResult result = C_IR_PREPARED_CALL_STEP_SUSPENDED;
-    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+    if (node == C_AST_NODE_INVALID || !c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                             .kind = C_IR_LOWER_FRAME_PLACE,
                                             .as.place =
                                                 {
@@ -26642,11 +26659,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place_nod
     return result;
 }
 
-BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
-                                                                               CIrPreparedCallContinuation continuation, u32 start, u32 end)
-{
-    return c_ir_prepared_call_request_place_node(builder, frame, continuation, C_AST_NODE_INVALID, start, end);
-}
 
 // Aggregate exchanges compare the promoted object's representation. Keep the
 // atomic instruction integer-typed: two pointer views name the same object,
@@ -26801,11 +26813,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
         {
             // The continuation restores this flag; the place request does not change it.
             frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
-            step = c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, starts[0], ends[0]);
+            step = c_ir_prepared_call_request_place_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0]);
         }
         else
         {
-            step = c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, starts[0], ends[0], true);
+            step = c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0], true);
         }
     }
     else if (valid)
@@ -26818,7 +26830,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
             {
                 starts[0] += 1;
             }
-            step = c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION, starts[0], ends[0]);
+            step = c_ir_prepared_call_request_place_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0]);
         }
         else
         {
@@ -26845,7 +26857,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
                 destination_type = type->is_volatile ? type->unqualified_type : destination->canonical_type;
                 if (selected->builtin_va_copy && continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION)
                 {
-                    step = c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_COPY, starts[1], ends[1], true);
+                    step = c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_COPY, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], true);
                 }
                 else if (selected->builtin_va_copy)
                 {
@@ -26934,20 +26946,27 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // choice in the condition is already settled. Only a
                 // condition it leaves to lowering (__builtin_constant_p) has
                 // no row and is folded here.
-                u32 selected_start = UINT32_MAX;
-                u32 selected_end = UINT32_MAX;
-                u64 condition = 0;
-                if (argument_count != 3 ||
-                    (!c_ir_selection_answer(builder, selected->token_index, selected->close_index + 1, &selected_start, &selected_end) &&
-                     !c_ir_constant_condition_evaluate(builder, starts[0], ends[0], &condition)))
+                u32 selected_node = c_ast_facts_selection(builder->syntax_facts, selected->node);
+                u32 selected_start = 0;
+                u32 selected_end = 0;
+                if (argument_count != 3)
                 {
-                    return false;
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
-                if (selected_start == UINT32_MAX)
+                if (selected_node == C_AST_NODE_INVALID)
                 {
-                    selected_start = condition ? starts[1] : starts[2];
-                    selected_end = condition ? ends[1] : ends[2];
+                    u64 condition = 0;
+                    if (!c_ir_constant_condition_evaluate(builder, starts[0], ends[0], &condition))
+                    {
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    selected_node = c_ir_call_argument_node(builder, selected, condition ? 1 : 2);
                 }
+                if (selected_node == C_AST_NODE_INVALID)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                c_ir_span_expanded(builder->syntax_tree, builder->syntax_spans, selected_node, &selected_start, &selected_end);
                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CHOOSE)
                 {
                     if (!child_success)
@@ -26958,7 +26977,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, selected_start, selected_end, false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, selected_node, selected_start, selected_end, false);
                 }
             }
             else if (selected->builtin_types_compatible_p || selected->builtin_classify_type)
@@ -27049,7 +27068,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED, starts[0], ends[0], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0], false);
                 }
                 if (selected->result.value >= builder->function->value_count)
                 {
@@ -27078,14 +27097,14 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         if (selected->builtin_generic)
         {
+            u32 association_node = c_ast_facts_selection(builder->syntax_facts, selected->node);
             u32 association_start = 0;
             u32 association_end = 0;
-            bool selection_valid =
-                c_ir_selection_answer(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end);
-            if (!selection_valid)
+            if (association_node == C_AST_NODE_INVALID)
             {
-                return false;
+                return C_IR_PREPARED_CALL_STEP_FAILED;
             }
+            c_ir_span_expanded(builder->syntax_tree, builder->syntax_spans, association_node, &association_start, &association_end);
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_GENERIC)
             {
                 if (!child_success)
@@ -27099,8 +27118,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // The selected association is the only one lowered, and
                 // discovery never looked inside _Generic, so its calls are
                 // prepared by the child expression itself.
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_start,
-                                                             association_end, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_node, association_start, association_end, false);
             }
             selected->argument_count = 1;
             selected->emitted = true;
@@ -27179,7 +27197,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE, starts[0], ends[0], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0], false);
             }
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE)
             {
@@ -27381,9 +27399,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame,
-                                                                 C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_RESULT_PLACE,
-                                                                 starts[1], ends[1], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_RESULT_PLACE, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
                 }
             }
             if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP ||
@@ -27407,8 +27423,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE)
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, starts[1], ends[1],
-                                                                 false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
                 }
                 if (!child_success)
                 {
@@ -27426,7 +27441,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         return false;
                     }
                     frame->as.prepared_call.state->first = expected_value;
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, starts[2], ends[2], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, c_ir_call_argument_node(builder, selected, 2), starts[2], ends[2], false);
                 }
                 IrValueId expected = frame->as.prepared_call.state->first;
                 IrValueId desired = c_ir_emit_cast(builder, child_value, value_type_id, source);
@@ -27486,8 +27501,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, starts[1], ends[1],
-                                                                 false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
                 }
                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE)
                 {
@@ -27535,7 +27549,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 else
                 {
                     frame->as.prepared_call.state->first = expected;
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, starts[2], ends[2], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, c_ir_call_argument_node(builder, selected, 2), starts[2], ends[2], false);
                 }
                 if (!selected->builtin_atomic_generic)
                 {
@@ -27832,15 +27846,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_EXCHANGE)
                         {
                             frame->as.prepared_call.state->first = value;
-                            return c_ir_prepared_call_request_expression(
-                                builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_RESULT_PLACE,
-                                starts[2], ends[2], false);
+                            return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_RESULT_PLACE, c_ir_call_argument_node(builder, selected, 2), starts[2], ends[2], false);
                         }
                     }
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE, starts[1], ends[1], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
                 }
                 // C11's fetch-add on an atomic pointer is pointer arithmetic
                 // and scales by the element size; the GNU family's is not.
@@ -28140,9 +28152,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             if (continuation != C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT &&
                 continuation != C_IR_PREPARED_CALL_CONTINUATION_SSE2_COUNT)
             {
-                return c_ir_prepared_call_request_expression(builder, frame,
-                                                             C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT,
-                                                             starts[0], ends[0], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0], false);
             }
             if (!child_success)
             {
@@ -28171,9 +28181,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
                 frame->as.prepared_call.state->first = child_value;
-                return c_ir_prepared_call_request_expression(builder, frame,
-                                                             C_IR_PREPARED_CALL_CONTINUATION_SSE2_COUNT,
-                                                             starts[1], ends[1], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SSE2_COUNT, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
             }
             builder->failure_token_index = starts[1];
             IrValueId result = c_ir_emit_sse2_runtime_shift(builder, entry,
@@ -28232,7 +28240,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32 next = frame->as.prepared_call.state->argument_count;
             if (next < shape.operand_count)
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT, starts[next], ends[next], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT, c_ir_call_argument_node(builder, selected, next), starts[next], ends[next], false);
             }
             u64 immediate = 0;
             if (shape.immediate_count &&
@@ -28350,8 +28358,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     frame->as.prepared_call.state->argument_index += 1;
                 }
                 else
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT,
-                                                                 starts[written], ends[written], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT, c_ir_call_argument_node(builder, selected, written), starts[written], ends[written], false);
             }
             IrTypeId type = IR_TYPE_ID_INVALID;
             if (!c_ir_vendor_result_type(builder, selected->token_index, selected->close_index, &type))
@@ -28395,14 +28402,12 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 if (argument_count == 2)
                 {
                     frame->as.prepared_call.state->first = first;
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_TRANSFORM_SECOND,
-                        starts[1], ends[1], false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_TRANSFORM_SECOND, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
                 }
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_TRANSFORM_FIRST,
-                    starts[0], ends[0], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_TRANSFORM_FIRST, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0], false);
             }
             selected->result = c_ir_emit_integer_transform(builder, transform, first, second, token);
             if (selected->result.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
@@ -28430,7 +28435,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_UNARY, argument_start, argument_end, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_UNARY, c_ir_call_argument_node(builder, selected, 0), argument_start, argument_end, false);
             }
             if (operand.value >= builder->function->value_count)
             {
@@ -28592,7 +28597,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_STRLEN, argument_start, argument_end, false);
+                    return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_STRLEN, c_ir_call_argument_node(builder, selected, 0), argument_start, argument_end, false);
                 }
                 // Like the memory family, a non-constant operand calls the
                 // library and needs no <string.h> declaration in scope.
@@ -28635,7 +28640,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ALLOCA, size_start, size_end, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ALLOCA, c_ir_call_argument_node(builder, selected, 0), size_start, size_end, false);
             }
             size = c_ir_emit_cast(builder, size, builder->size_type, c_ir_token_source_range(builder, token));
             IrTypeId storage_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
@@ -28694,11 +28699,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
                 frame->as.prepared_call.state->first = child_value;
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_IMAGINARY, starts[1], ends[1], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_IMAGINARY, c_ir_call_argument_node(builder, selected, 1), starts[1], ends[1], false);
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL, starts[0], ends[0], false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0], false);
             }
             if (real_part.value >= builder->function->value_count || imaginary_part.value >= builder->function->value_count)
             {
@@ -28859,12 +28864,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
                 frame->as.prepared_call.state->first = child_value;
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND, separator + 1,
-                                                             selected->close_index, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND, c_ir_call_argument_node(builder, selected, 1), separator + 1, selected->close_index, false);
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST, argument_start, separator, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST, c_ir_call_argument_node(builder, selected, 0), argument_start, separator, false);
             }
             bool windows_runtime = builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->target.os == OPERATING_SYSTEM_WINDOWS;
             if (windows_runtime)
@@ -28927,7 +28931,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_PREFETCH, argument_start, first_end, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_PREFETCH, c_ir_call_argument_node(builder, selected, 0), argument_start, first_end, false);
             }
             (void)address;
             // The read/write and locality arguments are required to be integer
@@ -29009,7 +29013,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_ARG, argument_start, separator, true);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_ARG, c_ir_call_argument_node(builder, selected, 0), argument_start, separator, true);
             }
             if (!c_ir_va_list_operand_valid(builder, list))
             {
@@ -29097,7 +29101,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_IDENTITY, argument_start, first_end, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_IDENTITY, c_ir_call_argument_node(builder, selected, 0), argument_start, first_end, false);
             }
             selected->argument_count = 1;
             selected->emitted = true;
@@ -29112,7 +29116,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             selected->builtin_overflow != C_IR_OVERFLOW_BUILTIN_NONE)
         {
             u32 argument_count = frame->as.prepared_call.state->argument_count;
-            u32 argument_end = selected->close_index;
+            u32 argument_total = c_ir_call_argument_count(builder, selected);
             u32 argument_index = selected->open_index + 1;
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT)
             {
@@ -29129,7 +29133,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 selected->arguments = arena_allocate(builder->arena, IrValueId, argument_capacity ? argument_capacity : 1);
                 argument_count = 0;
             }
-            while (argument_index < argument_end)
+            while (argument_count < argument_total)
             {
                 u32 separator = c_ir_call_argument_end(builder, selected, argument_count);
                 if (separator == argument_index)
@@ -29138,7 +29142,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 frame->as.prepared_call.state->argument_count = argument_count;
                 frame->as.prepared_call.state->separator = separator;
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT, argument_index, separator, false);
+                return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT, c_ir_call_argument_node(builder, selected, argument_count), argument_index, separator, false);
             }
             selected->argument_count = argument_count;
             selected->result = selected->builtin_math_link_name.length
@@ -29155,7 +29159,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             continue;
         }
         // Splitting the argument list and resolving the callee depend only on
-        // the call's tokens, so they run on the first entry alone. Each
+        // the call's retained children and their source provenance, so they run on the first entry alone. Each
         // argument re-entry resumes from the declaration, callee and
         // signature saved in the call state below; redoing the split there
         // made an N-argument call cost N^2 token visits.
@@ -29168,11 +29172,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         else
         {
             TemporalArena call_argument_temporary = arena_begin_temporal(builder->temporary_arena);
-            u32 argument_capacity = selected->close_index - selected->open_index;
+            u32 argument_capacity = c_ir_call_argument_count(builder, selected);
             u32* argument_starts = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
             u32* argument_ends = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
             u32 predicted_argument_index = selected->open_index + 1;
-            while (predicted_argument_index < selected->close_index)
+            while (predicted_argument_count < argument_capacity)
             {
                 u32 separator = c_ir_call_argument_end(builder, selected, predicted_argument_count);
                 if (separator == predicted_argument_index || predicted_argument_count >= argument_capacity)
@@ -29493,7 +29497,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             selected->arguments[argument_count++] = value;
             index = frame->as.prepared_call.state->separator + 1;
         }
-        while (index < argument_end)
+        while (argument_count < selected->argument_total)
         {
             u32 separator = c_ir_call_argument_end(builder, selected, argument_count);
             if (separator == index)
@@ -29516,7 +29520,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             frame->as.prepared_call.state->argument_count = argument_count;
             frame->as.prepared_call.state->argument_index = index;
             frame->as.prepared_call.state->separator = separator;
-            return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT, index, separator, false);
+            return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT, c_ir_call_argument_node(builder, selected, argument_count), index, separator, false);
         }
         // Too few arguments for the parameters the callee does declare. The
         // direct call reports this from its name resolution, which never
