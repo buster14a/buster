@@ -10444,7 +10444,12 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                 CTypeId* saved_sources = machine->fact_parameter_sources;
                 u32 saved_begin = machine->fact_parameter_begin;
                 u32 saved_capacity = machine->fact_parameter_capacity;
-                u64 capacity64 = (u64)after - first + 64;
+                bool parameters = false;
+                for (u32 child = c_ast_subtree_begin(ast, node); child < node && !parameters; child += 1)
+                {
+                    parameters = ast->kinds[child] == C_AST_DECLARATOR_FUNCTION;
+                }
+                u64 capacity64 = parameters ? (u64)after - first + 64 : 0;
                 u32 capacity = capacity64 <= UINT32_MAX ? (u32)capacity64 : 0;
                 machine->fact_parameter_sources = capacity ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CTypeId, capacity) : 0;
                 machine->fact_parameter_begin = checkpoint.parameter_count;
@@ -10453,8 +10458,9 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                 {
                     memset(machine->fact_parameter_sources, 0xff, sizeof(CTypeId) * capacity);
                 }
-                facts->recipe_failed = facts->recipe_failed || !machine->fact_parameter_sources;
-                machine->failed = machine->failed || !machine->fact_parameter_sources;
+                bool refused_parameters = parameters && !machine->fact_parameter_sources;
+                facts->recipe_failed = facts->recipe_failed || (refused_parameters && !c_parse_body_scratch_exhausted());
+                machine->failed = machine->failed || refused_parameters;
                 CTypeId base = C_TYPE_ID_INVALID;
                 CTypeId type = machine->failed ? C_TYPE_ID_INVALID : c_parse_identity_type_name_detail(machine, result, preprocess, node_scope, first, after, &base);
                 bool sound = type.value < result->type_count && base.value < result->type_count && !machine->failed &&
@@ -46642,6 +46648,10 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         arena_set_position(machine->scratch_arena, validation_mark);
         if (exhausted)
         {
+            // A guarded allocation canceled this body's query. Its explicit
+            // machine refusal belongs to the body diagnostic; later bodies
+            // begin with their full frame/task budgets and a clear status.
+            machine->failed = false;
             result->diagnostic_count = body_diagnostic_mark;
             result->warning_count = body_warning_mark;
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
