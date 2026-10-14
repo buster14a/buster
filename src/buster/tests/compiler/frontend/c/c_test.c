@@ -43382,6 +43382,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting(UnitTestArguments* argum
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_hoisting_node_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_prepared_control_identity_replay());
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_WINDOWS
     String8 source = S8(
         "static int ticks;\n"

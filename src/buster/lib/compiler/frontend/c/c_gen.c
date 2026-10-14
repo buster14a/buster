@@ -24451,7 +24451,9 @@ BUSTER_C_INTERNAL void c_ir_prepared_control_expression_end(CIntegerIrBuilder* b
         u32* mark = builder->prepared_control_emitted_marks + (node - builder->prepared_control_node_start);
         CIrPreparedControlExpression* previous = *mark && *mark - 1 < builder->prepared_control_expression_count
                                                     ? builder->prepared_control_expressions + (*mark - 1) : 0;
-        bool covered = previous && previous->emitted && previous->first_node <= node && node <= previous->last_node;
+        // Its own stale mark can name this reused row before its wider
+        // interval has been marked; it proves no skipped node has a mark.
+        bool covered = previous && previous != expression && previous->emitted && previous->first_node <= node && node <= previous->last_node;
         u32 last = covered ? BUSTER_MIN(previous->last_node, expression->last_node) : node;
         *mark = expression_index + 1;
         node = last + 1;
@@ -24485,6 +24487,71 @@ BUSTER_C_INTERNAL void c_ir_prepared_control_expression_rollback(CIntegerIrBuild
     }
     builder->prepared_control_lowering_count = kept;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// A token-free structural tree: INDEX(ADD(0, 1), ADD(3, 4)), then a CALL
+// whose callee is that INDEX and whose argument is node 7. A released inner
+// group's row is reused for a wider interval, as a typeof replay can do.
+bool c_test_prepared_control_identity_replay(void)
+{
+    u8 kinds[] = {C_AST_NUMBER, C_AST_NUMBER, C_AST_ADD, C_AST_NUMBER, C_AST_NUMBER, C_AST_ADD, C_AST_INDEX, C_AST_NUMBER, C_AST_CALL};
+    u32 extents[] = {1, 1, 3, 1, 1, 3, 7, 1, 9};
+    CAst ast = {.kinds = kinds, .extents = extents, .node_count = BUSTER_ARRAY_LENGTH(kinds)};
+    CIrPreparedControlExpression records[4] = {0};
+    u32 heads[BUSTER_ARRAY_LENGTH(kinds)] = {0};
+    u32 marks[BUSTER_ARRAY_LENGTH(kinds)] = {0};
+    u32 stack[BUSTER_ARRAY_LENGTH(records)] = {0};
+    CIntegerIrBuilder builder = {.syntax_tree = &ast, .prepared_control_expressions = records,
+                                .prepared_control_expression_count = 1, .prepared_control_expression_capacity = BUSTER_ARRAY_LENGTH(records),
+                                .prepared_control_node_heads = heads, .prepared_control_emitted_marks = marks,
+                                .prepared_control_lowering_stack = stack, .prepared_control_node_count = BUSTER_ARRAY_LENGTH(kinds)};
+    records[0] = (CIrPreparedControlExpression){.node = 2, .wrapping = 1, .lowering = true};
+    c_ir_prepared_control_expression_begin(&builder, 0);
+    records[0].lowering = false;
+    records[0].emitted = true;
+    c_ir_prepared_control_expression_end(&builder, 0);
+    bool valid = c_ir_prepared_control_expression_find(&builder, 2, 1) == records &&
+                 c_ir_prepared_control_expression_contains(&builder, 0) && !c_ir_prepared_control_expression_contains(&builder, 3);
+    c_ir_prepared_control_expression_rollback(&builder, 0);
+    valid = valid && !c_ir_prepared_control_expression_find(&builder, 2, 1) && !c_ir_prepared_control_expression_contains(&builder, 0);
+    records[0] = (CIrPreparedControlExpression){.node = 6, .wrapping = 2, .lowering = true};
+    builder.prepared_control_expression_count = 1;
+    c_ir_prepared_control_expression_begin(&builder, 0);
+    valid = valid && c_ir_prepared_control_expression_contains_group(&builder, 6, 1) &&
+            !c_ir_prepared_control_expression_contains_group(&builder, 6, 2);
+    records[0].lowering = false;
+    records[0].emitted = true;
+    c_ir_prepared_control_expression_end(&builder, 0);
+    for (u32 node = 0; node <= 6; node += 1)
+    {
+        valid = valid && c_ir_prepared_control_expression_contains(&builder, node);
+    }
+    c_ir_prepared_control_expression_rollback(&builder, 0);
+    records[0] = (CIrPreparedControlExpression){.node = 6, .lowering = true};
+    builder.prepared_control_expression_count = 1;
+    c_ir_prepared_control_expression_begin(&builder, 0);
+    valid = valid && records[0].first_node == 3 && records[0].last_node == 5 &&
+            c_ir_prepared_control_expression_contains_group(&builder, 5, 1) &&
+            !c_ir_prepared_control_expression_contains_group(&builder, 2, 1);
+    records[1] = (CIrPreparedControlExpression){.node = 6, .wrapping = 1, .lowering = true};
+    builder.prepared_control_expression_count = 2;
+    c_ir_prepared_control_expression_begin(&builder, 1);
+    valid = valid && c_ir_prepared_control_expression_find(&builder, 6, 0) == records &&
+            c_ir_prepared_control_expression_find(&builder, 6, 1) == records + 1;
+    c_ir_prepared_control_expression_rollback(&builder, 1);
+    valid = valid && c_ir_prepared_control_expression_find(&builder, 6, 0) == records &&
+            !c_ir_prepared_control_expression_find(&builder, 6, 1) && builder.prepared_control_lowering_count == 1;
+    c_ir_prepared_control_expression_rollback(&builder, 0);
+    records[0] = (CIrPreparedControlExpression){.node = 8, .lowering = true};
+    builder.prepared_control_expression_count = 1;
+    c_ir_prepared_control_expression_begin(&builder, 0);
+    valid = valid && records[0].first_node == 7 && records[0].last_node == 7 &&
+            c_ir_prepared_control_expression_contains_group(&builder, 7, 1) &&
+            !c_ir_prepared_control_expression_contains_group(&builder, 6, 1) &&
+            !c_ir_prepared_control_expression_contains_group(&builder, 8, 1);
+    return valid;
+}
+#endif
 
 BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
 
