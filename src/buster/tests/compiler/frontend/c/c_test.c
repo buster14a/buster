@@ -38214,6 +38214,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_parameter_expression_type(UnitTe
         {S8("void consume(char ***); int f(void) { char *a[3] = {0}; consume(&a); return 0; }"), false},
         {S8("void consume(int **); int f(int a[const 3]) { consume(&a); return 0; }"), false},
         {S8("void consume(int **); int f(const int a[3]) { consume(&a); return 0; }"), false},
+        // A qualifier on an array typedef belongs to the element, not the
+        // adjusted pointer. Preserve refusal of these wrong target types
+        // while the broader qualified-alias adjustment remains #4183.
+        {S8("typedef int A[3]; void consume(int *const *); int f(const A a) { consume(&a); return 0; }"), false},
+        {S8("typedef int A[3]; void consume(int *volatile *); int f(volatile A a) { consume(&a); return 0; }"), false},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {

@@ -6200,25 +6200,27 @@ BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, 
     return type;
 }
 
-// Keep the declared array for parameter-bound/VLA ownership, but every use of
-// its identifier denotes the adjusted pointer (C17 6.7.6.3p7), even under &.
+// Keep the declared array for parameter-bound/VLA ownership; an unqualified
+// outer array's identifier denotes the adjusted pointer (C17 6.7.6.3p7), even
+// under &. Qualified array aliases keep their existing path pending #4183:
+// their outer qualifiers belong to elements, not to this pointer.
 // Ordinary arrays retain their type, so &local still points at the whole array.
 // The read-only tree typer declines if the query has not interned this row.
 BUSTER_C_SHARED CTypeId c_parse_expression_entity_type(CParseResult* result, CEntity const* entity, bool existing_only)
 {
     CTypeId type = entity->type;
-    if (entity->kind == C_ENTITY_PARAMETER && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
+    if (entity->kind == C_ENTITY_PARAMETER && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY &&
+        !result->types[type.value].is_const && !result->types[type.value].is_volatile &&
+        !result->types[type.value].is_restrict && !result->types[type.value].is_atomic)
     {
         CType array = result->types[type.value];
-        bool pointer_const = array.is_const || (array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const);
+        bool pointer_const = array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const;
         CType pointer = {
             .element_type = array.element_type,
             .return_type = C_TYPE_ID_INVALID,
             .array_bound = C_ARRAY_BOUND_INVALID,
             .kind = C_TYPE_POINTER,
             .is_const = pointer_const,
-            .is_volatile = array.is_volatile,
-            .is_restrict = array.is_restrict,
         };
         type = existing_only ? c_parse_interned_type(result, pointer) : c_parse_intern_type(result, pointer);
     }

@@ -6,7 +6,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 
 ## Array parameter expression types
 
-An identifier denoting an array parameter has its adjusted pointer type in
+An identifier denoting a parameter with an unqualified outer array row has its adjusted pointer type in
 expression queries, including under address-of. `char *argv[]` therefore
 permits `char ***p = &argv`, while the address of a local `char *a[3]` retains
 pointer-to-array type. `c_parse_expression_entity_type` supplies this rule to
@@ -19,6 +19,10 @@ parameter's bracket `const` are retained. The registered
 conversions in semantic-only analysis and both canonical frontend forms;
 `c_test_array_parameter_address_runtime` checks pointer-object mutation and
 multidimensional parameters with both allocators and tree/query routes (#4173).
+Qualifiers applied to an array typedef remain on the existing path pending
+[#4183](https://github.com/buster14a/buster/issues/4183); they cannot be moved to
+the pointer to disguise lost element qualifiers. Wrong-target const/volatile
+alias conversions remain rejected.
 
 ## Transparent-union pointer arguments
 
