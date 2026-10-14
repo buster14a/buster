@@ -210,6 +210,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_storage_scaling_tests(UnitTe
     return result;
 }
 
+// Root output crosses several allocation batches, then its storage is reused
+// by the next line. Final tokens and their invocation locations must survive.
+// A caller-owned phase arena must remain excluded from that reuse too.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_line_output_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 line_counts[] = {16, 128};
+    for (u32 supplied_phase = 0; supplied_phase < 2; supplied_phase += 1)
+    {
+        u64 peaks[BUSTER_ARRAY_LENGTH(line_counts)] = {0};
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(line_counts); size_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 replacement = c_macro_storage_nest(temporary.arena, S8("x+"), S8("x"), S8(""), 64);
+            String8 lines = c_macro_storage_nest(temporary.arena, S8("R(7);\n"), S8(""), S8(""), line_counts[size_index]);
+            String8 source = string_format(temporary.arena, S8("#define R(x) {S8}\n{S8}"), replacement, lines);
+            String8 expression = c_macro_storage_nest(temporary.arena, S8("7+"), S8("7;"), S8(""), 64);
+            String8 expected = c_macro_storage_nest(temporary.arena, expression, S8(""), S8(""), line_counts[size_index]);
+            Arena* phase = supplied_phase ? arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)}) : 0;
+            CPreprocessResult actual = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .source_path = S8("line-output.c"),
+                .phase_arena = phase,
+                .retain_output_spacing = true,
+            });
+            BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+            BUSTER_TEST(arguments, actual.detail->preprocessed.expansions == line_counts[size_index]);
+            BUSTER_TEST(arguments, actual.detail->macro_output_node_count == line_counts[size_index] * 130);
+            BUSTER_TEST(arguments, actual.detail->macro_output_batch_count * 8 < actual.detail->macro_output_node_count);
+            peaks[size_index] = actual.detail->macro_line_peak_bytes;
+            BUSTER_TEST(arguments, peaks[size_index] != 0);
+            // Overwrite the reusable output scratch after preprocessing as
+            // well as between its lines; only the sealed result is inspected.
+            Arena* conflicts[] = {temporary.arena, phase};
+            Arena* line_arena = thread_context_get_scratch(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            if (line_arena)
+            {
+                TemporalArena overwrite = arena_begin_temporal(line_arena);
+                memset(arena_allocate(line_arena, u8, peaks[size_index]), 0xa5, peaks[size_index]);
+                scratch_end(overwrite);
+            }
+            UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual, expected);
+            result.test_count += compared.test_count;
+            result.succeeded_test_count += compared.succeeded_test_count;
+            for (u32 line = 0; line < line_counts[size_index]; line += 1)
+            {
+                CSourceLocation location = c_preprocess_token_location(&actual, actual.tokens[line * 130]);
+                BUSTER_TEST(arguments, location.line == line + 2);
+                BUSTER_STRING_TEST(arguments, actual.files[location.file], S8("line-output.c"));
+            }
+            if (phase)
+            {
+                arena_destroy(phase, 1);
+            }
+            c_test_scratch_end(temporary);
+        }
+        BUSTER_TEST(arguments, peaks[0] == peaks[1]);
+    }
+    return result;
+}
+
 // Definition-owned argument demand is reused, never a previous expansion's
 // tokens or stamps. Count checks pin both omitted work and once-only prescan.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArguments* arguments)
@@ -2139,6 +2199,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_trigraph_preprocess_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_line_output_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_reservation_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_rlimit_tests);
     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_demand_tests);

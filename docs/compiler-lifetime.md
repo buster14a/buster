@@ -57,6 +57,20 @@ together for the same reason.
 
 The registered Linux x86-64 regression also runs the ordinary `-E -o` path in a fresh process. After prewarming and parsing, the child measures its virtual size and applies a checked `RLIMIT_AS` allowance for the 31 GiB preprocessing phase arena, three 1 GiB preprocessing base arenas, an 8 GiB macro arena, and 2 GiB of setup headroom. Its one in-memory input uses the driver's single-input fast path, which executes in the already measured caller/test arena; it does not reserve a new 32 GiB compiler unit arena. The bound must leave the phase and preprocessing base reservations available while a macro arena reservation fails; the diagnostic identifies whether the failed request was the 8 GiB argument arena or the 8 GiB expansion arena. The child records the measured baseline, each reservation allowance, the planned limit, and the applied `RLIMIT_AS` in the captured diagnostic stream. The parent requires that exact macro-reservation diagnostic and exit status 1 without a signal, and verifies that preprocessing published no output file; an unlimited child control must publish exactly the token sequence `int value = (7+1);` (whitespace ignored), so the original `F(7)` invocation cannot satisfy the control.
 
+**Macro text-line output.** Root rescan nodes are allocated in stable batches.
+Ordinary text-line wrapping and those nodes use an available thread scratch
+arena until `c_preprocess_process_expanded_line` has written final tokens and
+shapes, copied foreign spellings, recorded source-map origins and applied
+pragma markers. Only then is that line's storage rewound, on success or failure.
+Macro definitions, stamps, diagnostic messages and spellings keep their existing
+owners. If the caller occupies both scratch arenas with the result and phase,
+the line uses phase storage without rewinding it. Directive expansion keeps
+phase ownership. Neither choice changes the sealed result's lifetime.
+
+The registered `c_macro_line_output_tests` checks allocation batching, equal
+per-line scratch size across increasing line counts, exact tokens and macro
+locations after scratch overwrite, and a separate caller-owned phase arena.
+
 **Semantic layout queries.** `c_parse_type_layout_core` allocates its
 query-local state (the arrays sized to the whole type table, bound token copies,
 local spelling spaces, evaluation buffers) in the machine's phase arena above a

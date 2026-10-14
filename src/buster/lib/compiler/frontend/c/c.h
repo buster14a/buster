@@ -495,6 +495,11 @@ struct CPreprocessDetail
     // for the scaling fixtures. Tests-disabled builds neither store nor
     // maintain it.
     u64 macro_expansion_peak_bytes;
+    // Root output allocation batches versus the token nodes they contain.
+    u64 macro_output_batch_count;
+    u64 macro_output_node_count;
+    // Largest ordinary text-line wrapping/output run before its rewind.
+    u64 macro_line_peak_bytes;
 #endif
     u32 lexed_file_count;
     // Caller-arena-owned copy that survives option-array expiry through
