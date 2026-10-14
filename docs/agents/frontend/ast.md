@@ -2388,7 +2388,10 @@ Semantic validation retains F5 as `CInitializerPlan` records indexed by the
 initializer value node. `CInitializerPath` rows name root-relative member
 and array edges, including anonymous promoted members and GNU range
 endpoints. Ordered `CInitializerItem` rows retain values and explicit list
-entry/exit events. An array's already inferred count is copied from its
+entry/exit events with matching event indices. Complex brace components name
+member 0/1 and retain their parent CType plus the `COMPLEX_COMPONENT` flag;
+the primitive real kind follows from that CType without adding a model row.
+An array's already inferred count is copied from its
 semantic bound. Plans and their checked sparse node index belong to the
 result arena and survive body-scratch rewinds.
 

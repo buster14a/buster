@@ -12332,22 +12332,64 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_plan_continuation_path(CParseResult* r
     return resumed;
 }
 
-BUSTER_C_INTERNAL void c_parse_initializer_plan_item(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
-                                                       CInitializerPlan* plan, CTypeId type, u32 path_plus_one, u32 start, u32 end, u32 source_token, u8 flags)
+BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess, u32 start, u32 limit);
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_plan_append(CParseResult* result, CInitializerPlan* plan, CInitializerItem item)
 {
+    u32 item_plus_one = 0;
+    if (plan && !plan->failed && c_parse_initializer_plan_reserve(result, plan, false))
+    {
+        plan->items[plan->item_count++] = item;
+        item_plus_one = plan->item_count;
+    }
+    return item_plus_one;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_plan_item(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                                    CInitializerPlan* plan, CTypeId type, u32 path_plus_one, u32 start, u32 end,
+                                                    u32 source_token, u8 flags)
+{
+    u32 item_plus_one = 0;
     if (plan && !plan->failed)
     {
         u32 node = c_ast_facts_locate(machine->ast_facts, preprocess, start, end);
         bool located = node < machine->syntax_tree->node_count;
-        if (located && c_parse_initializer_plan_reserve(result, plan, false))
+        CInitializerItem item = {.type = type, .node = node, .path_plus_one = path_plus_one, .source_token = start,
+            .range_source_token = source_token, .value_start = start, .value_end = end, .flags = flags};
+        if (located)
         {
-            plan->items[plan->item_count++] = (CInitializerItem){.type = type, .node = node, .path_plus_one = path_plus_one, .source_token = start, .range_source_token = source_token, .value_start = start, .value_end = end, .flags = flags};
+            bool complex_list = type.value < result->type_count && c_type_kind_is_complex(result->types[type.value].kind) &&
+                (flags & C_INITIALIZER_ITEM_VALUE) && machine->syntax_tree->kinds[node] == C_AST_INITIALIZER_LIST &&
+                c_ast_child_count(machine->syntax_tree, node) != 0;
+            if (complex_list)
+            {
+                u32 child_count = c_ast_child_count(machine->syntax_tree, node);
+                plan->failed = child_count > 2;
+                item.flags = C_INITIALIZER_ITEM_LIST_BEGIN | (flags & C_INITIALIZER_ITEM_DESIGNATED);
+                item_plus_one = c_parse_initializer_plan_append(result, plan, item);
+                u32 cursor = machine->syntax_tree->tokens[node] + 1;
+                u32 limit = machine->ast_facts->spans->end[node] - 1;
+                for (u32 child = 0; child < child_count && !plan->failed; child += 1)
+                {
+                    u32 value_end = c_parse_initializer_value_end(*preprocess, cursor, limit);
+                    u32 child_node = c_ast_child_at(machine->syntax_tree, node, child);
+                    u32 child_path = c_parse_initializer_plan_path(result, plan, path_plus_one, type, child, 0, 0, UINT32_MAX);
+                    c_parse_initializer_plan_append(result, plan, (CInitializerItem){.type = type, .node = child_node,
+                        .path_plus_one = child_path, .source_token = cursor, .range_source_token = cursor,
+                        .value_start = cursor, .value_end = value_end,
+                        .flags = C_INITIALIZER_ITEM_VALUE | C_INITIALIZER_ITEM_COMPLEX_COMPONENT | (flags & C_INITIALIZER_ITEM_DESIGNATED)});
+                    cursor = value_end + 1;
+                }
+                item.flags = C_INITIALIZER_ITEM_LIST_END;
+                item.paired_item_plus_one = item_plus_one;
+                u32 end_plus_one = c_parse_initializer_plan_append(result, plan, item);
+                if (item_plus_one && end_plus_one) plan->items[item_plus_one - 1].paired_item_plus_one = end_plus_one;
+            }
+            else item_plus_one = c_parse_initializer_plan_append(result, plan, item);
         }
-        else
-        {
-            plan->failed = true;
-        }
+        else plan->failed = true;
     }
+    return item_plus_one;
 }
 
 BUSTER_C_INTERNAL u32 c_parse_initializer_plan_bucket(u32 node, u32 capacity)
@@ -12438,6 +12480,7 @@ struct CParseInitializerInferenceFrame
     u32 path_plus_one;
     u32 list_start;
     u32 source_token_plus_one;
+    u32 begin_item_plus_one;
     bool designated;
 };
 
@@ -13739,7 +13782,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             .root = aggregate_type.value >= result->type_count,
         };
     }
-    if (workspace) c_parse_initializer_plan_item(machine, result, &preprocess, plan, plan ? plan->type : aggregate_type, 0, start, end, start, C_INITIALIZER_ITEM_LIST_BEGIN);
+    if (workspace) frames[0].begin_item_plus_one = c_parse_initializer_plan_item(machine, result, &preprocess, plan,
+        plan ? plan->type : aggregate_type, 0, start, end, start, C_INITIALIZER_ITEM_LIST_BEGIN);
     u64 count = 0;
     u64 progress_budget = ((u64)span + 1) * ((u64)span + 1);
     while (frame_count)
@@ -13839,8 +13883,16 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         }
         if (frame->cursor >= frame->limit)
         {
-            if (!frame->borrowed) c_parse_initializer_plan_item(machine, result, &preprocess, plan, frame->type, frame->path_plus_one,
-                frame->list_start, frame->limit + 1, frame->list_start, C_INITIALIZER_ITEM_LIST_END);
+            if (!frame->borrowed)
+            {
+                u32 end_plus_one = c_parse_initializer_plan_item(machine, result, &preprocess, plan, frame->type, frame->path_plus_one,
+                    frame->list_start, frame->limit + 1, frame->list_start, C_INITIALIZER_ITEM_LIST_END);
+                if (end_plus_one && frame->begin_item_plus_one)
+                {
+                    plan->items[end_plus_one - 1].paired_item_plus_one = frame->begin_item_plus_one;
+                    plan->items[frame->begin_item_plus_one - 1].paired_item_plus_one = end_plus_one;
+                }
+            }
             u32 cursor = frame->cursor;
             bool borrowed = frame->borrowed;
             frame_count -= 1;
@@ -13909,13 +13961,14 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                     .borrowed = true,
                 };
             }
-            c_parse_initializer_plan_item(machine, result, &preprocess, plan, designator.value_type, designator.path_plus_one,
+            u32 begin_item_plus_one = c_parse_initializer_plan_item(machine, result, &preprocess, plan, designator.value_type, designator.path_plus_one,
                 designator.value_start, close + 1, item_source, C_INITIALIZER_ITEM_LIST_BEGIN | (designator.has_designator ? C_INITIALIZER_ITEM_DESIGNATED : 0));
             frames[frame_count++] = (CParseInitializerInferenceFrame){
                 .type = designator.value_type,
                 .cursor = designator.value_start + 1,
                 .limit = close,
                 .list_start = designator.value_start,
+                .begin_item_plus_one = begin_item_plus_one,
                 .path_plus_one = designator.path_plus_one,
                 .designated = frame->designated || designator.has_designator,
             };

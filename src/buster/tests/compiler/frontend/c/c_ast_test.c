@@ -6462,6 +6462,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "int table[] = { [2 ... 4] = 1, [3] = 9, 7 };\n"
                         "int matrix[2][2] = { 1, 2, 3, 4 };\n"
                         "char* names[] = { \"argument\" }; char letters[] = { \"abc\" };\n"
+                        "double _Complex complex_value = { 1.0, 2.0 };\n"
                         "int f(void) { struct S local = { .y = 1, 2 }; int conditional[] = { 1 ? 2, 3 : 4, 5 };\n"
                         "return ((int[]){ 3, 4 })[0] + local.z + conditional[1]; }\n");
     CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
@@ -6500,7 +6501,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                 if (edge.member != UINT32_MAX && edge.container.value < analysis.type_count)
                 {
                     CType container = analysis.types[edge.container.value];
-                    BUSTER_TEST(arguments, edge.member < container.member_count);
+                    BUSTER_TEST(arguments, c_type_kind_is_complex(container.kind) ? edge.member < 2 : edge.member < container.member_count);
                     promoted += edge.parent_plus_one != 0;
                 }
                 else nested += edge.parent_plus_one != 0;
@@ -6511,6 +6512,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                 BUSTER_TEST(arguments, value.node < built.ast.node_count && value.type.value < analysis.type_count &&
                                        value.path_plus_one <= plan->path_count);
                 values += (value.flags & C_INITIALIZER_ITEM_VALUE) != 0;
+                if (value.flags & (C_INITIALIZER_ITEM_LIST_BEGIN | C_INITIALIZER_ITEM_LIST_END))
+                    BUSTER_TEST(arguments, value.paired_item_plus_one != 0 && value.paired_item_plus_one <= plan->item_count &&
+                        plan->items[value.paired_item_plus_one - 1].node == value.node);
             }
             if (plan->type.value < analysis.type_count && analysis.types[plan->type.value].kind == C_TYPE_ARRAY &&
                 plan->inferred_count == 5)

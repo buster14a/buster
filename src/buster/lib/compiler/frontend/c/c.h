@@ -2235,6 +2235,9 @@ typedef enum CInitializerItemFlag
     C_INITIALIZER_ITEM_LIST_BEGIN = 2,
     C_INITIALIZER_ITEM_LIST_END = 4,
     C_INITIALIZER_ITEM_DESIGNATED = 8,
+    // Complex brace components use the parent type's primitive real kind,
+    // with member 0/1 paths, without appending semantic scalar rows.
+    C_INITIALIZER_ITEM_COMPLEX_COMPONENT = 16,
 } CInitializerItemFlag;
 
 typedef struct CInitializerItem CInitializerItem;
@@ -2249,6 +2252,8 @@ struct CInitializerItem
     // Exact value provenance; parentheses are absent from syntax topology.
     u32 value_start;
     u32 value_end;
+    // Matched list entry/exit event, plus one; zero for a value event.
+    u32 paired_item_plus_one;
     u8 flags;
 };
 
