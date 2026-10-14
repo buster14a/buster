@@ -2154,6 +2154,7 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64_into(Arena* arena, Mach
                                                               u8* caller_bytes, u64 caller_capacity);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL u32 machine_test_compact_virtual_registers(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
                                                     MachineFunction* machine_function, u32 const* value_stack_slots,
                                                     u32 const* value_indirect_slots);
