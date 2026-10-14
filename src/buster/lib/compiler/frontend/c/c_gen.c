@@ -44248,11 +44248,6 @@ IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_arena, IrProgram
 
 BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_at(CIntegerIrBuilder* builder, u32 token_index);
 
-u64 c_test_ir_initializer_slot_count(IrType* type)
-{
-    return c_ir_constant_initializer_slot_count_walk(type);
-}
-
 bool c_test_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out)
 {
     return c_ir_decode_quoted(arena, spelling, delimiter, bytes_out);

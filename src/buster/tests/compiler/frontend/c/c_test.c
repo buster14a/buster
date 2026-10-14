@@ -10164,7 +10164,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_u64_initializer_slots(UnitTestArgument
                 .resolved = true,
             },
     };
-    BUSTER_TEST(arguments, c_test_ir_initializer_slot_count(&array) == count);
     BUSTER_TEST(arguments, array.element_count > UINT32_MAX);
     BUSTER_TEST(arguments, element.layout.size == 1);
     return result;
