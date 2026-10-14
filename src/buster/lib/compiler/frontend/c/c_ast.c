@@ -6551,12 +6551,22 @@ u64 c_ast_retain_in_arena(Arena* arena, CAst* ast)
             retained.slices = arena_allocate(arena, u32, ast->node_count);
             memcpy(retained.slices, ast->slices, sizeof(*ast->slices) * ast->node_count);
         }
+        if (ast->parenthesis_count)
+        {
+            retained.parentheses = arena_allocate(arena, CAstParenthesis, ast->parenthesis_count);
+            memcpy(retained.parentheses, ast->parentheses, sizeof(*ast->parentheses) * ast->parenthesis_count);
+        }
+        else
+        {
+            retained.parentheses = 0;
+        }
         c_ast_release(ast);
         *ast = retained;
         copied = arena->position - start;
     }
     return copied;
 }
+
 
 // ---- names, accessors and traversal ---------------------------------------
 

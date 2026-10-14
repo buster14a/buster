@@ -40,12 +40,13 @@ through lowering, code generation, object construction and emission.
 
 **Direct frontend output publication.** Ordinary `c_parse_ast` retains its
 finished syntax tree in the caller's unit arena: it copies the four compact
-columns (13 bytes per node) and any explicit child slices, then retires the
-builder's private column arenas once. Full semantic entrypoints create missing
+columns (13 bytes per node), sparse parenthesis/delimiter records and any
+explicit child slices, then retires the builder's private storage once. Full semantic entrypoints create missing
 node facts before their first semantic query. When those entrypoints own the
 facts, they copy the finished 9-byte-per-node fact columns and the span index
 (12 bytes per node and 4 bytes per token, plus its header) into the unit arena,
-then retire the private fact and index arenas once. The publication functions
+and each sparse type-recipe, constant, offsetof and x87 initializer array at its
+final count, then retire every private fact/index/recipe/constant arena once. The publication functions
 return exact allocation bytes, including alignment; the analyzed model records
 their sum in `frontend_retained_copy_bytes`. This ownership publication adds no
 syntax or semantic pass. Repeated canonical lowering calls borrow the same

@@ -2920,6 +2920,8 @@ u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
         CAstFacts retained = *facts;
         retained.arena = 0;
         retained.index_arena = 0;
+        retained.recipe_arena = 0;
+        retained.constants_arena = 0;
         retained.types = arena_allocate(arena, u32, facts->node_count);
         retained.payloads = arena_allocate(arena, u32, facts->node_count);
         retained.flags = arena_allocate(arena, u8, facts->node_count);
@@ -2940,6 +2942,40 @@ u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
             memcpy(retained.spans->link, source->link, sizeof(u32) * source->node_count);
             memcpy(retained.spans->start_head, source->start_head, sizeof(u32) * ((u64)source->token_total + 1));
         }
+        retained.recipes = facts->recipe_count ? arena_allocate(arena, CAstTypeRecipe, facts->recipe_count) : 0;
+        if (facts->recipe_count)
+        {
+            memcpy(retained.recipes, facts->recipes, sizeof(*facts->recipes) * facts->recipe_count);
+        }
+        retained.constant_slots = facts->constant_slots ? arena_allocate(arena, u32, facts->node_count) : 0;
+        if (facts->constant_slots)
+        {
+            memcpy(retained.constant_slots, facts->constant_slots, sizeof(*facts->constant_slots) * facts->node_count);
+        }
+        retained.constants = facts->constant_count ? arena_allocate(arena, CAstConstantFact, facts->constant_count) : 0;
+        if (facts->constant_count)
+        {
+            memcpy(retained.constants, facts->constants, sizeof(*facts->constants) * facts->constant_count);
+        }
+        retained.constant_capacity = facts->constant_count;
+        retained.offsetof_plans = facts->offsetof_plan_count ? arena_allocate(arena, CAstOffsetofPlan, facts->offsetof_plan_count) : 0;
+        if (facts->offsetof_plan_count)
+        {
+            memcpy(retained.offsetof_plans, facts->offsetof_plans, sizeof(*facts->offsetof_plans) * facts->offsetof_plan_count);
+        }
+        retained.offsetof_plan_capacity = facts->offsetof_plan_count;
+        retained.offsetof_steps = facts->offsetof_step_count ? arena_allocate(arena, CAstOffsetofStep, facts->offsetof_step_count) : 0;
+        if (facts->offsetof_step_count)
+        {
+            memcpy(retained.offsetof_steps, facts->offsetof_steps, sizeof(*facts->offsetof_steps) * facts->offsetof_step_count);
+        }
+        retained.offsetof_step_capacity = facts->offsetof_step_count;
+        retained.ext80_initializers = facts->ext80_initializer_count ? arena_allocate(arena, CAstExt80InitializerFact, facts->ext80_initializer_count) : 0;
+        if (facts->ext80_initializer_count)
+        {
+            memcpy(retained.ext80_initializers, facts->ext80_initializers, sizeof(*facts->ext80_initializers) * facts->ext80_initializer_count);
+        }
+        retained.ext80_initializer_capacity = facts->ext80_initializer_count;
         c_ast_facts_release(facts);
         *facts = retained;
         copied = arena->position - start;
