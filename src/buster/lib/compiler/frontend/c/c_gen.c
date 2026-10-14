@@ -51732,15 +51732,6 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
     return count != 0;
 }
 
-BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count(CIntegerIrBuilder* builder, CScopeId scope, IrTypeId element_type, u32 start, u32 end, u64* count_out,
-                                                            String8* message_out, u32* token_out)
-{
-    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    bool success = c_ir_infer_initializer_array_count_core(builder, temporary.arena, scope, element_type, start, end, count_out, message_out, token_out);
-    scratch_end(temporary);
-    return success;
-}
-
 // The initializer that gives an incomplete array its bound is found by type,
 // so both directions of the search are indexed by type once instead of
 // rescanning every declaration and every entity per array type.  Declarations
@@ -51754,84 +51745,59 @@ struct CIrIncompleteArrayInitializerIndex
     u32 type_count;
 };
 
+BUSTER_C_INTERNAL u32 c_ir_local_initializer_node(CIntegerIrBuilder* builder, CEntity const* entity)
+{
+    CAst const* ast = builder->syntax_tree;
+    u32 declarator = entity->init_declarator_plus_one - 1;
+    bool has = ast && declarator < ast->node_count && ast->kinds[declarator] == C_AST_INIT_DECLARATOR && c_ast_child_count(ast, declarator) == 2;
+    return has ? declarator - 1 : C_AST_NODE_INVALID;
+}
+
 BUSTER_C_INTERNAL void c_ir_index_incomplete_array_initializers(CIntegerIrBuilder* builder, CIrIncompleteArrayInitializerIndex* index)
 {
     u32 type_count = builder->parse.type_count;
-    index->type_count = type_count;
-    index->first_declaration = arena_allocate(builder->temporary_arena, u32, type_count);
-    index->first_entity = arena_allocate(builder->temporary_arena, u32, type_count);
-    if (!type_count || !index->first_declaration || !index->first_entity)
+    index->type_count = 0;
+    u64 position = builder->temporary_arena->position;
+    bool ready = type_count && c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), type_count, BUSTER_ALIGN_OF(u32)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), type_count, BUSTER_ALIGN_OF(u32));
+    index->first_declaration = ready ? arena_allocate(builder->temporary_arena, u32, type_count) : 0;
+    index->first_entity = ready ? arena_allocate(builder->temporary_arena, u32, type_count) : 0;
+    if (index->first_declaration && index->first_entity)
     {
-        index->type_count = 0;
-        return;
-    }
-    memset(index->first_declaration, 0xff, sizeof(*index->first_declaration) * type_count);
-    memset(index->first_entity, 0xff, sizeof(*index->first_entity) * type_count);
-    for (u32 declaration_index = builder->parse.declaration_count; declaration_index; declaration_index -= 1)
-    {
-        CDeclaration declaration = builder->parse.declarations[declaration_index - 1];
-        if (declaration.kind == C_DECLARATION_OBJECT && declaration.type.value < type_count &&
-            c_ir_declaration_initializer_range(builder->preprocess, declaration, &(u32){0}, &(u32){0}))
+        index->type_count = type_count;
+        memset(index->first_declaration, 0xff, sizeof(*index->first_declaration) * type_count);
+        memset(index->first_entity, 0xff, sizeof(*index->first_entity) * type_count);
+        for (u32 declaration_index = builder->parse.declaration_count; declaration_index; declaration_index -= 1)
         {
-            index->first_declaration[declaration.type.value] = declaration_index - 1;
+            CDeclaration declaration = builder->parse.declarations[declaration_index - 1];
+            if (declaration.kind == C_DECLARATION_OBJECT && declaration.type.value < type_count && declaration.initializer_node_plus_one)
+                index->first_declaration[declaration.type.value] = declaration_index - 1;
         }
-    }
-    for (u32 entity_index = builder->parse.entity_count; entity_index; entity_index -= 1)
-    {
-        CEntity* entity = builder->parse.entities + entity_index - 1;
-        if (entity->kind != C_ENTITY_LOCAL || entity->type.value >= type_count || !entity->declaration_token_count)
+        for (u32 entity_index = builder->parse.entity_count; entity_index; entity_index -= 1)
         {
-            continue;
-        }
-        CDeclaration declaration = {
-            .token_start = entity->declaration_token_start,
-            .token_count = entity->declaration_token_count,
-        };
-        if (c_ir_declaration_initializer_range(builder->preprocess, declaration, &(u32){0}, &(u32){0}))
-        {
-            index->first_entity[entity->type.value] = entity_index - 1;
+            CEntity const* entity = builder->parse.entities + entity_index - 1;
+            if (entity->kind == C_ENTITY_LOCAL && entity->type.value < type_count && c_ir_local_initializer_node(builder, entity) != C_AST_NODE_INVALID)
+                index->first_entity[entity->type.value] = entity_index - 1;
         }
     }
 }
 
-BUSTER_C_INTERNAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder* builder, CIrIncompleteArrayInitializerIndex const* index, u32 type_index,
-                                                                u32* start_out, u32* end_out, CScopeId* scope_out)
+BUSTER_C_INTERNAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder* builder, CIrIncompleteArrayInitializerIndex const* index,
+                                                            u32 type_index, u32* node_out)
 {
+    u32 node = C_AST_NODE_INVALID;
     if (type_index < index->type_count)
     {
         u32 declaration_index = index->first_declaration[type_index];
-        if (declaration_index != UINT32_MAX)
+        if (declaration_index != UINT32_MAX) node = builder->parse.declarations[declaration_index].initializer_node_plus_one - 1;
+        else
         {
-            CDeclaration declaration = builder->parse.declarations[declaration_index];
-            if (c_ir_declaration_initializer_range(builder->preprocess, declaration, start_out, end_out))
-            {
-                if (scope_out)
-                {
-                    *scope_out = declaration.scope;
-                }
-                return true;
-            }
-        }
-        u32 entity_index = index->first_entity[type_index];
-        if (entity_index != UINT32_MAX)
-        {
-            CEntity* entity = builder->parse.entities + entity_index;
-            CDeclaration declaration = {
-                .token_start = entity->declaration_token_start,
-                .token_count = entity->declaration_token_count,
-            };
-            if (c_ir_declaration_initializer_range(builder->preprocess, declaration, start_out, end_out))
-            {
-                if (scope_out)
-                {
-                    *scope_out = entity->scope;
-                }
-                return true;
-            }
+            u32 entity_index = index->first_entity[type_index];
+            if (entity_index != UINT32_MAX) node = c_ir_local_initializer_node(builder, builder->parse.entities + entity_index);
         }
     }
-
-    return false;
+    if (node_out) *node_out = node;
+    return node != C_AST_NODE_INVALID;
 }
 
 // The next row of a lowering result's diagnostics. The table keeps the
@@ -51854,6 +51820,7 @@ BUSTER_C_INTERNAL CDiagnostic* c_ir_lower_diagnostic_slot(CIRLowerResult* result
 
 BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* builder, CIRLowerResult* result, Arena* diagnostic_arena, u64 diagnostic_capacity)
 {
+    CArrayBound* private_bounds = 0;
     CIrIncompleteArrayInitializerIndex initializer_index = {0};
     c_ir_index_incomplete_array_initializers(builder, &initializer_index);
     bool* candidates = arena_allocate(builder->temporary_arena, bool, builder->parse.type_count);
@@ -51867,7 +51834,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
         }
         CArrayBound bound = builder->parse.array_bounds[type->array_bound];
         candidates[type_index] = !bound.token_count && !bound.is_star && !bound.has_inferred_count &&
-                                 c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &(u32){0}, &(u32){0}, &(CScopeId){0});
+                                 c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, 0);
         if (candidates[type_index])
         {
             builder->c_type_ir_map[type_index] = IR_TYPE_ID_INVALID;
@@ -51886,18 +51853,17 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
         }
         IrTypeId element_type = builder->c_type_ir_map[type->element_type.value];
         IrType* element = ir_type_from_id(&builder->program->types, element_type);
-        u32 initializer_start = 0;
-        u32 initializer_end = 0;
-        CScopeId initializer_scope = C_SCOPE_ID_INVALID;
+        u32 initializer_node = C_AST_NODE_INVALID;
         if (!element || !element->layout.resolved ||
-            !c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &initializer_start, &initializer_end, &initializer_scope))
+            !c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &initializer_node))
         {
             continue;
         }
-        u64 count = 0;
-        String8 failure = {0};
-        u32 failure_token = initializer_start;
-        if (!c_ir_infer_initializer_array_count(builder, initializer_scope, element_type, initializer_start, initializer_end, &count, &failure, &failure_token))
+        CInitializerPlan const* plan = c_initializer_plan_find(&builder->parse, initializer_node);
+        u64 count = plan ? plan->inferred_count : 0;
+        String8 failure = !count ? S8("missing retained inferred initializer count") : (String8){0};
+        u32 failure_token = plan && plan->item_count ? plan->items[0].value_start : builder->syntax_tree->tokens[initializer_node];
+        if (!count)
         {
             if (failure.length && result->diagnostic_count < builder->parse.declaration_count + builder->parse.entity_count + 1)
             {
@@ -51922,6 +51888,19 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
                 };
             }
             continue;
+        }
+        if (!private_bounds)
+        {
+            u64 position = builder->temporary_arena->position;
+            bool fits = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(CArrayBound), builder->parse.array_bound_count, BUSTER_ALIGN_OF(CArrayBound));
+            private_bounds = fits ? arena_allocate(builder->temporary_arena, CArrayBound, builder->parse.array_bound_count) : 0;
+            if (!private_bounds)
+            {
+                c_ir_constant_initializer_fail(builder, S8("inferred array bounds exceed the scratch reservation"), failure_token);
+                return false;
+            }
+            memcpy(private_bounds, builder->parse.array_bounds, sizeof(*private_bounds) * builder->parse.array_bound_count);
+            builder->parse.array_bounds = private_bounds;
         }
         builder->parse.array_bounds[type->array_bound].inferred_count = count;
         builder->parse.array_bounds[type->array_bound].has_inferred_count = true;
@@ -61769,39 +61748,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     }
     bool* flexible_array_types = arena_allocate(temporary_arena, bool, parse.type_count);
     u8* oversized_array_bounds = 0;
-    // The string-literal bound inference below asks for the object
-    // declarations of one type; scanning every declaration per unresolved
-    // array type is quadratic in the translation unit, so bucket the object
-    // declarations by type once.  Declarations never change inside the round
-    // loop, and each bucket keeps ascending declaration order, so walking a
-    // bucket visits the same declarations the full scan did.
-    u32* object_declarations_by_type_offsets = arena_allocate(temporary_arena, u32, (u64)parse.type_count + 1);
-    memset(object_declarations_by_type_offsets, 0, sizeof(*object_declarations_by_type_offsets) * ((u64)parse.type_count + 1));
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        CDeclaration* declaration = parse.declarations + declaration_index;
-        if (declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < parse.type_count)
-        {
-            object_declarations_by_type_offsets[declaration->type.value + 1] += 1;
-        }
-    }
-    for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
-    {
-        object_declarations_by_type_offsets[type_index + 1] += object_declarations_by_type_offsets[type_index];
-    }
-    u32* object_declarations_by_type = arena_allocate(temporary_arena, u32, object_declarations_by_type_offsets[parse.type_count]);
-    u32* object_declarations_by_type_cursors = arena_allocate(temporary_arena, u32, parse.type_count);
-    memset(object_declarations_by_type_cursors, 0, sizeof(*object_declarations_by_type_cursors) * parse.type_count);
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        CDeclaration* declaration = parse.declarations + declaration_index;
-        if (declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < parse.type_count)
-        {
-            u32 type_value = declaration->type.value;
-            object_declarations_by_type[object_declarations_by_type_offsets[type_value] + object_declarations_by_type_cursors[type_value]] = declaration_index;
-            object_declarations_by_type_cursors[type_value] += 1;
-        }
-    }
     u32* type_mapping_worklist = arena_allocate(temporary_arena, u32, parse.type_count);
     CIrTypeMappingWaits type_mapping_waits = {
         .head = arena_allocate(temporary_arena, u32, parse.type_count),
@@ -62494,28 +62440,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     element_count = 0;
                     count_resolved = true;
                 }
-                if (!count_resolved && !bound.is_star && bound.token_count == 0)
-                {
-                    u32 bucket_end = object_declarations_by_type_offsets[type_index + 1];
-                    for (u32 bucket_index = object_declarations_by_type_offsets[type_index]; bucket_index < bucket_end; bucket_index += 1)
-                    {
-                        CDeclaration declaration = parse.declarations[object_declarations_by_type[bucket_index]];
-                        u32 initializer_start = 0;
-                        u32 initializer_end = 0;
-                        if (!c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end) ||
-                            !c_ir_tokens_are_string_literals(preprocess, initializer_start, initializer_end))
-                        {
-                            continue;
-                        }
-                        CIrDecodedString decoded = {0};
-                        if (c_ir_decode_string_literal_range_for_target(arena, preprocess, target, initializer_start, initializer_end, parse.string_literals, &decoded))
-                        {
-                            element_count = decoded.element_count + 1;
-                            count_resolved = true;
-                            break;
-                        }
-                    }
-                }
                 if (!count_resolved)
                 {
                     continue;
@@ -62578,6 +62502,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         if (type_mapping_round == 0)
         {
             c_ir_infer_incomplete_array_bounds(&constant_builder, &result, arena, lowering_diagnostic_capacity);
+            parse.array_bounds = constant_builder.parse.array_bounds;
         }
     }
     // An array element has to be addressable at its own alignment in every
