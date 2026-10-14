@@ -1,6 +1,6 @@
 // First-party #3670 witnesses. Equality consumes label provenance before logical composition.
 // The frozen typeof witness and plain reduction run against independent hosted GCC/Clang
-// before Buster's pilot/tree-free and SSA/memory cells. Pointer transport remains refused.
+// before Buster's debug/no-debug and SSA/memory cells. Pointer transport remains refused.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24,6 +24,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
            "int main(void) { void *p=&&done; done: return take(p!=&&done || p!=&&done) || saved; }"),
         S8("int saved; int main(void) { void *p=&&done; done:"
            "saved=(p!=&&done || (p!=&&done && 1)); return saved; }"),
+        S8("int main(void) { void *p=&&done; done: return (p==&&done ? 7 : 9)!=7; }"),
+        S8("int main(void) { void *p=&&done; done: return ((p==&&done ? 1 : 0) ? (p!=&&done ? 9 : 7) : 3)!=7; }"),
+        S8("int main(void) { int n=0; void *p=&&done; done: int value=p==&&done ? ++n : ++n; return value!=1 || n!=1; }"),
+        S8("int main(void) { void *p=&&done; done: return (p==&&done ?: 0)!=1; }"),
+        S8("int saved; int take(int x) { saved=x; return x; } int main(void) { void *p=&&done; done: saved=p==&&done ? 7 : 9; return take(p==&&done ? 7 : 9)!=7 || saved!=7; }"),
     };
     String8 escapes[] = {
         S8("int f(void) { void *p=&&done; done: return p || 0; }"),
@@ -34,6 +39,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
         S8("void *f(void) { void *p=&&done; done: return (p!=&&done,p); }"),
         S8("void take(void*); void f(void) { void *p=&&done; done: take(p); }"),
         S8("void *saved; void f(void) { void *p=&&done; done: saved=p; }"),
+        S8("void *f(void) { void *p=&&done; done: return p==&&done ? 0 : p; }"),
+        S8("void *f(void) { void *p=&&done; done: return p ?: 0; }"),
+        S8("void take(void*); void f(void) { void *p=&&done; done: take(p==&&done ? p : 0); }"),
+        S8("void *saved; void f(void) { void *p=&&done; done: saved=p==&&done ? p : 0; }"),
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
     Target targets[] = {
@@ -112,7 +121,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
                     (CPreprocessOptions){.target = targets[target], .dialect = dialects[dialect]});
                 CParserResult syntax = c_parse_ast(temporary.arena, tokens);
                 CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                CParserResult reference_syntax = c_parse_ast_reference(temporary.arena, tokens);
+                CAnalysisResult reference = c_analyze_semantics_only(temporary.arena, tokens, reference_syntax);
                 BUSTER_TEST(arguments, !tokens.diagnostic_count);
+                BUSTER_TEST(arguments, !reference_syntax.ast && reference.analysis_complete && semantic.analysis_complete);
+                BUSTER_TEST_RAW(arguments, reference.diagnostic_count == semantic.diagnostic_count, text);
+                for (u32 row = 0; row < BUSTER_MIN(reference.diagnostic_count, semantic.diagnostic_count); row += 1)
+                {
+                    BUSTER_STRING_TEST(arguments, reference.diagnostics[row].message, semantic.diagnostics[row].message);
+                    BUSTER_TEST(arguments, reference.diagnostics[row].kind == semantic.diagnostics[row].kind &&
+                        reference.diagnostics[row].location.line == semantic.diagnostics[row].location.line &&
+                        reference.diagnostics[row].location.column == semantic.diagnostics[row].location.column);
+                }
                 if (positive)
                 {
                     BUSTER_TEST_RAW(arguments, !semantic.diagnostic_count, text);
@@ -143,7 +163,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
             String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
             for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(standards); dialect += 1)
             {
-                for (u32 pilot = 0; pilot < 2; pilot += 1)
+                for (u32 debug = 0; debug < 2; debug += 1)
                 {
                     for (u32 form = 0; form < 2; form += 1)
                     {
@@ -151,7 +171,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
                         {
                             TemporalArena temporary = scratch_begin(&fixture.arena, 1);
                             String8 output = buster_test_temporary_unique_path(temporary.arena, S8("label-logical-run"), S8(".exe"));
-                            String8 command[] = {pilot ? S8("-fc-ast-pilot") : S8("-fno-c-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode],
+                            String8 command[] = {debug ? S8("-g") : S8("-g0"), S8("-nostdinc"), standards[dialect], modes[mode],
                                 S8("-fverify-codegen"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, input};
                             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                                 compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));

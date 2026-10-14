@@ -48446,8 +48446,9 @@ struct CParseLabelRange
     u32 first, limit;
 };
 
-// Comparisons consume label values. Logical operators compose those booleans,
-// but each unsunk operand must still pass the original label-value scan.
+// Comparisons consume label values. Logical operators compose those booleans;
+// a conditional transports only its result arms, including the condition for
+// a GNU omitted true arm. Unsunk ranges retain the original label-value scan.
 BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                   u8 const* labels, u32 start, u32 end)
 {
@@ -48463,11 +48464,13 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
         {
             label = false;
         }
-        else if (root == conjunction || root == disjunction)
+        else if (root == conjunction || root == disjunction || root == 3)
         {
             u64 mark = machine->scratch_arena->position;
             u32 capacity = end - start;
             CParseLabelRange* work = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CParseLabelRange, capacity);
+            CIrExt80ConditionalIndex conditional = {.base = start, .token_count = capacity};
+            bool indexed = false;
             u32 count = work ? 1 : 0;
             if (work) work[0] = (CParseLabelRange){.first = first, .limit = limit};
             label = !work;
@@ -48475,7 +48478,38 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
             {
                 CParseLabelRange range = work[--count];
                 u32 precedence = c_parse_label_expression_root(result, preprocess, scope, &range.first, &range.limit);
-                if (precedence == conjunction || precedence == disjunction)
+                if (precedence == 3)
+                {
+                    if (!indexed)
+                    {
+                        conditional.delimiter_closes_plus_one = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, capacity);
+                        conditional.conditional_colons_plus_one = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, capacity);
+                        conditional.depths = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, capacity);
+                        conditional.next_questions_at_depth = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, capacity);
+                        conditional.delimiter_stack = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, capacity);
+                        conditional.question_heads = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, (u64)capacity + 1);
+                        CIrExt80Fold indexing = {0};
+                        indexed = conditional.delimiter_closes_plus_one && conditional.conditional_colons_plus_one && conditional.depths &&
+                            conditional.next_questions_at_depth && conditional.delimiter_stack && conditional.question_heads &&
+                            c_ir_ext80_conditional_index_build(&indexing, preprocess, start, end, &conditional);
+                    }
+                    u32 question = 0;
+                    u32 colon = 0;
+                    bool split = indexed && c_ir_ext80_fold_root_conditional(&conditional, preprocess, range.first, range.limit,
+                        &range.first, &question, &colon, &range.limit);
+                    if (split && count + 2 <= capacity)
+                    {
+                        work[count++] = (CParseLabelRange){.first = colon + 1, .limit = range.limit};
+                        work[count++] = question + 1 == colon
+                            ? (CParseLabelRange){.first = range.first, .limit = question}
+                            : (CParseLabelRange){.first = question + 1, .limit = colon};
+                    }
+                    else
+                    {
+                        label = c_parse_label_expression_has_value(machine, result, preprocess, scope, labels, range.first, range.limit);
+                    }
+                }
+                else if (precedence == conjunction || precedence == disjunction)
                 {
                     u32 operand = range.first;
                     // Split all top-level logical operators in one walk. Each
