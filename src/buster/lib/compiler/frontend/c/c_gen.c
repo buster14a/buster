@@ -1836,7 +1836,6 @@ struct CIrNodeQueryFrame
 
 typedef enum CIrQueryFrameKind
 {
-    C_IR_QUERY_FRAME_ARRAY_BOUND,
     C_IR_QUERY_FRAME_CONSTANT,
     C_IR_QUERY_FRAME_SIZEOF,
     C_IR_QUERY_FRAME_VLA_C_TYPE,
@@ -1849,7 +1848,6 @@ struct CIrQueryFrame
 {
     CIrNodeQueryFrame node_task;
     CIrConstantValue constant;
-    CArrayBound bound;
     IrTypeId result_type;
     u64 integer;
     u32 start;
@@ -1937,7 +1935,8 @@ typedef enum CIrAlignmentStatus
 BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
                                                              u32* alignment_out, u32* requested_out, String8* rejection_out);
 
-BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
+BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_node(CIntegerIrBuilder* builder, u32 node, CArrayBound bound, u64* count_out);
+BUSTER_C_INTERNAL bool c_ir_array_bound_original_projection(CIntegerIrBuilder* builder, u32 node);
 BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder, u32 start, u32 end, u32* alignment);
 
 typedef struct CIrPreparedCall CIrPreparedCall;
@@ -2719,6 +2718,7 @@ struct CIrVlaArrayType
     CIrVlaArrayType* next;
     IrTypeId type;
     CArrayBound bound;
+    u32 bound_node_plus_one;
     u32 typeof_start;
     u32 typeof_end;
     u32 typeof_node_plus_one;
@@ -2729,7 +2729,7 @@ typedef struct CIrVlaSavedBound CIrVlaSavedBound;
 struct CIrVlaSavedBound
 {
     CIrVlaSavedBound* next;
-    CArrayBound bound;
+    u32 node;
     IrValueId count;
 };
 
@@ -3573,7 +3573,6 @@ BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32
 }
 
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
-BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, CTypeId type);
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out);
@@ -3596,10 +3595,6 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
     {
         switch (left.kind)
         {
-        case C_IR_QUERY_FRAME_ARRAY_BOUND:
-            return left.bound.inferred_count == right.bound.inferred_count && left.bound.token_start == right.bound.token_start &&
-                   left.bound.token_count == right.bound.token_count && left.bound.is_static == right.bound.is_static && left.bound.is_star == right.bound.is_star &&
-                   left.bound.has_inferred_count == right.bound.has_inferred_count;
         case C_IR_QUERY_FRAME_CONSTANT:
         case C_IR_QUERY_FRAME_SIZEOF:
         case C_IR_QUERY_FRAME_VLA_C_TYPE: return left.start == right.start && left.end == right.end && left.flag == right.flag;
@@ -3623,11 +3618,6 @@ BUSTER_C_INTERNAL u32 c_ir_query_key_hash(CIrQueryFrame key)
     case C_IR_QUERY_FRAME_NODE_TASK:
         first = key.node_task.node;
         second = ((u32)key.node_task.kind << 8) | (u32)key.node_task.view;
-        break;
-    case C_IR_QUERY_FRAME_ARRAY_BOUND:
-        first = key.bound.token_start;
-        second = key.bound.token_count;
-        hash += (u64)key.bound.inferred_count * 0x9e3779b97f4a7c15ull;
         break;
     default: break;
     }
@@ -3683,7 +3673,7 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
     if (!ready)
     {
         builder->failure_message = S8("C query nesting exceeds the query frame capacity");
-        builder->failure_token_index = root.kind == C_IR_QUERY_FRAME_ARRAY_BOUND ? root.bound.token_start : root.start;
+        builder->failure_token_index = root.start;
     }
     else
     {
@@ -3705,7 +3695,6 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
                 frame->success = c_ir_node_query_attempt(builder, &frame->node_task);
                 frame->node_task.success = frame->success;
                 break;
-            case C_IR_QUERY_FRAME_ARRAY_BOUND: frame->success = c_ir_array_bound_evaluate_attempt(builder, frame->bound, &frame->integer); break;
             case C_IR_QUERY_FRAME_CONSTANT: frame->success = c_ir_constant_evaluate_attempt(builder, frame->start, frame->end, &frame->constant); break;
             case C_IR_QUERY_FRAME_VLA_C_TYPE:
                 frame->result_type = c_ir_vla_c_type_attempt(builder, (CTypeId){.value = frame->start});
@@ -4173,8 +4162,7 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
         {
             CArrayBound bound = recipe ? recipe->bound : type->array_bound < builder->parse.array_bound_count
                                                               ? builder->parse.array_bounds[type->array_bound] : (CArrayBound){0};
-            u32 node = recipe ? recipe->bound_node : bound.token_count
-                           ? c_ast_facts_locate(facts, &builder->preprocess, bound.token_start, bound.token_start + bound.token_count) : C_AST_NODE_INVALID;
+            u32 node = recipe ? recipe->bound_node : c_ast_facts_bound_node(facts, type->array_bound);
             bool constant = recipe ? recipe->count_is_constant : bound.has_inferred_count;
             u64 count = recipe ? recipe->resolved_count : bound.inferred_count;
             if (node != C_AST_NODE_INVALID && !current->bound_seen)
@@ -4217,7 +4205,7 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
                     array = ir_program_add_type(builder->program, (IrType){.kind = IR_TYPE_ARRAY, .element_type = current->element,
                         .return_type = IR_TYPE_ID_INVALID, .element_count = constant ? count : 0, .layout = {.alignment = element->layout.alignment}});
                     CIrVlaArrayType* entry = arena_allocate(builder->arena, CIrVlaArrayType, 1);
-                    *entry = (CIrVlaArrayType){.next = builder->vla_array_types, .type = array, .bound = bound};
+                    *entry = (CIrVlaArrayType){.next = builder->vla_array_types, .type = array, .bound = bound, .bound_node_plus_one = node + 1};
                     builder->vla_array_types = entry;
                 }
                 c_ir_retained_type_complete(builder, state, c_ir_retained_qualify(builder, type, array));
@@ -4503,17 +4491,6 @@ BUSTER_C_INTERNAL bool c_ir_query_type_name(CIntegerIrBuilder* builder, u32 star
     u32 node = c_ir_type_name_node_at(builder, start, end);
     *type_out = c_ir_type_name_node(builder, node);
     return type_out->value != IR_ID_UNDERLYING_INVALID;
-}
-
-BUSTER_C_INTERNAL bool c_ir_query_array_bound(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
-{
-    CIrQueryFrame result = {0};
-    if (!c_ir_query_request(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result))
-    {
-        return false;
-    }
-    *count_out = result.integer;
-    return result.success;
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_constant(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* value_out)
@@ -12154,24 +12131,6 @@ struct CIrVlaLayout
     u32 dimension_count;
 };
 
-BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult preprocess, CArrayBound bound)
-{
-    u32 end = bound.token_start + bound.token_count;
-    while (bound.token_start < end)
-    {
-        CToken token = preprocess.tokens[bound.token_start];
-        bool qualifier = token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("static")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("const")) ||
-                                                              string_equal(c_token_spelling(preprocess.spelling_base, token), S8("volatile")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("restrict")));
-        if (!qualifier)
-        {
-            break;
-        }
-        bound.token_start += 1;
-    }
-    bound.token_count = end - bound.token_start;
-    return bound;
-}
-
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
                                                 u32 declaration_node_plus_one, CIrVlaLayout* result);
 BUSTER_C_INTERNAL CIrVlaArrayType* c_ir_vla_array_type(CIntegerIrBuilder* builder, IrTypeId type);
@@ -17955,6 +17914,7 @@ struct CIrLowerVlaLayoutState
 {
     CIrVlaLayout* result;
     CArrayBound* bounds;
+    u32* bound_nodes;
     CTypeId array_type;
     IrTypeId type_name;
     u32 declaration_node_plus_one;
@@ -30671,12 +30631,12 @@ BUSTER_C_INTERNAL CIrVlaArrayType* c_ir_vla_array_type(CIntegerIrBuilder* builde
     return result;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_vla_saved_bound(CIntegerIrBuilder* builder, CArrayBound bound)
+BUSTER_C_INTERNAL IrValueId c_ir_vla_saved_bound(CIntegerIrBuilder* builder, u32 node)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     for (CIrVlaSavedBound* entry = builder->vla_saved_bounds; entry; entry = entry->next)
     {
-        if (entry->bound.token_start == bound.token_start && entry->bound.token_count == bound.token_count)
+        if (node != C_AST_NODE_INVALID && entry->node == node)
         {
             result = entry->count;
             break;
@@ -30685,11 +30645,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_vla_saved_bound(CIntegerIrBuilder* builder, CAr
     return result;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, IrTypeId element, CArrayBound bound)
+BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, IrTypeId element, CArrayBound bound, u32 node)
 {
     IrTypeId result = IR_TYPE_ID_INVALID;
     u64 count = 0;
-    bool constant = c_ir_query_array_bound(builder, bound, &count);
+    bool constant = c_ir_array_bound_original_projection(builder, node) && c_ir_array_bound_evaluate_node(builder, node, bound, &count);
     if (!builder->queries->has_request)
     {
         IrType* element_type = ir_type_from_id(&builder->program->types, element);
@@ -30716,7 +30676,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, I
                 .layout = {.alignment = element_type->layout.alignment},
             });
             CIrVlaArrayType* entry = arena_allocate(builder->arena, CIrVlaArrayType, 1);
-            *entry = (CIrVlaArrayType){.next = builder->vla_array_types, .type = result, .bound = bound};
+            *entry = (CIrVlaArrayType){.next = builder->vla_array_types, .type = result, .bound = bound, .bound_node_plus_one = node + 1};
             builder->vla_array_types = entry;
         }
     }
@@ -30767,7 +30727,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, C
                 result = value.kind == C_TYPE_POINTER
                              ? c_ir_add_pointer_type(builder->program, builder->pointer_types, result)
                              : value.array_bound < builder->parse.array_bound_count
-                                 ? c_ir_vla_array_type_add(builder, result, builder->parse.array_bounds[value.array_bound])
+                                 ? c_ir_vla_array_type_add(builder, result, builder->parse.array_bounds[value.array_bound],
+                                                           c_ast_facts_bound_node(builder->syntax_facts, value.array_bound))
                                  : IR_TYPE_ID_INVALID;
                 if (!builder->queries->has_request)
                 {
@@ -35467,6 +35428,8 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         result->element_type = IR_TYPE_ID_INVALID;
         u32 capacity = state->named_type ? builder->program->types.count + 1 : builder->parse.type_count + 1;
         state->bounds = arena_allocate(builder->scratch_arena, CArrayBound, capacity);
+        state->bound_nodes = arena_allocate(builder->scratch_arena, u32, capacity);
+        memset(state->bound_nodes, 0xff, sizeof(u32) * capacity);
         if (state->pointer)
         {
             state->bounds[result->dimension_count++] = (CArrayBound){0};
@@ -35477,6 +35440,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
             CIrVlaArrayType* array = c_ir_vla_array_type(builder, type);
             while (array && result->dimension_count < capacity)
             {
+                state->bound_nodes[result->dimension_count] = array->bound_node_plus_one ? array->bound_node_plus_one - 1 : C_AST_NODE_INVALID;
                 state->bounds[result->dimension_count++] = array->bound;
                 type = ir_type_from_id(&builder->program->types, type)->element_type;
                 array = c_ir_vla_array_type(builder, type);
@@ -35496,6 +35460,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
+                state->bound_nodes[result->dimension_count] = c_ast_facts_bound_node(builder->syntax_facts, value.array_bound);
                 state->bounds[result->dimension_count++] = builder->parse.array_bounds[value.array_bound];
                 type = value.element_type;
             }
@@ -35626,8 +35591,9 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
     while (state->dimension < result->dimension_count)
     {
         u32 dimension = state->dimension;
-        CArrayBound bound = c_ir_vla_bound_expression(builder->preprocess, state->bounds[dimension]);
-        IrValueId saved_count = c_ir_vla_saved_bound(builder, bound);
+        CArrayBound bound = state->bounds[dimension];
+        u32 node = state->bound_nodes[dimension];
+        IrValueId saved_count = c_ir_vla_saved_bound(builder, node);
         if (saved_count.value != IR_ID_UNDERLYING_INVALID)
         {
             result->dimension_counts[dimension] = saved_count;
@@ -35635,14 +35601,14 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
             continue;
         }
         u64 constant_count = 0;
-        if (c_ir_array_bound_evaluate(builder, bound, &constant_count))
+        if (c_ir_array_bound_evaluate_node(builder, node, bound, &constant_count))
         {
             result->dimension_counts[dimension] =
                 c_ir_emit_integer_value_typed(builder, constant_count, false, state->token, builder->size_type);
             state->dimension += 1;
             continue;
         }
-        if (!bound.token_count || bound.is_star)
+        if (node == C_AST_NODE_INVALID || bound.is_star)
         {
             if (state->parameter && dimension == 0)
             {
@@ -35655,12 +35621,16 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         }
         state->temporary_mark = builder->temporary_arena->position;
         frame->stage = C_IR_LOWER_STAGE_CHILD;
+        u32 bound_first = 0;
+        u32 bound_end = 0;
+        c_ir_span_expanded(builder->syntax_tree, builder->syntax_spans, node, &bound_first, &bound_end);
         c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                            .as.expression =
                                                {
-                                                   .start = bound.token_start,
-                                                   .end = bound.token_start + bound.token_count,
+                                                   .node_plus_one = node + 1,
+                                                   .start = bound_first,
+                                                   .end = bound_end,
                                                },
                                        });
         return;
@@ -35698,11 +35668,11 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
     {
         for (u32 dimension = 0; dimension < result->dimension_count; dimension += 1)
         {
-            CArrayBound bound = c_ir_vla_bound_expression(builder->preprocess, state->bounds[dimension]);
-            if (bound.token_count && c_ir_vla_saved_bound(builder, bound).value == IR_ID_UNDERLYING_INVALID)
+            u32 node = state->bound_nodes[dimension];
+            if (node != C_AST_NODE_INVALID && c_ir_vla_saved_bound(builder, node).value == IR_ID_UNDERLYING_INVALID)
             {
                 CIrVlaSavedBound* entry = arena_allocate(builder->arena, CIrVlaSavedBound, 1);
-                *entry = (CIrVlaSavedBound){.next = builder->vla_saved_bounds, .bound = bound, .count = result->dimension_counts[dimension]};
+                *entry = (CIrVlaSavedBound){.next = builder->vla_saved_bounds, .node = node, .count = result->dimension_counts[dimension]};
                 builder->vla_saved_bounds = entry;
             }
         }
@@ -54671,6 +54641,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_fact(CIntegerIrBuilder* builder, CAstC
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_ir_constant_node_constructor_free(CAst const* ast, u32 node)
+{
+    bool pure = ast && node < ast->node_count;
+    u32 first = pure ? c_ast_subtree_begin(ast, node) : 0;
+    for (u32 cursor = first; pure && cursor <= node; cursor += 1)
+    {
+        u32 kind = ast->kinds[cursor];
+        pure = kind != C_AST_TYPE_NAME && kind != C_AST_CAST && kind != C_AST_COMPOUND_LITERAL && kind != C_AST_CALL &&
+               kind != C_AST_SIZEOF_TYPE && kind != C_AST_SIZEOF_EXPRESSION && kind != C_AST_ALIGNOF_TYPE && kind != C_AST_ALIGNOF_EXPRESSION;
+    }
+    return pure;
+}
+
 typedef struct CIrConstantOffsetofNodeState CIrConstantOffsetofNodeState;
 struct CIrConstantOffsetofNodeState
 {
@@ -54779,7 +54762,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         u32 selected = c_ast_facts_selection(builder->syntax_facts, node);
         bool fact_leaf = kind == C_AST_NUMBER || kind == C_AST_CHARACTER || kind == C_AST_IDENTIFIER ||
                          kind == C_AST_BOOLEAN_CONSTANT;
-        if (fact_leaf && c_ir_constant_node_fact(builder, fact, &value.real))
+        if ((fact_leaf || (fact.status == C_AST_CONSTANT_INTEGER &&
+                          c_ir_constant_node_constructor_free(ast, node))) && c_ir_constant_node_fact(builder, fact, &value.real))
         {
             value.type = value.real.type;
         }
@@ -54913,7 +54897,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             bool expression = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION;
             bool alignment = kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_ALIGNOF_TYPE;
             u32 operand = c_ast_child_at(ast, node, 0);
-            if (expression && ast->kinds[operand] == C_AST_STRING)
+            IrType const* projected_operand = 0;
+            if (expression && ast->kinds[operand] == C_AST_CALL && fact.status == C_AST_CONSTANT_INTEGER)
+            {
+                // Sizing a call reads its finished result layout without
+                // constructing or evaluating its callee and arguments.
+                admitted = c_ir_constant_node_fact(builder, fact, &value.real);
+                value.type = value.real.type;
+            }
+            else if (expression && ast->kinds[operand] == C_AST_STRING)
             {
                 // The legacy sizeof literal path creates no array or pointer
                 // type. Count the retained run without emitting its object.
@@ -54935,7 +54927,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 admitted = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = operand,
                     .kind = expression ? C_IR_NODE_QUERY_EXPRESSION_TYPE : C_IR_NODE_QUERY_TYPE_NAME, .view = C_IR_AST_TYPE_STRICT}, &type) && type.success;
                 IrType* row = admitted ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
-                admitted = admitted && row && row->layout.resolved;
+                projected_operand = row;
+                admitted = admitted && row && (row->layout.resolved || row->kind == IR_TYPE_VOID || row->kind == IR_TYPE_FUNCTION);
                 if (admitted)
                 {
                     value.real = c_ir_constant_integer(builder->size_type,
@@ -54946,6 +54939,16 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                     if (fact.status == C_AST_CONSTANT_INTEGER) value.real.integer = fact.low;
                 }
             }
+#if BUSTER_INCLUDE_TESTS
+            if (!alignment && !builder->queries->has_request && c_sizeof_handoff_enabled())
+            {
+                bool typed = projected_operand && projected_operand->kind == IR_TYPE_INTEGER;
+                c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, anchor, admitted, value.real.integer,
+                                         typed, typed && projected_operand->is_signed, C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER);
+            }
+#else
+            BUSTER_UNUSED(projected_operand);
+#endif
         }
 
         else if (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_INDEX)
@@ -55802,196 +55805,34 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
+BUSTER_C_INTERNAL bool c_ir_array_bound_original_projection(CIntegerIrBuilder* builder, u32 node)
 {
-    Arena* arena = builder->arena;
-    IrProgram* program = builder->program;
-    CPreprocessResult preprocess = builder->preprocess;
-    CParseResult parse = builder->parse;
-    if (bound.has_inferred_count)
+    CAst const* ast = builder->syntax_tree;
+    bool qualified = false;
+    if (ast && node < ast->node_count && node + 1 < ast->node_count && ast->kinds[node + 1] == C_AST_DECLARATOR_ARRAY)
     {
-        *count_out = bound.inferred_count;
-        return true;
+        u32 flags = ast->data[node + 1];
+        qualified |= (flags & (C_AST_ARRAY_STATIC | C_AST_QUALIFIER_CONST | C_AST_QUALIFIER_VOLATILE | C_AST_QUALIFIER_RESTRICT | C_AST_QUALIFIER_ATOMIC |
+                              C_AST_QUALIFIER_NONNULL | C_AST_QUALIFIER_NULLABLE | C_AST_QUALIFIER_NULL_UNSPECIFIED)) != 0;
     }
-    if (bound.is_star || !bound.token_count)
-    {
-        return false;
-    }
-    CIrConstantValue typed_value = {0};
-    bool constant_resolved = c_ir_query_constant(builder, bound.token_start, bound.token_start + bound.token_count, &typed_value);
-    if (!constant_resolved && builder->queries->has_request)
-    {
-        return false;
-    }
-    if (constant_resolved &&
-        typed_value.kind == C_IR_CONSTANT_INTEGER)
-    {
-        // A count above u64 saturates instead of failing: a zero-size element
-        // makes the object zero bytes whatever the count (GNU empty records and
-        // zero-length arrays, as Clang accepts them), and any other element
-        // fails the object-size check of the array-type constructors, which
-        // report the written bound. A negative wide value is no count at all.
-        IrType* value_type = ir_type_from_id(&program->types, typed_value.type);
-        bool wide_negative = typed_value.integer_high && value_type && value_type->is_signed && (typed_value.integer_high >> 63);
-        bool saturated = typed_value.integer_high && !wide_negative;
-        *count_out = saturated ? UINT64_MAX : typed_value.integer;
-        return !typed_value.integer_high || saturated;
-    }
-    CToken* tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
-    u32 token_count = 0;
-    u32 end = bound.token_start + bound.token_count;
-    u64 bound_spelling_capacity = 0;
-    for (u32 index = bound.token_start; index < end; index += 1)
-    {
-        bound_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + 21;
-    }
-    CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
-    for (u32 index = bound.token_start; index < end; index += 1)
-    {
-        CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            IrTypeId parenthesized_type = IR_TYPE_ID_INVALID;
-            if (close > index + 1 && close < end)
-            {
-                c_ir_query_type_name(builder, index + 1, close, true, &parenthesized_type);
-                if (builder->queries->has_request)
-                {
-                    return false;
-                }
-            }
-            if (parenthesized_type.value != IR_ID_UNDERLYING_INVALID)
-            {
-                index = close;
-                continue;
-            }
-        }
-        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) && index + 2 < end &&
-            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            u32 close = c_ir_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            // `char pad[sizeof (int[3]){1, 2, 3}]` sizes the compound literal,
-            // so the operand runs past the type name's `)` to the end of the
-            // initializer (and any postfix suffix on it). Stopping at that `)`
-            // folds the right size but leaves `{1, 2, 3}` in the retokenized
-            // integer expression, which then fails to evaluate.
-            u32 literal_end = c_ir_sizeof_compound_literal_operand_end(builder, index + 1, end);
-            bool literal = literal_end != UINT32_MAX;
-            u32 operand_start = literal ? index + 1 : index + 2;
-            u32 operand_end = literal ? literal_end : close;
-            u32 consumed_index = literal ? literal_end - 1 : close;
-            IrTypeId type = IR_TYPE_ID_INVALID;
-            u64 operand_size = 0;
-            u32 operand_alignment = 0;
-            bool operand_resolved = false;
-            if (close != UINT32_MAX)
-            {
-                if (!literal)
-                {
-                    c_ir_query_type_name(builder, operand_start, operand_end, true, &type);
-                    if (builder->queries->has_request)
-                    {
-                        return false;
-                    }
-                }
-                IrType* value = ir_type_from_id(&program->types, type);
-                if (value && value->layout.resolved)
-                {
-                    operand_size = c_ir_sizeof_operand_size(value);
-                    operand_alignment = c_ir_sizeof_operand_alignment(value);
-                    operand_resolved = true;
-                }
-                else if (type.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    // The operand is an expression, not a type name. Resolve it
-                    // through the sizeof query only: the type-prediction query
-                    // once guessed int for anything it could not resolve, and a
-                    // guessed size folded into an array bound laid the global
-                    // out too small (the stage-1 stray-global-write incident of
-                    // 2026-08-08). Failing here re-queues the bound for a later
-                    // type-mapping pass instead.
-                    operand_resolved = c_ir_query_sizeof(builder, operand_start, operand_end, &operand_size, &operand_alignment);
-                    if (builder->queries->has_request)
-                    {
-                        return false;
-                    }
-                }
-            }
-            if (!operand_resolved)
-            {
-                return false;
-            }
-            tokens[token_count++] = c_space_token(
-                &bound_space,
-                string_format(arena, S8("{u64}"),
-                              c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_ALIGNOF_WORDS) ? operand_alignment : operand_size),
-                C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            index = consumed_index;
-            continue;
-        }
-        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS) &&
-            index + 1 < end && !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            // `char tmp[sizeof h->chksum]` (sbase's tar) applies sizeof to a
-            // unary expression instead of a parenthesized type name. Its
-            // operand ends where the call-discovery scan says an unevaluated
-            // operand ends, and the sizeof query resolves the expression's
-            // type or fails outright — it never guesses one, so a bound this
-            // pass cannot fold yet is re-queued rather than folded wrong.
-            // Without this the bound stays unresolved and the array becomes a
-            // variable-length one, which a declarator list then rejects.
-            u32 operand_start = index + 1;
-            u32 operand_end = c_ir_tree_unevaluated_operand_end(builder, index, end);
-            u64 operand_size = 0;
-            u32 operand_alignment = 0;
-            if (operand_end <= operand_start || !c_ir_query_sizeof(builder, operand_start, operand_end, &operand_size, &operand_alignment) ||
-                builder->queries->has_request)
-            {
-                return false;
-            }
-            tokens[token_count++] = c_space_token(
-                &bound_space,
-                string_format(arena, S8("{u64}"),
-                              c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_ALIGNOF_WORDS) ? operand_alignment : operand_size),
-                C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            index = operand_end - 1;
-            continue;
-        }
-        if (token.kind == C_TOKEN_IDENTIFIER)
-        {
-            CEntity* constant = c_parse_first_constant_entity_token(&parse, builder->preprocess.spelling_base, token);
-            if (!constant)
-            {
-                return false;
-            }
-            if (constant->constant_is_negative)
-            {
-                tokens[token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
-            }
-            tokens[token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant->constant_value),
-                                                  C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            continue;
-        }
-        tokens[token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
-    }
-    CPreprocessResult evaluation = {
-        .target = preprocess.target,
-        .dialect = preprocess.dialect,
-    };
-    return c_integer_expression_evaluate(arena, bound_space.base, tokens, token_count, 65536, &evaluation, count_out) && evaluation.diagnostic_count == 0;
+    return !qualified;
 }
 
-BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
+BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_node(CIntegerIrBuilder* builder, u32 node, CArrayBound bound, u64* count_out)
 {
-    IR_SEMANTIC_RANGE(LOWERING_BOUND, builder->preprocess.tokens, bound.token_start, bound.token_start + bound.token_count);
-    CIrQueryFrame result = {0};
-    if (!c_ir_query_execute(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result) || !result.success)
+    CIrConstantValue value = {0};
+    bool valid = bound.has_inferred_count;
+    u64 count = bound.inferred_count;
+    if (!valid && !bound.is_star && node != C_AST_NODE_INVALID)
     {
-        return false;
+        valid = c_ir_constant_evaluate_node(builder, node, &value) && value.kind == C_IR_CONSTANT_INTEGER;
+        IrType* type = valid ? ir_type_from_id(&builder->program->types, value.type) : 0;
+        bool negative = valid && value.integer_high && type && type->is_signed && (value.integer_high >> 63);
+        valid = valid && !negative;
+        count = value.integer_high ? UINT64_MAX : value.integer;
     }
-    *count_out = result.integer;
-    return true;
+    if (valid) *count_out = count;
+    return valid;
 }
 
 // Answers the alignment the specifiers in [alignment_start, alignment_count)
@@ -56038,19 +55879,18 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
         u64 requested = 0;
         if (specifier.type.value < parse.type_count)
         {
+            u32 owner = c_ast_facts_alignment_node(builder->syntax_facts, alignment_start + index);
+            bool named = builder->syntax_tree && owner < builder->syntax_tree->node_count && builder->syntax_tree->kinds[owner] == C_AST_TYPE_NAME;
             IrTypeId type = c_type_ir_map[specifier.type.value];
             IrType* value = ir_type_from_id(&program->types, type);
-            if (!value || !value->layout.resolved)
+            if (!named || !value || !value->layout.resolved)
             {
                 return C_IR_ALIGNMENT_PENDING;
             }
             requested = value->layout.alignment;
         }
-        else if (!c_ir_array_bound_evaluate(builder, (CArrayBound){
-                                                .token_start = specifier.token_start,
-                                                .token_count = specifier.token_count,
-                                            },
-                                            &requested))
+        else if (!c_ir_array_bound_evaluate_node(builder, c_ast_facts_alignment_node(builder->syntax_facts, alignment_start + index),
+                                                  (CArrayBound){0}, &requested))
         {
             return C_IR_ALIGNMENT_PENDING;
         }
@@ -56067,10 +55907,8 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
             }
             continue;
         }
-        // Only a request under the natural alignment can be the maximum that
-        // violates the `_Alignas` rule, so the spelling -- a token load and a
-        // compare -- is asked for only on that path.
-        standard_below_natural |= requested < natural_alignment && c_alignment_specifier_is_standard(builder->preprocess, specifier);
+        // The semantic owner retains the standard/GNU distinction once.
+        standard_below_natural |= requested < natural_alignment && c_ast_facts_alignment_is_standard(builder->syntax_facts, alignment_start + index);
         requested_maximum = BUSTER_MAX(requested_maximum, requested);
         alignment = BUSTER_MAX(alignment, (u32)requested);
     }
@@ -57532,11 +57370,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     if (member->is_bit_field && !member->bit_width_resolved && member->bit_width_token_count)
                     {
                         u64 evaluated_width = 0;
-                        if (!c_ir_array_bound_evaluate(&constant_builder, (CArrayBound){
-                                                           .token_start = member->bit_width_token_start,
-                                                           .token_count = member->bit_width_token_count,
-                                                       },
-                                                       &evaluated_width) ||
+                        if (!c_ir_array_bound_evaluate_node(&constant_builder, c_ast_facts_member_width_node(constant_builder.syntax_facts, (u32)(member - parse.members)),
+                                                            (CArrayBound){0}, &evaluated_width) ||
                             evaluated_width > UINT32_MAX)
                         {
                             fields_resolved = false;
@@ -57787,7 +57622,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 }
                 CArrayBound bound = parse.array_bounds[c_type->array_bound];
                 u64 element_count = 0;
-                bool count_resolved = c_ir_array_bound_evaluate(&constant_builder, bound, &element_count);
+                u32 node = c_ast_facts_bound_node(constant_builder.syntax_facts, c_type->array_bound);
+                bool count_resolved = c_ir_array_bound_original_projection(&constant_builder, node) &&
+                                      c_ir_array_bound_evaluate_node(&constant_builder, node, bound, &element_count);
                 if (!count_resolved && !bound.is_star && !bound.token_count && flexible_array_types[type_index])
                 {
                     element_count = 0;
@@ -59422,7 +59259,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 // above. The element type must map for the same reason the
                 // layout step demands a resolved element layout.
                 CArrayBound outermost_bound = parameter_type->array_bound < parse.array_bound_count
-                                                  ? c_ir_vla_bound_expression(preprocess, parse.array_bounds[parameter_type->array_bound])
+                                                  ? parse.array_bounds[parameter_type->array_bound]
                                                   : (CArrayBound){0};
                 bool unspecified_bound = parameter_type->array_bound < parse.array_bound_count && !outermost_bound.has_inferred_count &&
                                          (!outermost_bound.token_count || outermost_bound.is_star) &&

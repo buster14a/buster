@@ -3078,6 +3078,16 @@ members retain sorted sparse member/node pairs. Publication follows protected
 query rollback, without adding semantic rows. The sidecar is charged at its
 actual retained size, compact-copied with the unit, and sealed before lowering.
 
+The ARRAY_BOUND token query and retokenizer are retired. Initial type mapping
+retains the old unresolved projection for bracket-qualified parameter bounds;
+the later runtime layout fold consumes the retained expression node. VLA
+shells, layout dimensions, and saved bound values carry that exact owner.
+Numeric alignment and unresolved width queries use their committed source
+owners; type-valued alignment projects the finished mapped type without new
+constructors. Certified integer subtrees with no type constructors use their
+semantic value; constructor-bearing expressions keep ordered node tasks.
+Actual settled sizeof tasks feed the existing semantic-answer comparison.
+
 The scalar node API reads a certified literal/enumerator leaf directly when
 it has no constructor effects. A pointer-valued scalar place can read its
 matching read-only global initializer; array/string places stay addresses.
