@@ -168,12 +168,17 @@
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and
   a 30-second total metadata budget. Transient 5xx/429/transport reads retry
-  in that budget, falling back to smaller jobs pages after a 5xx; a 4xx fails
-  immediately. A later exact snapshot may recover a transient omission; a
-  persistent empty, stale or ambiguous record fails closed, and its errors are
-  printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
-  shadows that job. Run a fresh full CI attempt when required metadata remains
-  unresolved; a green job-level conclusion alone is not execution evidence.
+  in that budget, each read capped at a third of it, falling back to smaller
+  jobs pages after a 5xx or read timeout; a 4xx fails immediately. A later
+  exact snapshot may recover a transient omission; an ambiguous record fails
+  closed, and its errors are printed to the log and step summary. It never
+  borrows step proof from an older attempt when a newer attempt shadows that
+  job. After every refresh, a completed successful job whose required steps are
+  only absent (`steps=[]`) or still pending passes on its job conclusion, never
+  when any step record failed or was skipped. Each such job is logged as
+  `CI complete inventory gate: step proof unavailable, accepted on job conclusion: <job>`
+  (#4102); see [GitHub Actions CI](../ci-github-actions.md). Run a fresh full
+  CI attempt when other required metadata remains unresolved.
   GitHub can attach externally published admission and compiler-benchmark checks
   to this Actions inventory. `github_ci_time.py` separates their metadata only
   after exact check ID/name/head/app/namespace proof. The compiler benchmark

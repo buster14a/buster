@@ -389,22 +389,46 @@ successful record for every required desktop/native step. GitHub can briefly
 publish job or step metadata before those records are complete, so the gate
 re-reads inconsistent inventories with 1/2/4-second backoff, at most three
 refreshes and a 30-second total metadata budget. A later exact snapshot can
-recover a transient omission; a persistent empty, stale or ambiguous record
-fails closed. It never borrows required-step proof from an older attempt when a
-newer attempt shadows that job. A completed job whose API record has
-`steps=[]` is reported as that distinct case and stays unresolved; it is never
-treated as success. Transient API reads (HTTP 5xx or 429, connection loss or a
-timeout) retry inside the same 30-second budget. The run read retries with the
-same backoff. A failed jobs page discards that snapshot and is re-read as a
-pending refresh; after a 5xx, later snapshots request 30 jobs per page instead
-of 100. Any other HTTP status, and every identity, pagination or consistency
-violation, still fails immediately. The retained `desktop-partitions.json`
-records the exact run/head, final job attempts, observed required-step status
-and conclusion, refresh count, the final page size, the outcome of every API
-read, and any unresolved proof errors. An unsuccessful verdict also prints
-those errors, with run, attempt, head, snapshot and refresh counts, to the job
-log and step summary; a raised read or input error prints `CI timing failed:`
-instead. A green job-level conclusion alone cannot pass the gate.
+recover a transient omission; an ambiguous record fails closed. It never borrows
+required-step proof from an older attempt when a newer attempt shadows that job.
+A completed job whose API record has `steps=[]` is reported as that distinct
+case while refreshes remain.
+
+GitHub's jobs API can keep serving stale step metadata for many minutes after a
+job finished: on 2026-10-13 completed green jobs still listed `steps=[]` or
+`pending`/`in_progress` required steps 15 minutes later, and every merge-group
+run failed in this gate for about two hours (#4102). So after every refresh,
+the gate judges the newest complete snapshot once more. A job may then pass on
+its job-level `conclusion: success` only when it is a completed, non-deferred
+job and each required step is either absent because the API returned
+`steps=[]`, or listed exactly once as `queued`, `pending`, `waiting` or
+`in_progress` without a conclusion. No waiver is given when any step record of
+that job has a conclusion other than `success` (including `skipped`), a
+required step is missing from a non-empty list or duplicated, the job is
+missing, duplicated, foreign, running or not successful, or the snapshot has
+any other error. Each waived job is printed as
+`CI complete inventory gate: step proof unavailable, accepted on job conclusion: <job>`,
+raised as a `::warning::` annotation, listed in the step summary, and recorded
+in `desktop-partitions.json` (`step_proof_waived`, the per-job
+`step_proof_waived` flag and `job_metadata.step_proof_waiver_snapshot`). The
+matrix group's `needs` result must also be `success` in the same job's
+`Require every shard` step. `main_ci_reuse.py` keeps the strict step proof and has no waiver.
+
+Transient API reads (HTTP 5xx or 429, connection loss or a timeout) retry
+inside the same 30-second budget, and each gate read is capped at a third of
+that budget (`JOB_METADATA_READ_TIMEOUT_SECONDS`), so one slow read cannot use
+all of it. The run read retries with the same backoff. A failed jobs page
+discards that snapshot and is re-read as a pending refresh; after a 5xx or a
+read timeout, later snapshots request 30 jobs per page instead of 100. Any
+other HTTP status, and every identity, pagination or consistency violation,
+still fails immediately. The retained `desktop-partitions.json` records the
+exact run/head, final job attempts, observed required-step status and
+conclusion, refresh count, the final page size, the outcome of every API read,
+any waived step proof, and any unresolved proof errors. An unsuccessful verdict
+also prints those errors, with run, attempt, head, snapshot and refresh counts,
+to the job log and step summary; a raised read or input error prints
+`CI timing failed:` instead. Outside that stale-metadata waiver, a green
+job-level conclusion alone cannot pass the gate.
 
 A hosted runner that stops reporting cannot run its own summary or upload
 steps, so the gate also records controller-visible interruption evidence. For
