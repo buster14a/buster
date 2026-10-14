@@ -9,9 +9,11 @@
 // tree keeps them: one private arena per column (CAstStorage), each reserving
 // C_AST_COLUMN_CAPACITY nodes of address space and committing C_AST_COLUMN_STEP
 // nodes at a time, so a node is written once and never copied. A tree that
-// outgrows its reservations moves once per doubling, the only copy a build can
-// make. The published tree owns the column arenas until c_ast_release; a failed
-// build releases them itself. The storage record and the diagnostics live in
+// outgrows its reservations moves once per doubling. Expression parentheses
+// are sparse rows committed at their closing markers in an independent arena,
+// with the same checked reservation growth. The published tree owns the column
+// and group arenas until c_ast_release; a failed build releases them itself.
+// The storage record and the diagnostics live in
 // the caller's arena. The tree references the preprocessing result's tokens and
 // symbols by index, so that result must outlive it. The only shared state a
 // build writes is the unit's symbol table, and only to intern the spelling of a
@@ -6906,7 +6908,7 @@ u32 c_ast_validate(CAst const* ast)
         }
         if (!valid)
         {
-            result = group.node;
+            result = group.node < count ? group.node : ast->root;
         }
     }
     for (u32 node = 0; node < count && result == C_AST_NODE_INVALID; node += 1)

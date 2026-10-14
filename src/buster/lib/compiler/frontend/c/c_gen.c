@@ -3564,30 +3564,20 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_hoist_assignment_kind(u32 kind)
     return kind >= C_AST_ASSIGN && kind <= C_AST_BIT_OR_ASSIGN;
 }
 
-// Whether `node`'s span is wrapped by a pair of parentheses, the innermost of
-// which opens at spans->first[node] - 1 and closes at spans->end[node].
-BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_span_wrapped(CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u32 node)
+// A retained expression group belongs to its node, with innermost level 1.
+// Syntax-owned call and condition delimiters have their own node identities.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_span_wrapped(CAst const* ast, u32 node)
 {
-    u32 first = spans->first[node];
-    u32 end = spans->end[node];
-    return first != C_AST_SPAN_NONE && first > 0 && tokens[first - 1].punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS &&
-           matches_plus_one[first - 1] == end + 1;
+    return c_ast_parentheses(ast, node).count != 0;
 }
 
-// The span of `node` widened over every pair of parentheses that wraps it.
-BUSTER_C_INTERNAL BUSTER_INLINE void c_ir_span_expanded(CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u32 node,
-                                                       u32* first_out, u32* end_out)
+// The span widened to its outermost retained expression group.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_ir_span_expanded(CAst const* ast, CAstSpans const* spans, u32 node, u32* first_out, u32* end_out)
 {
-    u32 first = spans->first[node];
-    u32 end = spans->end[node];
-    while (first != C_AST_SPAN_NONE && first > 0 && tokens[first - 1].punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS &&
-           matches_plus_one[first - 1] == end + 1)
-    {
-        first -= 1;
-        end += 1;
-    }
-    *first_out = first;
-    *end_out = end;
+    CAstParentheses groups = c_ast_parentheses(ast, node);
+    CAstParenthesis const* outer = groups.count ? ast->parentheses + groups.first + groups.count - 1 : 0;
+    *first_out = outer ? outer->open : spans->first[node];
+    *end_out = outer ? outer->close + 1 : spans->end[node];
 }
 
 // The interior facts a group must have for the control prepass to hoist it:
@@ -3660,8 +3650,9 @@ BUSTER_C_INTERNAL bool c_ir_hoist_child_rooted(u32 parent_kind, bool first_child
 // precede parents, so each child's byte is final when its parent is reached.
 // A node's own operator joins its root region after its first child, where
 // every binary, conditional and assignment operator sits.
-BUSTER_C_INTERNAL void c_ir_hoist_facts_build(CAst const* ast, CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u8* facts)
+BUSTER_C_INTERNAL void c_ir_hoist_facts_build(CAst const* ast, u8 const* wrapped_bits, u8* facts)
 {
+    u32 group_cursor = 0;
     for (u32 node = 0; node < ast->node_count; node += 1)
     {
         u32 kind = ast->kinds[node];
@@ -3713,7 +3704,7 @@ BUSTER_C_INTERNAL void c_ir_hoist_facts_build(CAst const* ast, CAstSpans const* 
             u32 child_facts = facts[child];
             below |= child_facts & (C_IR_HOIST_ANY_BITS | C_IR_HOIST_HOLDS_CALL | C_IR_HOIST_HOLDS_GROUP);
             bool first = c_ast_subtree_begin(ast, child) == begin;
-            bool rooted = c_ir_hoist_child_rooted(kind, first, child_count == 0) && !c_ir_span_wrapped(spans, tokens, matches_plus_one, child);
+            bool rooted = c_ir_hoist_child_rooted(kind, first, child_count == 0) && !(wrapped_bits[child / 8] & (1u << (child % 8)));
             u32 root = rooted ? child_facts & C_IR_HOIST_ROOT_BITS : 0;
             if (first)
             {
@@ -3734,12 +3725,25 @@ BUSTER_C_INTERNAL void c_ir_hoist_facts_build(CAst const* ast, CAstSpans const* 
         // A parenthesis right after a name opens no group, except at the
         // very start of a range, which the walk checks on its leftmost path
         // itself (c_ir_tree_control_groups).
-        bool wrapped = c_ir_span_wrapped(spans, tokens, matches_plus_one, node);
-        bool after_name = wrapped && spans->first[node] >= 2 && tokens[spans->first[node] - 2].kind == C_TOKEN_IDENTIFIER;
-        bool callee_named = kind == C_AST_CALL && ast->tokens[node] > 0 && tokens[ast->tokens[node] - 1].kind == C_TOKEN_IDENTIFIER;
+        CAstParenthesis const* parenthesis = group_cursor < ast->parenthesis_count && ast->parentheses[group_cursor].node == node
+                                                ? ast->parentheses + group_cursor : 0;
+        bool wrapped = parenthesis != 0;
+        bool after_name = wrapped && (parenthesis->flags & C_AST_PARENTHESIS_AFTER_IDENTIFIER);
+        bool callee_named = false;
+        if (kind == C_AST_CALL && child_count)
+        {
+            u32 callee = c_ast_child_at(ast, node, 0);
+            u32 callee_kind = ast->kinds[callee];
+            callee_named = !(wrapped_bits[callee / 8] & (1u << (callee % 8))) &&
+                           (callee_kind == C_AST_IDENTIFIER || callee_kind == C_AST_MEMBER || callee_kind == C_AST_MEMBER_ARROW);
+        }
+        while (group_cursor < ast->parenthesis_count && ast->parentheses[group_cursor].node == node)
+        {
+            group_cursor += 1;
+        }
         bool group = (wrapped && !after_name && c_ir_hoist_paren_preparable(value)) ||
                      ((kind == C_AST_INDEX || (kind == C_AST_DECLARATOR_ARRAY && (ast->data[node] & (1u << 1)))) && child_count &&
-                      !c_ir_span_wrapped(spans, tokens, matches_plus_one, last_child) && c_ir_hoist_bracket_preparable(facts[last_child])) ||
+                      !(wrapped_bits[last_child / 8] & (1u << (last_child % 8))) && c_ir_hoist_bracket_preparable(facts[last_child])) ||
                      (kind == C_AST_CALL && child_count > 2 && !callee_named);
         facts[node] = (u8)(value | (group ? C_IR_HOIST_HOLDS_GROUP : 0));
     }
@@ -24557,7 +24561,6 @@ typedef enum CIrTreeWalkTag
     // Visit the node.
     C_IR_TREE_WALK_NODE,
     // Visit the node, whose innermost parentheses are its call's own.
-    C_IR_TREE_WALK_NODE_UNWRAPPED,
     // The `[` group of an INDEX or DECLARATOR_ARRAY.
     C_IR_TREE_WALK_BRACKET,
     // The argument list of a CALL.
@@ -24755,7 +24758,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_starts_at(CIntegerIrBuilder* builder, u32 node,
 {
     u32 first = C_AST_SPAN_NONE;
     u32 end = C_AST_SPAN_NONE;
-    c_ir_span_expanded(builder->syntax_spans, builder->preprocess.tokens, builder->syntax_matches, node, &first, &end);
+    c_ir_span_expanded(builder->syntax_tree, builder->syntax_spans, node, &first, &end);
     return first == start;
 }
 
@@ -24766,7 +24769,6 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
     CAstSpans const* spans = builder->syntax_spans;
     u8 const* hoist = builder->syntax_hoist;
     CToken const* tokens = builder->preprocess.tokens;
-    u32 const* matches = builder->syntax_matches;
     u64 mark = builder->temporary_arena->position;
     CIrTreeWalk walk;
     bool valid = c_ir_tree_walk_begin(builder, root, &walk);
@@ -24795,13 +24797,16 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
         CIrTreeWalkEntry entry = walk.entries[walk.count];
         u32 node = entry.node;
         u32 kind = ast->kinds[node];
-        if (entry.tag == C_IR_TREE_WALK_NODE || entry.tag == C_IR_TREE_WALK_NODE_UNWRAPPED)
+        if (entry.tag == C_IR_TREE_WALK_NODE)
         {
             bool skipped = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE || kind == C_AST_ALIGNOF_EXPRESSION ||
                            kind == C_AST_ALIGNOF_TYPE || kind == C_AST_GENERIC_SELECTION;
-            if (kind == C_AST_CALL && ast->tokens[node] > 0)
+            if (kind == C_AST_CALL)
             {
-                CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, tokens[ast->tokens[node] - 1]);
+                u32 callee = c_ir_tree_first_child(ast, node);
+                CSymbolBuiltin builtin = ast->kinds[callee] == C_AST_IDENTIFIER && !c_ir_span_wrapped(ast, callee)
+                                             ? c_ir_token_builtin_kind(builder, tokens[ast->tokens[callee]])
+                                             : C_SYMBOL_BUILTIN_NONE;
                 skipped = builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR;
             }
             bool spine = entry.deferred != 0;
@@ -24815,11 +24820,12 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             {
                 builder->hoist_statistics->hoist_steps += 1;
             }
-            if (descend && entry.tag == C_IR_TREE_WALK_NODE && c_ir_span_wrapped(spans, tokens, matches, node) && spans->first[node] - 1 >= start)
+            CAstParenthesis const* parenthesis = c_ast_parenthesis_at(ast, node, 1);
+            if (descend && entry.tag == C_IR_TREE_WALK_NODE && parenthesis && parenthesis->open >= start)
             {
-                u32 open = spans->first[node] - 1;
-                u32 close = spans->end[node];
-                bool after_name = open > start && tokens[open - 1].kind == C_TOKEN_IDENTIFIER;
+                u32 open = parenthesis->open;
+                u32 close = parenthesis->close;
+                bool after_name = open > start && (parenthesis->flags & C_AST_PARENTHESIS_AFTER_IDENTIFIER);
                 if (c_ir_tree_group_taken(builder, node, 1))
                 {
                     descend = false;
@@ -24924,10 +24930,10 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             // The subscript or size is the node's last child.
             u32 inner = node - 1;
             u32 open = ast->tokens[node];
-            bool wrapped = c_ir_span_wrapped(spans, tokens, matches, inner);
+            bool wrapped = c_ir_span_wrapped(ast, inner);
             u32 inner_first = C_AST_SPAN_NONE;
             u32 inner_end = C_AST_SPAN_NONE;
-            c_ir_span_expanded(spans, tokens, matches, inner, &inner_first, &inner_end);
+            c_ir_span_expanded(ast, spans, inner, &inner_first, &inner_end);
             u32 close = kind == C_AST_INDEX ? spans->end[node] - 1 : inner_end;
             if (inner_end == C_AST_SPAN_NONE || (kind == C_AST_INDEX && spans->end[node] == C_AST_SPAN_NONE))
             {
@@ -24952,9 +24958,11 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
             u32 close = spans->end[node] - 1;
             u32 argument_count = c_ir_tree_children(ast, node, children, BUSTER_ARRAY_LENGTH(children)) - 1;
             u32 begin = c_ast_subtree_begin(ast, node);
-            bool after_name = open > start && tokens[open - 1].kind == C_TOKEN_IDENTIFIER;
+            u32 callee = c_ir_tree_first_child(ast, node);
+            u32 callee_kind = ast->kinds[callee];
+            bool after_name = open > start && !c_ir_span_wrapped(ast, callee) &&
+                              (callee_kind == C_AST_IDENTIFIER || callee_kind == C_AST_MEMBER || callee_kind == C_AST_MEMBER_ARROW);
             bool hoisted = false;
-            bool unwrapped_single = false;
             if (spans->end[node] == C_AST_SPAN_NONE)
             {
                 valid = false;
@@ -24972,11 +24980,10 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
                 for (u32 cursor = node; cursor > begin && c_ast_subtree_begin(ast, cursor - 1) > begin; cursor = c_ast_subtree_begin(ast, cursor - 1))
                 {
                     u32 argument = cursor - 1;
-                    bool own_parentheses = c_ir_span_wrapped(spans, tokens, matches, argument) && spans->first[argument] - 1 != open;
+                    bool own_parentheses = c_ir_span_wrapped(ast, argument);
                     u32 argument_root = own_parentheses ? 0 : hoist[argument] & C_IR_HOIST_ROOT_BITS;
                     suffix = c_ir_hoist_root_then(argument_root, suffix);
                     interior |= hoist[argument] & C_IR_HOIST_ANY_BITS;
-                    unwrapped_single = argument_count == 1 && !own_parentheses && c_ir_span_wrapped(spans, tokens, matches, argument);
                 }
                 interior |= suffix;
                 hoisted = c_ir_hoist_paren_preparable(interior);
@@ -24991,7 +24998,7 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
                 {
                     if (hoist[cursor - 1] & C_IR_HOIST_HOLDS_GROUP)
                     {
-                        valid = valid && c_ir_tree_walk_push(builder, &walk, cursor - 1, unwrapped_single ? C_IR_TREE_WALK_NODE_UNWRAPPED : C_IR_TREE_WALK_NODE, false);
+                        valid = valid && c_ir_tree_walk_push(builder, &walk, cursor - 1, C_IR_TREE_WALK_NODE, false);
                     }
                 }
             }
@@ -26031,7 +26038,7 @@ BUSTER_C_INTERNAL u32 c_ir_tree_closing_group_open(CIntegerIrBuilder* builder, u
     CAstSpans const* spans = builder->syntax_spans;
     u32 first = C_AST_SPAN_NONE;
     u32 end = C_AST_SPAN_NONE;
-    c_ir_span_expanded(spans, builder->preprocess.tokens, builder->syntax_matches, node, &first, &end);
+    c_ir_span_expanded(builder->syntax_tree, spans, node, &first, &end);
     u32 kind = ast->kinds[node];
     u32 open = C_AST_NODE_INVALID;
     if (first == C_AST_SPAN_NONE)
@@ -26058,19 +26065,16 @@ BUSTER_C_INTERNAL u32 c_ir_tree_closing_group_open(CIntegerIrBuilder* builder, u
 BUSTER_C_INTERNAL u32 c_ir_tree_subscript_base(CIntegerIrBuilder* builder, u32 node, u32 start)
 {
     CAst const* ast = builder->syntax_tree;
-    CAstSpans const* spans = builder->syntax_spans;
-    CToken const* tokens = builder->preprocess.tokens;
-    u32 const* matches = builder->syntax_matches;
     u32 base = node;
     bool valid = true;
-    while (valid && ast->kinds[base] == C_AST_INDEX && !c_ir_span_wrapped(spans, tokens, matches, base))
+    while (valid && ast->kinds[base] == C_AST_INDEX && !c_ir_span_wrapped(ast, base))
     {
         valid = ast->tokens[base] > start;
         // An INDEX's first child is its base.
         base = valid ? c_ir_tree_first_child(ast, base) : base;
     }
     u32 kind = ast->kinds[base];
-    bool named = valid && !c_ir_span_wrapped(spans, tokens, matches, base) &&
+    bool named = valid && !c_ir_span_wrapped(ast, base) &&
                  (kind == C_AST_IDENTIFIER || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW);
     return named ? base : C_AST_NODE_INVALID;
 }
@@ -37222,24 +37226,51 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_ir_core_last_child(u32 node)
 // How many pairs of parentheses wrap `node` whose `(` is at `limit` or later.
 BUSTER_C_INTERNAL u32 c_ir_core_wraps(CIntegerIrBuilder* builder, u32 node, u32 limit)
 {
-    CAstSpans const* spans = builder->syntax_spans;
-    u32 first = spans->first[node];
-    u32 end = spans->end[node];
-    u32 wraps = 0;
-    while (first > limit && builder->preprocess.tokens[first - 1].punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS &&
-           builder->syntax_matches[first - 1] == end + 1)
+    CAst const* ast = builder->syntax_tree;
+    CAstParentheses groups = c_ast_parentheses(ast, node);
+    u32 wraps = groups.count;
+    while (wraps && ast->parentheses[groups.first + wraps - 1].open < limit)
     {
-        first -= 1;
-        end += 1;
-        wraps += 1;
+        wraps -= 1;
     }
     return wraps;
 }
 
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_core_wrapped(CIntegerIrBuilder* builder, u32 node)
 {
-    return c_ir_span_wrapped(builder->syntax_spans, builder->preprocess.tokens, builder->syntax_matches, node);
+    return c_ir_span_wrapped(builder->syntax_tree, node);
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_retained_parenthesis_navigation(void)
+{
+    u8 kinds[] = {C_AST_IDENTIFIER, C_AST_IDENTIFIER, C_AST_ASSIGN, C_AST_NUMBER, C_AST_ADD};
+    u32 extents[] = {1, 1, 3, 1, 5};
+    u32 tokens[] = {42, 47, 45, 65, 62};
+    u32 data[] = {0, 0, 0, 0, 0};
+    CAstParenthesis parentheses[] = {{2, 40, 50, 0}, {2, 30, 55, 0}, {4, 20, 80, C_AST_PARENTHESIS_AFTER_IDENTIFIER}};
+    CAst ast = {.kinds = kinds, .extents = extents, .tokens = tokens, .data = data, .node_count = 5,
+                .parentheses = parentheses, .parenthesis_count = 3, .root = 4};
+    u32 firsts[] = {42, 47, 42, 65, 30};
+    u32 ends[] = {43, 48, 48, 66, 66};
+    CAstSpans spans = {.first = firsts, .end = ends};
+    CIntegerIrBuilder builder = {.syntax_tree = &ast, .syntax_spans = &spans};
+    u32 first = 0;
+    u32 end = 0;
+    c_ir_span_expanded(&ast, &spans, 2, &first, &end);
+    bool valid = c_ir_core_wraps(&builder, 2, 0) == 2 && c_ir_core_wraps(&builder, 2, 31) == 1 &&
+                 c_ir_core_wraps(&builder, 2, 41) == 0 && c_ir_core_wrapped(&builder, 2) && !c_ir_core_wrapped(&builder, 3) &&
+                 first == 30 && end == 56;
+    c_ir_span_expanded(&ast, &spans, 3, &first, &end);
+    valid = valid && first == 65 && end == 66;
+    u8 wrapped = (1u << 2) | (1u << 4);
+    u8 facts[5];
+    c_ir_hoist_facts_build(&ast, &wrapped, facts);
+    valid = valid && facts[2] == (C_IR_HOIST_ROOT_ASSIGNMENT | C_IR_HOIST_ANY_ASSIGNMENT | C_IR_HOIST_HOLDS_GROUP) &&
+            facts[4] == (C_IR_HOIST_ANY_ASSIGNMENT | C_IR_HOIST_HOLDS_GROUP);
+    return valid;
+}
+#endif
 
 // Whether the operand of a prefix `++` or `--` is spelled from a `*` or a
 // `(`: the token path took such an expression through its evaluator rather
@@ -37650,7 +37681,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_sizeof(CIntegerIrBuilder* builder, CIr
     {
         u32 first = C_AST_SPAN_NONE;
         u32 end = C_AST_SPAN_NONE;
-        c_ir_span_expanded(spans, builder->preprocess.tokens, builder->syntax_matches, operand, &first, &end);
+        c_ir_span_expanded(ast, spans, operand, &first, &end);
         // Parenthesized: a `(` right after the word that closes where the
         // operand ends -- a group around it, or a statement expression's
         // own. A compound literal, and a group a postfix operator follows,
@@ -38084,7 +38115,6 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_enter(CIntegerIrBuilder* builder, CIrL
     CIrCoreWalkEntry* entry = state->walk + state->walk_count - 1;
     u32 node = entry->node;
     u32 first = spans->first[node];
-    u32 end = spans->end[node];
     CIrCoreStatus status = C_IR_CORE_NEXT;
     bool consumed = false;
     if (first == C_AST_SPAN_NONE)
@@ -38095,7 +38125,12 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_enter(CIntegerIrBuilder* builder, CIrL
     // Only the parentheses inside the frame's range belong to it: a range
     // that is the interior of a group starts after its `(`.
     u32 limit = entry->parent == C_AST_NODE_INVALID ? frame->as.expression_core.start : 0;
-    u32 wraps = status == C_IR_CORE_NEXT ? c_ir_core_wraps(builder, node, limit) : 0;
+    CAstParentheses groups = c_ast_parentheses(builder->syntax_tree, node);
+    u32 wraps = status == C_IR_CORE_NEXT ? groups.count : 0;
+    while (wraps && builder->syntax_tree->parentheses[groups.first + wraps - 1].open < limit)
+    {
+        wraps -= 1;
+    }
     u32 facts = builder->syntax_hoist[node];
     while (status == C_IR_CORE_NEXT && !consumed && wraps)
     {
@@ -38103,8 +38138,9 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_enter(CIntegerIrBuilder* builder, CIrL
         {
             builder->hoist_statistics->evaluator_steps += 1;
         }
-        u32 open = first - wraps;
-        u32 close = end - 1 + wraps;
+        CAstParenthesis const* group = builder->syntax_tree->parentheses + groups.first + wraps - 1;
+        u32 open = group->open;
+        u32 close = group->close;
         builder->failure_token_index = open;
         CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, node, wraps);
         // A group that did not come prepared -- an enclosing prepared group
@@ -39357,7 +39393,7 @@ BUSTER_C_INTERNAL bool c_ir_node_root_conditional(CIntegerIrBuilder* builder, u3
                 if (kind == C_AST_CONDITIONAL)
                 {
                     u32 middle_first = C_AST_SPAN_NONE;
-                    c_ir_span_expanded(builder->syntax_spans, builder->preprocess.tokens, builder->syntax_matches, children[1], &middle_first,
+                    c_ir_span_expanded(builder->syntax_tree, builder->syntax_spans, children[1], &middle_first,
                                        &colon_token);
                 }
                 bool refused = colon_token == question_token + 1 && !c_preprocess_dialect_is_gnu(builder->preprocess.dialect);
@@ -44469,7 +44505,15 @@ BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CPre
             }
             result->hoist = arena_allocate(arena, u8, ast->node_count);
             result->walked = arena_allocate_zeroed(arena, u8, ((u64)ast->node_count + 7) / 8);
-            c_ir_hoist_facts_build(ast, &result->spans, preprocess->tokens, result->matches, result->hoist);
+            // The walked bitset is not yet published: use it as a linear
+            // presence index while building facts, then clear it for walks.
+            for (u32 group = 0; group < ast->parenthesis_count; group += 1)
+            {
+                u32 node = ast->parentheses[group].node;
+                result->walked[node / 8] |= (u8)(1u << (node % 8));
+            }
+            c_ir_hoist_facts_build(ast, result->walked, result->hoist);
+            memset(result->walked, 0, ((u64)ast->node_count + 7) / 8);
             if (statistics)
             {
                 statistics->span_nodes += result->spans.spanned;

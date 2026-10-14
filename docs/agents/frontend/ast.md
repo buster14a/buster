@@ -1883,7 +1883,7 @@ byte-for-byte comparison of `-g` objects checks it.
 
 ### Retained expression parentheses
 
-`CAst.parentheses` retains sparse `(node, open, close)` records when the
+`CAst.parentheses` retains sparse `(node, open, close, flags)` records when the
 forward expression builder consumes a `C_AST_OP_PAREN` marker's closing
 parenthesis. These groups add no nodes and preserve implicit, hybrid and
 explicit topology. Records are append-built in node order, then innermost to
@@ -1897,7 +1897,13 @@ reservation growth and independent step commits. A failed build retires it;
 `c_ast_release` releases it once through any copy of the tree. Logical rows
 are charged to `retained_bytes`, unused committed capacity is visible as
 `parenthesis_committed_bytes`, and reservation moves charge
-`parenthesis_copy_bytes`. The producer does no token reparse or sorting.
+`parenthesis_copy_bytes`. The producer does no token reparse or sorting. The flags retain the parser's
+opening context when a group follows an identifier, including a keyword
+spelled as an identifier. Lowering's wrapper navigation and control hoisting
+read these rows; they inspect no token punctuators or matching delimiters to
+find an expression group's owner or level. The hoist facts make one linear
+pass over rows and nodes with a temporary presence bitset, released for the
+normal visited-node role before the table is published.
 `c_ast_test_parentheses` specifies exact roots and delimiters independently,
 checks every layout and refill batch, forces both column and group moves,
 and covers deep nesting, release through copies and failed-build rollback.
@@ -1927,11 +1933,12 @@ and the initializer walkers. There the end comes from nodes, as in the
 [statement plan](#statement-plan-from-the-tree):
 - a node's last token is the greatest anchor on its rightmost chain;
 - a `CALL` or `INDEX` adds its closer;
-- wrapping parentheses are counted outward, each checked against the token
-  the grammar puts there.
+- expression groups read their parser-committed sparse records;
+- the statement range adapter still widens syntax-owned delimiters pending
+  its owner metadata migration.
 
-That costs the wrapping depth, not the range length. A failed check sends
-the core back to the token path.
+Expression wrapper navigation has no token fallback. Syntax-owned delimiter
+ranges in the statement adapter remain a separate step-5 boundary.
 
 Row 8 retires from lowering only when none of the four classes asks a
 delimiter question. That happens after slices 1–5, so it is the last step.

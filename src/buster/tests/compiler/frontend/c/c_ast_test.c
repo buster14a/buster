@@ -1205,6 +1205,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_options_and_statistics(UnitTestArg
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_parentheses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_retained_parenthesis_navigation());
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
         S8("void f(void) { (a + (b * c)); ((d)); f((e)); (f)(g); }"), C_PREPROCESS_DIALECT_GNU17);
@@ -1234,6 +1235,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_parentheses(UnitTestArguments* arg
                 BUSTER_TEST(arguments, !c_ast_parenthesis_at(&built.ast, 14, 0) && !c_ast_parenthesis_at(&built.ast, 14, 3));
                 BUSTER_TEST(arguments, c_ast_parentheses(&built.ast, 21).count == 0);
                 BUSTER_TEST(arguments, c_ast_parentheses(&built.ast, C_AST_NODE_INVALID).count == 0);
+                CAstParenthesis saved = built.ast.parentheses[0];
+                built.ast.parentheses[0].node = C_AST_NODE_INVALID;
+                BUSTER_TEST(arguments, c_ast_validate(&built.ast) == built.ast.root);
+                built.ast.parentheses[0] = saved;
                 CAst copy = built.ast;
                 u64 live = arena_test_live_reserved_bytes();
                 c_ast_release(&built.ast);

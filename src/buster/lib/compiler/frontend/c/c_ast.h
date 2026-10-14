@@ -70,12 +70,14 @@
 // Ownership: the four node columns are written once, in place, where the
 // published tree keeps them: each grows in its own private arena (CAstStorage)
 // that reserves address space and commits it as the builder appends, so no
-// node is staged and copied. The tree owns those arenas until c_ast_release;
+// node is staged and copied. Sparse expression groups use an independent
+// retained arena, append-built in node order at each grammar commitment.
+// The tree owns those arenas until c_ast_release;
 // the storage record, the diagnostics and the HYBRID/EXPLICIT slices live in
 // the caller's arena. Builder frames, stacks and bindings live in the phase
 // arena (CAstOptions.phase_arena, else a private one created and retired by
 // the build) and are released before return. A failed build releases its
-// columns itself. The tree references the preprocessing result's tokens and
+// columns and groups itself. The tree references the preprocessing result's tokens and
 // symbols by index and requires that result to stay alive.
 //
 // Scope: the builder resolves the names that change the parse at their
@@ -395,7 +397,7 @@ struct CAstStatistics
 {
     // Always reported.
     u64 node_count;
-    u64 retained_bytes;      // the columns (13 bytes per node), plus children/slices in HYBRID and EXPLICIT
+    u64 retained_bytes;      // logical node/group rows, plus children/slices in HYBRID and EXPLICIT
     u64 transient_high_water; // peak builder bytes in the phase arena: frames, stacks, bindings, refill ring
     u64 column_copy_bytes;   // bytes copied moving the columns to larger reservations; 0 below C_AST_COLUMN_CAPACITY
     u64 parenthesis_copy_bytes; // sparse group rows copied when their reservation grows
