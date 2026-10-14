@@ -2152,6 +2152,11 @@ byte.
   argument, so the default implicit tree needs one sibling walk per call.
   This adds 4 bytes per cached argument, removes the temporary start cache
   used to create the ends, and sizes prediction scratch by actual arguments.
+  Identity, prefetch and clear-cache builtins use those retained argument
+  ends for their separators. Object-size and string-length shortcuts inspect
+  the exact argument's node kind and intrinsic span, including grouped and
+  concatenated strings; they do not strip token parentheses or classify a
+  token sequence as an argument.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment

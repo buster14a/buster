@@ -27030,17 +27030,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return false;
                 }
                 u64 size = mode >= 2 ? 0 : UINT64_MAX;
-                u32 object_start = starts[0];
-                u32 object_end = ends[0];
-                while (object_start < object_end && c_token_is_punctuator(&builder->preprocess.tokens[object_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                       c_ir_matching_delimiter_cached(builder, object_start, object_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
-                           object_end - 1)
-                {
-                    object_start += 1;
-                    object_end -= 1;
-                }
-                if (object_start < object_end && builder->preprocess.tokens[object_start].kind == C_TOKEN_STRING_LITERAL &&
-                    c_ir_tokens_are_string_literals(builder->preprocess, object_start, object_end))
+                u32 object_node = c_ir_call_argument_node(builder, selected, 0);
+                u32 object_start = builder->syntax_spans->first[object_node];
+                u32 object_end = builder->syntax_spans->end[object_node];
+                if (builder->syntax_tree->kinds[object_node] == C_AST_STRING)
                 {
                     CIrDecodedString decoded = {0};
                     if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, object_start, object_end, builder->parse.string_literals, &decoded) ||
@@ -27050,7 +27043,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     }
                     size = (decoded.element_count + 1) * decoded.element_width;
                 }
-                else if (object_start + 1 == object_end && builder->preprocess.tokens[object_start].kind == C_TOKEN_IDENTIFIER)
+                else if (builder->syntax_tree->kinds[object_node] == C_AST_IDENTIFIER)
                 {
                     CEntityId entity = c_ir_identifier_entity(builder, object_start);
                     IrTypeId object_type = IR_TYPE_ID_INVALID;
@@ -28575,30 +28568,23 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         if (selected->builtin_strlen)
         {
-            u32 argument_start = selected->open_index + 1;
-            u32 argument_end = selected->close_index;
-            while (argument_start < argument_end && c_token_is_punctuator(&builder->preprocess.tokens[argument_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                   c_ir_matching_delimiter_cached(builder, argument_start, argument_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
-                       argument_end - 1)
-            {
-                argument_start += 1;
-                argument_end -= 1;
-            }
+            u32 argument_node = c_ir_call_argument_node(builder, selected, 0);
+            u32 argument_start = builder->syntax_spans->first[argument_node];
+            u32 argument_end = builder->syntax_spans->end[argument_node];
             u64 length = 0;
             bool valid = false;
-            if (argument_start < argument_end && builder->preprocess.tokens[argument_start].kind == C_TOKEN_STRING_LITERAL)
+            if (builder->syntax_tree->kinds[argument_node] == C_AST_STRING)
             {
                 CIrDecodedString decoded = {0};
                 valid =
-                    c_ir_tokens_are_string_literals(builder->preprocess, argument_start, argument_end) &&
                     c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, argument_start, argument_end, builder->parse.string_literals, &decoded) &&
                     decoded.element_width == 1;
                 length = decoded.element_count;
             }
-            else if (argument_end == argument_start + 1 && builder->preprocess.tokens[argument_start].kind == C_TOKEN_IDENTIFIER &&
-                     (string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__func__")) ||
-                      string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__FUNCTION__")) ||
-                      string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__PRETTY_FUNCTION__"))))
+            else if (builder->syntax_tree->kinds[argument_node] == C_AST_IDENTIFIER &&
+                     (string_equal(c_ir_source_spelling(&builder->preprocess, argument_start), S8("__func__")) ||
+                      string_equal(c_ir_source_spelling(&builder->preprocess, argument_start), S8("__FUNCTION__")) ||
+                      string_equal(c_ir_source_spelling(&builder->preprocess, argument_start), S8("__PRETTY_FUNCTION__"))))
             {
                 length = builder->function->name.length;
                 valid = true;
@@ -28846,25 +28832,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         if (selected->builtin_clear_cache)
         {
             u32 argument_start = selected->open_index + 1;
-            u32 separator = selected->close_index;
-            u32 parentheses = 0;
-            for (u32 index = argument_start; index < selected->close_index; index += 1)
-            {
-                CToken current = builder->preprocess.tokens[index];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (!parentheses && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    separator = index;
-                    break;
-                }
-            }
+            u32 separator = c_ir_call_argument_end(builder, selected, 0);
             IrValueId first = IR_VALUE_ID_INVALID;
             IrValueId second = IR_VALUE_ID_INVALID;
             if (separator == argument_start || separator + 1 >= selected->close_index)
@@ -28920,25 +28888,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         if (selected->builtin_prefetch)
         {
             u32 argument_start = selected->open_index + 1;
-            u32 first_end = selected->close_index;
-            u32 parentheses = 0;
-            for (u32 index = argument_start; index < selected->close_index; index += 1)
-            {
-                CToken current = builder->preprocess.tokens[index];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (!parentheses && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    first_end = index;
-                    break;
-                }
-            }
+            u32 first_end = c_ir_call_argument_end(builder, selected, 0);
             IrValueId address = IR_VALUE_ID_INVALID;
             if (first_end == argument_start)
             {
@@ -29073,43 +29023,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         if (selected->builtin_identity)
         {
             u32 argument_start = selected->open_index + 1;
-            u32 first_end = selected->close_index;
-            u32 parentheses = 0;
-            u32 brackets = 0;
-            u32 braces = 0;
-            for (u32 index = argument_start; index < selected->close_index; index += 1)
-            {
-                CToken current = builder->preprocess.tokens[index];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    braces += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-                {
-                    braces -= 1;
-                }
-                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    first_end = index;
-                    break;
-                }
-            }
+            u32 first_end = c_ir_call_argument_end(builder, selected, 0);
             if (first_end == argument_start || first_end == selected->close_index)
             {
                 return false;
