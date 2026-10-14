@@ -3448,7 +3448,6 @@ BUSTER_C_INTERNAL CSourceAnchor c_ir_space_name_anchor(CIntegerIrBuilder* builde
 // compare.
 #endif
 
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
@@ -4372,8 +4371,6 @@ BUSTER_C_INTERNAL void c_ir_constant_deposit_bit_field(IrProgram* program, u8* b
                                                        bool clear);
 
 
-
-BUSTER_C_INTERNAL u32 c_ir_tree_range_node(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 // Whether c_ir_prepare_control_expressions_step over [start, end) can do more
 // than succeed having prepared nothing. Every group it prepares holds `?`,
@@ -15110,9 +15107,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_source_location_builtin(CIntegerIrBuilder*
     return result;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
+BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_node(CIntegerIrBuilder* builder, u32 node);
 
-// c_ir_predict_expression_type answers the invalid type for an expression it
+// c_ir_predict_expression_type_node answers the invalid type for an expression it
 // cannot type; it never guesses. A caller that needs the type reports that
 // here, unless a more specific failure is already recorded.
 BUSTER_C_INTERNAL void c_ir_report_untyped_expression(CIntegerIrBuilder* builder, u32 start)
@@ -15404,23 +15401,20 @@ BUSTER_C_INTERNAL bool c_ir_signature_accepts_arity(CIrSignature signature, u32 
     return result;
 }
 
-BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u32 symbol, String8 name, u32* argument_starts, u32* argument_ends,
+BUSTER_C_INTERNAL u32 c_ir_call_argument_node(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 ordinal);
+
+BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u32 symbol, String8 name, CIrPreparedCall* call, u32 const* argument_starts,
                                                    u32 argument_count)
 {
     CIrFunctionNameResolution* resolution = c_ir_function_name_resolution_symbol(builder, symbol, name);
-    if (resolution && resolution->unique)
-    {
-        CIrSignature signature = builder->signatures[resolution->declaration_index];
-        bool arity_matches = signature.valid && c_ir_signature_accepts_arity(signature, argument_count);
-        return arity_matches ? resolution->declaration_index : UINT32_MAX;
-    }
+    bool unique = resolution && resolution->unique;
     u32 best = UINT32_MAX;
     u32 best_rank = UINT32_MAX;
     u32 sole_candidate = UINT32_MAX;
     u32 candidate_count = 0;
     u32 untyped_argument = UINT32_MAX;
     bool ambiguous = false;
-    for (u32 name_candidate = resolution ? resolution->first_candidate : UINT32_MAX; name_candidate != UINT32_MAX;
+    for (u32 name_candidate = resolution && !unique ? resolution->first_candidate : UINT32_MAX; name_candidate != UINT32_MAX;
          name_candidate = builder->function_names->candidates[name_candidate].next)
     {
         u32 candidate_index = builder->function_names->candidates[name_candidate].declaration_index;
@@ -15435,7 +15429,7 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
         bool viable = true;
         for (u32 argument_index = 0; !signature.is_unprototyped && argument_index < signature.parameter_count; argument_index += 1)
         {
-            IrTypeId argument_type = c_ir_predict_expression_type(builder, argument_starts[argument_index], argument_ends[argument_index]);
+            IrTypeId argument_type = c_ir_predict_expression_type_node(builder, c_ir_call_argument_node(builder, call, argument_index));
             if (argument_type.value == IR_ID_UNDERLYING_INVALID)
             {
                 untyped_argument = argument_starts[argument_index];
@@ -15466,7 +15460,13 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
     // One candidate is taken whatever the arguments are. Between several, an
     // argument without a type cannot be ranked, so no candidate is chosen.
     u32 result;
-    if (candidate_count == 1)
+    if (unique)
+    {
+        CIrSignature signature = builder->signatures[resolution->declaration_index];
+        bool arity_matches = signature.valid && c_ir_signature_accepts_arity(signature, argument_count);
+        result = arity_matches ? resolution->declaration_index : UINT32_MAX;
+    }
+    else if (candidate_count == 1)
     {
         result = sole_candidate;
     }
@@ -15630,8 +15630,6 @@ typedef enum CIrLowerFrameKind
     C_IR_LOWER_FRAME_SELECTION_CONTINUE,
     C_IR_LOWER_FRAME_PLACE = 64,
     C_IR_LOWER_FRAME_VLA_INDEX_PLACE = 65,
-    C_IR_LOWER_FRAME_ATOMIC_PLACE = 66,
-    C_IR_LOWER_FRAME_VA_LIST_EXPRESSION = 67,
     C_IR_LOWER_FRAME_COMPOUND_LITERAL = 68,
     C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL = 69,
     C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS = 128,
@@ -16192,19 +16190,6 @@ struct CIrLowerFrame
         } vla_index_place;
         struct
         {
-            IrSourceRange source;
-            u32 start;
-            u32 end;
-        } atomic_place;
-        struct
-        {
-            u32 start;
-            u32 end;
-            bool previous_builtin_operand;
-            u8 reserved[3];
-        } va_list_expression;
-        struct
-        {
             CInitializerPlan const* plan;
             IrValueId* operands;
             u64* fields;
@@ -16303,10 +16288,6 @@ BUSTER_C_INTERNAL u32 c_ir_lower_frame_token_index(CIrLowerFrame frame)
             return frame.as.body.state ? frame.as.body.state->declaration.body_start : UINT32_MAX;
         case C_IR_LOWER_FRAME_VLA_INDEX_PLACE:
             return frame.as.vla_index_place.index;
-        case C_IR_LOWER_FRAME_ATOMIC_PLACE:
-            return frame.as.atomic_place.start;
-        case C_IR_LOWER_FRAME_VA_LIST_EXPRESSION:
-            return frame.as.va_list_expression.start;
         case C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL:
             return frame.as.nested_compound_literal.state->root_open;
         case C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS:
@@ -16333,88 +16314,21 @@ BUSTER_C_INTERNAL u32 c_ir_lower_frame_token_index(CIrLowerFrame frame)
 BUSTER_C_INTERNAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowerFrame frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
-    if (machine->failed || machine->frame_count >= machine->frame_capacity)
+    bool accepted = !machine->failed && machine->frame_count < machine->frame_capacity;
+    if (accepted)
+    {
+        // Every syntax owner supplies its exact child node. Source spans
+        // remain provenance and cannot reconstruct a missing identity.
+        frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
+        machine->frames[machine->frame_count++] = frame;
+    }
+    else
     {
         machine->failed = true;
         builder->failure_message = S8("C lowering machine frame capacity exceeded");
         builder->failure_token_index = c_ir_lower_frame_token_index(frame);
-        return false;
     }
-    // TEMPORARY ADAPTER (#3102 step 4): declaration, query and assembly
-    // owners still hand their expression operands over as token ranges.
-    // Resolve those ranges at this boundary once. Tree-owned expressions
-    // pass the exact node, including each comma and assignment continuation.
-    u32* node_plus_one = 0;
-    u32 first = 0;
-    u32 end = 0;
-    switch (frame.kind)
-    {
-    case C_IR_LOWER_FRAME_EXPRESSION:
-        if (frame.as.expression.argument_count <= 1)
-        {
-            node_plus_one = &frame.as.expression.node_plus_one;
-        }
-        first = frame.as.expression.start;
-        end = frame.as.expression.end;
-        break;
-    case C_IR_LOWER_FRAME_EXPRESSION_CORE:
-        node_plus_one = &frame.as.expression_core.node_plus_one;
-        first = frame.as.expression_core.start;
-        end = frame.as.expression_core.end;
-        break;
-    case C_IR_LOWER_FRAME_LOGICAL_VALUE:
-        node_plus_one = &frame.as.logical.node_plus_one;
-        first = frame.as.logical.start;
-        end = frame.as.logical.end;
-        break;
-    case C_IR_LOWER_FRAME_CONDITION:
-        node_plus_one = &frame.as.condition.node_plus_one;
-        first = frame.as.condition.start;
-        end = frame.as.condition.end;
-        break;
-    case C_IR_LOWER_FRAME_CONDITION_LEAF:
-        node_plus_one = &frame.as.condition_leaf.node_plus_one;
-        first = frame.as.condition_leaf.start;
-        end = frame.as.condition_leaf.end;
-        break;
-    case C_IR_LOWER_FRAME_CONDITIONAL_VALUE:
-        node_plus_one = &frame.as.conditional.node_plus_one;
-        first = frame.as.conditional.start;
-        end = frame.as.conditional.end;
-        break;
-    case C_IR_LOWER_FRAME_PLACE:
-        node_plus_one = &frame.as.place.node_plus_one;
-        first = frame.as.place.start;
-        end = frame.as.place.end;
-        break;
-    case C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS:
-        node_plus_one = &frame.as.prepare_control.node_plus_one;
-        first = frame.as.prepare_control.start;
-        end = frame.as.prepare_control.end;
-        break;
-    case C_IR_LOWER_FRAME_PREPARE_CALLS:
-        node_plus_one = &frame.as.prepare_calls.node_plus_one;
-        first = frame.as.prepare_calls.start;
-        end = frame.as.prepare_calls.end;
-        break;
-    default:
-        break;
-    }
-    if (node_plus_one && !*node_plus_one)
-    {
-        *node_plus_one = c_ir_tree_range_node(builder, first, end) + 1;
-    }
-    // TEMPORARY ADAPTER (#4061): declaration owners still pass initializer
-    // provenance ranges. Resolve the root once here; plan consumers use only
-    // its node. Tree-owned compound literals supply their last child directly.
-    if (frame.kind == C_IR_LOWER_FRAME_COMPOUND_LITERAL && !frame.as.compound_literal_machine.node_plus_one)
-    {
-        frame.as.compound_literal_machine.node_plus_one =
-            c_ir_tree_range_node(builder, frame.as.compound_literal_machine.open, frame.as.compound_literal_machine.close + 1) + 1;
-    }
-    frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
-    machine->frames[machine->frame_count++] = frame;
-    return true;
+    return accepted;
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_frame_finish(CIntegerIrBuilder* builder, bool success, IrValueId value)
@@ -17153,58 +17067,6 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
     c_ir_lower_frame_finish(builder, success, success ? frame->as.place.place : IR_VALUE_ID_INVALID);
 }
 
-BUSTER_C_INTERNAL void c_ir_lower_atomic_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
-{
-    CIrLowerMachine* machine = &builder->lower_machine;
-    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
-    {
-        frame->stage = C_IR_LOWER_STAGE_CHILD;
-        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                .as.expression =
-                                                    {
-                                                        .start = frame->as.atomic_place.start,
-                                                        .end = frame->as.atomic_place.end,
-                                                    },
-                                            }))
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-        }
-        return;
-    }
-    IrValueId place = machine->child_result.success
-                          ? c_ir_emit_dereference_place(builder, machine->child_result.value, frame->as.atomic_place.source)
-                          : IR_VALUE_ID_INVALID;
-    c_ir_lower_frame_finish(builder, place.value != IR_ID_UNDERLYING_INVALID, place);
-}
-
-BUSTER_C_INTERNAL void c_ir_lower_va_list_expression_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
-{
-    CIrLowerMachine* machine = &builder->lower_machine;
-    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
-    {
-        frame->as.va_list_expression.previous_builtin_operand = builder->va_list_builtin_operand;
-        builder->va_list_builtin_operand = true;
-        frame->stage = C_IR_LOWER_STAGE_CHILD;
-        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                .as.expression =
-                                                    {
-                                                        .start = frame->as.va_list_expression.start,
-                                                        .end = frame->as.va_list_expression.end,
-                                                    },
-                                            }))
-        {
-            builder->va_list_builtin_operand = frame->as.va_list_expression.previous_builtin_operand;
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-        }
-        return;
-    }
-    builder->va_list_builtin_operand = frame->as.va_list_expression.previous_builtin_operand;
-    c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
-}
-
-
 BUSTER_C_INTERNAL void c_ir_lower_machine_unwind(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -17892,7 +17754,7 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
 
 BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
 
-BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
+BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_node(CIntegerIrBuilder* builder, u32 node);
 
 BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, u32 initializer_node, IrType* type, IrGlobal* global);
 
@@ -21643,13 +21505,6 @@ BUSTER_C_INTERNAL bool c_ir_call_pointer_function(CIntegerIrBuilder* builder, u3
 // The node a lowering range [start, end) spans, after balanced outer
 // parentheses; C_AST_NODE_INVALID when the unit has no spans or no node spans
 // it.
-BUSTER_C_INTERNAL u32 c_ir_tree_range_node(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    return builder->syntax_spans ? c_ast_spans_locate(builder->syntax_spans, builder->preprocess.tokens, builder->syntax_matches,
-                                                      start, end)
-                                 : C_AST_NODE_INVALID;
-}
-
 // ---- temporary adapters for step 4 (GitHub #3102 step 3, #4061) -----------
 //
 // TEMPORARY ADAPTER: the type-query machine, the constant evaluator, the
@@ -22660,9 +22515,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_argument_value(CIntegerIrBuilder* builde
 
 // Root callers enter a strict operand-type query; the attempt above is used
 // only while the query machine owns an active frame and can suspend requests.
-BUSTER_C_INTERNAL bool c_ir_vendor_result_type(CIntegerIrBuilder* builder, u32 start, u32 close, IrTypeId* type_out)
+BUSTER_C_INTERNAL bool c_ir_vendor_result_type(CIntegerIrBuilder* builder, u32 node, IrTypeId* type_out)
 {
-    return c_ir_sizeof_operand_type_attempt(builder, start, close + 1, type_out);
+    *type_out = c_ir_expression_type_node(builder, node, C_IR_AST_TYPE_STRICT);
+    return type_out->value != IR_ID_UNDERLYING_INVALID;
 }
 
 // Classify the exact CALL or GENERIC_SELECTION from retained semantic
@@ -23674,7 +23530,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
         IrTypeId end_character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
         bool end_bridge_candidate = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
             string_equal(c_ir_source_spelling(&builder->preprocess, selected->token_index), S8("__builtin_va_end"));
-        IrTypeId end_operand_type = end_bridge_candidate ? c_ir_predict_expression_type(builder, starts[0], ends[0]) : IR_TYPE_ID_INVALID;
+        IrTypeId end_operand_type = end_bridge_candidate ? c_ir_predict_expression_type_node(builder, c_ir_call_argument_node(builder, selected, 0)) : IR_TYPE_ID_INVALID;
         IrType* end_operand = ir_type_from_id(&builder->program->types, end_operand_type);
         bool end_cursor = end_operand && end_operand->kind == IR_TYPE_POINTER && end_character.value != IR_ID_UNDERLYING_INVALID &&
                           end_operand->element_type.value == end_character.value;
@@ -25237,7 +25093,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT, c_ir_call_argument_node(builder, selected, written), starts[written], ends[written], false);
             }
             IrTypeId type = IR_TYPE_ID_INVALID;
-            if (!c_ir_vendor_result_type(builder, selected->token_index, selected->close_index, &type))
+            if (!c_ir_vendor_result_type(builder, selected->node, &type))
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             selected->result = fixed ? c_ir_emit_vendor_builtin(builder, name, selected->arguments, emitted_count, token) :
                 c_ir_emit_vendor_generic(builder, name, type, selected->arguments, emitted_count, token);
@@ -25972,7 +25828,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             TemporalArena call_argument_temporary = arena_begin_temporal(builder->temporary_arena);
             u32 argument_capacity = c_ir_call_argument_count(builder, selected);
             u32* argument_starts = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
-            u32* argument_ends = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
             u32 predicted_argument_index = selected->open_index + 1;
             while (predicted_argument_count < argument_capacity)
             {
@@ -25983,14 +25838,14 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return false;
                 }
                 argument_starts[predicted_argument_count] = predicted_argument_index;
-                argument_ends[predicted_argument_count++] = separator;
+                predicted_argument_count += 1;
                 predicted_argument_index = separator + 1;
             }
             declaration_index =
                 selected->indirect ? UINT32_MAX
                                    : c_ir_find_function_for_call(builder, c_symbol_find(builder->parse.symbols, c_ir_source_spelling(&builder->preprocess, selected->token_index)),
                                                                  c_ir_source_spelling(&builder->preprocess, selected->token_index),
-                                                                 argument_starts, argument_ends, predicted_argument_count);
+                                                                 selected, argument_starts, predicted_argument_count);
             scratch_end(call_argument_temporary);
         }
         IrValueId indirect_callee = IR_VALUE_ID_INVALID;
@@ -26038,7 +25893,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         // pointer must still be read before the call.
                         if (ast->kinds[callee_node] == C_AST_DEREFERENCE && spans->first[callee_node] == callee_start)
                         {
-                            IrTypeId operand_type = c_ir_predict_expression_type(builder, callee_start + 1, callee_end);
+                            IrTypeId operand_type = c_ir_predict_expression_type_node(builder, c_ast_child_at(ast, callee_node, 0));
                             if (operand_type.value == IR_ID_UNDERLYING_INVALID)
                             {
                                 c_ir_report_untyped_expression(builder, callee_start + 1);
@@ -29775,13 +29630,6 @@ BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_unlowered_array_decay(CIntegerIrBuilder* 
 // widened to the `({ ... })` it spells.
 // Remaining range callers identify one retained expression; the query key
 // and every child projection carry only its node and view.
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
-{
-    u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
-    *type_out = c_ir_expression_type_node(builder, node, C_IR_AST_TYPE_STRICT);
-    return type_out->value != IR_ID_UNDERLYING_INVALID;
-}
-
 // `sizeof (T){...}` is sizeof applied to a compound literal, not `sizeof (T)`
 // followed by a stray brace: the C grammar is ambiguous there and both the
 // standard and clang resolve it toward the literal, so `sizeof (int[3]){1, 2,
@@ -32380,7 +32228,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 // core. The machine carries a void result as an integer
                 // placeholder, so the scalar constraint (C 6.8.4.1, 6.8.5) is
                 // checked on the type.
-                IrType* sequence_type = ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, task.start, task.end));
+                IrType* sequence_type = ir_type_from_id(&builder->program->types, c_ir_predict_expression_type_node(builder, node));
                 if (!sequence_type || sequence_type->kind == IR_TYPE_VOID)
                 {
                     if (sequence_type)
@@ -33329,12 +33177,6 @@ BUSTER_C_INTERNAL void c_ir_lower_frame_fallback(CIntegerIrBuilder* builder)
             return;
         case C_IR_LOWER_FRAME_VLA_INDEX_PLACE:
             c_ir_lower_vla_index_place_step(builder, active);
-            return;
-        case C_IR_LOWER_FRAME_ATOMIC_PLACE:
-            c_ir_lower_atomic_place_step(builder, active);
-            return;
-        case C_IR_LOWER_FRAME_VA_LIST_EXPRESSION:
-            c_ir_lower_va_list_expression_step(builder, active);
             return;
         case C_IR_LOWER_FRAME_COMPOUND_LITERAL:
             c_ir_lower_compound_literal_step(builder, active);
@@ -34289,10 +34131,9 @@ BUSTER_C_INTERNAL bool c_ir_expression_type_node_project(CIntegerIrBuilder* buil
     return admitted;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_node(CIntegerIrBuilder* builder, u32 node)
 {
     WORK_LEDGER_RECORD(REDERIVE_LOWER_TYPE_PREDICTIONS, 1);
-    u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
     return c_ir_expression_type_node(builder, node, C_IR_AST_TYPE_PREDICTED);
 }
 
@@ -34376,7 +34217,7 @@ BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLower
             }
             else
             {
-                last = c_ir_predict_expression_type(builder, task->as.selection.start, task->as.selection.end);
+                last = c_ir_predict_expression_type_node(builder, task->as.selection.node_plus_one - 1);
                 success = last.value != IR_ID_UNDERLYING_INVALID;
                 if (!success)
                 {
@@ -35301,10 +35142,9 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                                            &nested_expression_end, 0);
             if (nested_conditional)
             {
-                IrTypeId true_type = c_ir_predict_expression_type(builder, conditional_question + 1, conditional_colon);
-                IrTypeId false_type = c_ir_predict_expression_type(builder, conditional_colon + 1, conditional_end);
-                u32 conditional_node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, conditional_start, conditional_end);
-                IrTypeId result_type = c_ir_conditional_result_type_node(builder, conditional_node, true_type, false_type);
+                IrTypeId true_type = c_ir_predict_expression_type_node(builder, c_ast_child_at(builder->syntax_tree, conditional, 1));
+                IrTypeId false_type = c_ir_predict_expression_type_node(builder, c_ast_child_at(builder->syntax_tree, conditional, 2));
+                IrTypeId result_type = c_ir_conditional_result_type_node(builder, conditional, true_type, false_type);
                 if (result_type.value == IR_ID_UNDERLYING_INVALID)
                 {
                     c_ir_report_untyped_expression(builder, conditional_start);
@@ -35383,7 +35223,9 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 }
                 frame->as.expression.start = type_close + 2;
                 frame->as.expression.end = end - 1;
-                frame->as.expression.node_plus_one = c_ir_tree_range_node(builder, type_close + 2, end - 1) + 1;
+                u32 initializer = c_ast_child_at(builder->syntax_tree, node, 1);
+                frame->as.expression.node_plus_one = c_ast_child_count(builder->syntax_tree, initializer) == 1
+                    ? c_ast_child_at(builder->syntax_tree, initializer, 0) + 1 : 0;
                 continue;
             }
         }
@@ -37354,6 +37196,7 @@ BUSTER_C_INTERNAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* 
                                                    .type = state->local_type,
                                                    .open = expression_start,
                                                    .close = expression_end,
+                                                   .node_plus_one = state->initializer_node + 1,
                                                },
                                        });
     }
@@ -37365,6 +37208,7 @@ BUSTER_C_INTERNAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* 
                                                {
                                                    .start = expression_start,
                                                    .end = expression_end,
+                                                   .node_plus_one = state->initializer_node + 1,
                                                },
                                        });
     }
@@ -40509,8 +40353,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 if (!compatible_return && has_value && c_preprocess_dialect_is_gnu(builder->preprocess.dialect))
                 {
                     IrTypeId return_type = IR_TYPE_ID_INVALID;
-                    bool typed = c_ir_sizeof_operand_type_attempt(builder, anchor + 1, semicolon, &return_type);
-                    IrType* type = typed ? ir_type_from_id(&builder->program->types, return_type) : 0;
+                    return_type = c_ir_expression_type_node(builder, c_ast_child_at(ast, node, 0), C_IR_AST_TYPE_STRICT);
+                    IrType* type = ir_type_from_id(&builder->program->types, return_type);
                     compatible_return = type && type->kind == IR_TYPE_VOID;
                 }
                 if (!compatible_return)
@@ -41021,6 +40865,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                 {
                                     .start = value_start,
                                     .end = end,
+                                    .node_plus_one = initializer_node + 1,
                                 },
                         };
                         bool braced = initializer_node != C_AST_NODE_INVALID && ast->kinds[initializer_node] == C_AST_INITIALIZER_LIST;
@@ -41037,6 +40882,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                         .type = local_type,
                                         .open = value_start,
                                         .close = end - 1,
+                                        .node_plus_one = initializer_node + 1,
                                     },
                             };
                         }
@@ -41048,13 +40894,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                 u32 scalar = initializer_node - 1;
                                 u32 scalar_first = 0;
                                 u32 scalar_last = 0;
-                                // Temporary initializer-to-expression adapter (#4061 F5).
+                                // The list owns the scalar child; its range is provenance.
                                 if (!c_ir_node_expression_provenance(builder, scalar, &scalar_first, &scalar_last))
                                 {
                                     return false;
                                 }
                                 child.as.expression.start = scalar_first;
                                 child.as.expression.end = scalar_last + 1;
+                                child.as.expression.node_plus_one = scalar + 1;
                             }
                         }
                         if (empty_scalar)

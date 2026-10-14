@@ -7611,6 +7611,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments
         {S8("int live(int n) { void *target = &&out; if (n) goto *target; out: return 3; }\n"), 4, false},
         {S8("int live(int n) { return _Generic(n, int: 1, default: 0) + _Generic(n, int: 2, default: 0) + "
             "_Generic(n, int: 3, default: 0) + _Generic(n, int: 4, default: 0); }\n"), 4, false},
+        // Both declaration continuations carry their known initializer roots;
+        // calls, scalar braces and aggregate plans cannot recover them from spans.
+        {S8("int live(int n) { int x = n + 1; int y = {n}; int z = {}; "
+            "int a = n, b = (n ? n + 2 : n + 3); "
+            "struct R { int x; int y; }; struct R r = {x,y}, q = {a,b}; "
+            "return r.x + q.y + z; }\n"), 4, false},
+        {S8("static int callback(void) { return 7; }\n"
+            "int live(int n) { int (*p)(void) = callback; int a = p(), b = n; "
+            "struct R { int (*p)(void); }; struct R r = {p}; "
+            "return (n ? r.p() : p()) + a + b; }\n"), 12, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {

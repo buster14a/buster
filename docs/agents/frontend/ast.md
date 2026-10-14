@@ -2567,6 +2567,15 @@ consumes its retained numeric path. The remaining legacy initializer closure
 and VLA C-type projection frame are retired by their respective owners before
 the final source-grammar guard is green.
 
+The remaining expression-type callers now pass exact nodes for arity ranking,
+vendor results, variadic operands, indirect callees, sequences, selections,
+conditional arms and returns. Arity ranking uses the prepared CALL argument
+cache, so wide calls retain linear sibling traversal. The common lowering
+frame push no longer finds nodes from source spans: both single and multiple
+declaration continuations carry the initializer root, and scalar braces pass
+their known child. The unused atomic-place and variadic-expression frame kinds
+are removed. Source ranges remain diagnostic and emission provenance only.
+
 Each query kind becomes a fact read on the node its owner frame was handed.
 The machine, its keys, its memo and its resumes are deleted:
 
