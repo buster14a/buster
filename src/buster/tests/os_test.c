@@ -701,12 +701,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
         OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION,
         OS_PROCESS_SPAWN_TEST_HANDLE_LIST,
         OS_PROCESS_SPAWN_TEST_SPAWN,
+        OS_PROCESS_SPAWN_TEST_OWNER_ALLOCATION,
+        OS_PROCESS_SPAWN_TEST_JOB_ASSIGNMENT,
+        OS_PROCESS_SPAWN_TEST_RESUME,
     };
     ProcessSpawnFailure failures[] = {
         PROCESS_SPAWN_FAILURE_PIPE,
         PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION,
         PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION,
         PROCESS_SPAWN_FAILURE_HANDLE_LIST,
+        PROCESS_SPAWN_FAILURE_SPAWN,
+        PROCESS_SPAWN_FAILURE_OWNER_ALLOCATION,
+        PROCESS_SPAWN_FAILURE_SPAWN,
         PROCESS_SPAWN_FAILURE_SPAWN,
     };
 #else
@@ -1928,6 +1934,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
         }
         BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
         BUSTER_TEST(arguments, os_file_delete(ready));
+    }
+    OsProcessSpawnTestOperation unwind_operations[] = {OS_PROCESS_SPAWN_TEST_JOB_ASSIGNMENT, OS_PROCESS_SPAWN_TEST_RESUME};
+    for (EACH_ARRAY_INDEX(operation_index, unwind_operations))
+    {
+        for (u32 refused = 0; refused < 2; refused += 1)
+        {
+            os_process_spawn_test_fail_on_call(unwind_operations[operation_index], 0);
+            if (refused) os_process_cleanup_windows_test_begin((ProcessSpawnResult){0},
+                OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION | OS_PROCESS_CLEANUP_TEST_UNSIGNALED | OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY);
+            ProcessSpawnResult failed = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
+                (ProcessSpawnOptions){.new_process_group = 1});
+            bool consumed = os_process_spawn_test_end();
+            OsProcessCleanupWindowsTestStats stats = os_process_cleanup_windows_test_end();
+            BUSTER_TEST(arguments, consumed && !failed.handle && failed.failure == PROCESS_SPAWN_FAILURE_SPAWN && failed.error.v != 0);
+            BUSTER_TEST(arguments, (failed.pending_windows_owner_id != 0) == (refused != 0));
+            BUSTER_TEST(arguments, !stats.ceiling_reached && !stats.infinite_waits);
+            if (refused)
+            {
+                BUSTER_TEST(arguments, failed.cleanup_error.v == ERROR_ACCESS_DENIED);
+                ProcessCleanupResult pending = os_process_cleanup_snapshot();
+                BUSTER_TEST(arguments, pending.pending_owners == 1 && pending.error_owner_id == failed.pending_windows_owner_id);
+                ProcessCleanupResult resumed = os_process_cleanup_pending(5000000);
+                BUSTER_TEST(arguments, resumed.resumed_owner_id == failed.pending_windows_owner_id && !resumed.active_owners);
+            }
+            BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before && !os_process_cleanup_snapshot().active_owners);
+        }
     }
     // Native successful timeout cleanup, with and without a job.
     for (u32 grouped = 0; grouped < 2; grouped += 1)

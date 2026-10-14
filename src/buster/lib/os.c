@@ -4074,6 +4074,7 @@ struct OsWindowsProcessOwner
     OsError error;
     OsWindowsProcessOwnerState state;
     bool pending;
+    bool leader_in_job;
 };
 
 // Process-global storage has no dependency on an arena, lane or thread context.
@@ -4115,7 +4116,8 @@ OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void)
 BUSTER_GLOBAL_LOCAL bool os_windows_cleanup_test_call(HANDLE handle)
 {
     bool injected = os_windows_cleanup_test.active &&
-        (handle == os_windows_cleanup_test.process || handle == os_windows_cleanup_test.job);
+        (handle == os_windows_cleanup_test.process || handle == os_windows_cleanup_test.job ||
+         (!os_windows_cleanup_test.process && !os_windows_cleanup_test.job));
     if (injected)
     {
         os_windows_cleanup_test.stats.calls += 1;
@@ -4229,7 +4231,7 @@ BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owner_reserve(OsError* err
     else
     {
         AcquireSRWLockExclusive(&os_windows_owner_lock);
-        bool admitted = !os_windows_pending_count && !os_windows_shutdown_requested && os_windows_owner_next_id != (u64)-1;
+        bool admitted = !os_windows_pending_count && !os_windows_shutdown_requested && os_windows_owner_next_id < (u64)-2;
         if (admitted)
         {
             result->id = ++os_windows_owner_next_id;
@@ -4252,6 +4254,7 @@ BUSTER_GLOBAL_LOCAL void os_windows_owner_publish(OsWindowsProcessOwner* owner, 
     AcquireSRWLockExclusive(&os_windows_owner_lock);
     owner->process = process;
     owner->job = job;
+    owner->leader_in_job = job != 0;
     owner->state = OS_WINDOWS_OWNER_RUNNING;
     ReleaseSRWLockExclusive(&os_windows_owner_lock);
 }
@@ -4314,7 +4317,7 @@ BUSTER_GLOBAL_LOCAL bool os_windows_owner_cleanup(OsWindowsProcessOwner* owner, 
         // Exact owned leader fallback, including containment-assignment failure.
         DWORD before = os_windows_process_wait(owner->process, 0);
         if (before == WAIT_FAILED) os_windows_cleanup_error(error);
-        if (before != WAIT_OBJECT_0 && !job_terminated && !os_windows_process_terminate(owner->process, false)) os_windows_cleanup_error(error);
+        if (before != WAIT_OBJECT_0 && (!job_terminated || !owner->leader_in_job) && !os_windows_process_terminate(owner->process, false)) os_windows_cleanup_error(error);
     }
     u64 now = os_windows_cleanup_clock();
     DWORD milliseconds = now < deadline ? (DWORD)((deadline - now + 999) / 1000) : 0;
@@ -5062,7 +5065,8 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
     {
         OsError owner_error = {0};
-        windows_owner = os_windows_owner_reserve(&owner_error);
+        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_OWNER_ALLOCATION)) owner_error = os_process_spawn_injected_error();
+        else windows_owner = os_windows_owner_reserve(&owner_error);
         if (!windows_owner)
         {
             os_process_spawn_fail(&result, owner_error.v == ERROR_BUSY ? PROCESS_SPAWN_FAILURE_PENDING_CLEANUP :
@@ -5250,15 +5254,21 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             bool child_ready = true;
             if (result.process_tree)
             {
-                if (!AssignProcessToJobObject((HANDLE)result.process_tree, process_information.hProcess))
+                bool assignment_injected = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_JOB_ASSIGNMENT);
+                if (assignment_injected || !AssignProcessToJobObject((HANDLE)result.process_tree, process_information.hProcess))
                 {
-                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, assignment_injected ? os_process_spawn_injected_error() : os_get_last_error());
                     child_ready = false;
                 }
-                else if (ResumeThread(process_information.hThread) == (DWORD)-1)
+                else
                 {
-                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
-                    child_ready = false;
+                    windows_owner->leader_in_job = true;
+                    bool resume_injected = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_RESUME);
+                    if (resume_injected || ResumeThread(process_information.hThread) == (DWORD)-1)
+                    {
+                        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, resume_injected ? os_process_spawn_injected_error() : os_get_last_error());
+                        child_ready = false;
+                    }
                 }
             }
             if (child_ready)
