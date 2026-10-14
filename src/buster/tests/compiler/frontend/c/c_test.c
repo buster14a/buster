@@ -18644,8 +18644,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         S8("static_compound_literal_call("),
         S8("static_compound_literal_call("),
         S8("(struct StaticCompoundLiteral)"),
-        S8("&(int){7}"),
-        S8("[3]"),
+        S8("(int){7}"),
+        S8("(int[])"),
         S8("(int[])"),
     };
     String8 static_compound_literal_refused_messages[] = {
@@ -20303,9 +20303,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
                             {
                                 CDiagnostic diagnostic = lowered.diagnostics[0];
                                 BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-                                BUSTER_TEST(arguments, diagnostic.location.line == 1);
-                                BUSTER_TEST_RAW(arguments, string_starts_with_sequence(diagnostic.message,
-                                    S8("C IR lowering: could not determine the size of the string initializer")), diagnostic.message);
+                                // Full semantics owns the refused literal;
+                                // a bad concatenated middle fragment reports
+                                // at the first literal, before size inference.
+                                String8 first = concatenate ? string_format(arena, S8("{S8}\"A\""), prefix) : literal;
+                                BUSTER_TEST(arguments, diagnostic.location.line == 1 &&
+                                                       diagnostic.location.column == element_type.length + S8(" value[] = ").length + 1);
+                                BUSTER_STRING_TEST(arguments, diagnostic.message, string_format(arena,
+                                    S8("C IR lowering: cannot fold '{S8}' in a static initializer"), first));
+                                BUSTER_TEST(arguments, !lowered.program);
                             }
                         }
                     }
