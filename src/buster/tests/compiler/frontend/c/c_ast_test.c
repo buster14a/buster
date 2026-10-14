@@ -6501,7 +6501,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "typedef unsigned int V __attribute__((vector_size(32))); union U { V v; unsigned int lanes[8]; };\n"
                         "unsigned int g(unsigned int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
                         "union U u = { .v = __builtin_va_arg(ap, V) }; __builtin_va_end(ap); return u.lanes[0]; }\n"
-                        "int f(void) { struct S local = { .y = 1, 2 }; int conditional[] = { 1 ? 2, 3 : 4, 5 };\n"
+                        "int f(void) { static int selected = ({ 41; }); struct S local = { .y = 1, 2 }; int conditional[] = { 1 ? 2, 3 : 4, 5 };\n"
                         "return ((int[]){ 3, 4 })[0] + local.z + conditional[1]; }\n");
     CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
     CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
@@ -6525,9 +6525,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         u32 explicit_paths = 0;
         u32 implicit_paths = 0;
         u32 refused_ranges = 0;
+        u32 selected_tails = 0;
         for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
         {
             BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
+            if (built.ast.kinds[plan->node] == C_AST_STATEMENT_EXPRESSION)
+            {
+                selected_tails += 1;
+                BUSTER_TEST(arguments, plan->item_count == 1 && built.ast.kinds[plan->items[0].node] == C_AST_NUMBER &&
+                    string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[plan->items[0].value_start]), S8("41")));
+            }
             plans += plan->complete;
             if (plan->flags & C_INITIALIZER_PLAN_BARE_AGGREGATE_RANGE)
             {
@@ -6584,10 +6591,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         BUSTER_TEST(arguments, plans >= 5 && values >= 14 && ranged > 0 && promoted > 0 && nested > 0);
         BUSTER_TEST(arguments, flexible == 2);
         BUSTER_TEST(arguments, explicit_paths && implicit_paths);
-        BUSTER_TEST(arguments, refused_ranges == 1);
+        BUSTER_TEST(arguments, refused_ranges == 1 && selected_tails == 1);
     }
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// Inferred counts belong to semantic output. Lowering privately completes an
+// omitted bound that still needs F5's plan, and a second lower sees the same unit.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_lower_reuse(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("static char *names[] = { \"argument\" }; char text[] = { \"abc\" };"
+           "struct P { int x, y; }; struct P rows[] = { [1] = { 3, 4 } };"
+           "int f(void) { static int local[] = { 5, 6 }; return local[1] + rows[1].y + text[0] + names[0][0]; }"),
+        C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count))
+    {
+        u64 bound_bytes = sizeof(CArrayBound) * (u64)analysis.array_bound_count;
+        CArrayBound* before = arena_allocate(temporary.arena, CArrayBound, analysis.array_bound_count);
+        memcpy(before, analysis.array_bounds, bound_bytes);
+        CIRLowerResult first = c_lower_to_ir_with_options(temporary.arena, S8("initializer-reuse.c"), preprocess, analysis, target_native, (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, !memcmp(before, analysis.array_bounds, bound_bytes));
+        CIRLowerResult second = c_lower_to_ir_with_options(temporary.arena, S8("initializer-reuse.c"), preprocess, analysis, target_native, (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, !memcmp(before, analysis.array_bounds, bound_bytes));
+        if (BUSTER_REQUIRE(arguments, first.program && second.program && !first.diagnostic_count && !second.diagnostic_count &&
+                                     first.canonical_ir_certified && second.canonical_ir_certified))
+        {
+            BUSTER_TEST(arguments, first.program->types.count == second.program->types.count && first.program->symbols.count == second.program->symbols.count);
+            IrModule* a = first.program->modules;
+            IrModule* b = second.program->modules;
+            BUSTER_TEST(arguments, a->global_count == b->global_count);
+            for (u32 index = 0; index < a->global_count && index < b->global_count; index += 1)
+            {
+                IrGlobal* x = a->globals + index;
+                IrGlobal* y = b->globals + index;
+                BUSTER_TEST(arguments, x->initializer_kind == y->initializer_kind && x->initializer_bits == y->initializer_bits &&
+                    x->bytes.length == y->bytes.length && x->relocation_count == y->relocation_count && x->type.value == y->type.value);
+                if (x->bytes.length == y->bytes.length && x->bytes.length)
+                    BUSTER_TEST(arguments, !memcmp(x->bytes.pointer, y->bytes.pointer, x->bytes.length));
+                for (u32 relocation = 0; relocation < x->relocation_count && relocation < y->relocation_count; relocation += 1)
+                    BUSTER_TEST(arguments, x->relocations[relocation].offset == y->relocations[relocation].offset &&
+                        x->relocations[relocation].symbol.value == y->relocations[relocation].symbol.value &&
+                        x->relocations[relocation].addend == y->relocations[relocation].addend);
+            }
+        }
+    }
     c_test_scratch_end(temporary);
     return result;
 }
@@ -7500,6 +7554,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);

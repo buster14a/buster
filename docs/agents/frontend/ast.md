@@ -2493,25 +2493,25 @@ the semantic model and debug type inventory. The plan's `source_token`,
 rediscover grammar. `{0}` retains a producer flag because a trailing comma
 changes the existing zero-constructor emission.
 
-This is the additive producer stage. Runtime and static lowering still
-require migration to these plans before the initializer token walkers can
-be deleted.
+The accepted block-static single-statement-expression shortcut publishes its
+already-selected tail node and exact emission provenance in the scalar item.
+The original initializer node remains the plan key. Lowering does not inspect
+the statement-expression grammar to repeat that choice.
 
 ### Initializers
 
-One explicit-stack walk over an `INITIALIZER_LIST` subtree serves all three
-consumers:
+The ordered retained items supply all three consumers:
 - runtime stores (`c_ir_emit_initializer_capture` and the compound-literal
   steps);
 - static bytes and relocations (`c_ir_constant_initializer_bytes*`,
   `c_ir_global_initializer_impl`);
-- count inference (`c_ir_infer_*`).
+- incomplete-array canonical counts (`c_ir_infer_incomplete_array_bounds`).
 
 Each item is an expression, a nested `INITIALIZER_LIST` or a `DESIGNATION`
 whose last child is the value. F5 names the subobject each one initializes,
 so the walk has no designator cursor, slot table or brace-elision search of
-its own. Those exist today in both `c_parse` and `c_gen.c`, and the copies in
-`c_gen.c` are deleted.
+its own. Semantic analysis keeps those choices in `c_parse`; the production consumers
+read the resulting paths directly.
 
 A `DESIGNATOR_RANGE` keeps its GNU meaning: the value is evaluated once and
 copied over the range (`c_ir_nested_initializer_copy_range`). A string
@@ -2525,6 +2525,34 @@ order, with a later designator overriding an earlier one as
 token of each store is the anchor of the item's value node. The
 byte-for-byte comparison of `-g` objects must confirm this for every item
 kind. Any kind where it differs is listed here when it is implemented.
+
+### Static initializer values from retained selections
+
+`c_ir_global_initializer` receives the caller's retained initializer node.
+Scalar global kinds use the node constant query; aggregate bytes, strings,
+complex components, exact x87 annotations and label relocations use
+`c_ir_constant_initializer_bytes_node`. The F5 task iterates list events and
+canonical path projections, tracks union replacement state, and materializes
+a ranged value once before importing its bytes and relocations into each
+selected destination. Explicit braces clear their selected object before
+subsequent values. Bit-fields retain the canonical access unit and deposit
+only their selected bits.
+
+A source compound constructor is requested through the common node scheduler
+before its plan runs. `c_ir_static_compound_literal_node_attempt` keeps the
+private context arena in its owning constant frame across child requests;
+publication of the writable compound object occurs only after every store
+finishes. The state-release hook also releases that arena on query abort.
+Source scalar and lvalue views have distinct keys, preserving the occurrence
+identity of addressed scalar literals.
+
+Incomplete-array materialization reads the declaration/entity initializer
+root and `plan.inferred_count`. It completes a private bound-table copy so
+repeated lowering leaves semantic output unchanged. Flexible-tail synthesis
+reads the retained tail count and preserves the existing array-then-record
+constructor order. Remaining token byte/compound-address adapters belong to
+the retiring legacy constant-range engine; global static routing does not
+call them, and they must be deleted with that engine.
 
 ### Unit capacity facts
 

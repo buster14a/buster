@@ -41808,6 +41808,8 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             u32 initializer_end = 0;
             if (c_ir_declaration_initializer_range(preprocess, local, &initializer_start, &initializer_end))
             {
+                u32 retained_initializer = machine->ast_facts
+                    ? c_ast_facts_locate(machine->ast_facts, &preprocess, initializer_start, initializer_end) : C_AST_NODE_INVALID;
                 String8 conversion_message = {0};
                 bool braced = initializer_start < initializer_end &&
                               c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
@@ -41831,6 +41833,18 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                                                                            &folded_constant);
                     if (folded_constant && !statement_tail_scalar.message.length)
                     {
+                        CInitializerPlan const* retained = c_initializer_plan_find(result, retained_initializer);
+                        u32 tail_node = machine->ast_facts
+                            ? c_ast_facts_locate(machine->ast_facts, &preprocess, statement_tail_start, statement_tail_end) : C_AST_NODE_INVALID;
+                        if (retained && retained->item_count == 1 && tail_node != C_AST_NODE_INVALID)
+                        {
+                            CInitializerItem* leaf = retained->items;
+                            leaf->node = tail_node;
+                            leaf->value_start = statement_tail_start;
+                            leaf->value_end = statement_tail_end;
+                            leaf->source_token = statement_tail_start;
+                            leaf->range_source_token = statement_tail_start;
+                        }
                         initializer_start = statement_tail_start;
                         initializer_end = statement_tail_end;
                         statement_expression = initializer_end;

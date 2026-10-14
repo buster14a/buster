@@ -8511,7 +8511,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_designator_labels(UnitTestArg
     return result;
 }
 
-// A million flat leaves exercise the real initializer machines in bounded
+// A million retained flat leaves exercise the static store machine in bounded
 // scratch; the complete frontend additionally checks the original failure
 // threshold in both forms, plus independent containment/relocation oracles.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArguments* arguments)
