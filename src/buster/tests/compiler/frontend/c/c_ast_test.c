@@ -7255,6 +7255,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
     return result;
 }
 
+// #4227: a member's name does not turn its function pointer into a builtin.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_member_builtin_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+            S8("struct S { int (*__builtin_popcount)(int); int (*__builtin_expect)(int, int); }; "
+               "int f(struct S value, struct S *pointer) { return value.__builtin_popcount(1) + "
+               "pointer->__builtin_expect(2, 3) + __builtin_popcount(7); }"), C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+        if (BUSTER_REQUIRE(arguments, built.complete))
+        {
+            CParserResult syntax = c_parse_ast_from_tree(temporary.arena, preprocess, &built.ast, 0);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count && analysis.ast_facts))
+            {
+                u32 callbacks = 0;
+                u32 builtins = 0;
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    if (built.ast.kinds[node] == C_AST_CALL)
+                    {
+                        u32 callee = c_ast_child_at(&built.ast, node, 0);
+                        u32 kind = built.ast.kinds[callee];
+                        u32 builtin = c_ast_facts_call_builtin(&built.ast, analysis.ast_facts, node);
+                        bool member = kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW;
+                        BUSTER_TEST(arguments, builtin != C_AST_FACT_NONE && (member ? builtin == 0 : builtin != 0));
+                        callbacks += member;
+                        builtins += !member;
+                    }
+                }
+                BUSTER_TEST(arguments, callbacks == 2 && builtins == 1);
+            }
+        }
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7785,6 +7827,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_call_builtin_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_member_builtin_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);

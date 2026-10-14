@@ -3461,11 +3461,9 @@ BUSTER_GLOBAL_LOCAL CSymbolBuiltin c_ast_types_call_builtin(CAst const* ast, CPr
     u32 callee = c_ast_child_at(ast, node, 0);
     CSymbolBuiltin result = C_SYMBOL_BUILTIN_NONE;
     u32 kind = callee < ast->node_count ? ast->kinds[callee] : C_AST_KIND_COUNT;
-    bool named = kind == C_AST_IDENTIFIER || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW;
+    bool named = kind == C_AST_IDENTIFIER;
     if (named && !c_ast_parentheses(ast, callee).count)
     {
-        // Preserve the existing member-name admission in the identity slice;
-        // its ordinary callback classification is a separate correctness fix.
         u32 anchor = ast->tokens[callee];
         CToken token = preprocess->tokens[anchor];
         CSymbolTable* symbols = preprocess->symbols;

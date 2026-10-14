@@ -2160,7 +2160,10 @@ byte.
   CALL payloads retain the normalized semantic builtin family, independently
   of the CALL result and callee type. This includes intrinsics declared by
   headers, such as `_mm_pause`; standalone function designators keep their
-  ordinary CType. `c_ast_facts_call_builtin` returns that family, zero for an
+  ordinary CType. Member and arrow-member callback names are ordinary calls
+  even when their field spelling matches a builtin (#4227); their callee,
+  arguments and callback keep their exact-once effects.
+  `c_ast_facts_call_builtin` returns that family, zero for an
   ordinary call, and `C_AST_FACT_NONE` when no CALL fact was published. The
   call prepass refuses a missing publication. The classifier reads pointer
   and function types from the retained graph without materializing type rows;

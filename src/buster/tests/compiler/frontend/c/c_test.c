@@ -44732,6 +44732,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             " RESET(); int value = shared_parameter_vla(values); failed |= value != 17 || factory_calls != 1 || invoke_calls != 1;\n"
             " return failed;\n"
             "}\n"),
+        // #4227: member callback names retain ordinary call semantics.
+        S8(
+            "static int factory_calls, argument_calls, callback_calls;\n"
+            "struct S { int (*__builtin_popcount)(int); int (*__builtin_expect)(int, int); };\n"
+            "static int callback(int value) { callback_calls += 1; return value + 10; }\n"
+            "static int binary(int left, int right) { callback_calls += 1; return left * 10 + right; }\n"
+            "static struct S holder = {callback, binary};\n"
+            "static struct S *factory(void) { factory_calls += 1; return &holder; }\n"
+            "static int argument(int value) { argument_calls += 1; return value; }\n"
+            "#define RESET() factory_calls = 0; argument_calls = 0; callback_calls = 0\n"
+            "int main(void) {\n"
+            " RESET(); int value = holder.__builtin_popcount(argument(3));\n"
+            " if (value != 13 || factory_calls || argument_calls != 1 || callback_calls != 1) return 1;\n"
+            " RESET(); value = factory()->__builtin_popcount(argument(4));\n"
+            " if (value != 14 || factory_calls != 1 || argument_calls != 1 || callback_calls != 1) return 2;\n"
+            " RESET(); value = factory()->__builtin_expect(argument(5), argument(6));\n"
+            " if (value != 56 || factory_calls != 1 || argument_calls != 2 || callback_calls != 1) return 3;\n"
+            " RESET(); value = 0 && factory()->__builtin_popcount(argument(7));\n"
+            " if (value || factory_calls || argument_calls || callback_calls) return 4;\n"
+            " if (__builtin_popcount(7) != 3 || __builtin_expect(9, 0) != 9) return 5;\n"
+            " return 0;\n"
+            "}\n"
+        ),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
