@@ -1698,8 +1698,8 @@ struct CAstExtentStatistics
 // The retained facts (GitHub #3102 step 1): trees_built counts the units whose
 // tree lowering built itself because the caller passed none, with that tree's
 // nodes and retained bytes (CAstStatistics.retained_bytes); tree_rejections
-// the units whose syntax that build rejected, which lowered without a tree
-// (c_lower_to_ir_tree_run); span_nodes and
+// the units whose syntax that build rejected, which fail with its
+// diagnostics (c_lower_to_ir_tree_run); span_nodes and
 // span_bytes are the nodes c_ast_spans_build gave a span and the bytes of its
 // columns, for every lowered unit with a tree.
 typedef struct CAstLowerStatistics CAstLowerStatistics;

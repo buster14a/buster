@@ -28,10 +28,10 @@
 // driver's -fc-ast-pilot, its default since the 2026-10-13 switch), or
 // c_lower_to_ir_tree_run builds it from the final token stream and releases
 // it after the call (-fno-c-ast-pilot, the tree-free reference path, and
-// callers outside the driver). A tree that cannot be reserved fails the unit;
-// a unit whose syntax the builder rejects lowers without one
-// (CAstLowerStatistics.tree_rejections), and any expression of it that needs
-// hoisting fails. c_ir_syntax_spans_create keeps every node's token span
+// callers outside the driver). The tree is mandatory: a unit whose tree
+// cannot be reserved, or whose syntax the builder rejects
+// (CAstLowerStatistics.tree_rejections), fails with the builder's
+// diagnostics. c_ir_syntax_spans_create keeps every node's token span
 // (c_ast_spans_build), its range-to-node chain and a CIrHoistFact byte for
 // the whole call (CIntegerIrBuilder.syntax_spans, syntax_hoist). An
 // expression core's control groups and calls are hoisted from its node
@@ -66392,12 +66392,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
 // built one passes it; otherwise this builds it from the final token stream,
 // keeps it for the whole lowering call and releases it on this thread before
 // returning. A tree the builder cannot reserve (C_DIAGNOSTIC_SOURCE_TOO_LARGE)
-// fails the unit with the builder's diagnostic. A unit whose syntax the
-// builder rejects lowers without a tree and keeps lowering's own diagnostics
-// (CAstLowerStatistics.tree_rejections): those are inputs semantic analysis
-// accepts and lowering diagnoses, such as `[1 ... 2 ... 3]` designators and
-// stray initializer separators. Step 3 makes the tree mandatory, which first
-// needs the builder or analysis to diagnose them.
+// fails the unit with the builder's diagnostic, and so does a unit whose
+// syntax the builder rejects (CAstLowerStatistics.tree_rejections; GitHub
+// #3102 step 3): lowering does not run without the tree. Those are inputs
+// the parser accepts, such as `[1 ... 2 ... 3]` designators, empty
+// initializer elements and a second global assembly string; the driver's
+// analysis reports the first two before lowering.
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse,
                                                         Target target, CIRLowerOptions options, u64 query_reservation_limit,
                                                         u64 function_reservation_limit)
@@ -66420,15 +66420,17 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 so
                 statistics->tree_bytes += built.statistics.retained_bytes;
             }
         }
-        else if (built.diagnostic_count && built.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE)
+        else if (built.diagnostic_count)
         {
+            // The tree is mandatory: a unit the builder cannot reserve, or
+            // whose syntax it rejects, fails with the builder's diagnostics.
             result.diagnostics = built.diagnostics;
             result.diagnostic_count = built.diagnostic_count;
             lower = false;
-        }
-        else if (statistics)
-        {
-            statistics->tree_rejections += 1;
+            if (statistics && built.diagnostics[0].kind != C_DIAGNOSTIC_SOURCE_TOO_LARGE)
+            {
+                statistics->tree_rejections += 1;
+            }
         }
     }
     if (lower)
