@@ -1976,6 +1976,38 @@ struct CIrConstantValue
     bool function_designator;
 };
 
+// Exact numeric operations shared by literal lowering and the semantic
+// x87 initializer folder. These helpers consume numeric values or one literal
+// spelling and never inspect source expression or declarator structure.
+enum
+{
+    C_IR_ROUND_OK = 0,
+    C_IR_ROUND_OVERFLOW = 1,
+    C_IR_ROUND_UNDERFLOW = 2,
+    C_IR_ROUND_FAILED = 3,
+};
+
+BUSTER_C_EXTERN void c_ir_ext80_big_set_u64(CIrExt80Big* value, u64 bits);
+BUSTER_C_EXTERN void c_ir_ext80_big_copy(CIrExt80Big* destination, CIrExt80Big const* source);
+BUSTER_C_EXTERN bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right);
+BUSTER_C_EXTERN s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Big const* right);
+BUSTER_C_EXTERN bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out);
+BUSTER_C_EXTERN bool c_ir_ext80_big_shift_left(CIrExt80Big* value, u32 shift);
+BUSTER_C_EXTERN bool c_ir_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift);
+BUSTER_C_EXTERN bool c_ir_ext80_from_ieee32(u32 bits, bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN bool c_ir_ext80_from_ieee64(u64 bits, bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN u8 c_ir_ext80_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                              bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
+                                                           s32* binary_exponent_out);
+BUSTER_C_EXTERN bool c_ir_ext80_spelling_nonzero(String8 spelling);
+BUSTER_C_EXTERN f64 c_ir_float16_to_f64(u64 bits);
+BUSTER_C_EXTERN u32 c_ir_float_suffix(String8 spelling, char8* code_out);
+BUSTER_C_EXTERN u8 c_ir_ieee_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                             bool negative, u32 fraction_bits, s32 min_exponent, s32 max_exponent,
+                                             u32 exponent_bits, u64* bits_out);
+
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
 
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,

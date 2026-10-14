@@ -2521,6 +2521,15 @@ answers to nodes; compatibility/classification answers become integer
 facts. Protected temporary records never reach that pass, and discarded
 arms are not evaluated to publish the selected root.
 
+The x87 token expression folder (`c_semantic_ext80_fold_initializer`) and its
+private value, cast, arithmetic-frame and conditional-frame machinery belong
+to `c_parse.c`. Semantic validation publishes its destination image before
+lowering. Exact rational arithmetic and literal conversion remain shared
+numeric helpers in `c_gen.c`; their private contract in `c_internal.h` exposes
+no source structure. `c_ir_ext80_store_bytes` stores the finished image in
+lowering. The old byte initializer's `c_ir_ext80_fold_initializer` adapter
+remains a migration residual until that initializer family is retired.
+
 A C type becomes an IR type the way it does today: through
 `builder->c_type_ir_map`, or `c_ir_vla_c_type` for a variably modified type.
 F1 is the token-to-node map's design C, about 34 MB on the unity self-host

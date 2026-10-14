@@ -192,6 +192,7 @@
 //   c_switch_first_overlapping_label              sweep, shared with c_gen.c lowering
 //   c_parse_validate_one_switch                  per-switch label and range validation
 //   c_parse_validate_bit_field_addresses         unary address member constraints
+//   c_semantic_ext80_fold_initializer             semantic x87 token grammar and exact annotations
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_assignment_conversion_classify,      assignment-conversion admission and the
 //   c_parse_pointer_sign_warning                 -Wpointer-sign warning class (#4051)
@@ -7285,6 +7286,1846 @@ BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u
         }
     }
     return end;
+}
+
+// The semantic x87 constant grammar owns token structure. Its explicit
+// frames retain only numeric values and source positions; lowering consumes
+// the destination annotations published by c_parse_validate_static_scalar.
+// The exact rational helpers remain shared numeric operations in c_gen.c.
+#define C_PARSE_EXT80_INFINITY_SIGNIFICAND UINT64_C(0x8000000000000000)
+#define C_PARSE_EXT80_QUIET_NAN_SIGNIFICAND UINT64_C(0xc000000000000000)
+#define C_PARSE_EXT80_SPECIAL_EXPONENT UINT16_C(0x7fff)
+#define C_PARSE_EXT80_SIGN UINT16_C(0x8000)
+
+// Keep the former folder's no-match sentinel while using semantic delimiter
+// ownership. The fold's existing guards distinguish absence from a closing
+// delimiter inside its clipped range.
+BUSTER_C_INTERNAL u32 c_parse_ext80_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end,
+                                                       CPunctuator opening, CPunctuator closing)
+{
+    u32 match = c_parse_matching_delimiter(preprocess, open, end, opening, closing);
+    return match < end ? match : UINT32_MAX;
+}
+
+// One folded x87 value: the 64-bit significand carrying its explicit integer
+// bit and the 16-bit sign/exponent field, which is exactly the pair the object
+// writer stores.  Every leaf is rounded to its own declared type and every
+// binary operation is rounded back into this form, so the folder reproduces
+// C's per-operation rounding rather than an idealized exact result, and no
+// intermediate needs to survive as an unbounded rational.
+typedef struct CIrExt80Value CIrExt80Value;
+struct CIrExt80Value
+{
+    u64 significand;
+    u16 exponent_sign;
+    // The operand's own arithmetic rank, which decides where an operation on
+    // it would round.  See c_ir_ext80_fold_apply.
+    u8 rank;
+    // Unsigned integer domain after promotion, retained through grouping.
+    // Zero denotes a signed integer or any real floating value.
+    u8 unsigned_width;
+    // Bit width of the promoted integer type (32 or 64 on every supported
+    // target) for an integer value; zero for a real value.  Integer
+    // arithmetic needs it to pick the common type and to wrap or refuse.
+    u8 integer_width;
+};
+
+// The real floating types in conversion-rank order: an operation rounds in
+// the higher rank of its two operands, so the numbering is the comparison.
+enum
+{
+    C_IR_EXT80_RANK_INTEGER = 0,
+    C_IR_EXT80_RANK_HALF = 1,
+    C_IR_EXT80_RANK_FLOAT = 2,
+    C_IR_EXT80_RANK_DOUBLE = 3,
+    C_IR_EXT80_RANK_LONG_DOUBLE = 4,
+};
+
+// Reopen an encoded value as the exact rational significand * 2^exponent it
+// denotes, so the next operation can combine two of them without losing bits.
+BUSTER_C_INTERNAL bool c_ir_ext80_value_rational(CIrExt80Value value, CIrExt80Big* numerator_out, s32* binary_exponent_out, bool* negative_out)
+{
+    u32 exponent_field = value.exponent_sign & C_PARSE_EXT80_SPECIAL_EXPONENT;
+    if (exponent_field == C_PARSE_EXT80_SPECIAL_EXPONENT)
+    {
+        // Infinities and NaNs never reach the rational core:
+        // c_ir_ext80_value_special answers for every operation one of them
+        // takes part in, before this runs.
+        return false;
+    }
+    c_ir_ext80_big_set_u64(numerator_out, value.significand);
+    // A zero exponent field is the subnormal encoding, whose significand is
+    // scaled at the minimum normal exponent instead of at its own.
+    *binary_exponent_out = exponent_field ? (s32)exponent_field - 16383 - 63 : -16382 - 63;
+    *negative_out = (value.exponent_sign & 0x8000) != 0;
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_value_is_special(CIrExt80Value value)
+{
+    return (value.exponent_sign & C_PARSE_EXT80_SPECIAL_EXPONENT) == C_PARSE_EXT80_SPECIAL_EXPONENT;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_value_is_nan(CIrExt80Value value)
+{
+    return c_ir_ext80_value_is_special(value) && value.significand != C_PARSE_EXT80_INFINITY_SIGNIFICAND;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_value_is_infinite(CIrExt80Value value)
+{
+    return c_ir_ext80_value_is_special(value) && value.significand == C_PARSE_EXT80_INFINITY_SIGNIFICAND;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_value_is_zero(CIrExt80Value value)
+{
+    return !value.significand && !(value.exponent_sign & C_PARSE_EXT80_SPECIAL_EXPONENT);
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_infinity(bool negative, u8 rank)
+{
+    return (CIrExt80Value){
+        .significand = C_PARSE_EXT80_INFINITY_SIGNIFICAND,
+        .exponent_sign = (u16)(C_PARSE_EXT80_SPECIAL_EXPONENT | (negative ? C_PARSE_EXT80_SIGN : 0)),
+        .rank = rank,
+    };
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_zero(bool negative, u8 rank)
+{
+    return (CIrExt80Value){.significand = 0, .exponent_sign = (u16)(negative ? C_PARSE_EXT80_SIGN : 0), .rank = rank};
+}
+
+// The NaN an invalid operation produces.  It is positive whatever the operand
+// signs were -- `-0.0L * inf` and `-inf - -inf` both land here -- which is the
+// answer Clang's own folder gives and therefore the one the object bytes have
+// to match.
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_default_nan(u8 rank)
+{
+    return (CIrExt80Value){
+        .significand = C_PARSE_EXT80_QUIET_NAN_SIGNIFICAND,
+        .exponent_sign = C_PARSE_EXT80_SPECIAL_EXPONENT,
+        .rank = rank,
+    };
+}
+
+// Round an exact rational into the format an operation's rank names and carry
+// the answer back as the encoded pair.  A float or double result rounds in its
+// own format first and widens exactly, which is what leaves `1.0f/3.0f`
+// holding the float quotient rather than the long double one.  Overflow and
+// underflow are values here, not failures: C says the result becomes the
+// infinity or the signed zero, and Clang folds them that way.
+BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                                bool negative, u8 rank, CIrExt80Value* result_out)
+{
+    u64 significand = 0;
+    u16 exponent_sign = 0;
+    u8 status;
+    if (rank == C_IR_EXT80_RANK_LONG_DOUBLE)
+    {
+        status = c_ir_ext80_from_rational(numerator, denominator, binary_exponent, negative, &significand, &exponent_sign);
+    }
+    else if (rank == C_IR_EXT80_RANK_HALF)
+    {
+        // binary16 rounds in its own format and then widens through binary64,
+        // which is exact for every value it can hold, so the x87 encoding it
+        // reaches is the one the half result denotes.
+        u64 bits = 0;
+        status = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, 10, -14, 15, 5, &bits);
+        if (status == C_IR_ROUND_OK)
+        {
+            f64 widened = c_ir_float16_to_f64(bits);
+            u64 widened_bits = 0;
+            memcpy(&widened_bits, &widened, sizeof(widened_bits));
+            if (!c_ir_ext80_from_ieee64(widened_bits, false, &significand, &exponent_sign))
+            {
+                status = C_IR_ROUND_FAILED;
+            }
+        }
+    }
+    else
+    {
+        bool single = rank == C_IR_EXT80_RANK_FLOAT;
+        u64 bits = 0;
+        status = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, single ? 23 : 52, single ? -126 : -1022,
+                                         single ? 127 : 1023, single ? 8 : 11, &bits);
+        if (status == C_IR_ROUND_OK && !(single ? c_ir_ext80_from_ieee32((u32)bits, false, &significand, &exponent_sign)
+                                                : c_ir_ext80_from_ieee64(bits, false, &significand, &exponent_sign)))
+        {
+            status = C_IR_ROUND_FAILED;
+        }
+    }
+    bool result = true;
+    if (status == C_IR_ROUND_OK)
+    {
+        *result_out = (CIrExt80Value){.significand = significand, .exponent_sign = exponent_sign, .rank = rank};
+    }
+    else if (status == C_IR_ROUND_OVERFLOW)
+    {
+        *result_out = c_ir_ext80_value_infinity(negative, rank);
+    }
+    else if (status == C_IR_ROUND_UNDERFLOW)
+    {
+        *result_out = c_ir_ext80_value_zero(negative, rank);
+    }
+    else
+    {
+        result = false;
+    }
+
+    return result;
+}
+
+// One operand in the common real type the usual arithmetic conversions pick.
+// Only an integer operand can lose anything here -- a float widens into a
+// double exactly and every encoded value is already exact in the x87 format --
+// but that loss is real: `16777217 * 1.0f` holds 2^24 because the integer
+// rounds to float before the multiply, not after it.
+BUSTER_C_INTERNAL bool c_ir_ext80_value_convert(CIrExt80Value* value, u8 rank)
+{
+    CIrExt80Value converted = *value;
+    bool result = true;
+    if (converted.rank != rank && rank != C_IR_EXT80_RANK_LONG_DOUBLE && !c_ir_ext80_value_is_special(converted) && converted.significand)
+    {
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
+        s32 binary_exponent = 0;
+        bool negative = false;
+        c_ir_ext80_big_set_u64(&denominator, 1);
+        result = c_ir_ext80_value_rational(converted, &numerator, &binary_exponent, &negative) &&
+                 c_ir_ext80_value_round(&numerator, &denominator, binary_exponent, negative, rank, &converted);
+    }
+    if (result)
+    {
+        converted.rank = rank;
+        converted.unsigned_width = 0;
+        converted.integer_width = 0;
+        *value = converted;
+    }
+    return result;
+}
+
+// The IEEE special cases, which answer before the rational core sees anything.
+// The invalid combinations among them -- inf minus inf, inf times zero, inf
+// over inf, zero over zero -- have to give the same answer as
+// c_ir_fold_float_invalid_operation gives an in-function constant, because
+// the sign IEEE-754 leaves unspecified is a compatibility choice and the two
+// paths would otherwise print `nan` and `-nan` for one spelling.  They also
+// do not care where the operation would round: the NaN is the same value at
+// every precision and widens exactly.
+//
+// A NaN operand wins outright and keeps its own sign, the left one first; the
+// sign flip a subtraction applies to its right operand happens only after
+// that, which is why `1.0L - -nan` is still negative.  Everything else is the
+// ordinary infinity and division-by-zero algebra, with the invalid
+// combinations -- inf minus inf, inf times zero, inf over inf, zero over zero
+// -- becoming the default NaN.  A finite operation returns false and the
+// caller folds it as a rational instead.
+BUSTER_C_INTERNAL bool c_ir_ext80_value_special(CPunctuator op, CIrExt80Value left, CIrExt80Value right, u8 rank, CIrExt80Value* result_out)
+{
+    bool handled = true;
+    if (c_ir_ext80_value_is_nan(left) || c_ir_ext80_value_is_nan(right))
+    {
+        *result_out = c_ir_ext80_value_is_nan(left) ? left : right;
+        result_out->rank = rank;
+        result_out->unsigned_width = 0;
+    }
+    else
+    {
+        bool left_negative = (left.exponent_sign & C_PARSE_EXT80_SIGN) != 0;
+        bool right_negative = (right.exponent_sign & C_PARSE_EXT80_SIGN) != 0;
+        if (op == C_PUNCTUATOR_MINUS)
+        {
+            right_negative = !right_negative;
+        }
+        bool left_infinite = c_ir_ext80_value_is_infinite(left);
+        bool right_infinite = c_ir_ext80_value_is_infinite(right);
+        bool combined_negative = left_negative != right_negative;
+        if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS)
+        {
+            if (left_infinite && right_infinite)
+            {
+                *result_out = combined_negative ? c_ir_ext80_value_default_nan(rank) : c_ir_ext80_value_infinity(left_negative, rank);
+            }
+            else if (left_infinite || right_infinite)
+            {
+                *result_out = c_ir_ext80_value_infinity(left_infinite ? left_negative : right_negative, rank);
+            }
+            else
+            {
+                handled = false;
+            }
+        }
+        else if (op == C_PUNCTUATOR_STAR)
+        {
+            if (left_infinite || right_infinite)
+            {
+                bool other_zero = c_ir_ext80_value_is_zero(left_infinite ? right : left);
+                *result_out = other_zero ? c_ir_ext80_value_default_nan(rank) : c_ir_ext80_value_infinity(combined_negative, rank);
+            }
+            else
+            {
+                handled = false;
+            }
+        }
+        else if (left_infinite && right_infinite)
+        {
+            *result_out = c_ir_ext80_value_default_nan(rank);
+        }
+        else if (left_infinite)
+        {
+            *result_out = c_ir_ext80_value_infinity(combined_negative, rank);
+        }
+        else if (right_infinite)
+        {
+            *result_out = c_ir_ext80_value_zero(combined_negative, rank);
+        }
+        else if (c_ir_ext80_value_is_zero(right))
+        {
+            *result_out = c_ir_ext80_value_is_zero(left) ? c_ir_ext80_value_default_nan(rank)
+                                                         : c_ir_ext80_value_infinity(combined_negative, rank);
+        }
+        else
+        {
+            handled = false;
+        }
+    }
+
+    return handled;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value left, CIrExt80Value right, u8 rank, CIrExt80Value* result_out)
+{
+    CIrExt80Big left_numerator;
+    CIrExt80Big right_numerator;
+    s32 left_exponent = 0;
+    s32 right_exponent = 0;
+    bool left_negative = false;
+    bool right_negative = false;
+    if (!c_ir_ext80_value_rational(left, &left_numerator, &left_exponent, &left_negative) ||
+        !c_ir_ext80_value_rational(right, &right_numerator, &right_exponent, &right_negative))
+    {
+        return false;
+    }
+    CIrExt80Big denominator;
+    c_ir_ext80_big_set_u64(&denominator, 1);
+    bool negative = false;
+    bool valid = false;
+    s64 exponent = 0;
+    if (op == C_PUNCTUATOR_STAR)
+    {
+        CIrExt80Big product;
+        valid = c_ir_ext80_big_multiply(&left_numerator, &right_numerator, &product);
+        c_ir_ext80_big_copy(&left_numerator, &product);
+        negative = left_negative != right_negative;
+        exponent = (s64)left_exponent + right_exponent;
+    }
+    else if (op == C_PUNCTUATOR_SLASH)
+    {
+        // Division is the one operation that keeps a denominator: the rounding
+        // in c_ir_ext80_from_rational is what turns the exact quotient into
+        // the 64-bit significand, which is why `1/LDBL_EPSILON` needs no
+        // numeric core beyond what a single literal already used.  A zero
+        // divisor never arrives -- c_ir_ext80_value_special answered it.
+        valid = right_numerator.count != 0;
+        c_ir_ext80_big_copy(&denominator, &right_numerator);
+        negative = left_negative != right_negative;
+        exponent = (s64)left_exponent - right_exponent;
+    }
+    else if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS)
+    {
+        right_negative = op == C_PUNCTUATOR_MINUS ? !right_negative : right_negative;
+        s32 common = left_exponent < right_exponent ? left_exponent : right_exponent;
+        if (!left_numerator.count || !right_numerator.count)
+        {
+            // A zero operand is the exact identity and is taken before the
+            // alignment below rather than through it.  A zero's exponent is
+            // the minimum subnormal's, not its own, so lining it up against a
+            // near-maximum operand spans the entire 32.828-bit dynamic range,
+            // which is wider than C_IR_EXT80_BIG_LIMBS reaches; an addition
+            // that changes nothing would come back as a refusal.
+            valid = true;
+            if (!left_numerator.count && !right_numerator.count)
+            {
+                // Two zeros keep a sign they agree on and cancel to positive
+                // otherwise, which is what round-to-nearest gives.
+                negative = left_negative && right_negative;
+                exponent = left_exponent;
+            }
+            else if (!left_numerator.count)
+            {
+                c_ir_ext80_big_copy(&left_numerator, &right_numerator);
+                negative = right_negative;
+                exponent = right_exponent;
+            }
+            else
+            {
+                negative = left_negative;
+                exponent = left_exponent;
+            }
+        }
+        else if (!c_ir_ext80_big_shift_left(&left_numerator, (u32)(left_exponent - common)) ||
+                 !c_ir_ext80_big_shift_left(&right_numerator, (u32)(right_exponent - common)))
+        {
+            return false;
+        }
+        else if (left_negative == right_negative)
+        {
+            exponent = common;
+            valid = c_ir_ext80_big_add(&left_numerator, &right_numerator);
+            negative = left_negative;
+        }
+        else
+        {
+            // Opposite signs subtract the smaller magnitude from the larger and
+            // keep that operand's sign.  Operands that cancel exactly give
+            // positive zero under round-to-nearest, which is why the sign only
+            // survives while a difference remains.
+            exponent = common;
+            s32 comparison = c_ir_ext80_big_compare(&left_numerator, &right_numerator);
+            if (comparison >= 0)
+            {
+                negative = left_negative && comparison > 0;
+                valid = c_ir_ext80_big_subtract_shifted(&left_numerator, &right_numerator, 0);
+            }
+            else
+            {
+                valid = c_ir_ext80_big_subtract_shifted(&right_numerator, &left_numerator, 0);
+                c_ir_ext80_big_copy(&left_numerator, &right_numerator);
+                negative = right_negative;
+            }
+        }
+    }
+    if (!valid || exponent > INT32_MAX || exponent < INT32_MIN)
+    {
+        return false;
+    }
+    return c_ir_ext80_value_round(&left_numerator, &denominator, (s32)exponent, negative, rank, result_out);
+}
+
+// Integer constants live in CIrExt80Value as their exact encoding.  These two
+// helpers open one into sign and magnitude and close it again, so integer
+// arithmetic and casts never leave the 64-bit domain a promoted integer has.
+BUSTER_C_INTERNAL void c_ir_ext80_integer_open(CIrExt80Value value, bool* negative_out, u64* magnitude_out)
+{
+    u64 magnitude = 0;
+    u32 exponent = value.exponent_sign & C_PARSE_EXT80_SPECIAL_EXPONENT;
+    // An integer-rank value is an exact integer below 2^64, so its unbiased
+    // exponent lies in [0, 63]; anything else is not an opened integer.
+    if (value.significand && exponent >= 16383 && exponent - 16383 <= 63)
+    {
+        magnitude = value.significand >> (63 - (exponent - 16383));
+    }
+    *magnitude_out = magnitude;
+    *negative_out = magnitude && (value.exponent_sign & C_PARSE_EXT80_SIGN);
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_integer_close(bool negative, u64 magnitude, u32 width, bool is_unsigned)
+{
+    u32 shift = magnitude ? leading_zeroes_u64(magnitude) : 0;
+    CIrExt80Value value = {
+        .significand = magnitude << shift,
+        .exponent_sign = magnitude ? (u16)(16383 + 63 - shift) : (u16)0,
+        .rank = C_IR_EXT80_RANK_INTEGER,
+        .unsigned_width = is_unsigned ? (u8)width : (u8)0,
+        .integer_width = (u8)width,
+    };
+    if (negative && magnitude)
+    {
+        value.exponent_sign |= C_PARSE_EXT80_SIGN;
+    }
+    return value;
+}
+
+BUSTER_C_INTERNAL u64 c_ir_ext80_width_mask(u32 width)
+{
+    return width >= 64 ? UINT64_MAX : (((u64)1 << width) - 1);
+}
+
+// Re-express a sign/magnitude integer in a width/signedness pair.  The modular
+// answer is what an unsigned target defines and what every supported compiler
+// gives a signed one; `exact` reports whether the value survived unchanged, so
+// arithmetic can refuse overflow while a cast just takes the wrapped value.
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_integer_wrap(bool negative, u64 magnitude, u32 width, bool is_unsigned, bool* exact_out)
+{
+    u64 mask = c_ir_ext80_width_mask(width);
+    u64 bits = (negative ? (0 - magnitude) : magnitude) & mask;
+    u64 sign_bit = (u64)1 << (width - 1);
+    bool result_negative = false;
+    u64 result_magnitude = bits;
+    if (!is_unsigned && (bits & sign_bit))
+    {
+        result_negative = true;
+        result_magnitude = (0 - bits) & mask;
+    }
+    *exact_out = result_magnitude == magnitude && (result_negative == negative || !magnitude);
+    return c_ir_ext80_integer_close(result_negative, result_magnitude, width, is_unsigned);
+}
+
+// Integer arithmetic on two promoted integers, in the usual-arithmetic-
+// conversion common type.  Signed overflow and division by zero are not
+// constant expressions, so they refuse instead of wrapping.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_integer(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+{
+    u32 left_width = left.integer_width ? left.integer_width : 32;
+    u32 right_width = right.integer_width ? right.integer_width : 32;
+    u32 width = left_width > right_width ? left_width : right_width;
+    bool left_unsigned = left.unsigned_width != 0;
+    bool right_unsigned = right.unsigned_width != 0;
+    bool is_unsigned = left_width == right_width ? (left_unsigned || right_unsigned) : left_width > right_width ? left_unsigned : right_unsigned;
+    bool left_negative = false;
+    bool right_negative = false;
+    u64 left_magnitude = 0;
+    u64 right_magnitude = 0;
+    c_ir_ext80_integer_open(left, &left_negative, &left_magnitude);
+    c_ir_ext80_integer_open(right, &right_negative, &right_magnitude);
+    bool exact = true;
+    bool result = true;
+    // Bring both operands into the common type first: a negative signed value
+    // converted to an unsigned type wraps, which is the usual conversion.
+    CIrExt80Value left_common = c_ir_ext80_integer_wrap(left_negative, left_magnitude, width, is_unsigned, &exact);
+    CIrExt80Value right_common = c_ir_ext80_integer_wrap(right_negative, right_magnitude, width, is_unsigned, &exact);
+    c_ir_ext80_integer_open(left_common, &left_negative, &left_magnitude);
+    c_ir_ext80_integer_open(right_common, &right_negative, &right_magnitude);
+    bool negative = false;
+    u64 magnitude = 0;
+    if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS)
+    {
+        if (op == C_PUNCTUATOR_MINUS)
+        {
+            right_negative = !right_negative;
+        }
+        if (left_negative == right_negative)
+        {
+            magnitude = left_magnitude + right_magnitude;
+            negative = left_negative;
+            result = is_unsigned || magnitude >= left_magnitude;
+        }
+        else if (left_magnitude >= right_magnitude)
+        {
+            magnitude = left_magnitude - right_magnitude;
+            negative = left_negative;
+        }
+        else
+        {
+            magnitude = right_magnitude - left_magnitude;
+            negative = right_negative;
+        }
+    }
+    else if (op == C_PUNCTUATOR_STAR)
+    {
+        result = is_unsigned || !right_magnitude || left_magnitude <= UINT64_MAX / right_magnitude;
+        magnitude = result ? left_magnitude * right_magnitude : 0;
+        negative = left_negative != right_negative;
+    }
+    else if (op == C_PUNCTUATOR_SLASH)
+    {
+        result = right_magnitude != 0;
+        magnitude = result ? left_magnitude / right_magnitude : 0;
+        negative = left_negative != right_negative;
+    }
+    else
+    {
+        result = false;
+    }
+    if (result && is_unsigned)
+    {
+        // Unsigned arithmetic is modular; the operands are already in range,
+        // so only the wrap of the result remains.
+        if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS || op == C_PUNCTUATOR_STAR)
+        {
+            *result_out = c_ir_ext80_integer_wrap(negative, magnitude, width, true, &exact);
+        }
+        else
+        {
+            *result_out = c_ir_ext80_integer_close(false, magnitude, width, true);
+        }
+    }
+    else if (result)
+    {
+        u64 limit = (u64)1 << (width - 1);
+        result = negative ? magnitude <= limit : magnitude < limit;
+        if (result)
+        {
+            *result_out = c_ir_ext80_integer_close(negative && magnitude, magnitude, width, false);
+        }
+    }
+    return result;
+}
+
+// The usual arithmetic conversions decide where an operation rounds: both
+// operands convert to the common real type first and the result rounds there.
+// Two integer operands never reach the rounding core: they take the exact,
+// truncating integer path, so `1/3` is 0 rather than 0.5.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+{
+    u8 rank = left.rank > right.rank ? left.rank : right.rank;
+    bool result;
+    if (rank == C_IR_EXT80_RANK_INTEGER)
+    {
+        result = c_ir_ext80_fold_integer(op, left, right, result_out);
+    }
+    else if (!c_ir_ext80_value_convert(&left, rank) || !c_ir_ext80_value_convert(&right, rank))
+    {
+        result = false;
+    }
+    else if (c_ir_ext80_value_special(op, left, right, rank, result_out))
+    {
+        result = true;
+    }
+    else
+    {
+        result = c_ir_ext80_value_binary(op, left, right, rank, result_out);
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_type_only(CIrExt80Value value)
+{
+    CIrExt80Value result;
+    if (value.rank == C_IR_EXT80_RANK_INTEGER)
+    {
+        u32 width = value.integer_width ? value.integer_width : 32;
+        result = c_ir_ext80_integer_close(false, 0, width, value.unsigned_width != 0);
+    }
+    else
+    {
+        result = c_ir_ext80_value_zero(false, value.rank);
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_common_arithmetic_type(CIrExt80Value left, CIrExt80Value right)
+{
+    u8 rank = left.rank > right.rank ? left.rank : right.rank;
+    CIrExt80Value result = c_ir_ext80_value_zero(false, rank);
+    if (rank == C_IR_EXT80_RANK_INTEGER)
+    {
+        u32 left_width = left.integer_width ? left.integer_width : 32;
+        u32 right_width = right.integer_width ? right.integer_width : 32;
+        u32 width = left_width > right_width ? left_width : right_width;
+        bool is_unsigned = left_width == right_width ? (left.unsigned_width || right.unsigned_width)
+                           : left_width > right_width ? left.unsigned_width != 0
+                                                      : right.unsigned_width != 0;
+        result = c_ir_ext80_integer_close(false, 0, width, is_unsigned);
+    }
+    return result;
+}
+
+// Unary signs act in the operand's promoted integer domain until a real
+// conversion occurs. Integer values are exact here and need no rational core.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_unary(bool negative, CIrExt80Value* value)
+{
+    bool result = true;
+    if (negative)
+    {
+        if (value->rank != C_IR_EXT80_RANK_INTEGER)
+        {
+            value->exponent_sign ^= C_PARSE_EXT80_SIGN;
+        }
+        else if (value->unsigned_width)
+        {
+            u64 integer = 0;
+            if (value->significand)
+            {
+                u32 exponent = value->exponent_sign & C_PARSE_EXT80_SPECIAL_EXPONENT;
+                result = !(value->exponent_sign & C_PARSE_EXT80_SIGN) && exponent >= 16383 && exponent <= 16383 + 63 &&
+                         value->unsigned_width <= 64;
+                if (result)
+                {
+                    u32 shift = 63 - (exponent - 16383);
+                    u64 discarded = shift ? value->significand & (((u64)1 << shift) - 1) : 0;
+                    integer = value->significand >> shift;
+                    result = !discarded;
+                }
+            }
+            if (result)
+            {
+                integer = 0 - integer;
+                if (value->unsigned_width < 64)
+                {
+                    integer &= ((u64)1 << value->unsigned_width) - 1;
+                }
+                u32 shift = integer ? leading_zeroes_u64(integer) : 0;
+                value->significand = integer << shift;
+                value->exponent_sign = integer ? (u16)(16383 + 63 - shift) : 0;
+            }
+        }
+        else if (value->significand)
+        {
+            value->exponent_sign ^= C_PARSE_EXT80_SIGN;
+        }
+        else
+        {
+            value->exponent_sign = 0;
+        }
+    }
+    return result;
+}
+
+// One numeric token before any unary operator: a long-double spelling is
+// already in this format, while a float/double spelling first rounds in its
+// own format and widens exactly. An integer is exact and retains its promoted
+// unsigned domain until an operator or real conversion consumes it.
+// Overflow and underflow of real spellings retain their existing values.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 token_index, CIrExt80Value* value_out)
+{
+    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
+    u64 significand = 0;
+    bool negative = false;
+    u8 unsigned_width = 0;
+    u8 integer_width = 0;
+    u16 exponent_sign = 0;
+    bool floating = c_number_is_float(spelling);
+    char8 suffix = 0;
+    c_ir_float_suffix(spelling, &suffix);
+    bool long_suffix = suffix == 'l' || suffix == 'L';
+    u8 status = C_IR_ROUND_FAILED;
+    u8 rank = C_IR_EXT80_RANK_INTEGER;
+    if (floating && long_suffix)
+    {
+        rank = C_IR_EXT80_RANK_LONG_DOUBLE;
+        status = c_ir_ext80_parse_long_literal(spelling, negative, &significand, &exponent_sign);
+    }
+    else if (floating)
+    {
+        bool single = suffix == 'f' || suffix == 'F';
+        bool half = suffix == 'h';
+        rank = half ? C_IR_EXT80_RANK_HALF : single ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
+        s32 binary_exponent = 0;
+        if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+        {
+            u64 ieee_bits = 0;
+            bool source_nonzero = c_ir_ext80_spelling_nonzero(spelling);
+            status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, negative, half ? 10u : single ? 23u : 52u,
+                                             half ? -14 : single ? -126 : -1022, half ? 15 : single ? 127 : 1023, half ? 5u : single ? 8u : 11u,
+                                             &ieee_bits);
+            if (status == C_IR_ROUND_OK)
+            {
+                // A nonzero spelling that rounded to zero without reporting an
+                // underflow would be a bug in the core above, not a value.
+                u64 magnitude = half     ? (ieee_bits & UINT64_C(0x7fff))
+                                : single ? (ieee_bits & UINT32_C(0x7fffffff))
+                                         : (ieee_bits & UINT64_C(0x7fffffffffffffff));
+                // A half value widens into binary64 exactly, so the x87
+                // encoding reached through it is the one the half literal
+                // denotes.
+                u64 widened_bits = ieee_bits;
+                if (half)
+                {
+                    f64 widened = c_ir_float16_to_f64(ieee_bits);
+                    memcpy(&widened_bits, &widened, sizeof(widened_bits));
+                }
+                if ((source_nonzero && !magnitude) ||
+                    !(single ? c_ir_ext80_from_ieee32((u32)ieee_bits, false, &significand, &exponent_sign)
+                             : c_ir_ext80_from_ieee64(widened_bits, false, &significand, &exponent_sign)))
+                {
+                    status = C_IR_ROUND_FAILED;
+                }
+            }
+        }
+    }
+    else
+    {
+        u64 integer = 0;
+        if (c_conditional_number(spelling, &integer))
+        {
+            CTypeKind kind = c_semantic_integer_literal_kind(preprocess.target, 0, spelling, integer);
+            IrType integer_type = {0};
+            u32 alignment = 0;
+            bool integer_valid = c_ir_scalar_type_properties(preprocess.target, kind, &integer_type.kind, &integer_type.bit_width,
+                &integer_type.is_signed, &alignment) && integer_type.kind == IR_TYPE_INTEGER;
+            if (integer_valid)
+            {
+                // Narrow unsigned literals promote to signed int before a unary
+                // operation; wider unsigned literals retain their modulo width.
+                unsigned_width = !integer_type.is_signed && integer_type.bit_width >= 32 ? (u8)integer_type.bit_width : 0;
+                integer_width = (u8)(integer_type.bit_width < 32 ? 32 : integer_type.bit_width);
+                CIrExt80Big numerator;
+                CIrExt80Big denominator;
+                c_ir_ext80_big_set_u64(&numerator, integer);
+                c_ir_ext80_big_set_u64(&denominator, 1);
+                // Every u64 is exact in a 64-bit significand, so an integer
+                // spelling can only come back as C_IR_ROUND_OK or a failure.
+                status = c_ir_ext80_from_rational(&numerator, &denominator, 0, negative, &significand, &exponent_sign);
+            }
+        }
+    }
+    bool result = true;
+    if (status == C_IR_ROUND_OK)
+    {
+        *value_out = (CIrExt80Value){
+            .significand = significand,
+            .exponent_sign = exponent_sign,
+            .rank = rank,
+            .unsigned_width = unsigned_width,
+            .integer_width = integer_width,
+        };
+    }
+    else if (status == C_IR_ROUND_OVERFLOW)
+    {
+        *value_out = c_ir_ext80_value_infinity(negative, rank);
+    }
+    else if (status == C_IR_ROUND_UNDERFLOW)
+    {
+        *value_out = c_ir_ext80_value_zero(negative, rank);
+    }
+    else
+    {
+        result = false;
+    }
+
+    return result;
+}
+
+// A parenthesized type name made only of arithmetic keywords: the casts the
+// token folder can evaluate.  A typedef name or anything else is not a type
+// here, because this folder has no scope to resolve it in.
+typedef struct CIrExt80Cast CIrExt80Cast;
+struct CIrExt80Cast
+{
+    bool integer;
+    bool is_unsigned;
+    u8 rank;
+    u32 width;
+};
+
+BUSTER_C_INTERNAL bool c_ir_ext80_cast_parse(CPreprocessResult preprocess, u32 open, u32 close, CIrExt80Cast* cast_out)
+{
+    u32 long_count = 0;
+    u32 double_count = 0;
+    u32 float_count = 0;
+    u32 int_count = 0;
+    u32 short_count = 0;
+    u32 char_count = 0;
+    u32 signed_count = 0;
+    u32 unsigned_count = 0;
+    bool valid = close > open + 1;
+    for (u32 index = open + 1; valid && index < close; index += 1)
+    {
+        CToken const* token = &preprocess.tokens[index];
+        String8 word = token->kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, *token) : (String8){0};
+        if (string_equal(word, S8("long")))
+        {
+            long_count += 1;
+        }
+        else if (string_equal(word, S8("double")))
+        {
+            double_count += 1;
+        }
+        else if (string_equal(word, S8("float")))
+        {
+            float_count += 1;
+        }
+        else if (string_equal(word, S8("int")))
+        {
+            int_count += 1;
+        }
+        else if (string_equal(word, S8("short")))
+        {
+            short_count += 1;
+        }
+        else if (string_equal(word, S8("char")))
+        {
+            char_count += 1;
+        }
+        else if (string_equal(word, S8("signed")))
+        {
+            signed_count += 1;
+        }
+        else if (string_equal(word, S8("unsigned")))
+        {
+            unsigned_count += 1;
+        }
+        else if (!string_equal(word, S8("const")) && !string_equal(word, S8("volatile")))
+        {
+            valid = false;
+        }
+    }
+    CTypeKind kind = C_TYPE_VOID;
+    if (valid && (double_count || float_count))
+    {
+        bool integer_words = int_count || short_count || char_count || signed_count || unsigned_count;
+        valid = !integer_words && double_count + float_count == 1 && long_count <= (double_count ? 1u : 0u);
+        cast_out->integer = false;
+        cast_out->rank = float_count ? C_IR_EXT80_RANK_FLOAT : long_count ? C_IR_EXT80_RANK_LONG_DOUBLE : C_IR_EXT80_RANK_DOUBLE;
+    }
+    else if (valid)
+    {
+        bool is_unsigned = unsigned_count != 0;
+        valid = signed_count + unsigned_count <= 1 && int_count <= 1 && short_count <= 1 && char_count <= 1 && long_count <= 2 &&
+                char_count + short_count + (long_count ? 1u : 0u) <= 1 && !(char_count && int_count);
+        if (char_count)
+        {
+            kind = unsigned_count ? C_TYPE_UNSIGNED_CHAR : signed_count ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+        }
+        else if (short_count)
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+        }
+        else if (long_count == 2)
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+        }
+        else if (long_count == 1)
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+        }
+        else
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+        }
+        IrTypeKind ir_kind = IR_TYPE_VOID;
+        u32 width = 0;
+        bool is_signed = false;
+        u32 alignment = 0;
+        valid = valid && c_ir_scalar_type_properties(preprocess.target, kind, &ir_kind, &width, &is_signed, &alignment) &&
+                ir_kind == IR_TYPE_INTEGER && width >= 8 && width <= 64;
+        cast_out->integer = true;
+        cast_out->is_unsigned = !is_signed;
+        cast_out->width = width;
+    }
+    return valid;
+}
+
+// Apply a parsed cast.  Real targets round through the same conversion an
+// operand takes; an integer source wraps modularly into an integer target; a
+// real source truncates toward zero and refuses a value the target cannot hold
+// (infinity, NaN or out of range), which C leaves undefined.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_cast(CIrExt80Cast cast, CIrExt80Value* value)
+{
+    bool result = true;
+    if (!cast.integer)
+    {
+        result = c_ir_ext80_value_convert(value, cast.rank);
+    }
+    else
+    {
+        bool negative = false;
+        u64 magnitude = 0;
+        if (value->rank == C_IR_EXT80_RANK_INTEGER)
+        {
+            c_ir_ext80_integer_open(*value, &negative, &magnitude);
+        }
+        else if (c_ir_ext80_value_is_special(*value))
+        {
+            result = false;
+        }
+        else if (value->significand)
+        {
+            s32 unbiased = (s32)(value->exponent_sign & C_PARSE_EXT80_SPECIAL_EXPONENT) - 16383;
+            negative = (value->exponent_sign & C_PARSE_EXT80_SIGN) != 0;
+            if (unbiased > 63)
+            {
+                result = false;
+            }
+            else if (unbiased >= 0)
+            {
+                magnitude = value->significand >> (63 - unbiased);
+            }
+        }
+        if (result)
+        {
+            bool exact = true;
+            CIrExt80Value wrapped = c_ir_ext80_integer_wrap(negative, magnitude, cast.width, cast.is_unsigned, &exact);
+            // A real source must fit; an integer source simply wraps.
+            result = exact || value->rank == C_IR_EXT80_RANK_INTEGER;
+            if (result)
+            {
+                // Types narrower than int promote to int.
+                if (cast.width < 32)
+                {
+                    wrapped.unsigned_width = 0;
+                    wrapped.integer_width = 32;
+                }
+                *value = wrapped;
+            }
+        }
+    }
+    return result;
+}
+
+// The initializer expression itself: an operator-precedence machine over the
+// token range with the two ordinary binary precedence levels, the prefix
+// operators (unary sign and cast) and parenthesized groups.  Values are ten
+// bytes, so nothing here carries a bignum; the bounded ones live inside a
+// single operation.  There is no input-dependent recursion: pending prefix
+// operators, binary operators and open groups wait on one frame stack, their
+// operands on one value stack, and both are sized from the token count of the
+// range, because every frame and every value consumes at least one token.
+enum CIrExt80FrameKind
+{
+    C_IR_EXT80_FRAME_GROUP,
+    C_IR_EXT80_FRAME_ADD,
+    C_IR_EXT80_FRAME_SUBTRACT,
+    C_IR_EXT80_FRAME_MULTIPLY,
+    C_IR_EXT80_FRAME_DIVIDE,
+    C_IR_EXT80_FRAME_PLUS,
+    C_IR_EXT80_FRAME_NEGATE,
+    C_IR_EXT80_FRAME_CAST,
+};
+typedef enum CIrExt80FrameKind CIrExt80FrameKind;
+
+typedef struct CIrExt80Frame CIrExt80Frame;
+struct CIrExt80Frame
+{
+    CIrExt80FrameKind kind;
+    // The operator token a refusal names; for a group and a cast, the closing
+    // parenthesis.
+    u32 token;
+    // A group restores the limit of the range it was opened in.
+    u32 saved_limit;
+    CIrExt80Cast cast;
+};
+
+typedef struct CIrExt80Fold CIrExt80Fold;
+struct CIrExt80Fold
+{
+    CPreprocessResult preprocess;
+    Arena* arena;
+    u32 cursor;
+    // The end of the innermost open group, or of the whole range.
+    u32 limit;
+    // The token the refusal names, kept separate from the cursor because the
+    // failing operator is behind it by the time an operation reports.
+    u32 blame;
+    CIrExt80Frame* frames;
+    CIrExt80Value* values;
+    u32 frame_count;
+    u32 value_count;
+    u32 capacity;
+    // Set when the frame or value stack would overflow its token-count size,
+    // so the caller can say so instead of naming a token.
+    bool capacity_exceeded;
+    // Type-only evaluation keeps common conditional-arm types when an
+    // unselected constant expression has no value (for example `1 / 0`).
+    bool type_only;
+};
+
+// Entries each stack keeps on the host stack before it asks the arena.
+#define C_IR_EXT80_FOLD_INLINE_CAPACITY 16
+
+// Binding strength of a pending frame; prefix operators bind tightest and a
+// group binds nothing, so a reduction never crosses one.
+BUSTER_C_INTERNAL u32 c_ir_ext80_frame_precedence(CIrExt80FrameKind kind)
+{
+    u32 precedence = 3;
+    if (kind == C_IR_EXT80_FRAME_GROUP)
+    {
+        precedence = 0;
+    }
+    else if (kind == C_IR_EXT80_FRAME_ADD || kind == C_IR_EXT80_FRAME_SUBTRACT)
+    {
+        precedence = 1;
+    }
+    else if (kind == C_IR_EXT80_FRAME_MULTIPLY || kind == C_IR_EXT80_FRAME_DIVIDE)
+    {
+        precedence = 2;
+    }
+    return precedence;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_push_frame(CIrExt80Fold* fold, CIrExt80Frame frame)
+{
+    bool fits = fold->frame_count < fold->capacity;
+    if (fits)
+    {
+        fold->frames[fold->frame_count] = frame;
+        fold->frame_count += 1;
+    }
+    else
+    {
+        fold->capacity_exceeded = true;
+    }
+    return fits;
+}
+
+// The next value slot, or 0 at capacity.
+BUSTER_C_INTERNAL CIrExt80Value* c_ir_ext80_fold_value_slot(CIrExt80Fold* fold)
+{
+    CIrExt80Value* slot = 0;
+    if (fold->value_count < fold->capacity)
+    {
+        slot = &fold->values[fold->value_count];
+    }
+    else
+    {
+        fold->capacity_exceeded = true;
+    }
+    return slot;
+}
+
+// Pop the top frame and apply it to the value stack.  A failure names the
+// operator that failed, exactly as the operation did when it ran inline.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_reduce(CIrExt80Fold* fold)
+{
+    CIrExt80Frame frame = fold->frames[fold->frame_count - 1];
+    fold->frame_count -= 1;
+    bool applied = true;
+    if (frame.kind == C_IR_EXT80_FRAME_PLUS || frame.kind == C_IR_EXT80_FRAME_NEGATE)
+    {
+        CIrExt80Value* value = &fold->values[fold->value_count - 1];
+        applied = c_ir_ext80_fold_unary(frame.kind == C_IR_EXT80_FRAME_NEGATE, value);
+        if (!applied && fold->type_only)
+        {
+            *value = c_ir_ext80_value_type_only(*value);
+            applied = true;
+        }
+    }
+    else if (frame.kind == C_IR_EXT80_FRAME_CAST)
+    {
+        CIrExt80Value* value = &fold->values[fold->value_count - 1];
+        applied = c_ir_ext80_fold_cast(frame.cast, value);
+        if (!applied && fold->type_only)
+        {
+            if (frame.cast.integer)
+            {
+                *value = c_ir_ext80_integer_close(false, 0, frame.cast.width, frame.cast.is_unsigned);
+                if (frame.cast.width < 32)
+                {
+                    value->unsigned_width = 0;
+                    value->integer_width = 32;
+                }
+            }
+            else
+            {
+                *value = c_ir_ext80_value_zero(false, frame.cast.rank);
+            }
+            applied = true;
+        }
+    }
+    else
+    {
+        CPunctuator op = frame.kind == C_IR_EXT80_FRAME_ADD        ? C_PUNCTUATOR_PLUS
+                         : frame.kind == C_IR_EXT80_FRAME_SUBTRACT ? C_PUNCTUATOR_MINUS
+                         : frame.kind == C_IR_EXT80_FRAME_MULTIPLY ? C_PUNCTUATOR_STAR
+                                                                   : C_PUNCTUATOR_SLASH;
+        CIrExt80Value right = fold->values[fold->value_count - 1];
+        fold->value_count -= 1;
+        CIrExt80Value* left = &fold->values[fold->value_count - 1];
+        applied = c_ir_ext80_fold_apply(op, *left, right, left);
+        if (!applied && fold->type_only)
+        {
+            *left = c_ir_ext80_value_common_arithmetic_type(*left, right);
+            applied = true;
+        }
+    }
+    if (!applied)
+    {
+        fold->blame = frame.token;
+    }
+    return applied;
+}
+
+// The two constant-valued math intrinsics, folded here for the same
+// reason c_ir_constant_evaluate folds them: a hosted <math.h> spells
+// INFINITY and NAN as `__builtin_inff()` and `__builtin_nanf("")`
+// whenever the compiler advertises the GNU builtins, and every `long
+// double` table libc-test writes opens with one of them.  The
+// pointer-arithmetic spellings musl falls back to (`1e5000f`,
+// `(0.0f/0.0f)`) already fold through the number and operator paths;
+// these are the same values written the other way.  A refusal, including
+// "not one of these", names the token at the cursor.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value* value_out)
+{
+    CToken const* token = &fold->preprocess.tokens[fold->cursor];
+    bool folded = false;
+    if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
+        c_token_is_punctuator(&fold->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token)));
+        bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
+        if (quiet_nan || infinity)
+        {
+            u32 open = fold->cursor + 1;
+            u32 close = c_parse_ext80_matching_delimiter(fold->preprocess, open, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close != UINT32_MAX)
+            {
+                // Only the default payload folds: `__builtin_nan("")` is the
+                // quiet NaN every hosted header spells, and a non-empty payload
+                // string names a different value.
+                String8 payload = close == open + 2 && fold->preprocess.tokens[open + 1].kind == C_TOKEN_STRING_LITERAL
+                                      ? c_token_spelling(fold->preprocess.spelling_base, fold->preprocess.tokens[open + 1])
+                                      : (String8){0};
+                bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
+                if (quiet_nan ? empty_payload : close == open + 1)
+                {
+                    u8 rank = special.kind == C_TYPE_FLOAT ? C_IR_EXT80_RANK_FLOAT
+                              : special.kind == C_TYPE_LONG_DOUBLE ? C_IR_EXT80_RANK_LONG_DOUBLE : C_IR_EXT80_RANK_DOUBLE;
+                    *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
+                    fold->cursor = close + 1;
+                    folded = true;
+                }
+            }
+        }
+    }
+    if (!folded)
+    {
+        fold->blame = fold->cursor;
+    }
+    return folded;
+}
+
+// Step over `__extension__` markers; true while a token remains in the range.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_skip_extensions(CIrExt80Fold* fold)
+{
+    while (fold->cursor < fold->limit &&
+           c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
+                                    C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+    {
+        fold->cursor += 1;
+    }
+    return fold->cursor < fold->limit;
+}
+
+// One step in operand position: a prefix operator or an opening group pushes a
+// frame and stays in operand position; a number or intrinsic pushes a value and
+// moves to operator position.  Returns false on a refusal.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_operand(CIrExt80Fold* fold, bool* expect_operand)
+{
+    bool ok = true;
+    if (!c_ir_ext80_fold_skip_extensions(fold))
+    {
+        fold->blame = fold->limit ? fold->limit - 1 : 0;
+        ok = false;
+    }
+    else
+    {
+        CToken const* token = &fold->preprocess.tokens[fold->cursor];
+        if (c_token_is_punctuator(token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
+        {
+            bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
+            u32 operator_index = fold->cursor;
+            fold->cursor += 1;
+            bool more = c_ir_ext80_fold_skip_extensions(fold);
+            if (more && fold->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
+            {
+                // Direct and grouped operands use the same promoted-domain sign.
+                u32 number = fold->cursor;
+                fold->cursor += 1;
+                CIrExt80Value* slot = c_ir_ext80_fold_value_slot(fold);
+                if (!slot)
+                {
+                    ok = false;
+                }
+                else if (!c_ir_ext80_fold_number(fold->preprocess, number, slot) || !c_ir_ext80_fold_unary(negative, slot))
+                {
+                    fold->blame = number;
+                    ok = false;
+                }
+                else
+                {
+                    fold->value_count += 1;
+                    *expect_operand = false;
+                }
+            }
+            else
+            {
+                ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = negative ? C_IR_EXT80_FRAME_NEGATE : C_IR_EXT80_FRAME_PLUS,
+                                                                       .token = operator_index});
+            }
+        }
+        else if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_ext80_matching_delimiter(fold->preprocess, fold->cursor, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            CIrExt80Cast cast = {0};
+            if (close == UINT32_MAX)
+            {
+                fold->blame = fold->cursor;
+                ok = false;
+            }
+            else if (c_ir_ext80_cast_parse(fold->preprocess, fold->cursor, close, &cast))
+            {
+                // A cast binds to the unary expression after it.
+                ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = C_IR_EXT80_FRAME_CAST, .token = close, .cast = cast});
+                fold->cursor = close + 1;
+            }
+            else
+            {
+                ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = C_IR_EXT80_FRAME_GROUP, .token = close,
+                                                                       .saved_limit = fold->limit});
+                fold->limit = close;
+                fold->cursor += 1;
+            }
+        }
+        else
+        {
+            CIrExt80Value* slot = c_ir_ext80_fold_value_slot(fold);
+            if (!slot)
+            {
+                ok = false;
+            }
+            else if (token->kind == C_TOKEN_PREPROCESSING_NUMBER)
+            {
+                u32 number = fold->cursor;
+                fold->cursor += 1;
+                if (!c_ir_ext80_fold_number(fold->preprocess, number, slot))
+                {
+                    fold->blame = number;
+                    ok = false;
+                }
+            }
+            else
+            {
+                ok = c_ir_ext80_fold_builtin(fold, slot);
+            }
+            if (ok)
+            {
+                fold->value_count += 1;
+                *expect_operand = false;
+            }
+        }
+    }
+    return ok;
+}
+
+// One step in operator position, after a value: a binary operator reduces what
+// binds at least as tightly and waits for its right operand; anything else ends
+// the innermost expression, which closes its group or finishes the range.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_operator(CIrExt80Fold* fold, bool* expect_operand, bool* running)
+{
+    bool ok = true;
+    // A group kind here means "not a binary operator".
+    CIrExt80FrameKind kind = C_IR_EXT80_FRAME_GROUP;
+    if (fold->cursor < fold->limit)
+    {
+        CToken const* token = &fold->preprocess.tokens[fold->cursor];
+        kind = c_token_is_punctuator(token, C_PUNCTUATOR_PLUS)    ? C_IR_EXT80_FRAME_ADD
+               : c_token_is_punctuator(token, C_PUNCTUATOR_MINUS) ? C_IR_EXT80_FRAME_SUBTRACT
+               : c_token_is_punctuator(token, C_PUNCTUATOR_STAR)  ? C_IR_EXT80_FRAME_MULTIPLY
+               : c_token_is_punctuator(token, C_PUNCTUATOR_SLASH) ? C_IR_EXT80_FRAME_DIVIDE
+                                                                  : C_IR_EXT80_FRAME_GROUP;
+    }
+    u32 precedence = c_ir_ext80_frame_precedence(kind);
+    while (ok && fold->frame_count && fold->frames[fold->frame_count - 1].kind != C_IR_EXT80_FRAME_GROUP &&
+           c_ir_ext80_frame_precedence(fold->frames[fold->frame_count - 1].kind) >= precedence)
+    {
+        ok = c_ir_ext80_fold_reduce(fold);
+    }
+    if (ok && kind != C_IR_EXT80_FRAME_GROUP)
+    {
+        ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = kind, .token = fold->cursor});
+        fold->cursor += 1;
+        *expect_operand = true;
+    }
+    else if (ok && fold->frame_count)
+    {
+        CIrExt80Frame group = fold->frames[fold->frame_count - 1];
+        if (fold->cursor != group.token)
+        {
+            fold->blame = fold->cursor;
+            ok = false;
+        }
+        else
+        {
+            fold->frame_count -= 1;
+            fold->limit = group.saved_limit;
+            fold->cursor = group.token + 1;
+        }
+    }
+    else if (ok)
+    {
+        *running = false;
+    }
+    return ok;
+}
+
+// Evaluate the range [fold->cursor, fold->limit).  On success the cursor is
+// where the expression stopped; the caller decides whether that is the end.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_expression(CIrExt80Fold* fold, CIrExt80Value* value_out)
+{
+    CIrExt80Frame inline_frames[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    CIrExt80Value inline_values[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    // Every frame and value consumes a token, so the range length bounds both.
+    u32 capacity = fold->limit - fold->cursor + 1;
+    bool ok = true;
+    if (capacity <= C_IR_EXT80_FOLD_INLINE_CAPACITY)
+    {
+        fold->frames = inline_frames;
+        fold->values = inline_values;
+    }
+    else
+    {
+        fold->frames = arena_allocate(fold->arena, CIrExt80Frame, capacity);
+        fold->values = arena_allocate(fold->arena, CIrExt80Value, capacity);
+        if (!fold->frames || !fold->values)
+        {
+            fold->capacity_exceeded = true;
+            ok = false;
+        }
+    }
+    fold->capacity = capacity;
+    fold->frame_count = 0;
+    fold->value_count = 0;
+    bool expect_operand = true;
+    bool running = ok;
+    while (running)
+    {
+        ok = expect_operand ? c_ir_ext80_fold_operand(fold, &expect_operand) : c_ir_ext80_fold_operator(fold, &expect_operand, &running);
+        running = running && ok;
+    }
+    if (ok)
+    {
+        *value_out = fold->values[0];
+    }
+    fold->frames = NULL;
+    fold->values = NULL;
+    fold->capacity = 0;
+    fold->frame_count = 0;
+    fold->value_count = 0;
+    return ok;
+}
+
+typedef struct CIrExt80ConditionalFrame CIrExt80ConditionalFrame;
+struct CIrExt80ConditionalFrame
+{
+    u32 start;
+    u32 end;
+    u32 question;
+    u32 colon;
+    u8 stage;
+    bool omitted;
+    bool selected_is_true;
+    bool type_only;
+    CIrExt80Value condition;
+    CIrExt80Value selected_value;
+    CIrExt80Value other_value;
+};
+
+typedef struct CIrExt80ConditionalIndex CIrExt80ConditionalIndex;
+struct CIrExt80ConditionalIndex
+{
+    u32 base;
+    u32 token_count;
+    u32* delimiter_closes_plus_one;
+    u32* conditional_colons_plus_one;
+    u32* depths;
+    u32* next_questions_at_depth;
+    u32* delimiter_stack;
+    u32* question_heads;
+};
+
+// Pair every delimiter and conditional once for this initializer. The
+// evaluator's subranges can then find enclosing parentheses and the next
+// question at their own nesting level without rescanning suffixes.
+BUSTER_C_INTERNAL bool c_ir_ext80_conditional_index_build(CIrExt80Fold* fold, CPreprocessResult preprocess, u32 start, u32 end,
+                                                            CIrExt80ConditionalIndex* index)
+{
+    u32 token_count = index->token_count;
+    u32 depth = 0;
+    u32 delimiter_count = 0;
+    bool valid = token_count != 0;
+    if (valid)
+    {
+        memset(index->delimiter_closes_plus_one, 0, token_count * sizeof(*index->delimiter_closes_plus_one));
+        memset(index->conditional_colons_plus_one, 0, token_count * sizeof(*index->conditional_colons_plus_one));
+        memset(index->depths, 0, token_count * sizeof(*index->depths));
+        for (u32 offset = 0; offset < token_count; offset += 1)
+        {
+            index->next_questions_at_depth[offset] = UINT32_MAX;
+        }
+        for (u32 current_depth = 0; current_depth <= token_count; current_depth += 1)
+        {
+            index->question_heads[current_depth] = UINT32_MAX;
+        }
+    }
+    for (u32 token_index = start; valid && token_index < end; token_index += 1)
+    {
+        u32 offset = token_index - start;
+        CToken token = preprocess.tokens[token_index];
+        CPunctuator punctuator = (CPunctuator)token.punctuator;
+        index->depths[offset] = depth;
+        bool opening = punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+                       punctuator == C_PUNCTUATOR_LEFT_BRACE;
+        bool closing = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                       punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+        if (opening)
+        {
+            valid = delimiter_count < token_count && depth < token_count;
+            if (valid)
+            {
+                index->delimiter_stack[delimiter_count++] = token_index;
+                depth += 1;
+            }
+        }
+        else if (closing)
+        {
+            valid = delimiter_count != 0 && depth != 0;
+            if (valid)
+            {
+                u32 open_index = index->delimiter_stack[--delimiter_count];
+                CPunctuator open = (CPunctuator)preprocess.tokens[open_index].punctuator;
+                bool pair_matches = (open == C_PUNCTUATOR_LEFT_PARENTHESIS && punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                                    (open == C_PUNCTUATOR_LEFT_BRACKET && punctuator == C_PUNCTUATOR_RIGHT_BRACKET) ||
+                                    (open == C_PUNCTUATOR_LEFT_BRACE && punctuator == C_PUNCTUATOR_RIGHT_BRACE);
+                valid = pair_matches;
+                if (valid)
+                {
+                    index->delimiter_closes_plus_one[open_index - start] = token_index + 1;
+                    depth -= 1;
+                }
+            }
+        }
+        else if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            valid = depth <= token_count;
+            if (valid)
+            {
+                index->next_questions_at_depth[offset] = index->question_heads[depth];
+                index->question_heads[depth] = token_index;
+            }
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON && depth <= token_count)
+        {
+            u32 question = index->question_heads[depth];
+            if (question != UINT32_MAX)
+            {
+                index->conditional_colons_plus_one[question - start] = token_index + 1;
+                index->question_heads[depth] = index->next_questions_at_depth[question - start];
+            }
+        }
+    }
+    valid = valid && delimiter_count == 0 && depth == 0;
+    // The question-link array is no longer needed after pairing. Reuse it to
+    // answer each subrange's next question at the depth of its first token.
+    if (valid)
+    {
+        for (u32 current_depth = 0; current_depth <= token_count; current_depth += 1)
+        {
+            index->question_heads[current_depth] = UINT32_MAX;
+        }
+        for (u32 token_index = end; token_index > start;)
+        {
+            token_index -= 1;
+            u32 offset = token_index - start;
+            u32 current_depth = index->depths[offset];
+            if (preprocess.tokens[token_index].punctuator == C_PUNCTUATOR_QUESTION)
+            {
+                index->question_heads[current_depth] = token_index;
+            }
+            index->next_questions_at_depth[offset] = index->question_heads[current_depth];
+        }
+    }
+    if (!valid && (!index->delimiter_closes_plus_one || !index->conditional_colons_plus_one || !index->depths ||
+                   !index->next_questions_at_depth || !index->delimiter_stack || !index->question_heads))
+    {
+        fold->capacity_exceeded = true;
+    }
+    return valid;
+}
+
+// Find a conditional that is the whole expression. Its delimiter and
+// question-colon boundaries come from the single initializer index above.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_root_conditional(CIrExt80ConditionalIndex const* index, CPreprocessResult preprocess, u32 start,
+                                                         u32 end, u32* expression_start, u32* question_out, u32* colon_out,
+                                                         u32* expression_end)
+{
+    while (start < end && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[start],
+                                                     C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+    {
+        start += 1;
+    }
+    bool trimming = true;
+    while (trimming && start < end)
+    {
+        trimming = false;
+        u32 offset = start - index->base;
+        if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            index->delimiter_closes_plus_one[offset] == end)
+        {
+            start += 1;
+            end -= 1;
+            while (start < end && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[start],
+                                                             C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                start += 1;
+            }
+            trimming = true;
+        }
+    }
+    bool found = false;
+    if (start < end)
+    {
+        u32 question = index->next_questions_at_depth[start - index->base];
+        if (question != UINT32_MAX && question < end)
+        {
+            u32 colon_plus_one = index->conditional_colons_plus_one[question - index->base];
+            if (colon_plus_one && colon_plus_one - 1 < end)
+            {
+                u32 colon = colon_plus_one - 1;
+                bool omitted = question + 1 == colon;
+                if (question != start && (!omitted || c_preprocess_dialect_is_gnu(preprocess.dialect)) && colon + 1 < end)
+                {
+                    *expression_start = start;
+                    *question_out = question;
+                    *colon_out = colon;
+                    *expression_end = end;
+                    found = true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_conditional_convert(CIrExt80Value left_type, CIrExt80Value right_type, CIrExt80Value selected,
+                                                            CIrExt80Value* result_out)
+{
+    CIrExt80Value common = c_ir_ext80_value_common_arithmetic_type(left_type, right_type);
+    bool converted = true;
+    if (common.rank != C_IR_EXT80_RANK_INTEGER)
+    {
+        converted = c_ir_ext80_value_convert(&selected, common.rank);
+    }
+    else
+    {
+        bool negative = false;
+        u64 magnitude = 0;
+        bool exact = true;
+        c_ir_ext80_integer_open(selected, &negative, &magnitude);
+        selected = c_ir_ext80_integer_wrap(negative, magnitude, common.integer_width, common.unsigned_width != 0, &exact);
+        BUSTER_UNUSED(exact);
+    }
+    if (converted)
+    {
+        *result_out = selected;
+    }
+    return converted;
+}
+
+// Evaluate conditional subranges with an explicit token-bounded work stack.
+// The unselected arm supplies only its arithmetic type; type-only folding
+// keeps an invalid value such as integer division by zero from changing the
+// selected branch's constant value.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_constant_range(CIrExt80Fold* fold, u32 start, u32 end, CIrExt80Value* value_out)
+{
+    CIrExt80ConditionalFrame inline_frames[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    CIrExt80Value inline_values[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_closes[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_colons[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_depths[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_next_questions[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_delimiter_stack[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_question_heads[C_IR_EXT80_FOLD_INLINE_CAPACITY + 1];
+    u32 token_count = end >= start ? end - start : UINT32_MAX;
+    u32 capacity = token_count < UINT32_MAX ? token_count + 1 : 0;
+    bool has_conditional = false;
+    for (u32 token_index = start; token_index < end && !has_conditional; token_index += 1)
+    {
+        has_conditional = c_token_is_punctuator(&fold->preprocess.tokens[token_index], C_PUNCTUATOR_QUESTION);
+    }
+    bool valid = token_count != 0 && capacity != 0;
+    if (valid && !has_conditional)
+    {
+        CIrExt80Value value = {0};
+        fold->cursor = start;
+        fold->limit = end;
+        fold->blame = start;
+        valid = c_ir_ext80_fold_expression(fold, &value) && fold->cursor == end;
+        if (valid)
+        {
+            *value_out = value;
+        }
+    }
+    else if (valid)
+    {
+        CIrExt80ConditionalIndex index = {.base = start, .token_count = token_count};
+        CIrExt80ConditionalFrame* frames = inline_frames;
+        CIrExt80Value* values = inline_values;
+        if (capacity <= C_IR_EXT80_FOLD_INLINE_CAPACITY)
+        {
+            index.delimiter_closes_plus_one = inline_closes;
+            index.conditional_colons_plus_one = inline_colons;
+            index.depths = inline_depths;
+            index.next_questions_at_depth = inline_next_questions;
+            index.delimiter_stack = inline_delimiter_stack;
+            index.question_heads = inline_question_heads;
+        }
+        else
+        {
+            index.delimiter_closes_plus_one = arena_allocate(fold->arena, u32, token_count);
+            index.conditional_colons_plus_one = arena_allocate(fold->arena, u32, token_count);
+            index.depths = arena_allocate(fold->arena, u32, token_count);
+            index.next_questions_at_depth = arena_allocate(fold->arena, u32, token_count);
+            index.delimiter_stack = arena_allocate(fold->arena, u32, token_count);
+            index.question_heads = arena_allocate(fold->arena, u32, capacity);
+            frames = arena_allocate(fold->arena, CIrExt80ConditionalFrame, capacity);
+            values = arena_allocate(fold->arena, CIrExt80Value, capacity);
+        }
+        valid = index.delimiter_closes_plus_one && index.conditional_colons_plus_one && index.depths && index.next_questions_at_depth &&
+                index.delimiter_stack && index.question_heads && frames && values;
+        if (valid)
+        {
+            valid = c_ir_ext80_conditional_index_build(fold, fold->preprocess, start, end, &index);
+        }
+        else
+        {
+            fold->capacity_exceeded = true;
+        }
+        u32 frame_count = 0;
+        u32 value_count = 0;
+        if (valid)
+        {
+            frames[frame_count++] = (CIrExt80ConditionalFrame){.start = start, .end = end};
+        }
+        while (valid && frame_count)
+        {
+            CIrExt80ConditionalFrame* frame = frames + frame_count - 1;
+            if (frame->stage == 0)
+            {
+                u32 expression_start = 0;
+                u32 question = 0;
+                u32 colon = 0;
+                u32 expression_end = 0;
+                if (!c_ir_ext80_fold_root_conditional(&index, fold->preprocess, frame->start, frame->end, &expression_start, &question,
+                                                       &colon, &expression_end))
+                {
+                    CIrExt80Value value = {0};
+                    bool saved_type_only = fold->type_only;
+                    fold->cursor = frame->start;
+                    fold->limit = frame->end;
+                    fold->blame = frame->start;
+                    fold->type_only = frame->type_only;
+                    valid = c_ir_ext80_fold_expression(fold, &value) && fold->cursor == frame->end && value_count < capacity;
+                    fold->type_only = saved_type_only;
+                    if (valid)
+                    {
+                        values[value_count++] = value;
+                        frame_count -= 1;
+                    }
+                }
+                else
+                {
+                    frame->start = expression_start;
+                    frame->end = expression_end;
+                    frame->question = question;
+                    frame->colon = colon;
+                    frame->omitted = colon == question + 1;
+                    frame->stage = 1;
+                    BUSTER_CHECK(frame_count < capacity);
+                    frames[frame_count++] = (CIrExt80ConditionalFrame){.start = expression_start, .end = question,
+                                                                        .type_only = frame->type_only};
+                }
+            }
+            else if (frame->stage == 1)
+            {
+                valid = value_count != 0;
+                if (valid)
+                {
+                    frame->condition = values[--value_count];
+                    frame->selected_is_true = !c_ir_ext80_value_is_zero(frame->condition);
+                    if (frame->omitted && frame->selected_is_true)
+                    {
+                        frame->selected_value = frame->condition;
+                        frame->stage = 3;
+                        BUSTER_CHECK(frame_count < capacity);
+                        frames[frame_count++] = (CIrExt80ConditionalFrame){.start = frame->colon + 1, .end = frame->end, .type_only = true};
+                    }
+                    else
+                    {
+                        frame->stage = 2;
+                        u32 selected_start = frame->omitted || !frame->selected_is_true ? frame->colon + 1 : frame->question + 1;
+                        u32 selected_end = frame->omitted || !frame->selected_is_true ? frame->end : frame->colon;
+                        BUSTER_CHECK(frame_count < capacity);
+                        frames[frame_count++] = (CIrExt80ConditionalFrame){.start = selected_start, .end = selected_end,
+                                                                            .type_only = frame->type_only};
+                    }
+                }
+            }
+            else if (frame->stage == 2)
+            {
+                valid = value_count != 0;
+                if (valid)
+                {
+                    frame->selected_value = values[--value_count];
+                    if (frame->omitted)
+                    {
+                        frame->other_value = frame->condition;
+                        frame->stage = 4;
+                    }
+                    else
+                    {
+                        frame->stage = 3;
+                        u32 other_start = frame->selected_is_true ? frame->colon + 1 : frame->question + 1;
+                        u32 other_end = frame->selected_is_true ? frame->end : frame->colon;
+                        BUSTER_CHECK(frame_count < capacity);
+                        frames[frame_count++] = (CIrExt80ConditionalFrame){.start = other_start, .end = other_end, .type_only = true};
+                    }
+                }
+            }
+            else if (frame->stage == 3)
+            {
+                valid = value_count != 0;
+                if (valid)
+                {
+                    frame->other_value = values[--value_count];
+                    frame->stage = 4;
+                }
+            }
+            else
+            {
+                CIrExt80Value true_type = frame->selected_is_true ? frame->selected_value : frame->other_value;
+                CIrExt80Value false_type = frame->selected_is_true ? frame->other_value : frame->selected_value;
+                CIrExt80Value converted = frame->type_only ? c_ir_ext80_value_common_arithmetic_type(true_type, false_type) : (CIrExt80Value){0};
+                valid = frame->type_only || c_ir_ext80_fold_conditional_convert(true_type, false_type, frame->selected_value, &converted);
+                valid = valid && value_count < capacity;
+                if (valid)
+                {
+                    values[value_count++] = converted;
+                    frame_count -= 1;
+                }
+                else
+                {
+                    fold->blame = frame->question;
+                }
+            }
+        }
+        valid = valid && value_count == 1;
+        if (valid)
+        {
+            *value_out = values[0];
+        }
+    }
+    if (valid)
+    {
+        fold->cursor = end;
+    }
+    else if (!token_count || !capacity)
+    {
+        fold->capacity_exceeded = true;
+    }
+    return valid;
+}
+
+// The entry point both static x87 writers use: the scalar global and one
+// element of an aggregate.  Anything the grammar above does not cover keeps
+// the refusal, with the diagnostic naming the token it stopped at.
+BUSTER_C_SHARED bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end,
+                                                         u64* significand_out, u16* exponent_sign_out, String8* message, u32* location)
+{
+    CIrExt80Fold fold = {.preprocess = preprocess, .arena = arena, .cursor = start, .limit = end, .blame = start};
+    CIrExt80Value value = {0};
+    bool folded = start < end && c_ir_ext80_fold_constant_range(&fold, start, end, &value);
+    bool valid = folded && fold.cursor == end;
+    if (!valid)
+    {
+        u32 blame = folded ? fold.cursor : fold.blame;
+        String8 spelling = blame < preprocess.token_count ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[blame]) : (String8){0};
+        *message = fold.capacity_exceeded ? S8("x86 long double static initializer exceeds the constant folder's stack capacity")
+                   : spelling.length ? string_format(arena, S8("cannot fold '{S8}' in an x86 long double static initializer"), spelling)
+                                   : S8("unsupported x86 long double static initializer");
+        *location = blame;
+    }
+    else
+    {
+        *significand_out = value.significand;
+        *exponent_sign_out = value.exponent_sign;
+    }
+    return valid;
 }
 
 // Reuse the unit's pair table only when its delimiters nest. Malformed streams

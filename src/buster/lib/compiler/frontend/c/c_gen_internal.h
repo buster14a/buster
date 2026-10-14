@@ -1,15 +1,17 @@
 #pragma once
 
-// Private test seams into c_gen.c.
+// Private numeric contracts and test seams shared by C semantic analysis and lowering.
 //
 // Member lookup: the builder remains owned by c_gen.c; tests supply distinct
 // persistent and rewindable arenas so an escaped search pointer or a
 // type-universe-sized scratch request is observable.
 //
-// The exact-literal bignum (c_ir_ext80_big_* in c_gen.c): only the limbs below
+// The exact-literal bignum (c_ir_ext80_big_* in c_gen.c) is shared with
+// c_parse.c semantic constant folding. Only the limbs below
 // `count` are defined.  Tests fill every other limb with a sentinel to show a
 // helper neither reads nor writes past its live limbs, so the value layout is
-// declared here instead of inside c_gen.c.
+// declared here instead of inside c_gen.c; c_internal.h supplies the exact
+// shared arithmetic helper declarations.
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir_append.h>
 
