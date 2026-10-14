@@ -131,6 +131,8 @@
 //   IDENTIFIER   bound through identifier_use_by_token_plus_one to an object,
 //                function, parameter, local or enumerator: the entity's type,
 //                as c_parse_direct_expression_base answers the single token.
+//                An array parameter reads its interned adjusted pointer row;
+//                absent rows decline to the token query without appending.
 //                In an initializer, an unbound name is looked up instead, as
 //                that function falls back to doing.
 //   NUMBER,      c_parse_expression_leaf_without_cast itself, the leaf the
@@ -949,7 +951,11 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
     }
     if (entity && c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
     {
-        c_ast_types_accept(body, relative, entity->type, flags);
+        CTypeId type = c_parse_expression_entity_type(result, entity, true);
+        if (type.value < result->type_count)
+        {
+            c_ast_types_accept(body, relative, type, flags);
+        }
     }
     else if (identifier && !entity)
     {

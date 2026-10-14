@@ -6377,6 +6377,33 @@ BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, 
     return type;
 }
 
+// Keep the declared array for parameter-bound/VLA ownership; an unqualified
+// outer array's identifier denotes the adjusted pointer (C17 6.7.6.3p7), even
+// under &. Qualified array aliases keep their existing path pending #4183:
+// their outer qualifiers belong to elements, not to this pointer.
+// Ordinary arrays retain their type, so &local still points at the whole array.
+// The read-only tree typer declines if the query has not interned this row.
+BUSTER_C_SHARED CTypeId c_parse_expression_entity_type(CParseResult* result, CEntity const* entity, bool existing_only)
+{
+    CTypeId type = entity->type;
+    if (entity->kind == C_ENTITY_PARAMETER && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY &&
+        !result->types[type.value].is_const && !result->types[type.value].is_volatile &&
+        !result->types[type.value].is_restrict && !result->types[type.value].is_atomic)
+    {
+        CType array = result->types[type.value];
+        bool pointer_const = array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const;
+        CType pointer = {
+            .element_type = array.element_type,
+            .return_type = C_TYPE_ID_INVALID,
+            .array_bound = C_ARRAY_BOUND_INVALID,
+            .kind = C_TYPE_POINTER,
+            .is_const = pointer_const,
+        };
+        type = existing_only ? c_parse_interned_type(result, pointer) : c_parse_intern_type(result, pointer);
+    }
+    return type;
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                          u32 base_start, u32 base_end)
 {
@@ -6408,7 +6435,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
             entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[base_start]);
         }
         type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF
-                   ? result->entities[entity_id.value].type
+                   ? c_parse_expression_entity_type(result, result->entities + entity_id.value, false)
                    : C_TYPE_ID_INVALID;
         // A call base -- `_PyBaseExceptionObject_cast(self)->context` is what
         // CPython's Py_XSETREF callers hand _Py_TYPEOF -- contributes its
@@ -8091,8 +8118,9 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
     return place;
 }
 
-// A parameter keeps its declared array spelling in its entity type, so a
-// type query reports `int a[4]` or `char *argv[]` as an array. C17 6.7.6.3p7
+// A parameter keeps its declared array spelling in its entity type, so
+// bound/VLA readers retain `int a[4]` or `char *argv[]` as an array. Expression
+// queries use c_parse_expression_entity_type. C17 6.7.6.3p7
 // adjusts it to a pointer to the element, qualified by what the brackets
 // carry: `int a[const 2]` is a const pointer. The array type's own `const`
 // is what c_ir_mark_local_read_only also keeps read-only for that pointer.

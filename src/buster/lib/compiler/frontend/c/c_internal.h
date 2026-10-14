@@ -243,6 +243,7 @@ BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* m
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);
 BUSTER_C_EXTERN CTypeId c_parse_intern_type(CParseResult* result, CType type);
+BUSTER_C_EXTERN CTypeId c_parse_expression_entity_type(CParseResult* result, CEntity const* entity, bool existing_only);
 BUSTER_C_EXTERN CTypeId c_parse_interned_type(CParseResult const* result, CType type);
 // What c_parse_primitive_type reads from a run of specifier words, before it
 // diagnoses or appends anything; see c_parse_primitive_type_read.

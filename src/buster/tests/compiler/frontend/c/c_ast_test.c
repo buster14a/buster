@@ -4619,7 +4619,8 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("long f(long a) { return a += 2; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     // `++` and `--` keep the operand's own row, unpromoted and pointers
     // included; checked, the operand must be a modifiable place. An array
-    // parameter is the pointer it is adjusted to, and keeps its array row.
+    // parameter is the pointer it is adjusted to; only its declaration keeps
+    // the array row for bound/VLA ownership.
     {S8_INITIALIZER("int f(int i) { return i++; }"), S8_INITIALIZER("i"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("long f(long i) { return --i; }"), S8_INITIALIZER("--"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("unsigned char f(unsigned char c) { return ++c; }"), S8_INITIALIZER("++"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER,
@@ -4629,7 +4630,16 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_SHORT},
     {S8_INITIALIZER("int f(int* a, int i) { return a[i++]; }"), S8_INITIALIZER("a"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p) { return *p++ + 1; }"), S8_INITIALIZER("*"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
-    {S8_INITIALIZER("void f(int a[4]) { a++; }"), S8_INITIALIZER("a"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_ARRAY},
+    {S8_INITIALIZER("void f(int a[4]) { a++; }"), S8_INITIALIZER("a"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("void consume(char***); void f(char* a[]) { consume(&a); }"), S8_INITIALIZER("a"), 1, 1,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("void consume(char***); void f(char* a[]) { consume(&a); }"), S8_INITIALIZER("&"), 0, 2,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    // A return query has already interned both adjusted pointer rows. The
+    // read-only tree lookup must reuse them without appending a duplicate.
+    {S8_INITIALIZER("char*** f(char* a[]) { return &a; }"), S8_INITIALIZER("&"), 0, 2,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("void f(void) { int a[4]; (void)a; }"), S8_INITIALIZER("a"), 1, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_ARRAY},
     // Over a qualified aggregate's member, which the pass now types through
     // its shared qualified copy, and over an element of a qualified array
     // member, which it still declines.
@@ -4897,6 +4907,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     }
     c_ast_release(&built.ast);
     BUSTER_TEST(arguments, arena_test_live_reserved_bytes() == reserved);
+    c_test_scratch_end(temporary);
+    // Array parameter adjustment also declines without the shared rows;
+    // the ordinary token query still accepts this valid pointer return.
+    temporary = scratch_begin(&arguments->arena, 1);
+    preprocess = c_ast_test_preprocess(temporary.arena, S8("char*** f(char* a[]) { return &a; }"), C_PREPROCESS_DIALECT_GNU17);
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    address = c_ast_test_token_index(preprocess, S8("&"), 0);
+    if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && address != UINT32_MAX))
+    {
+        for (u32 checked = 0; checked < 2; checked += 1)
+        {
+            CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), address, address + 2,
+                                                            checked != 0);
+            BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_DECLINE);
+        }
+    }
+    c_ast_release(&built.ast);
     c_test_scratch_end(temporary);
     // A late row: when no query has shared the member's qualified copy yet,
     // here because the analysis ran without interned rows, the machine would
