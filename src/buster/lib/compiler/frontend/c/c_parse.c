@@ -45663,7 +45663,13 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
     }
     bool operand = !depth && open > start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
                    c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1], C_SIZEOF_ALIGNOF_WORDS);
-    if (!depth && !operand)
+    // The same indexed proof the binder uses rejects a logical interior
+    // before the machineless reader walks its growing parenthesized prefix.
+    // A leading typeof still admits conjunctions inside its operand.
+    bool possible = !depth && !operand &&
+                    (c_parse_label_address_group_may_be_type(result, open, index - 1) ||
+                     c_parse_label_address_group_starts_typeof(result, &preprocess, scope, open, index - 1));
+    if (possible)
     {
         u32 cursor = open + 1;
         CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, cursor, index - 1, &cursor);

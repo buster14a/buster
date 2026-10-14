@@ -2150,7 +2150,9 @@ malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
 
 Label-address cast proofs reuse the matching-opener index. Before classifying a
 group's type words, `c_parse_label_address_group_may_be_type` rejects interiors
-containing an indexed `&& identifier`. The typedef-aware proof retains a scoped
+containing an indexed `&& identifier`. `c_parse_label_address_cast_at` applies
+that same rejection before its machineless type proof, so left-nested logical
+prefixes do not repeat the whole parenthesized scan. The typedef-aware proof retains a scoped
 exception for a genuine leading `typeof` specifier, after qualifiers: its bounded
 operand has its own expression/type grammar and may contain a conjunction.
 The ordinary proof still rejects that punctuator. The exception's prefix probes
