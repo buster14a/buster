@@ -1,3 +1,10 @@
+// Arm A64 semantic records retain the generated schema and source identities.
+// Only their private numeric storage is packed: fixed record blocks are
+// transposed by byte column, then encoded as bounded literal/run packets.
+// buster_a64_semantic_cached_byte serves cold queries with once-published
+// blocks; buster_a64_semantic_blob_decode is the pure descriptor fallback.
+// buster_a64_semantic_blob_fill_block restores row bytes for each claim;
+// buster_aarch64_semantics_prewarm publishes whole-table readiness last.
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/os.h>
 
@@ -72,29 +79,21 @@ static u8 buster_a64_semantic_base64_value(char8 value)
     return result;
 }
 
-// The generated semantic tables ship base64-encoded in the source, so reading
-// one byte used to decode a whole four-character group -- a divide and a
-// modulo by three plus four character lookups -- and the u16/u32/u64 readers
-// redecoded the same group two, four and eight times over. That made
-// buster_a64_semantic_blob_byte 16.1% of the test suite.
-//
-// Each blob is now decoded once into plain bytes and read by index. The
-// decode is a pure function of `static const` generated data, so the result
-// is fixed for the life of the process; see the module rule in AGENTS.md.
-// Costs about 0.91 MB of zero-initialized storage, paid only by callers that
-// prewarm.
+// Packed storage changes neither the record wire format nor its hot readers.
+// Serial prewarm restores the original little-endian row bytes in these
+// caches; every warmed accessor remains a direct byte read. Cold accessors
+// fill each fixed block once through the existing once-claim protocol.
 BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_segment_bytes[BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_field_bytes[BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_operand_bytes[BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_value_atom_bytes[BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_value_entry_bytes[BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE];
 // Read last by every accessor and written last by the prewarm. While it is
-// false the decoded arrays are still zeroed, so the accessors must not touch
-// them -- an unprewarmed caller takes the original decode and gets the same
-// answer at the old cost.
+// false, only individually published blocks may be read. A cold caller
+// claims its block before filling; no other block or ready flag is written.
 BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_bytes_ready;
 
-static u8 buster_a64_semantic_blob_decode(char8 const* blob, u32 blob_size, u32 index)
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_base64_byte(char8 const* blob, u32 blob_size, u32 index)
 {
     u8 result;
     if (index >= blob_size)
@@ -116,7 +115,220 @@ static u8 buster_a64_semantic_blob_decode(char8 const* blob, u32 blob_size, u32 
     return result;
 }
 
-static u8 buster_a64_semantic_blob_byte(char8 const* blob, u8 const* bytes, u32 blob_size, u32 index)
+BUSTER_CT_CHECK(BUSTER_AARCH64_SEMANTIC_STORAGE_VERSION == 1);
+
+BUSTER_GLOBAL_LOCAL u32 buster_a64_semantic_packed_size(char8 const* encoded, u32 length)
+{
+    u32 result = length / 4 * 3;
+    if (length)
+    {
+        result -= encoded[length - 1] == '=';
+        result -= length > 1 && encoded[length - 2] == '=';
+    }
+    return result;
+}
+
+// Packet bounds are checked before any write. A complete block must consume
+// its complete encoded payload; neither an overrun nor an ignored tail passes.
+// Column packets write directly into row storage, including across packets.
+BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_unpack_block(char8 const* encoded, u32 length, u8* output, u32 output_count, u32 record_bytes)
+{
+    bool valid = (!length || encoded) && (!output_count || output) && length % 4 == 0 && record_bytes && output_count % record_bytes == 0;
+    u32 packed_size = valid ? buster_a64_semantic_packed_size(encoded, length) : 0;
+    u32 rows = valid ? output_count / record_bytes : 0;
+    u32 input = 0;
+    u32 written = 0;
+    u32 row = 0;
+    u32 column = 0;
+    u32 destination = 0;
+    while (valid && written < output_count)
+    {
+        valid = input < packed_size;
+        if (valid)
+        {
+            u8 control = buster_a64_semantic_base64_byte(encoded, packed_size, input++);
+            bool repeated = control >= 128;
+            u32 count = repeated ? (u32)control - 128 + 3 : (u32)control + 1;
+            valid = count <= output_count - written && (repeated ? input < packed_size : count <= packed_size - input);
+            if (valid)
+            {
+                u8 value = repeated ? buster_a64_semantic_base64_byte(encoded, packed_size, input++) : 0;
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    output[destination] = repeated ? value : buster_a64_semantic_base64_byte(encoded, packed_size, input++);
+                    written += 1;
+                    row += 1;
+                    if (row == rows)
+                    {
+                        row = 0;
+                        column += 1;
+                        destination = column;
+                    }
+                    else
+                    {
+                        destination += record_bytes;
+                    }
+                }
+            }
+        }
+    }
+    valid = valid && written == output_count && input == packed_size;
+    return valid;
+}
+
+// A cold read scans only its bounded block and skips literal packet payloads
+// it does not need. It never initializes or mutates shared storage.
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_blob_decode(BusterA64SemanticGeneratedBlob const* blob, u32 blob_size, u32 index)
+{
+    u8 result = 0;
+    bool valid = blob && blob->data && blob->blocks && blob->record_bytes &&
+                 blob->record_bytes <= BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_BYTES / BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS &&
+                 blob_size % blob->record_bytes == 0 && index < blob_size;
+    if (valid)
+    {
+        u32 block_bytes = blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS;
+        u32 block = index / block_bytes;
+        u32 remaining = blob_size - block * block_bytes;
+        u32 size = BUSTER_MIN(block_bytes, remaining);
+        u32 rows = size / blob->record_bytes;
+        u32 within = index % block_bytes;
+        u32 wanted = (within % blob->record_bytes) * rows + within / blob->record_bytes;
+        u32 first = blob->blocks[block];
+        u32 end = blob->blocks[block + 1];
+        valid = end >= first && (end - first) % 4 == 0;
+        char8 const* encoded = blob->data + first;
+        u32 packed_size = valid ? buster_a64_semantic_packed_size(encoded, end - first) : 0;
+        u32 input = 0;
+        u32 decoded = 0;
+        bool found = false;
+        while (valid && !found && decoded < size)
+        {
+            valid = input < packed_size;
+            if (valid)
+            {
+                u8 control = buster_a64_semantic_base64_byte(encoded, packed_size, input++);
+                bool repeated = control >= 128;
+                u32 count = repeated ? (u32)control - 128 + 3 : (u32)control + 1;
+                valid = count <= size - decoded && (repeated ? input < packed_size : count <= packed_size - input);
+                if (valid)
+                {
+                    found = wanted - decoded < count;
+                    if (found)
+                    {
+                        result = buster_a64_semantic_base64_byte(encoded, packed_size, input + (repeated ? 0 : wanted - decoded));
+                    }
+                    input += repeated ? 1 : count;
+                    decoded += count;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_blob_fill_block(BusterA64SemanticGeneratedBlob const* blob, u32 blob_size, u32 block_index, u8* bytes)
+{
+    bool valid = blob && blob->data && blob->blocks && blob->record_bytes &&
+                 blob->record_bytes <= BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_BYTES / BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS &&
+                 blob_size % blob->record_bytes == 0 && bytes;
+    u32 block_bytes = valid ? blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS : 0;
+    valid = valid && block_index < blob_size / block_bytes + (blob_size % block_bytes != 0);
+    if (valid)
+    {
+        u32 first = block_index * block_bytes;
+        u32 encoded_first = blob->blocks[block_index];
+        u32 encoded_end = blob->blocks[block_index + 1];
+        u32 remaining = blob_size - first;
+        u32 size = BUSTER_MIN(block_bytes, remaining);
+        valid = encoded_end >= encoded_first && buster_a64_semantic_unpack_block(blob->data + encoded_first, encoded_end - encoded_first, bytes, size, blob->record_bytes);
+    }
+    return valid;
+}
+
+// Each state covers a disjoint decoded block. A fill reads only immutable
+// generated bytes and claims no other entry, so its once level is a leaf.
+// Both serial and lane-time readers publish exactly the same original bytes.
+enum
+{
+    BUSTER_A64_SEMANTIC_BLOCK_PENDING,
+    BUSTER_A64_SEMANTIC_BLOCK_BUSY,
+    BUSTER_A64_SEMANTIC_BLOCK_READY,
+    BUSTER_A64_SEMANTIC_BLOCK_INVALID,
+    BUSTER_A64_SEMANTIC_ONCE_LEVEL = 1,
+};
+#define BUSTER_A64_SEMANTIC_BLOCK_COUNT(records) (((records) + BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS - 1) / BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS)
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_segment_states[BUSTER_A64_SEMANTIC_BLOCK_COUNT(BUSTER_AARCH64_SEMANTIC_SEGMENT_COUNT)];
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_field_states[BUSTER_A64_SEMANTIC_BLOCK_COUNT(BUSTER_AARCH64_SEMANTIC_FIELD_COUNT)];
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_operand_states[BUSTER_A64_SEMANTIC_BLOCK_COUNT(BUSTER_AARCH64_SEMANTIC_OPERAND_COUNT)];
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_value_atom_states[BUSTER_A64_SEMANTIC_BLOCK_COUNT(BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT)];
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_value_entry_states[BUSTER_A64_SEMANTIC_BLOCK_COUNT(BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_COUNT)];
+#undef BUSTER_A64_SEMANTIC_BLOCK_COUNT
+
+typedef struct BusterA64SemanticBlobCache BusterA64SemanticBlobCache;
+struct BusterA64SemanticBlobCache
+{
+    BusterA64SemanticGeneratedBlob const* blob;
+    u8* bytes;
+    u8* states;
+    u32 size;
+    u32 block_count;
+};
+BUSTER_GLOBAL_LOCAL BusterA64SemanticBlobCache const buster_a64_semantic_blob_caches[] = {
+    {&buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, buster_a64_semantic_segment_states, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, BUSTER_ARRAY_LENGTH(buster_a64_semantic_segment_states)},
+    {&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, buster_a64_semantic_field_states, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, BUSTER_ARRAY_LENGTH(buster_a64_semantic_field_states)},
+    {&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, buster_a64_semantic_operand_states, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, BUSTER_ARRAY_LENGTH(buster_a64_semantic_operand_states)},
+    {&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, buster_a64_semantic_value_atom_states, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, BUSTER_ARRAY_LENGTH(buster_a64_semantic_value_atom_states)},
+    {&buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, buster_a64_semantic_value_entry_states, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, BUSTER_ARRAY_LENGTH(buster_a64_semantic_value_entry_states)},
+};
+
+BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_ensure_block(BusterA64SemanticBlobCache const* cache, u32 block)
+{
+    bool valid = block < cache->block_count;
+    if (valid)
+    {
+        u8* state = &cache->states[block];
+        valid = atomic_u8_load_acquire(state) == BUSTER_A64_SEMANTIC_BLOCK_READY;
+        if (!valid)
+        {
+            if (once_claim_u8(state, BUSTER_A64_SEMANTIC_BLOCK_PENDING, BUSTER_A64_SEMANTIC_BLOCK_BUSY, BUSTER_A64_SEMANTIC_ONCE_LEVEL))
+            {
+                u32 first = block * cache->blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS;
+                bool decoded = buster_a64_semantic_blob_fill_block(cache->blob, cache->size, block, cache->bytes + first);
+                once_publish_u8(state, decoded ? BUSTER_A64_SEMANTIC_BLOCK_READY : BUSTER_A64_SEMANTIC_BLOCK_INVALID);
+            }
+            valid = atomic_u8_load_acquire(state) == BUSTER_A64_SEMANTIC_BLOCK_READY;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_cached_byte(BusterA64SemanticGeneratedBlob const* blob, u32 blob_size, u32 index)
+{
+    u8 result = 0;
+    if (blob && index < blob_size)
+    {
+        // Never retain or publish data for a temporary descriptor. The five
+        // generated identities and their original decoded sizes are fixed.
+        if (blob->cache_slot < BUSTER_ARRAY_LENGTH(buster_a64_semantic_blob_caches) &&
+            buster_a64_semantic_blob_caches[blob->cache_slot].blob == blob &&
+            buster_a64_semantic_blob_caches[blob->cache_slot].size == blob_size)
+        {
+            BusterA64SemanticBlobCache const* cache = &buster_a64_semantic_blob_caches[blob->cache_slot];
+            u32 block_bytes = blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS;
+            if (buster_a64_semantic_ensure_block(cache, index / block_bytes))
+            {
+                result = cache->bytes[index];
+            }
+        }
+        else
+        {
+            result = buster_a64_semantic_blob_decode(blob, blob_size, index);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_blob_byte(BusterA64SemanticGeneratedBlob const* blob, u8 const* bytes, u32 blob_size, u32 index)
 {
     u8 result;
     if (index >= blob_size)
@@ -129,63 +341,123 @@ static u8 buster_a64_semantic_blob_byte(char8 const* blob, u8 const* bytes, u32 
     }
     else
     {
-        result = buster_a64_semantic_blob_decode(blob, blob_size, index);
+        result = buster_a64_semantic_cached_byte(blob, blob_size, index);
     }
-
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void buster_a64_semantic_blob_fill(char8 const* blob, u8* bytes, u32 blob_size)
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_blob_fill(BusterA64SemanticGeneratedBlob const* blob, u8* bytes, u32 blob_size)
 {
-    for (u32 index = 0; index < blob_size; index += 1)
+    bool valid = blob && blob->data && blob->blocks && blob->record_bytes &&
+                 blob->record_bytes <= BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_BYTES / BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS &&
+                 blob_size % blob->record_bytes == 0 && (!blob_size || bytes);
+    u32 block_bytes = valid ? blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS : 0;
+    for (u32 first = 0; valid && first < blob_size; first += block_bytes)
     {
-        bytes[index] = buster_a64_semantic_blob_decode(blob, blob_size, index);
+        valid = buster_a64_semantic_blob_fill_block(blob, blob_size, first / block_bytes, bytes + first);
     }
+    return valid;
 }
+#endif
 
 // Decode every semantic blob on the calling thread and publish the ready flag
-// last. Call before `lane_run`: the aarch64 semantic suites read these from
-// every lane, and the fill is an unsynchronized write to shared state.
+// last. Complete prewarm remains a serial phase before `lane_run`; cold
+// per-block fills use the same once-publication path without publishing it.
 void buster_aarch64_semantics_prewarm(void)
 {
-    if (buster_a64_semantic_bytes_ready)
+    if (!buster_a64_semantic_bytes_ready)
     {
-        return;
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        bool decoded = true;
+        for (u32 table = 0; table < BUSTER_ARRAY_LENGTH(buster_a64_semantic_blob_caches); table += 1)
+        {
+            BusterA64SemanticBlobCache const* cache = &buster_a64_semantic_blob_caches[table];
+            for (u32 block = 0; block < cache->block_count; block += 1)
+            {
+                decoded = buster_a64_semantic_ensure_block(cache, block) && decoded;
+            }
+        }
+        BUSTER_CHECK(decoded);
+        buster_a64_semantic_bytes_ready = decoded;
     }
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
-    buster_a64_semantic_blob_fill(buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes,
-                                  BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE);
-    buster_a64_semantic_blob_fill(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes,
-                                  BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE);
-    buster_a64_semantic_blob_fill(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes,
-                                  BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE);
-    buster_a64_semantic_blob_fill(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes,
-                                  BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE);
-    buster_a64_semantic_blob_fill(buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes,
-                                  BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE);
-    buster_a64_semantic_bytes_ready = true;
 }
 
-static u16 buster_a64_semantic_blob_u16(char8 const* blob, u8 const* bytes, u32 blob_size, u32 offset)
+// Numeric readers acquire a complete span once, rather than repeating a
+// block lookup for each byte. The checked fallback preserves partial-range
+// zero bytes and pure reads of descriptors outside the generated caches.
+BUSTER_GLOBAL_LOCAL u8 const* buster_a64_semantic_blob_span(BusterA64SemanticGeneratedBlob const* blob, u8 const* bytes, u32 blob_size, u32 offset, u32 count)
 {
-    return (u16)((u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset) |
-                 ((u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 1) << 8));
+    u8 const* result = 0;
+    if (count && offset < blob_size && count <= blob_size - offset)
+    {
+        bool ready = buster_a64_semantic_bytes_ready;
+        if (!ready && blob && blob->cache_slot < BUSTER_ARRAY_LENGTH(buster_a64_semantic_blob_caches))
+        {
+            BusterA64SemanticBlobCache const* cache = &buster_a64_semantic_blob_caches[blob->cache_slot];
+            if (cache->blob == blob && cache->bytes == bytes && cache->size == blob_size)
+            {
+                u32 block_bytes = blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS;
+                u32 first = offset / block_bytes;
+                u32 last = (offset + count - 1) / block_bytes;
+                ready = true;
+                for (u32 block = first; block <= last; block += 1)
+                {
+                    ready = buster_a64_semantic_ensure_block(cache, block) && ready;
+                }
+            }
+        }
+        if (ready)
+        {
+            result = bytes + offset;
+        }
+    }
+    return result;
 }
 
-static u32 buster_a64_semantic_blob_u32(char8 const* blob, u8 const* bytes, u32 blob_size, u32 offset)
+static u16 buster_a64_semantic_blob_u16(BusterA64SemanticGeneratedBlob const* blob, u8 const* bytes, u32 blob_size, u32 offset)
 {
-    return (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset) |
-           (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 1) << 8 |
-           (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 2) << 16 |
-           (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 3) << 24;
+    u8 const* span = buster_a64_semantic_blob_span(blob, bytes, blob_size, offset, 2);
+    u16 result;
+    if (span)
+    {
+        result = (u16)((u32)span[0] | (u32)span[1] << 8);
+    }
+    else
+    {
+        result = (u16)((u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset) |
+                      (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 1) << 8);
+    }
+    return result;
 }
 
-static u64 buster_a64_semantic_blob_u64(char8 const* blob, u8 const* bytes, u32 blob_size, u32 offset)
+static u32 buster_a64_semantic_blob_u32(BusterA64SemanticGeneratedBlob const* blob, u8 const* bytes, u32 blob_size, u32 offset)
+{
+    u8 const* span = buster_a64_semantic_blob_span(blob, bytes, blob_size, offset, 4);
+    u32 result;
+    if (span)
+    {
+        result = (u32)span[0] | (u32)span[1] << 8 | (u32)span[2] << 16 | (u32)span[3] << 24;
+    }
+    else
+    {
+        result = (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset) |
+                 (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 1) << 8 |
+                 (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 2) << 16 |
+                 (u32)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + 3) << 24;
+    }
+    return result;
+}
+
+static u64 buster_a64_semantic_blob_u64(BusterA64SemanticGeneratedBlob const* blob, u8 const* bytes, u32 blob_size, u32 offset)
 {
     u64 value = 0;
-    u32 byte_index = 0;
-    for (; byte_index < 8; byte_index += 1)
-        value |= (u64)buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + byte_index) << (8 * byte_index);
+    u8 const* span = buster_a64_semantic_blob_span(blob, bytes, blob_size, offset, 8);
+    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    {
+        u8 byte = span ? span[byte_index] : buster_a64_semantic_blob_byte(blob, bytes, blob_size, offset + byte_index);
+        value |= (u64)byte << (8 * byte_index);
+    }
     return value;
 }
 
@@ -196,23 +468,23 @@ static bool buster_a64_semantic_generated_operand(u32 id, BusterA64SemanticGener
     {
         u32 offset = id * BUSTER_AARCH64_SEMANTIC_OPERAND_RECORD_BYTES;
         *result = (BusterA64SemanticGeneratedOperand){
-            .form_id = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 0),
-            .link_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 4),
-            .symbol_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 8),
-            .field_first = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 12),
-            .field_index_first = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 16),
-            .transform_first = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 20),
-            .kind_mask = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 24),
-            .flags = buster_a64_semantic_blob_u64(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 28),
-            .field_count = buster_a64_semantic_blob_u16(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 36),
-            .field_index_count = buster_a64_semantic_blob_u16(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 38),
-            .transform_count = buster_a64_semantic_blob_u16(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 40),
-            .kind = buster_a64_semantic_blob_byte(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 42),
-            .position = buster_a64_semantic_blob_byte(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 43),
-            .classification_status = buster_a64_semantic_blob_byte(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 44),
-            .reserved = buster_a64_semantic_blob_byte(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 45),
-            .role_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 46),
-            .direction_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 50),
+            .form_id = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 0),
+            .link_offset = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 4),
+            .symbol_offset = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 8),
+            .field_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 12),
+            .field_index_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 16),
+            .transform_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 20),
+            .kind_mask = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 24),
+            .flags = buster_a64_semantic_blob_u64(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 28),
+            .field_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 36),
+            .field_index_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 38),
+            .transform_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 40),
+            .kind = buster_a64_semantic_blob_byte(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 42),
+            .position = buster_a64_semantic_blob_byte(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 43),
+            .classification_status = buster_a64_semantic_blob_byte(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 44),
+            .reserved = buster_a64_semantic_blob_byte(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 45),
+            .role_offset = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 46),
+            .direction_offset = buster_a64_semantic_blob_u32(&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, offset + 50),
         };
     }
 
@@ -225,10 +497,10 @@ static bool buster_a64_semantic_generated_segment(u32 id, BusterA64SemanticGener
     if (valid)
     {
         u32 offset = id * BUSTER_AARCH64_SEMANTIC_SEGMENT_RECORD_BYTES;
-        result->instruction_lsb = buster_a64_semantic_blob_byte(buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 0);
-        result->width = buster_a64_semantic_blob_byte(buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 1);
-        result->value_lsb = buster_a64_semantic_blob_byte(buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 2);
-        result->reserved = buster_a64_semantic_blob_byte(buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 3);
+        result->instruction_lsb = buster_a64_semantic_blob_byte(&buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 0);
+        result->width = buster_a64_semantic_blob_byte(&buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 1);
+        result->value_lsb = buster_a64_semantic_blob_byte(&buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 2);
+        result->reserved = buster_a64_semantic_blob_byte(&buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, offset + 3);
     }
 
     return valid;
@@ -240,12 +512,12 @@ static bool buster_a64_semantic_generated_field(u32 id, BusterA64SemanticGenerat
     if (valid)
     {
         u32 offset = id * BUSTER_AARCH64_SEMANTIC_FIELD_RECORD_BYTES;
-        result->name_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 0);
-        result->source_mask = buster_a64_semantic_blob_u32(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 4);
-        result->segment_first = buster_a64_semantic_blob_u32(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 8);
-        result->segment_count = buster_a64_semantic_blob_u16(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 12);
-        result->width = buster_a64_semantic_blob_byte(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 14);
-        result->reserved = buster_a64_semantic_blob_byte(buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 15);
+        result->name_offset = buster_a64_semantic_blob_u32(&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 0);
+        result->source_mask = buster_a64_semantic_blob_u32(&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 4);
+        result->segment_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 8);
+        result->segment_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 12);
+        result->width = buster_a64_semantic_blob_byte(&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 14);
+        result->reserved = buster_a64_semantic_blob_byte(&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 15);
     }
 
     return valid;
@@ -257,12 +529,12 @@ static bool buster_a64_semantic_generated_value_atom(u32 id, BusterA64SemanticGe
     if (valid)
     {
         u32 offset = id * BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_RECORD_BYTES;
-        result->text_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 0);
-        result->integer = (s64)buster_a64_semantic_blob_u64(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 4);
-        result->program_first = buster_a64_semantic_blob_u32(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 12);
-        result->program_count = buster_a64_semantic_blob_u16(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 16);
-        result->type = buster_a64_semantic_blob_byte(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 18);
-        result->reserved[0] = buster_a64_semantic_blob_byte(buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 19);
+        result->text_offset = buster_a64_semantic_blob_u32(&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 0);
+        result->integer = (s64)buster_a64_semantic_blob_u64(&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 4);
+        result->program_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 12);
+        result->program_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 16);
+        result->type = buster_a64_semantic_blob_byte(&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 18);
+        result->reserved[0] = buster_a64_semantic_blob_byte(&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 19);
     }
 
     return valid;
@@ -274,10 +546,10 @@ static bool buster_a64_semantic_generated_value_entry(u32 id, BusterA64SemanticG
     if (valid)
     {
         u32 offset = id * BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_RECORD_BYTES;
-        result->key_first = buster_a64_semantic_blob_u32(buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 0);
-        result->result_first = buster_a64_semantic_blob_u32(buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 4);
-        result->key_count = buster_a64_semantic_blob_u16(buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 8);
-        result->result_count = buster_a64_semantic_blob_u16(buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 10);
+        result->key_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 0);
+        result->result_first = buster_a64_semantic_blob_u32(&buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 4);
+        result->key_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 8);
+        result->result_count = buster_a64_semantic_blob_u16(&buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 10);
     }
 
     return valid;
@@ -1053,3 +1325,167 @@ bool arm_a64_semantic_import_validate(void)
 {
     return buster_a64_semantic_validate();
 }
+
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/assembly/aarch64_semantics_internal.h>
+
+BusterA64SemanticStorageTestResult buster_aarch64_semantics_test_storage(Arena* arena)
+{
+    BusterA64SemanticStorageTestResult result = {0};
+#define BUSTER_A64_STORAGE_EXPECT(condition) do { result.checks += 1; result.failures += !(condition); } while (0)
+    u8 guarded[132];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        guarded[index] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(S8("/wA=").pointer, 4, guarded + 1, 130, 1));
+    BUSTER_A64_STORAGE_EXPECT(guarded[0] == 0xa5 && guarded[131] == 0xa5);
+    for (u32 index = 1; index <= 130; index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index] == 0);
+        guarded[index] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("/wA=").pointer, 4, guarded + 1, 129, 1));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index] == 0xa5);
+    }
+    // Truncated run/literal, an ignored payload tail, and a non-group tail.
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gA==").pointer, 4, guarded, 3, 1));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AgE=").pointer, 4, guarded, 3, 1));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AAMAAA==").pointer, 8, guarded, 1, 1));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AAA").pointer, 3, guarded, 1, 1));
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(0, 0, 0, 0, 1));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        guarded[index] = 0xa5;
+    }
+    String8 literal = S8("fwABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5/");
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(literal.pointer, (u32)literal.length, guarded + 1, 128, 1));
+    for (u32 index = 0; index < 128; index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index + 1] == index);
+    }
+    BUSTER_A64_STORAGE_EXPECT(guarded[0] == 0xa5 && guarded[129] == 0xa5);
+    // A run crosses the column boundary and a following literal continues it.
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        guarded[index] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(S8("gVoBYmM=").pointer, 8, guarded + 1, 6, 2));
+    u8 const crossed[] = {0x5a, 0x5a, 0x5a, 0x62, 0x5a, 0x63};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(crossed); index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index + 1] == crossed[index]);
+        guarded[index + 1] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(guarded[0] == 0xa5 && guarded[7] == 0xa5);
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gVoBYmM=").pointer, 8, guarded + 1, 6, 0));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gVoBYmM=").pointer, 8, guarded + 1, 5, 2));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index] == 0xa5);
+    }
+    // Two byte columns, one complete block followed by three final records.
+    char8 const fixture_data[] = "PwACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+AQMFBwkLDQ8RExUXGRsdHyEjJScpKy0vMTM1Nzk7PT8=BUBCREFDRQ==";
+    u32 const fixture_blocks[] = {0, 88, 100};
+    BusterA64SemanticGeneratedBlob fixture = {fixture_data, fixture_blocks, 2, 0};
+    u8 fixture_bytes[70];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixture_bytes); index += 1)
+    {
+        fixture_bytes[index] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_fill(&fixture, fixture_bytes, sizeof(fixture_bytes)));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixture_bytes); index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(fixture_bytes[index] == index);
+        BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_decode(&fixture, sizeof(fixture_bytes), index) == index);
+        BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_cached_byte(&fixture, sizeof(fixture_bytes), index) == index);
+    }
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_decode(&fixture, sizeof(fixture_bytes), 70) == 0);
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_decode(&fixture, sizeof(fixture_bytes), UINT32_MAX) == 0);
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_cached_byte(&fixture, sizeof(fixture_bytes), UINT32_MAX) == 0);
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_blob_fill_block(&fixture, sizeof(fixture_bytes), UINT32_MAX, fixture_bytes));
+    struct
+    {
+        BusterA64SemanticGeneratedBlob const* blob;
+        u8 const* bytes;
+        u32 size;
+        u64 expected;
+    } tables[] = {
+        {&buster_a64_semantic_segment_blob, buster_a64_semantic_segment_bytes, BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE, UINT64_C(0x872a0037d89d2071)},
+        {&buster_a64_semantic_field_blob, buster_a64_semantic_field_bytes, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, UINT64_C(0x5c38755e61eebdc0)},
+        {&buster_a64_semantic_operand_blob, buster_a64_semantic_operand_bytes, BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE, UINT64_C(0xf3e46611ec58564a)},
+        {&buster_a64_semantic_value_atom_blob, buster_a64_semantic_value_atom_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, UINT64_C(0x566fbe062f47516d)},
+        {&buster_a64_semantic_value_entry_blob, buster_a64_semantic_value_entry_bytes, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, UINT64_C(0xf425646c9fb33ea5)},
+    };
+    bool ready_before = buster_a64_semantic_bytes_ready;
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    for (u32 table = 0; table < BUSTER_ARRAY_LENGTH(tables); table += 1)
+    {
+        // These hashes were computed from the preceding uncompressed wire
+        // payloads, not from this decoder or the new packed representation.
+        TemporalArena buffer = arena_begin_temporal(temporary.arena);
+        u8* restored = arena_allocate(temporary.arena, u8, tables[table].size);
+        BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_fill(tables[table].blob, restored, tables[table].size));
+        u64 hash = UINT64_C(14695981039346656037);
+        bool cache_matches = true;
+        for (u32 index = 0; index < tables[table].size; index += 1)
+        {
+            hash = (hash ^ restored[index]) * UINT64_C(1099511628211);
+            cache_matches &= !ready_before || restored[index] == tables[table].bytes[index];
+        }
+        BUSTER_A64_STORAGE_EXPECT(hash == tables[table].expected);
+        BUSTER_A64_STORAGE_EXPECT(cache_matches);
+        u32 width = tables[table].blob->record_bytes;
+        u32 block_bytes = width * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS;
+        for (u32 first = 0; first < tables[table].size; first += block_bytes)
+        {
+            u32 remaining = tables[table].size - first;
+            u32 size = BUSTER_MIN(block_bytes, remaining);
+            for (u32 column = 0; column < width; column += 1)
+            {
+                u32 last = first + size - width + column;
+                BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_decode(tables[table].blob, tables[table].size, first + column) == restored[first + column]);
+                BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_decode(tables[table].blob, tables[table].size, last) == restored[last]);
+                BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_cached_byte(tables[table].blob, tables[table].size, first + column) == restored[first + column]);
+                BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_cached_byte(tables[table].blob, tables[table].size, last) == restored[last]);
+                BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_byte(tables[table].blob, tables[table].bytes, tables[table].size, last) == restored[last]);
+            }
+        }
+        // Numeric spans include a block boundary and a short final range;
+        // missing bytes retain the preceding zero-fill behavior.
+        u32 offsets[] = {0, block_bytes - 1, tables[table].size - 1, tables[table].size};
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(offsets); sample += 1)
+        {
+            u32 offset = offsets[sample];
+            u64 expected = 0;
+            for (u32 byte = 0; byte < 8; byte += 1)
+            {
+                if (offset + byte < tables[table].size)
+                {
+                    expected |= (u64)restored[offset + byte] << (8 * byte);
+                }
+            }
+            BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_u16(tables[table].blob, tables[table].bytes, tables[table].size, offset) == (u16)expected);
+            BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_u32(tables[table].blob, tables[table].bytes, tables[table].size, offset) == (u32)expected);
+            BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_u64(tables[table].blob, tables[table].bytes, tables[table].size, offset) == expected);
+        }
+        // Reuse previously published first/final blocks, interleaving blobs.
+        for (u32 repeat = 0; repeat < 2; repeat += 1)
+        {
+            for (u32 other = 0; other < BUSTER_ARRAY_LENGTH(tables); other += 1)
+            {
+                u32 index = repeat ? tables[other].size - 1 : 0;
+                BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_cached_byte(tables[other].blob, tables[other].size, index) ==
+                    buster_a64_semantic_blob_decode(tables[other].blob, tables[other].size, index));
+            }
+        }
+        scratch_end(buffer);
+    }
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_bytes_ready == ready_before);
+    scratch_end(temporary);
+#undef BUSTER_A64_STORAGE_EXPECT
+    return result;
+}
+#endif

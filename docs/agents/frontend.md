@@ -25,6 +25,16 @@ allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+## Local declaration nodes
+
+Lowering dispatches block declarations through their `DECLARATION` and
+`INIT_DECLARATOR` topology. Semantic analysis retains each declaration-name
+node's entity binding; storage flags and the initializer assignment source
+anchor come from the entity. Declarator parameter names cannot replace the
+declared name, and initializer storage words cannot change its storage.
+Initializer-layout and VLA type-query owners retain their documented temporary
+adapters; see [the syntax-tree contract](frontend/ast.md#declarations).
+
 ## Macro argument rescan boundaries
 
 Argument collection preserves `no_expand` on identifiers whose definition is

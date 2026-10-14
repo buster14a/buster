@@ -1,0 +1,47 @@
+{
+  "cases": 385,
+  "payloads": [
+    {
+      "name": "segment",
+      "decoded_bytes": 23428,
+      "old_base64_bytes": 31240,
+      "packed_base64_bytes": 14624,
+      "index_bytes": 740,
+      "sha256": "8cd57c548b48f1fe048af5e78600ebaba30cfd1ed45856358ab1dcb954ce890c"
+    },
+    {
+      "name": "field",
+      "decoded_bytes": 93696,
+      "old_base64_bytes": 124928,
+      "packed_base64_bytes": 44052,
+      "index_bytes": 736,
+      "sha256": "2f48a6da80d8177a3dd5ed67c539de4a4123605bbf2a2daedf84520548ed41b8"
+    },
+    {
+      "name": "operand",
+      "decoded_bytes": 338472,
+      "old_base64_bytes": 451296,
+      "packed_base64_bytes": 139648,
+      "index_bytes": 788,
+      "sha256": "c322216cf4a2e4877e829c61a213730fedfb285b34cc91f7fbb26c3ee40aeeab"
+    },
+    {
+      "name": "value_atom",
+      "decoded_bytes": 404880,
+      "old_base64_bytes": 539840,
+      "packed_base64_bytes": 121072,
+      "index_bytes": 2536,
+      "sha256": "9d6eaef2b746d7ca30196c51b3c827c0cc86566e7cfbbfaf6b60d193a227194a"
+    },
+    {
+      "name": "value_entry",
+      "decoded_bytes": 92172,
+      "old_base64_bytes": 122896,
+      "packed_base64_bytes": 28096,
+      "index_bytes": 968,
+      "sha256": "1e71eaf155627dc6dc34b84b790bed6317d848f6a2d8f270a96e92ca687dc00d"
+    }
+  ],
+  "regeneration_identical": true,
+  "semantic_provenance_unchanged": true
+}

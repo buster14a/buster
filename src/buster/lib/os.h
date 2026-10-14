@@ -244,6 +244,8 @@ typedef enum ProcessSpawnFailure
     PROCESS_SPAWN_FAILURE_UNSUPPORTED,
     PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY,
     PROCESS_SPAWN_FAILURE_CAPTURE_SINK,
+    PROCESS_SPAWN_FAILURE_PENDING_CLEANUP,
+    PROCESS_SPAWN_FAILURE_OWNER_ALLOCATION,
 } ProcessSpawnFailure;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;
@@ -253,12 +255,18 @@ struct ProcessSpawnResult
     // Windows Job Object used for kill-on-close tree containment. Null on
     // POSIX, where process_group reserves the exact group-leader identity.
     OsProcessHandle* process_tree;
+    // Windows consuming identity. Copies cannot consume an owner twice.
+    u64 windows_owner_id;
+    // Launch unwind can fail with a still-owned child despite handle == null.
+    u64 pending_windows_owner_id;
     OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
     ProcessCaptureLimits capture_limits;
     OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
     // The first failed validation or platform setup stage. Native error zero is
     // reserved for success; callers never need to scrape a diagnostic string.
     OsError error;
+    // Failed Windows launch unwind retains its independent first native error.
+    OsError cleanup_error;
     ProcessSpawnFailure failure;
     // Optional shared flag state. The wait lane remains the sole owner of the
     // process-group identity and performs every signal, query, and reap.
@@ -334,6 +342,11 @@ struct ProcessWaitResult
     u64 streamed_total;
     u64 dropped_total;
     ProcessResult result;
+    // First Windows wait/termination/query failure, captured before cleanup.
+    OsError cleanup_error;
+    // Nonzero means the module retains exact handles, independently of this
+    // result and its arena/thread. New Windows spawn admission is then closed.
+    u64 pending_windows_owner_id;
     // Native child status retained for diagnostics. On Windows this is the
     // DWORD returned by GetExitCodeProcess; on POSIX it is the status word
     // returned by waitpid. `result` remains the portable contract.
@@ -396,9 +409,40 @@ BUSTER_F_DECL String8 string8_from_os_error(Arena* arena, OsError error, bool nu
 BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values,
                                                   ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
+
+typedef struct ProcessCleanupResult ProcessCleanupResult;
+struct ProcessCleanupResult
+{
+    u64 active_owners;
+    u64 pending_owners;
+    u64 resumed_owner_id;
+    u64 error_owner_id;
+    // Windows receipt state: 0 reserved, 1 running, 2 waiting, 3 pending.
+    u32 error_owner_state;
+    OsError error;
+};
+// Windows: resume at most one pending owner under a shared <=5-second native
+// observation budget. Zero polls without waiting. No new process is launched;
+// exact handles remain retained until leader exit AND job emptiness are proven.
+// Other platforms return an empty result and retain their current contracts.
+BUSTER_F_DECL ProcessCleanupResult os_process_cleanup_pending(u64 timeout_microseconds);
+BUSTER_F_DECL ProcessCleanupResult os_process_cleanup_snapshot(void);
+// Permanently close admission, claim unconsumed running/pending ownership within
+// <=5 seconds and report every active owner, including an exclusive caller still
+// waiting or launching. A nonzero active_owners refuses finalization: the host
+// must remain alive. Closing a kill-on-close job never proves tree cleanup.
+BUSTER_F_DECL ProcessCleanupResult os_process_shutdown(u64 timeout_microseconds);
+// Executable exit contract: close admission, keep the host alive while exact
+// process/job ownership remains, emit an allocation-free failure receipt and
+// repeat bounded cleanup. False means a refusal was observed even if a later
+// retry finalized everything. This intentionally has no total shutdown deadline.
+BUSTER_F_DECL bool os_process_shutdown_keep_alive(void);
+
 // The same wait, given up on after `timeout_microseconds`: the child is killed,
 // whatever it had already written is still returned, and `timed_out` says the
 // deadline is why. Zero waits forever, which is what os_process_wait_sync does.
+// Windows failed finalization returns a retained pending_windows_owner_id; the
+// module owns those handles until os_process_cleanup_pending proves cleanup.
 // On Windows, each ordinary captured-pipe scan polls the leader and checks
 // a finite deadline even while bytes keep arriving. On the first signaled poll,
 // it freezes the remaining available byte count per stream, drains only that

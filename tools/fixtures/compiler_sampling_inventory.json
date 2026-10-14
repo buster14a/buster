@@ -1,0 +1,166 @@
+{
+  "source": "https://github.com/buster14a/buster/issues/4209",
+  "note": "Provenance-only projection of #4207 API records, captured 2026-10-14; queued report observed before completion. Job attachment identity is the reported CI inventory row.",
+  "job": {
+    "id": 115862912904,
+    "name": "9700X compiler sampling research",
+    "run_id": 38566941137,
+    "run_attempt": 1,
+    "head_sha": "bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd",
+    "status": "queued",
+    "conclusion": null,
+    "steps": [],
+    "runner_id": null
+  },
+  "checks": {
+    "queued": {
+      "id": 115862912904,
+      "name": "9700X compiler sampling research",
+      "head_sha": "bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd",
+      "external_id": "buster-main-sampling-v1:626519956d300f69395be97b2d1a99301c9bf8b42057bb26c0cc71f649372108:pilot:2:38566941159:38566978972:1",
+      "details_url": "https://github.com/buster14a/buster/runs/115862912904",
+      "status": "queued",
+      "conclusion": null,
+      "completed_at": null,
+      "output": {
+        "title": "Queued unqualified sampling research",
+        "summary": "Unqualified sampling research; routine profile remains disabled.\n\nLifecycle protocol: sampling-terminal-native-v1.\nPhase pilot, packet 2; whole physical-job reservation 3000 seconds.\nNative Actions state shows scheduling and execution. This short controller has not measured a compiler.\n\nRequest run 38566941159 attempt 1: https://github.com/buster14a/buster/actions/runs/38566941159/attempts/1\nWorkflow run 38566978972 attempt 1: https://github.com/buster14a/buster/actions/runs/38566978972/attempts/1"
+      },
+      "app": {
+        "id": 15368
+      }
+    },
+    "completed": {
+      "id": 115862912904,
+      "name": "9700X compiler sampling research",
+      "head_sha": "bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd",
+      "external_id": "buster-main-sampling-v1:626519956d300f69395be97b2d1a99301c9bf8b42057bb26c0cc71f649372108:pilot:2:38566941159:38566978972:1",
+      "details_url": "https://github.com/buster14a/buster/runs/115862912904",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-14T13:16:21Z",
+      "output": {
+        "title": "Valid unqualified sampling packet",
+        "summary": "Unqualified sampling research; routine profile remains disabled.\n\nLifecycle protocol: sampling-terminal-native-v1.\nPhase pilot, packet 2; whole physical-job reservation 3000 seconds.\nPacket state: complete-valid-research. Qualification state: unqualified.\n\nRequest run 38566941159 attempt 1: https://github.com/buster14a/buster/actions/runs/38566941159/attempts/1\nWorkflow run 38566978972 attempt 1: https://github.com/buster14a/buster/actions/runs/38566978972/attempts/1\n\nObserved accounting:\n```json\n{\"native_owner_wall_us\": 1083938953, \"native_packet_wall_us\": 1083911144, \"physical_job_wall_upper_us\": 1100000000, \"physical_job_wall_us\": 1098000000, \"pre_entry_platform_clock\": {\"job_id\": 115862938566, \"observed_pre_entry_us\": 8717261, \"observer_finished_unix_us\": 1791982625717261, \"observer_monotonic_elapsed_us\": 647665, \"observer_started_unix_us\": 1791982625069592, \"record_sha256\": \"020e8d31562d6eaf486ec8da6549b25860b28e9f4872d5193d5c4048e40f1a09\", \"start_lower_unix_us\": 1791982617000000, \"started_at\": \"2026-10-14T12:56:58Z\", \"started_unix_us\": 1791982618000000}, \"queue_delay_seconds\": 237.0}\n```\n\nEvidence: https://github.com/buster14a/buster/actions/runs/38566978972/artifacts/11896754355\n"
+      },
+      "app": {
+        "id": 15368
+      }
+    }
+  },
+  "reads": {
+    "actions/runs/38566941159/attempts/1": {
+      "id": 38566941159,
+      "run_attempt": 1,
+      "head_sha": "bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd",
+      "head_branch": "claude/3212-sampling-pilot-10-packet-2",
+      "path": ".github/workflows/9700x-direct-request.yml",
+      "event": "pull_request",
+      "display_title": "bench(9700X): request #3212 campaign-10 pilot packet 2",
+      "status": "completed",
+      "conclusion": "success",
+      "repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "head_repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "actor": {
+        "id": 39247043,
+        "login": "davidgmbb"
+      },
+      "triggering_actor": {
+        "id": 39247043,
+        "login": "davidgmbb"
+      }
+    },
+    "actions/runs/38566978972/attempts/1": {
+      "id": 38566978972,
+      "run_attempt": 1,
+      "head_sha": "c14841ae8e286447cf126de59119a887c13c9e36",
+      "head_branch": "main",
+      "path": ".github/workflows/9700x-direct-bench.yml",
+      "event": "workflow_run",
+      "display_title": "9700X request 38566941159.1 head bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd",
+      "status": "completed",
+      "conclusion": "success",
+      "repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "head_repository": {
+        "id": 1071732997,
+        "full_name": "buster14a/buster"
+      },
+      "actor": {
+        "id": 39247043,
+        "login": "davidgmbb"
+      },
+      "triggering_actor": {
+        "id": 39247043,
+        "login": "davidgmbb"
+      }
+    },
+    "actions/runs/38566978972/attempts/1/jobs?per_page=100": {
+      "total_count": 2,
+      "jobs": [
+        {
+          "id": 115862541528,
+          "run_id": 38566978972,
+          "run_attempt": 1,
+          "head_sha": "c14841ae8e286447cf126de59119a887c13c9e36",
+          "name": "Queue sampling qualification packet",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Check out the frozen qualification implementation",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3,
+              "started_at": "2026-10-14T12:52:22Z",
+              "completed_at": "2026-10-14T12:52:28Z"
+            },
+            {
+              "name": "Queue the exact unqualified research attempt",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8,
+              "started_at": "2026-10-14T12:52:34Z",
+              "completed_at": "2026-10-14T12:52:59Z"
+            }
+          ]
+        },
+        {
+          "id": 115873260709,
+          "run_id": 38566978972,
+          "run_attempt": 1,
+          "head_sha": "c14841ae8e286447cf126de59119a887c13c9e36",
+          "name": "Validate sampling packet evidence",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Check out the frozen qualification implementation",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3,
+              "started_at": "2026-10-14T13:15:29Z",
+              "completed_at": "2026-10-14T13:15:35Z"
+            },
+            {
+              "name": "Publish only independently validated research evidence",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8,
+              "started_at": "2026-10-14T13:15:42Z",
+              "completed_at": "2026-10-14T13:16:21Z"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

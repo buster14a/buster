@@ -60,13 +60,17 @@
 // other structure questions still re-walk token ranges, resolving identifiers
 // through the parse result's scopes and the prebuilt matching-delimiter index
 // (c_ir_build_delimiter_index). The caller may also pass the facts semantic
-// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062); no
-// lowering consumer reads them yet. No node id reaches the IR. The prepared control
-// expressions of a function are answered by node-indexed tables:
-// c_ir_prepared_control_expression_find uses a node and wrapping level,
-// _contains and _contains_group read postorder interior intervals. _begin,
-// _end and _rollback keep the heads, emitted marks and active stack current
-// across a typeof replay; source tokens remain provenance.
+// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062).
+// Local declarations read their DECLARATOR_NAME bindings from these facts;
+// their storage and assignment provenance come from CEntity. Declarator lists,
+// initializer presence and labeled-local predeclaration use node topology
+// (c_ir_declarator_name, c_parse_publish_declaration_facts; GitHub #4061 F4).
+// Initializer-layout, attributes and VLA queries retain marked owner adapters.
+// No node id reaches the IR. Prepared control expressions use node-indexed
+// tables: c_ir_prepared_control_expression_find uses a node and wrapping
+// level; _contains and _contains_group read postorder interior intervals.
+// _begin, _end and _rollback keep heads, emitted marks and the active stack
+// current across typeof replay; source tokens remain provenance.
 // The range's node and its CIrHoistFact bits let
 // c_ir_lower_expression_core_step skip a control
 // prepass (c_ir_node_may_prepare_control) or a call prepass
@@ -2112,22 +2116,6 @@ BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preproc
     return index;
 }
 
-// The body lowerer and declaration-list splitter hold ranges with their
-// terminating comma or semicolon just outside the range. Include that one
-// delimiter so a declaration with no initializer still proves where its
-// first declarator starts.
-BUSTER_C_INTERNAL u32 c_ir_local_declarator_start(CPreprocessResult preprocess, u32 start, u32 end)
-{
-    u32 bounded_end = end;
-    if (end < preprocess.token_count &&
-        (c_token_is_punctuator(&preprocess.tokens[end], C_PUNCTUATOR_COMMA) ||
-         c_token_is_punctuator(&preprocess.tokens[end], C_PUNCTUATOR_SEMICOLON)))
-    {
-        bounded_end += 1;
-    }
-    return c_ir_declarator_list_specifier_end(preprocess, start, bounded_end);
-}
-
 /* Whether a function declaration is marked noreturn. glibc declares exit,
    abort, _Exit and longjmp with __attribute__((__noreturn__)), so reading the
    attribute is what lets a call to any of them terminate control flow without
@@ -3891,6 +3879,8 @@ struct CIntegerIrBuilder
     // (c_ir_syntax_spans_create, GitHub #3102 step 1): read-only, shared by
     // every function of the unit. Null without a tree.
     CAstSpans const* syntax_spans;
+    // Semantic facts retained through lowering; DECLARATOR_NAME payloads bind declarations.
+    CAstFacts const* syntax_facts;
     // The unit's CIrHoistFact bytes, beside syntax_spans; null without them.
     u8 const* syntax_hoist;
     // The delimiter index syntax_spans was computed with.
@@ -6384,23 +6374,6 @@ BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u3
         }
     }
     return resolved;
-}
-
-BUSTER_C_INTERNAL CEntityId c_ir_local_entity_at(CIntegerIrBuilder* builder, u32 token_index)
-{
-    CEntityId bound = c_ir_identifier_entity(builder, token_index);
-    CEntityId result;
-    if (bound.value < builder->parse.entity_count && builder->parse.entities[bound.value].kind == C_ENTITY_LOCAL &&
-        builder->parse.entities[bound.value].declaration_token_plus_one == token_index + 1)
-    {
-        result = bound;
-    }
-    else
-    {
-        result = C_ENTITY_ID_INVALID;
-    }
-
-    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)
@@ -18205,7 +18178,8 @@ struct CIrLowerTypedefState
 {
     u32 start;
     u32 end;
-    u32 index;
+    u32 node;
+    u32 cursor;
 };
 
 typedef struct CIrLowerBodyState CIrLowerBodyState;
@@ -18496,23 +18470,30 @@ struct CIrLowerVlaLayoutState
 typedef struct CIrBodyTask CIrBodyTask;
 typedef struct CIrSwitchCase CIrSwitchCase;
 typedef struct CIrNodeList CIrNodeList;
+BUSTER_C_INTERNAL u32 c_ir_declarator_name(CAst const* ast, u32 node);
+BUSTER_C_INTERNAL CEntityId c_ir_declarator_entity(CIntegerIrBuilder* builder, u32 name);
 // A function containing labels may re-enter its token stream after jumping
 // over one or more declarations. Reserve fixed-size automatic objects in the
 // entry block before any terminator is emitted. The declaration itself still
 // owns initialization, cleanup activation, and VLA allocation, so a path that
 // crosses it receives storage but executes none of those side effects.
-BUSTER_C_INTERNAL bool c_ir_predeclare_labeled_automatic_locals(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_predeclare_labeled_automatic_locals(CIntegerIrBuilder* builder, u32 compound)
 {
-    for (CEntityId entity = {.value = 0}; entity.value < builder->parse.entity_count; entity.value += 1)
+    CAst const* ast = builder->ast;
+    for (u32 node = c_ast_subtree_begin(ast, compound); node < compound; node += 1)
     {
-        CEntity* value = builder->parse.entities + entity.value;
-        u32 declaration_token = value->declaration_token_plus_one ? value->declaration_token_plus_one - 1 : UINT32_MAX;
-        if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || value->is_extern ||
-            declaration_token < start || declaration_token >= end ||
+        if (ast->kinds[node] != C_AST_DECLARATOR_NAME)
+        {
+            continue;
+        }
+        CEntityId entity = c_ir_declarator_entity(builder, node);
+        CEntity* value = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
+        if (!value || value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || value->is_extern ||
             value->type.value >= builder->parse.type_count || c_ir_find_local_by_entity(builder, entity))
         {
             continue;
         }
+        u32 declaration_token = ast->tokens[node];
         IrTypeId local_type = builder->c_type_ir_map[value->type.value];
         IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
         // Unmapped array types are VLAs. Their allocation and stack checkpoint
@@ -18624,6 +18605,8 @@ struct CIrLowerAutomaticDeclarationState
     u32 end;
     u32 specifier_start;
     u32 specifier_end;
+    u32 node;
+    u32 initializer_node;
     u32 initializer_index;
     u64 temporary_mark;
     u8 child_kind;
@@ -18666,16 +18649,11 @@ struct CIrLowerInlineAssemblyState
 typedef struct CIrLowerAutomaticDeclarationListState CIrLowerAutomaticDeclarationListState;
 struct CIrLowerAutomaticDeclarationListState
 {
+    CIrNodeList* declarators;
     u32 start;
     u32 end;
-    u32 scan;
-    u32 segment_start;
+    u32 item;
     u32 specifier_end;
-    u32 parentheses;
-    u32 brackets;
-    u32 braces;
-    // The `?:` nesting outside every group (c_token_conditional_depth_step).
-    u32 conditionals;
     u64 temporary_mark;
 };
 
@@ -40257,12 +40235,17 @@ BUSTER_C_INTERNAL void c_ir_lower_typedef_step(CIntegerIrBuilder* builder)
     bool pending = false;
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        state->index = state->start;
+        state->cursor = c_ast_subtree_begin(builder->ast, state->node);
     }
-    while (success && !pending && state->index < state->end)
+    while (success && !pending && state->cursor < state->node)
     {
-        u32 index = state->index++;
-        CEntityId entity = c_ir_identifier_entity(builder, index);
+        u32 name = state->cursor++;
+        if (builder->ast->kinds[name] != C_AST_DECLARATOR_NAME)
+        {
+            continue;
+        }
+        u32 index = builder->ast->tokens[name];
+        CEntityId entity = c_ir_declarator_entity(builder, name);
         CEntity* value = builder->parse.entities && entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
         if (value && value->kind == C_ENTITY_TYPEDEF && value->declaration_token_plus_one == index + 1 &&
             value->type.value < builder->parse.type_count &&
@@ -43874,7 +43857,6 @@ struct CIrSubstatementCase
 
 typedef struct CIrLabel CIrLabel;
 
-BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 index, u32 end, u32* after_out);
 
 // The rest of `task` after the statement just taken from it, as the task that
 // lowers it from `block`: it opens at `after` and keeps the task's end, its
@@ -43949,21 +43931,23 @@ BUSTER_C_INTERNAL bool c_ir_node_holds_label(CIntegerIrBuilder* builder, CIrLowe
     return found;
 }
 
-// Temporary adapter (#4058): where the declaration frames' range for a block
-// declaration starts. A C23 `[[...]]` or GNU `__attribute__((...))` run ahead
-// of the specifiers lowers nothing: the parser read what it says onto the
-// declared entities (#1685).
-BUSTER_C_INTERNAL u32 c_ir_node_declaration_start(CIntegerIrBuilder* builder, u32 first, u32 end)
+// The first declaration specifier after leading attribute nodes. Attributes
+// still reach their own lowering readers; this boundary needs no token scan.
+BUSTER_C_INTERNAL u32 c_ir_node_declaration_start(CIntegerIrBuilder* builder, u32 node)
 {
-    u32 start = first;
-    for (bool attribute_run = true; attribute_run;)
+    CAst const* ast = builder->ast;
+    u32 specifiers = c_ast_child_at(ast, node, 0);
+    u32 result = ast->tokens[specifiers];
+    u32 floor = c_ast_subtree_begin(ast, specifiers);
+    for (u32 cursor = specifiers; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
     {
-        u32 attribute_end = start;
-        attribute_run = c_parse_c23_attribute_at(builder->preprocess, start, end, &attribute_end) ||
-                        c_ir_gnu_attribute_at(builder, start, end, &attribute_end);
-        start = attribute_end;
+        u32 child = cursor - 1;
+        if (ast->kinds[child] != C_AST_ATTRIBUTE_LIST)
+        {
+            result = ast->tokens[child];
+        }
     }
-    return start;
+    return result;
 }
 
 // Whether the DECLARATION at `node` carries `typedef` among its specifiers.
@@ -44342,25 +44326,6 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
     return UINT32_MAX;
 }
 
-// One GNU `__attribute__((...))` (or `__attribute((...))`) list at `index`:
-// true with `after_out` one past its closing parenthesis. An unbalanced list
-// answers false and is left for the statement it begins to diagnose.
-BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 index, u32 end, u32* after_out)
-{
-    CPreprocessResult* preprocess = &builder->preprocess;
-    bool result = index + 1 < end && preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER &&
-                  c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
-                                            C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) &&
-                  c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-    u32 close = result ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) : end;
-    result = result && close < end;
-    if (result)
-    {
-        *after_out = close + 1;
-    }
-    return result;
-}
-
 // The unit's retained span facts (GitHub #3102 step 1), in a private arena:
 // one c_ast_spans_build over the whole tree, before the first function is
 // lowered. Null without a tree or a delimiter index, or when the arena cannot
@@ -44488,9 +44453,10 @@ BUSTER_C_INTERNAL CIrSyntaxSpans* c_ir_syntax_spans_create(CAst const* ast, CPre
 // Gives a builder the unit's span facts and tree: every function body's, and
 // the one that evaluates file-scope constants and initializers.
 BUSTER_C_INTERNAL void c_ir_builder_syntax_attach(CIntegerIrBuilder* builder, CIrSyntaxSpans* syntax_spans, CAst const* ast,
-                                                  CAstLowerStatistics* statistics)
+                                                  CAstLowerStatistics* statistics, CAstFacts const* facts)
 {
     bool attached = syntax_spans && syntax_spans->hoist;
+    builder->syntax_facts = facts;
     builder->syntax_spans = attached ? &syntax_spans->spans : 0;
     builder->syntax_hoist = attached ? syntax_spans->hoist : 0;
     builder->syntax_matches = attached ? syntax_spans->matches : 0;
@@ -44728,29 +44694,84 @@ BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaL
     return emitted;
 }
 
+// The declared name follows the declarator's inner-child chain. Parameter
+// names are siblings of that chain and cannot substitute for the owner.
+BUSTER_C_INTERNAL u32 c_ir_declarator_name(CAst const* ast, u32 node)
+{
+    u32 result = C_AST_NODE_INVALID;
+    while (node != C_AST_NODE_INVALID && node < ast->node_count && result == C_AST_NODE_INVALID)
+    {
+        u32 kind = ast->kinds[node];
+        if (kind == C_AST_DECLARATOR_NAME)
+        {
+            result = node;
+        }
+        else if (kind == C_AST_INIT_DECLARATOR)
+        {
+            node = c_ast_child_at(ast, node, (ast->data[node] & (1u << 3)) != 0);
+        }
+        else if (kind == C_AST_DECLARATOR_ATTRIBUTED)
+        {
+            node = c_ast_child_at(ast, node, 1);
+        }
+        else if (kind == C_AST_DECLARATOR_POINTER && (ast->data[node] & 2u))
+        {
+            node = c_ast_child_at(ast, node, (ast->data[node] & 1u) != 0);
+        }
+        else if ((kind == C_AST_DECLARATOR_ARRAY || kind == C_AST_DECLARATOR_FUNCTION) && (ast->data[node] & 1u))
+        {
+            node = c_ast_child_at(ast, node, 0);
+        }
+        else
+        {
+            node = C_AST_NODE_INVALID;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CEntityId c_ir_declarator_entity(CIntegerIrBuilder* builder, u32 name)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    CEntityId result = C_ENTITY_ID_INVALID;
+    if (name < builder->ast->node_count)
+    {
+        if (facts && name < facts->node_count && (facts->flags[name] & C_AST_FACT_BOUND))
+        {
+            result.value = facts->payloads[name];
+        }
+        else if (!facts)
+        {
+            // Model-only callers and the explicit opt-out build their tree
+            // after analysis. This index is published from finalized entity
+            // declaration anchors; no token grammar or scope lookup is read.
+            u32 anchor = builder->ast->tokens[name];
+            if (anchor < builder->preprocess.token_count && builder->token_entities_plus_one)
+            {
+                result.value = builder->token_entities_plus_one[anchor] - 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_init_declarator_initializer(CAst const* ast, u32 node)
+{
+    u32 result = node < ast->node_count && ast->kinds[node] == C_AST_INIT_DECLARATOR && (ast->data[node] & 4u)
+                     ? node - 1 : C_AST_NODE_INVALID;
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* builder, CIrLowerAutomaticDeclarationState* state,
                                                              u32* expression_start_out, u32* expression_end_out, bool* expression_pending_out)
 {
     u32 start = state->start;
     u32 end = state->end;
     *expression_pending_out = false;
-    CEntityId entity = C_ENTITY_ID_INVALID;
-    u32 name_index = end;
-    u32 candidate_start = c_ir_local_declarator_start(builder->preprocess, start, end);
-    for (u32 index = candidate_start; index < end; index += 1)
-    {
-        if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        CEntityId candidate = c_ir_local_entity_at(builder, index);
-        if (candidate.value < builder->parse.entity_count && builder->parse.entities[candidate.value].kind == C_ENTITY_LOCAL)
-        {
-            entity = candidate;
-            name_index = index;
-            break;
-        }
-    }
+    state->initializer_node = c_ir_init_declarator_initializer(builder->ast, state->node);
+    u32 name_node = c_ir_declarator_name(builder->ast, state->node);
+    CEntityId entity = c_ir_declarator_entity(builder, name_node);
+    u32 name_index = name_node != C_AST_NODE_INVALID ? builder->ast->tokens[name_node] : end;
     if (name_index >= end || entity.value >= builder->parse.entity_count)
     {
         builder->failure_message = S8("could not resolve the automatic local declaration");
@@ -44800,17 +44821,6 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     bool local_extern = local_entity->is_extern;
     bool local_static = local_entity->is_static_storage;
     bool local_thread_local = local_entity->is_thread_local;
-    for (u32 token_index = start; token_index < end; token_index += 1)
-    {
-        CToken token = builder->preprocess.tokens[token_index];
-        if (token.kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        local_extern |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("extern"));
-        local_static |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("static"));
-        local_thread_local |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Thread_local")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__thread"));
-    }
     // A variable-length array's alignment is its element's: the local itself
     // holds the pointer the ALLOCATE produced, and the ALLOCATE is what carries
     // the alignment the storage has to meet.
@@ -44841,12 +44851,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         {
             return true;
         }
-        if (c_ir_declaration_initializer_range(builder->preprocess,
-                                               (CDeclaration){
-                                                   .token_start = start,
-                                                   .token_count = end - start,
-                                               },
-                                               &(u32){0}, &(u32){0}))
+        if (state->initializer_node != C_AST_NODE_INVALID)
         {
             builder->failure_message = S8("local extern declarations cannot allocate an initialized automatic object");
             return false;
@@ -44909,12 +44914,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     }
     if (variable_length_array)
     {
-        if (c_ir_declaration_initializer_range(builder->preprocess,
-                                               (CDeclaration){
-                                                   .token_start = start,
-                                                   .token_count = end - start,
-                                               },
-                                               &(u32){0}, &(u32){0}))
+        if (state->initializer_node != C_AST_NODE_INVALID)
         {
             builder->failure_message = S8("variable-length array cannot have an initializer");
             return false;
@@ -44963,34 +44963,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     state->local_type_value = local_type_value;
     state->local_type = local_type;
     state->name = name;
-    u32 initializer_index = end;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    for (u32 index = start; index < end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (!parentheses && !brackets && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
-        {
-            initializer_index = index;
-            break;
-        }
-    }
+    u32 initializer_index = local_entity->initializer_token_plus_one ? local_entity->initializer_token_plus_one - 1 : end;
+    state->initializer_node = c_ir_init_declarator_initializer(builder->ast, state->node);
     if (initializer_index >= end)
     {
         c_ir_mark_local_read_only(builder, local);
@@ -45027,13 +45001,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         }
     }
     IrValueId value = IR_VALUE_ID_INVALID;
-    if (c_ir_tokens_are_string_literals(builder->preprocess, value_start, end))
+    if (state->initializer_node != C_AST_NODE_INVALID && builder->ast->kinds[state->initializer_node] == C_AST_STRING)
     {
         value = c_ir_emit_string_range_typed(builder, value_start, end, local_type);
     }
-    else if (c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
-             c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
-             c_ir_matching_delimiter_cached(builder, value_start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)
+    else if (state->initializer_node != C_AST_NODE_INVALID && builder->ast->kinds[state->initializer_node] == C_AST_INITIALIZER_LIST)
     {
         state->initializer_index = initializer_index;
         state->child_kind = 2;
@@ -45140,81 +45112,46 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION_LIST);
     CIrLowerAutomaticDeclarationListState* state = frame->as.automatic_declaration_list;
     BUSTER_CHECK(state);
-    if (!state->specifier_end)
-    {
-        state->specifier_end = c_ir_local_declarator_start(builder->preprocess, state->start, state->end);
-    }
+    bool success = true;
+    bool pending = false;
     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
         arena_set_position(builder->temporary_arena, state->temporary_mark);
-        if (!machine->child_result.success)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
+        success = machine->child_result.success;
         frame->stage = C_IR_LOWER_STAGE_BEGIN;
     }
-    while (state->scan <= state->end)
+    if (success && state->item < state->declarators->count)
     {
-        bool at_end = state->scan == state->end;
-        CToken token = at_end ? (CToken){0} : builder->preprocess.tokens[state->scan];
-        if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        u32 node = state->declarators->items[state->item];
+        u32 name = c_ir_declarator_name(builder->ast, node);
+        CEntityId entity = c_ir_declarator_entity(builder, name);
+        success = entity.value < builder->parse.entity_count;
+        if (success)
         {
-            state->parentheses += 1;
+            CEntity const* declared = builder->parse.entities + entity.value;
+            CIrLowerAutomaticDeclarationState* declaration_child = arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationState, 1);
+            *declaration_child = (CIrLowerAutomaticDeclarationState){
+                .start = state->item ? declared->declaration_token_start : state->start,
+                .end = declared->declaration_token_start + declared->declaration_token_count,
+                .specifier_start = state->start,
+                .specifier_end = state->specifier_end,
+                .node = node,
+            };
+            CIrLowerFrame child = {
+                .kind = C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION,
+                .as.automatic_declaration = declaration_child,
+            };
+            state->item += 1;
+            state->temporary_mark = builder->temporary_arena->position;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            success = c_ir_lower_frame_push(builder, child);
+            pending = success;
         }
-        else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && state->parentheses)
-        {
-            state->parentheses -= 1;
-        }
-        else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            state->brackets += 1;
-        }
-        else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && state->brackets)
-        {
-            state->brackets -= 1;
-        }
-        else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            state->braces += 1;
-        }
-        else if (!at_end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && state->braces)
-        {
-            state->braces -= 1;
-        }
-        bool outside_groups = !state->parentheses && !state->brackets && !state->braces;
-        bool separator = at_end || (outside_groups && !state->conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));
-        state->conditionals = outside_groups && !separator ? c_token_conditional_depth_step(&token, state->conditionals) : state->conditionals;
-        if (!separator)
-        {
-            state->scan += 1;
-            continue;
-        }
-        if (state->segment_start == state->scan)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        CIrLowerAutomaticDeclarationState* declaration_child =
-            arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationState, 1);
-        *declaration_child = (CIrLowerAutomaticDeclarationState){
-            .start = state->segment_start,
-            .end = state->scan,
-            .specifier_start = state->start,
-            .specifier_end = state->specifier_end,
-        };
-        CIrLowerFrame child = {
-            .kind = C_IR_LOWER_FRAME_BODY_AUTOMATIC_DECLARATION,
-            .as.automatic_declaration = declaration_child,
-        };
-        state->segment_start = state->scan + 1;
-        state->scan += 1;
-        state->temporary_mark = builder->temporary_arena->position;
-        frame->stage = C_IR_LOWER_STAGE_CHILD;
-        c_ir_lower_frame_push(builder, child);
-        return;
     }
-    c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+    if (!pending)
+    {
+        c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+    }
 }
 
 BUSTER_C_SHARED u32 c_semantic_asm_type_class(IrType* type)
@@ -47448,7 +47385,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         builder->label_index = state->label_index;
         builder->label_count = state->label_count;
     }
-    ok = ok && (!state->label_count || c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end));
+    ok = ok && (!state->label_count || c_ir_predeclare_labeled_automatic_locals(builder, state->compound));
     u64 statement_count = 0;
     u32 switch_case_capacity = 0;
     for (u32 node = begin; ok && node < end; node += 1)
@@ -47579,25 +47516,22 @@ BUSTER_C_INTERNAL bool c_ir_body_task_take_stack_checkpoint(CIntegerIrBuilder* b
 // answers rather than the token shape. The declarator-list path asks before it
 // splits, because the stack checkpoint the allocations need is the task's and
 // the list frame does not carry one.
-BUSTER_C_INTERNAL bool c_ir_declaration_declares_vla(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_declaration_declares_vla(CIntegerIrBuilder* builder, u32 node)
 {
     bool result = false;
-    for (u32 index = start; !result && index < end; index += 1)
+    u32 cursor = node - 1;
+    u32 floor = c_ast_subtree_begin(builder->ast, node);
+    while (!result && cursor > floor && builder->ast->kinds[cursor] == C_AST_INIT_DECLARATOR)
     {
-        if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+        CEntityId entity = c_ir_declarator_entity(builder, c_ir_declarator_name(builder->ast, cursor));
+        if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL)
         {
-            continue;
+            CTypeId type = builder->parse.entities[entity.value].type;
+            result = type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_ARRAY &&
+                     builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID;
         }
-        CEntityId entity = c_ir_local_entity_at(builder, index);
-        if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_LOCAL)
-        {
-            continue;
-        }
-        CTypeId type = builder->parse.entities[entity.value].type;
-        result = type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_ARRAY &&
-                 builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID;
+        cursor = c_ast_subtree_begin(builder->ast, cursor) - 1;
     }
-
     return result;
 }
 
@@ -48691,10 +48625,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             case C_AST_DECLARATION:
             {
-                // Temporary adapter (#4058): the declaration frames read the
-                // declaration's tokens past a leading attribute run, up to
-                // its `;`, until step 4 lowers declarations from their nodes.
-                u32 start = c_ir_node_declaration_start(builder, first, semicolon);
+                // Declaration topology and bindings are retained facts. The
+                // initializer and VLA owners keep marked range adapters until
+                // their separate step-4 slices migrate.
+                u32 start = c_ir_node_declaration_start(builder, node);
                 u32 end = semicolon;
                 if (start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[end], C_PUNCTUATOR_SEMICOLON))
                 {
@@ -48704,7 +48638,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 if (c_ir_node_declaration_is_typedef(ast, node))
                 {
                     CIrLowerTypedefState* type_declaration = arena_allocate(builder->scratch_arena, CIrLowerTypedefState, 1);
-                    *type_declaration = (CIrLowerTypedefState){.start = start, .end = end};
+                    *type_declaration = (CIrLowerTypedefState){.start = start, .end = end, .node = node};
                     c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
                                           (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_BODY_TYPEDEF, .as.type_declaration = type_declaration});
                     state->task_count = task_count;
@@ -48716,18 +48650,35 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     // declarators, and each declarator is lowered from its own
                     // frame, which has no task to take the checkpoint on. Take
                     // it here, once, ahead of the whole list.
-                    if (c_ir_declaration_declares_vla(builder, start, end) &&
+                    if (c_ir_declaration_declares_vla(builder, node) &&
                         !c_ir_body_task_take_stack_checkpoint(builder, &task, builder->preprocess.tokens[start]))
+                    {
+                        return false;
+                    }
+                    u32 count = c_ast_list_count(ast, node);
+                    CIrNodeList* declarators = c_ir_node_list_make(builder, count);
+                    if (!declarators)
+                    {
+                        return false;
+                    }
+                    u32 cursor = node - 1;
+                    for (u32 item = count; item; item -= 1)
+                    {
+                        declarators->items[item - 1] = cursor;
+                        cursor = c_ast_subtree_begin(ast, cursor) - 1;
+                    }
+                    CEntityId first_entity = c_ir_declarator_entity(builder, c_ir_declarator_name(ast, declarators->items[0]));
+                    if (first_entity.value >= builder->parse.entity_count)
                     {
                         return false;
                     }
                     CIrLowerAutomaticDeclarationListState* declaration_state =
                         arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationListState, 1);
                     *declaration_state = (CIrLowerAutomaticDeclarationListState){
+                        .declarators = declarators,
                         .start = start,
                         .end = end,
-                        .scan = start,
-                        .segment_start = start,
+                        .specifier_end = builder->parse.entities[first_entity.value].declaration_token_start,
                     };
                     c_ir_lower_body_yield(builder, state, task, next, C_IR_LOWER_BODY_CONTINUE_AUTOMATIC_DECLARATION,
                                           (CIrLowerFrame){
@@ -48737,24 +48688,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     state->task_count = task_count;
                     return false;
                 }
-                u32 name_index = end;
-                CEntityId entity = C_ENTITY_ID_INVALID;
-                u32 candidate_index = c_ir_local_declarator_start(builder->preprocess, start, end);
-                while (candidate_index < end)
-                {
-                    CToken candidate = builder->preprocess.tokens[candidate_index];
-                    if (candidate.kind == C_TOKEN_IDENTIFIER)
-                    {
-                        CEntityId candidate_entity = c_ir_local_entity_at(builder, candidate_index);
-                        if (candidate_entity.value != C_ID_UNDERLYING_INVALID)
-                        {
-                            name_index = candidate_index;
-                            entity = candidate_entity;
-                            break;
-                        }
-                    }
-                    candidate_index += 1;
-                }
+                u32 init_declarator = c_ast_list_count(ast, node) ? node - 1 : C_AST_NODE_INVALID;
+                u32 name_node = c_ir_declarator_name(ast, init_declarator);
+                CEntityId entity = c_ir_declarator_entity(builder, name_node);
+                u32 name_index = name_node != C_AST_NODE_INVALID ? ast->tokens[name_node] : end;
+                u32 initializer_node = c_ir_init_declarator_initializer(ast, init_declarator);
                 if (name_index >= end)
                 {
                     // A declaration with no declarator declares only a tag
@@ -48781,43 +48719,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY &&
                     local_c_type->array_bound < builder->parse.array_bound_count && !builder->parse.array_bounds[local_c_type->array_bound].token_count)
                 {
-                    u32 initializer_index = end;
-                    u32 initializer_parentheses = 0;
-                    u32 initializer_brackets = 0;
-                    u32 initializer_braces = 0;
-                    for (u32 scan = name_index + 1; scan < end; scan += 1)
-                    {
-                        CToken token = builder->preprocess.tokens[scan];
-                        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                        {
-                            initializer_parentheses += 1;
-                        }
-                        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && initializer_parentheses)
-                        {
-                            initializer_parentheses -= 1;
-                        }
-                        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                        {
-                            initializer_brackets += 1;
-                        }
-                        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && initializer_brackets)
-                        {
-                            initializer_brackets -= 1;
-                        }
-                        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                        {
-                            initializer_braces += 1;
-                        }
-                        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && initializer_braces)
-                        {
-                            initializer_braces -= 1;
-                        }
-                        else if (!initializer_parentheses && !initializer_brackets && !initializer_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
-                        {
-                            initializer_index = scan;
-                            break;
-                        }
-                    }
+                    u32 initializer_index = builder->parse.entities[entity.value].initializer_token_plus_one
+                                                ? builder->parse.entities[entity.value].initializer_token_plus_one - 1 : end;
                     u32 initializer_start = initializer_index + 1;
                     CType* element_c = c_type_from_id(&builder->parse, local_c_type->element_type);
                     IrTypeId element_type = local_c_type->element_type.value < builder->parse.type_count
@@ -48825,7 +48728,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                 : IR_TYPE_ID_INVALID;
                     IrType* element = ir_type_from_id(&builder->program->types, element_type);
                     CIrDecodedString decoded = {0};
-                    if (initializer_index < end && c_ir_tokens_are_string_literals(builder->preprocess, initializer_start, end) &&
+                    if (initializer_node != C_AST_NODE_INVALID && ast->kinds[initializer_node] == C_AST_STRING &&
                         c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, initializer_start, end, builder->parse.string_literals, &decoded) &&
                         element_c && element && element->kind == IR_TYPE_INTEGER && element->bit_width == decoded.element_width * 8 &&
                         decoded.element_count < UINT64_MAX)
@@ -48905,44 +48808,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 bool local_extern = builder->parse.entities[entity.value].is_extern;
                 bool static_storage = builder->parse.entities[entity.value].is_static_storage;
                 bool local_thread_local = builder->parse.entities[entity.value].is_thread_local;
-                for (u32 specifier = name_index; specifier > builder->parse.declarations[builder->declaration_index].body_start; specifier -= 1)
-                {
-                    CToken token = builder->preprocess.tokens[specifier - 1];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
-                        c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                    {
-                        break;
-                    }
-                    static_storage |= token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_STATIC);
-                }
-                for (u32 specifier = start; specifier < name_index; specifier += 1)
-                {
-                    local_extern |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
-                                    c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_SYMBOL_WELL_KNOWN_EXTERN);
-                    static_storage |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
-                                      c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_SYMBOL_WELL_KNOWN_STATIC);
-                    local_thread_local |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
-                                          c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_IR_THREAD_LOCAL_KEYWORD_SET);
-                }
-                if (variable_length_array && static_storage)
-                {
-                    builder->failure_message = S8("variable-length array cannot have static storage duration");
-                    return false;
-                }
                 if (local_extern && !static_storage)
                 {
                     if (local_c_type->kind == C_TYPE_FUNCTION)
                     {
                         continue;
                     }
-                    u32 initializer_start = 0;
-                    u32 initializer_end = 0;
-                    if (c_ir_declaration_initializer_range(builder->preprocess,
-                                                           (CDeclaration){
-                                                               .token_start = start,
-                                                               .token_count = end - start,
-                                                           },
-                                                           &initializer_start, &initializer_end))
+                    if (initializer_node != C_AST_NODE_INVALID)
                     {
                         builder->failure_message = S8("local extern declarations cannot allocate an initialized automatic object");
                         return false;
@@ -48967,12 +48839,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         return false;
                     }
-                    if (c_ir_declaration_initializer_range(builder->preprocess,
-                                                           (CDeclaration){
-                                                               .token_start = start,
-                                                               .token_count = end - start,
-                                                           },
-                                                           &(u32){0}, &(u32){0}))
+                    if (initializer_node != C_AST_NODE_INVALID)
                     {
                         builder->failure_message = S8("variable-length array cannot have an initializer");
                         return false;
@@ -49102,65 +48969,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                 }
-                u32 initializer_index = end;
-                u32 declarator_brackets = 0;
-                u32 declarator_parentheses = 0;
-                // The specifiers may define an enumeration inline, and its
-                // enumerators carry `=` of their own: `enum { LCASE = 1 << 0,
-                // ... } conv = 0;` is one declaration in sbase's dd. Those
-                // signs sit inside the braces, so track brace depth here as
-                // well or the first enumerator's `=` is mistaken for this
-                // declarator's initializer.
-                u32 declarator_braces = 0;
-                for (u32 scan = start; scan < end; scan += 1)
-                {
-                    CToken token = builder->preprocess.tokens[scan];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                    {
-                        declarator_brackets += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-                    {
-                        if (!declarator_brackets)
-                        {
-                            return false;
-                        }
-                        declarator_brackets -= 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        declarator_parentheses += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                    {
-                        if (!declarator_parentheses)
-                        {
-                            return false;
-                        }
-                        declarator_parentheses -= 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        declarator_braces += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                    {
-                        if (!declarator_braces)
-                        {
-                            return false;
-                        }
-                        declarator_braces -= 1;
-                    }
-                    else if (!declarator_brackets && !declarator_parentheses && !declarator_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
-                    {
-                        initializer_index = scan;
-                        break;
-                    }
-                }
-                if (declarator_brackets || declarator_parentheses || declarator_braces)
-                {
-                    return false;
-                }
+                u32 initializer_index = builder->parse.entities[entity.value].initializer_token_plus_one
+                                            ? builder->parse.entities[entity.value].initializer_token_plus_one - 1 : end;
                 if (!static_storage && initializer_index < end)
                 {
                     if (variable_length_array)
@@ -49200,7 +49010,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                             return false;
                         }
                     }
-                    if (c_ir_tokens_are_string_literals(builder->preprocess, value_start, end))
+                    if (initializer_node != C_AST_NODE_INVALID && ast->kinds[initializer_node] == C_AST_STRING)
                     {
                         value = c_ir_emit_string_range_typed(builder, value_start, end, local_type);
                     }
@@ -49212,11 +49022,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                 {
                                     .start = value_start,
                                     .end = end,
+                                    .node_plus_one = initializer_node + 1,
                                 },
                         };
-                        bool braced = c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
-                                      c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
-                                      c_ir_matching_delimiter_cached(builder, value_start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+                        bool braced = initializer_node != C_AST_NODE_INVALID && ast->kinds[initializer_node] == C_AST_INITIALIZER_LIST;
                         bool empty_scalar = false;
                         IrType* initializer_type = ir_type_from_id(&builder->program->types, local_type);
                         bool aggregate = initializer_type && (initializer_type->kind == IR_TYPE_ARRAY || initializer_type->kind == IR_TYPE_VECTOR ||
@@ -49235,20 +49044,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         }
                         else if (braced)
                         {
-                            u32 scalar_end = end - 1;
-                            // Only `{}` itself is the empty initializer; `{,}` is a separator
-                            // with no initializer before it and stays rejected.
-                            empty_scalar = scalar_end == value_start + 1;
-                            if (scalar_end > value_start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[scalar_end - 1], C_PUNCTUATOR_COMMA))
+                            empty_scalar = c_ast_list_count(ast, initializer_node) == 0;
+                            if (!empty_scalar)
                             {
-                                scalar_end -= 1;
+                                u32 scalar = initializer_node - 1;
+                                u32 scalar_first = 0;
+                                u32 scalar_last = 0;
+                                // Temporary initializer-to-expression adapter (#4061 F5).
+                                if (!c_ir_node_expression_provenance(builder, scalar, &scalar_first, &scalar_last))
+                                {
+                                    return false;
+                                }
+                                child.as.expression.start = scalar_first;
+                                child.as.expression.end = scalar_last + 1;
+                                child.as.expression.node_plus_one = scalar + 1;
                             }
-                            if (!empty_scalar && scalar_end <= value_start + 1)
-                            {
-                                return false;
-                            }
-                            child.as.expression.start = value_start + 1;
-                            child.as.expression.end = scalar_end;
                         }
                         if (empty_scalar)
                         {
@@ -62313,7 +62123,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         .body_token_start = (u32)preprocess.token_count,
         .stream_matching_delimiters_plus_one = stream_matching_delimiters_plus_one,
     };
-    c_ir_builder_syntax_attach(&constant_builder, syntax_spans, options.syntax_tree, options.ast_lower_statistics);
+    c_ir_builder_syntax_attach(&constant_builder, syntax_spans, options.syntax_tree, options.ast_lower_statistics, options.syntax_facts);
     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
     {
         CType* c_type = &parse.types[type_index];
@@ -64761,7 +64571,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .body_nodes = &body_nodes,
             .statement_statistics = options.ast_lower_statistics,
         };
-        c_ir_builder_syntax_attach(&builder, syntax_spans, options.syntax_tree, options.ast_lower_statistics);
+        c_ir_builder_syntax_attach(&builder, syntax_spans, options.syntax_tree, options.ast_lower_statistics, options.syntax_facts);
         builder.lower_machine.frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, lower_frame_capacity);
         builder.locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_array_capacity);
         builder.local_entities = arena_allocate(lowering_temporary.arena, u32, local_array_capacity);

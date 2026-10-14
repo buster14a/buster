@@ -98,6 +98,9 @@ jobs:
           "$RUNNER_TEMP/native-timing" --self-test
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/performance_evidence.c -lm -o "$RUNNER_TEMP/performance-evidence"
           "$RUNNER_TEMP/performance-evidence" --self-test
+          gcc --version
+          gcc -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/performance_evidence.c -lm -o "$RUNNER_TEMP/performance-evidence-gcc"
+          "$RUNNER_TEMP/performance-evidence-gcc" --self-test
           clang -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/compiler_probes.c -o "$RUNNER_TEMP/compiler-probes"
           "$RUNNER_TEMP/compiler-probes" --self-test
       - name: Replay micro-architecture lab formats

@@ -1612,11 +1612,11 @@
       "diagnostics": [
         {
           "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+          "text": "SPIR-V compute does not support calls"
         }
       ],
       "feature": "scalar-calls",
-      "note": "Any callee makes the module carry more than one function, so calls are rejected before kernel lowering; the registered call cases assert the exact module diagnostic.",
+      "note": "Registered scalar-callee and barrier-call controls assert the calls diagnostic before the module fallback.",
       "status": "unsupported-diagnostic"
     },
     {
@@ -1624,11 +1624,11 @@
       "diagnostics": [
         {
           "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+          "text": "SPIR-V compute does not support calls"
         }
       ],
       "feature": "aggregate-calls",
-      "note": "Rejected by the one-function module check; no dedicated aggregate-call rejection case, but the same reachable module diagnostic is asserted by registered call and global-module cases.",
+      "note": "A registered aggregate-returning callee control asserts the calls diagnostic; aggregate call ABI remains unsupported.",
       "status": "unsupported-diagnostic"
     },
     {
@@ -1636,11 +1636,15 @@
       "diagnostics": [
         {
           "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+          "text": "SPIR-V compute does not support calls"
+        },
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute does not support variadic functions or arguments"
         }
       ],
       "feature": "variadic-calls",
-      "note": "Rejected by the one-function module check; no dedicated variadic-call rejection case, but the same reachable module diagnostic is asserted by registered call and global-module cases.",
+      "note": "Registered variadic-callee and variadic-kernel controls assert calls and variadic-function diagnostics respectively; both remain unsupported.",
       "status": "unsupported-diagnostic"
     },
     {
@@ -1648,11 +1652,11 @@
       "diagnostics": [
         {
           "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+          "text": "SPIR-V compute does not support calls"
         }
       ],
       "feature": "indirect-calls",
-      "note": "Rejected by the kernel row check; no registered indirect-call rejection case.",
+      "note": "Registered local function-pointer and no-store indirect-call controls assert the calls diagnostic before row provenance or missing-store checks.",
       "status": "unsupported-diagnostic"
     },
     {
@@ -1676,15 +1680,11 @@
       "diagnostics": [
         {
           "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
-        },
-        {
-          "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute requires void kernel(unsigned *buffer, unsigned index) with 32-bit unsigned integers and pointers"
+          "text": "SPIR-V compute does not support vectors"
         }
       ],
       "feature": "simd",
-      "note": "Only scalar 32-bit unsigned rows are accepted. Registered vector-operation and vector-buffer-parameter cases assert the row and kernel-signature diagnostics.",
+      "note": "Only scalar 32-bit unsigned rows are accepted. Registered used-vector and vector-buffer-parameter controls assert the vectors diagnostic.",
       "status": "unsupported-diagnostic"
     },
     {
@@ -1692,11 +1692,11 @@
       "diagnostics": [
         {
           "file": "src/buster/lib/compiler/spirv/spirv.c",
-          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+          "text": "SPIR-V compute does not support thread-local storage (TLS)"
         }
       ],
       "feature": "tls",
-      "note": "_Thread_local objects are globals and hit the no-globals check; the registered global-module case asserts that exact reachable diagnostic. The kernel-signature TLS diagnostic is not reached by C TLS objects.",
+      "note": "A registered _Thread_local global control asserts the thread-local storage diagnostic before the module fallback. The unreachable C-function TLS wording was removed.",
       "status": "unsupported-diagnostic"
     },
     {
