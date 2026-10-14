@@ -115,6 +115,8 @@ from pathlib import Path
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
                               AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
+                              AST_RETIREMENT_PROFILE, AST_RETIREMENT_CELLS, AST_RETIREMENT_CORPUS, AST_RETIREMENT_REQUEST_LINE,
+                              validate_ast_retirement_acceptance,
                               CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
                               validate_constant_reuse_acceptance,
                               PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_CELLS,
@@ -158,6 +160,7 @@ THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
 AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS = 45 * 60
 # Two -c cells of 20 ABBA pairs each, the size of the ast-pilot object cell.
 CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
 # Three cells of tiny compiles, each bounded by process_floor_acceptance.COMPARE_TIMEOUT_SECONDS.
@@ -1239,6 +1242,18 @@ def ast_pilot_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     return True, ""
 
 
+def ast_retirement_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #4058 only on one exact new occurrence against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, AST_RETIREMENT_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the AST retirement selector against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the AST retirement selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def constant_reuse_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #3011's fixed profile only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
@@ -1635,6 +1650,11 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append(floor_problem)
     elif getattr(arguments, "process_floor_requested", False):
         reasons.append(f"{selected_profile['name']} cannot be combined with the process-floor selector")
+    retirement_problem = getattr(arguments, "ast_retirement_request_problem", "")
+    if retirement_problem:
+        reasons.append(retirement_problem)
+    elif getattr(arguments, "ast_retirement_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the AST retirement selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
@@ -1910,6 +1930,46 @@ def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, ev
 AST_PILOT_REQUIRED = ("acceptance.json", "probe/probe.json",
                       *(f"{cell}/{name}" for cell in AST_PILOT_ACCEPTANCE_PROFILE["cells"]
                         for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c",
+                           *(f"inputs/{name}.c" for name in AST_RETIREMENT_CORPUS),
+                           *(f"{cell}/{name}" for cell in AST_RETIREMENT_CELLS
+                             for name in ("summary.json", "compare.json", "pairs.json", "reference.json", "a/lab.json", "b/lab.json",
+                                          "a/env/env.json", "b/env/env.json", "a/reference.diagnostics", "b/reference.diagnostics",
+                                          "reference.000.bin.gz", "reference.001.bin.gz")),
+                           *(f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in AST_RETIREMENT_CELLS
+                             for pair in range(1, AST_RETIREMENT_PROFILE["pairs"] + 1) for arm in ("a", "b")),
+                           *(f"probe/{cell}/{name}" for cell in AST_RETIREMENT_CELLS for name in ("probe.json", "a.log", "b.log")))
+
+
+def measure_ast_retirement(arguments: argparse.Namespace, candidate: Path, bins: Path, work: Path, evidence: Path,
+                           receipt: dict, harness: Path | None) -> None:
+    """Run the fixed default/default leg after both binaries and the base corpus exist."""
+    mark(receipt, evidence, "ast-retirement-acceptance")
+    output = work / "ast-retirement-acceptance"
+    helper = Path(__file__).with_name("ast_retirement_acceptance.py").resolve()
+    measured = time.monotonic()
+    native = harness if harness is not None else candidate / "build/throughput-tools/throughput"
+    status = run([sys.executable, "-B", str(helper), "--lab", str(arguments.lab.resolve()), "--harness", str(native),
+                  "--baseline-ide", str(bins / "ide-base"), "--candidate-ide", str(bins / "ide-cand"),
+                  "--repo-root", str(candidate), "--base-revision", arguments.base, "--head-revision", arguments.head,
+                  "--cpu", str(AST_RETIREMENT_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "ast-retirement-acceptance.log", AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS)
+    receipt["timings"]["ast_retirement_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["ast_retirement_acceptance"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "ast_retirement_acceptance", evidence, EVIDENCE_IGNORE, AST_RETIREMENT_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "ast_retirement_acceptance" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #4058 retirement receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_ast_retirement_acceptance(summary, arguments.base, arguments.head, receipt["binaries"]))
+    if status != 0:
+        errors.append(f"issue #4058 retirement measurement exited {status}; raw unavailable/failed evidence is retained")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
 
 
 def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
@@ -2692,6 +2752,19 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
                 linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested:
             reasons.append("process-floor-v1 cannot be combined with another opt-in leg")
+    retirement_requested = arguments.mode == "pull" and getattr(arguments, "ast_retirement_requested", False)
+    problem = getattr(arguments, "ast_retirement_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if retirement_requested:
+        receipt["ast_retirement_acceptance"] = {"requested": True, "request_line": AST_RETIREMENT_REQUEST_LINE,
+                                                "profile": AST_RETIREMENT_PROFILE, "status": "pending"}
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested or floor_requested or \
+                scaling_requested(candidate, arguments.base, arguments.head) or getattr(arguments, "analyzer_profile_requested", False):
+            reasons.append("ast-retirement-acceptance-v1 cannot be combined with another opt-in leg or scaling")
+        if not getattr(arguments, "evidence_seal", False):
+            reasons.append("ast-retirement-acceptance-v1 requires the ordinary verified evidence-seal route")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
@@ -2699,7 +2772,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
                   or inline_requested or linker_requested or link_tls_requested or reuse_requested
-                  or selfhost_requested or nesting_requested or floor_requested
+                  or selfhost_requested or nesting_requested or floor_requested or retirement_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2822,6 +2895,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                                            sealed=getattr(arguments, "evidence_seal", False))
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
+        if retirement_requested and not reasons:
+            measure_ast_retirement(arguments, candidate, bins, work, evidence, receipt, harness)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
             mark(receipt, evidence, "scaling")
             measured = time.monotonic()
@@ -2935,6 +3010,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("issue #1125 process-floor profile was requested but did not reach its candidate-build phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if retirement_requested:
+        record = receipt["ast_retirement_acceptance"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #4058 retirement profile was requested but did not reach its two-binary measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
     if real_requested:
         record = receipt["throughput_real_source"]
         reasons.extend(record.get("errors", []))
@@ -3024,6 +3107,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     arguments.ast_pilot_requested, arguments.ast_pilot_request_problem = (
         ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.ast_retirement_requested, arguments.ast_retirement_request_problem = (
+        ast_retirement_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.constant_reuse_requested, arguments.constant_reuse_request_problem = (
         constant_reuse_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.process_floor_requested, arguments.process_floor_request_problem = (
@@ -3068,6 +3153,10 @@ def main(argv: list[str] | None = None) -> int:
     reasons = receipt["reasons"]
     if analyzer_request_problem:
         reasons.append(analyzer_request_problem)
+    if arguments.ast_retirement_request_problem:
+        reasons.append(arguments.ast_retirement_request_problem)
+    if analyzer_requested and arguments.ast_retirement_requested:
+        reasons.append("an analyzer profile cannot be combined with AST retirement acceptance")
     if analyzer_requested and arguments.real_source_requested:
         reasons.append("an analyzer profile cannot be combined with real-source throughput")
     log = evidence / "build.log"

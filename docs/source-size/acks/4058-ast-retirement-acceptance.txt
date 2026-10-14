@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 58761
+reason Fixed opt-in AST-retirement benchmark route (#4058): twenty paired syntax/object cells, separate retained-byte probes, sealed source/binary/object evidence, independent raw publisher replay and exact native snapshot-phase bindings. Existing profiles and admission rules stay unchanged; no compiler production growth.

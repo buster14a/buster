@@ -1144,7 +1144,54 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    Since `-fc-ast-pilot` became the default (2026-10-13, #3102), variant A
    builds a tree on a head after the switch, so the profile fails closed at
    its tree probe there. The tree's acceptance follows #4058 through the
-   ordinary two-binary comparison.
+   ordinary two-binary comparison and the separate final profile below.
+
+   **Issue #4058 AST retirement profile.** The existing owner-authorized
+   pull-compare route accepts one fresh exact
+   `profile: ast-retirement-acceptance-v1` line, added exactly once against
+   every parent. Its trusted-main harness must land before the candidate
+   request. It keeps `compiler-compare-v1`, `throughput-corpus-v2` and the
+   historical AST flag-pair profile unchanged. It cannot share an attempt
+   with an analyzer, scaling or another long opt-in leg; the historical
+   inline companion keeps its existing behavior.
+
+   After both tests-off Clang Release binaries and the ordinary corpus are
+   prepared, `ast_retirement_acceptance.py` compares baseline and candidate
+   in their defaults on one frozen baseline/current-main source tree and
+   that tree's generated headers. The existing native throughput generator
+   produces its six unchanged `ci` sources. The twenty cells are the unity
+   self-host source at `-g0 -fsyntax-only` and `-g0 -c`, six corpus sources
+   at `-g0 -O0 -fsyntax-only`, and those six at `-g0 -O0 -c` under both FAST
+   and QUALITY. Syntax-only has one cell per source because it invokes no
+   allocator. No retired AST flag, link operation, source override or
+   request-provided count enters these cells.
+
+   Every cell uses twenty ABBA pairs after one warmup on CPU 2 with fresh
+   binary copies. It reuses the lab's wall-time 95% interval, `instructions:u`
+   and `wait4` peak RSS. Timed phase/output metrics stay disabled; each arm
+   has an untimed `-v` probe recording `C_AST.retained_bytes` and
+   `C_AST_FACTS.retained_bytes`. These are distinct published tree and node
+   fact components, not a whole-frontend arena total or RSS. A syntax-only
+   arm may report zero fact bytes. Separate `C_SYMBOL_BINDINGS` bytes are
+   recorded where available; a compiler without that counter reports it
+   unavailable, not zero. `C_AST_RETAINED` alias fields are never added again.
+
+   The publisher recomputes each cell's metrics from all forty raw timed
+   rows, checks the exact commands/host/binaries/source population, compares
+   reference diagnostics and object bytes, and re-reads the retained-byte
+   probe logs. Identical arm objects share one raw reference stored as two
+   deterministic gzip chunks. Both arm manifests bind its raw size/hash;
+   stored and decompressed chunks retain the existing 32-MiB member bound.
+   The publisher bounds decompression and verifies each stored/raw chunk and
+   whole object. Exceeding 64 MiB raw or the unchanged whole-bundle byte/file
+   budget fails the leg; compression raises no resource limit.
+   Source/header/generator/binary hashes must remain unchanged. Sealed raw
+   evidence and the observed approved 9700X machine record remain required.
+   Failed or unavailable counters retain their reason and raw attempt;
+   absent positive instruction counts cannot produce complete acceptance.
+   The profile is report-only, sets no new adoption threshold, and does not
+   release #4058's correctness or owner acceptance holds. Record the exact
+   authorized baseline/head and measured cells with `tools/new_audit.py`.
 
    **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
    fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
