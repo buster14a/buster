@@ -6848,6 +6848,16 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
         break;
     }
     CType* type_value = &result->types[type.value];
+    if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+        CTypeId function = type;
+        if (type_value->kind == C_TYPE_POINTER) function = type_value->element_type;
+        bool callable = close < end && function.value < result->type_count && result->types[function.value].kind == C_TYPE_FUNCTION;
+        type = callable ? result->types[function.value].return_type : C_TYPE_ID_INVALID;
+        index = callable ? close + 1 : end;
+        continue;
+    }
     if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
     {
         u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);

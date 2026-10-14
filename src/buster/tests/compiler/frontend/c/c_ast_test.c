@@ -7466,6 +7466,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTest
     return result;
 }
 
+// #4194: a call following a member or subscript retains the callable's
+// return type when a declaration's typeof operand uses that postfix chain.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_postfix_calls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("typedef int(*Unary)(int);struct Holder{Unary callback;};struct Holder*get_holder(void);"
+           "typedef __typeof__(get_holder()->callback(0)) Result;"
+           "_Static_assert(__builtin_types_compatible_p(Result,int),\"member call return\");int main(void){return 0;}"),
+        S8("typedef int(*Unary)(int);Unary*get_table(void);typedef __typeof__(get_table()[0](0)) Result;"
+           "_Static_assert(__builtin_types_compatible_p(Result,int),\"indexed call return\");int main(void){return 0;}"),
+        S8("struct R{long value;};typedef struct R*(*Callback)(int);struct Holder{Callback callback;};struct Holder*get_holder(void);"
+           "typedef __typeof__(get_holder()->callback(0)->value) Result;"
+           "_Static_assert(__builtin_types_compatible_p(Result,long),\"continued call return\");int main(void){return 0;}"),
+        S8("struct Holder{int callback;};struct Holder*get_holder(void);typedef __typeof__(get_holder()->callback(0)) Result;"
+           "_Static_assert(__builtin_types_compatible_p(Result,int),\"noncallable member\");int main(void){return 0;}"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+        CParseResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, !preprocess.diagnostic_count && analysis.analysis_complete);
+        if (index < 3)
+        {
+            BUSTER_TEST(arguments, !analysis.diagnostic_count);
+            CTypeKind kind = index == 2 ? C_TYPE_LONG : C_TYPE_INT;
+            bool alias = false;
+            for (u32 entity = 0; entity < analysis.entity_count; entity += 1)
+            {
+                CEntity const* row = analysis.entities + entity;
+                if (row->kind == C_ENTITY_TYPEDEF && string_equal(row->name, S8("Result")))
+                {
+                    alias = row->type.value < analysis.type_count && analysis.types[row->type.value].kind == kind;
+                }
+            }
+            BUSTER_TEST(arguments, alias);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("typeof-postfix-call.c"), preprocess, analysis, target_native);
+            BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, analysis.diagnostic_count != 0);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Reused scope bitsets may not turn a file-scope enum in the second comma
 // initializer into a prototype-scoped enum. Actual prototypes stay isolated.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_enum_scope_scratch_reuse(UnitTestArguments* arguments)
@@ -7564,6 +7613,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
