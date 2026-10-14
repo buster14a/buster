@@ -31,6 +31,8 @@ class LoweringProvenanceTests(unittest.TestCase):
             "CPreprocessResult original; auto copy = original; consume(copy.tokens[i].kind);",
             "CPreprocessResult first, second; consume(second.tokens[i].kind);",
             "consume(unit.expanded_stream.tokens[i].kind);",
+            "CAst const* ast; consume(ast->expanded_stream.tokens[i].kind);",
+            "consume(builder->syntax_tree->expanded_stream.tokens[i].kind);",
             "auto copy = fetch_expansion(); consume(copy.tokens[i].kind);",
             "consume(c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA));",
             "consume(c_punctuator_in_set(value, set));",

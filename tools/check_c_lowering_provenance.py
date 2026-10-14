@@ -191,7 +191,13 @@ def violations(source: str) -> list[Token]:
             # Only owned AST anchor columns are permitted. This also rejects
             # raw streams reached through an untyped alias, comma declarator
             # or a preprocessing-result field whose name is not `preprocess`.
-            forbidden |= any(name in aliases for name in owner) or not any(name in ast_aliases for name in owner)
+            # An AST mentioned earlier in a receiver expression does not
+            # authorize another object's stream, such as ast->input.tokens.
+            # Lowering projects the anchor column directly from a typed AST
+            # alias (or its syntax_tree field), so the immediate receiver
+            # must be that alias. More elaborate expressions first bind an
+            # explicit CAst pointer, keeping the boundary reviewable.
+            forbidden |= any(name in aliases for name in owner) or not owner or owner[0] not in ast_aliases
         if forbidden:
             result.append(token)
     return result
