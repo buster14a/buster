@@ -12350,7 +12350,7 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
 BUSTER_C_INTERNAL bool c_ir_integer_literal_at(CIntegerIrBuilder* builder, u32 token_index, u64* value_out, IrTypeId* type_out)
 {
     CNumberFacts const* facts = builder->parse.number_facts;
-    CNumberFact fact = c_number_fact(facts, builder->preprocess.tokens, token_index);
+    CNumberFact fact = c_source_number_fact(&builder->preprocess, facts, token_index);
     CTypeKind kind = C_TYPE_INVALID;
     bool result;
     if (c_number_fact_kind(facts, fact, builder->target, &kind))
@@ -12379,7 +12379,7 @@ BUSTER_C_INTERNAL bool c_ir_integer_literal_at(CIntegerIrBuilder* builder, u32 t
 // c_number_is_float of the token at `token_index`, from its fact when present.
 BUSTER_C_INTERNAL bool c_ir_number_is_float_at(CIntegerIrBuilder* builder, u32 token_index)
 {
-    CNumberFact fact = c_number_fact(builder->parse.number_facts, builder->preprocess.tokens, token_index);
+    CNumberFact fact = c_source_number_fact(&builder->preprocess, builder->parse.number_facts, token_index);
     return fact.present ? (fact.flags & C_NUMBER_FACT_FLOATING) != 0
                         : c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]));
 }

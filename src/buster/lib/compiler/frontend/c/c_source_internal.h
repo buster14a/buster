@@ -22,6 +22,18 @@ struct CSourceIdentity
 };
 
 BUSTER_F_DECL CSourceIdentity c_source_identity(CPreprocessResult const* preprocess);
+
+// Finished numeric metadata selected by a provenance index. Missing or
+// foreign-stream rows remain absent; this lookup never scans token grammar.
+typedef struct CNumberFact CNumberFact;
+struct CNumberFact
+{
+    u64 value;
+    u8 flags;
+    bool present;
+};
+BUSTER_F_DECL CNumberFact c_source_number_fact(CPreprocessResult const* preprocess, CNumberFacts const* facts, u32 token_index);
+
 BUSTER_F_DECL CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index);
 BUSTER_F_DECL CSourceAnchor c_source_anchor_from_name(CPreprocessResult const* preprocess, String8 name);
 BUSTER_F_DECL String8 c_source_anchor_spelling(CPreprocessResult const* preprocess, CSourceAnchor anchor);

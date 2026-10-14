@@ -88,11 +88,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_source_anchors(UnitTestArguments* 
         String8 source = form < BUSTER_ARRAY_LENGTH(sources) ? sources[form] : (String8){.pointer = oversized, .length = 70003};
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
         BUSTER_TEST(arguments, !preprocess.error_count);
+        CParserResult parser = c_parse_ast_reference(temporary.arena, preprocess);
+        CPreprocessResult foreign = preprocess;
+        foreign.tokens += 1;
         IrSourceMapCursor cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
         bool large = false;
+        bool number = false;
         for (u32 index = 0; index < preprocess.token_count; index += 1)
         {
             CToken token = preprocess.tokens[index];
+            CNumberFact fact = c_source_number_fact(&preprocess, parser.number_facts, index);
+            number |= fact.present;
+            BUSTER_TEST(arguments, !c_source_number_fact(&foreign, parser.number_facts, index).present &&
+                                   !c_source_number_fact(&preprocess, 0, index).present);
             CSourceAnchor anchor = c_source_anchor_at(&preprocess, index);
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
             BUSTER_TEST(arguments, anchor.offset == token.offset && anchor.length == spelling.length);
@@ -119,9 +127,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_source_anchors(UnitTestArguments* 
                                    string_equal(c_source_anchor_spelling(&preprocess, poisoned), spelling));
             CSourceLocation poisoned_location = c_source_anchor_location_cursor(&preprocess, poisoned, &cursor);
             BUSTER_TEST(arguments, !memcmp(&old_location, &poisoned_location, sizeof(poisoned_location)));
+            CNumberFact poisoned_fact = c_source_number_fact(&preprocess, parser.number_facts, index);
+            BUSTER_TEST(arguments, fact.present == poisoned_fact.present && fact.flags == poisoned_fact.flags && fact.value == poisoned_fact.value);
             large |= anchor.length == 70002;
         }
         BUSTER_TEST(arguments, form < BUSTER_ARRAY_LENGTH(sources) || large);
+        BUSTER_TEST(arguments, form >= BUSTER_ARRAY_LENGTH(sources) || number);
     }
     c_test_scratch_end(temporary);
     return result;

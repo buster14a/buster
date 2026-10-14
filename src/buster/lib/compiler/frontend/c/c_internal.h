@@ -416,14 +416,6 @@ struct CNumberFacts
     u32 number_count;
 };
 
-typedef struct CNumberFact CNumberFact;
-struct CNumberFact
-{
-    u64 value;
-    u8 flags;
-    bool present;
-};
-
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE CNumberFact c_number_fact(CNumberFacts const* facts, CToken const* tokens, u64 token_index)
 {
     CNumberFact result = {0};

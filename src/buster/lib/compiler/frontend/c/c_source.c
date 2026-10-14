@@ -1931,6 +1931,11 @@ CSourceIdentity c_source_identity(CPreprocessResult const* preprocess)
     return (CSourceIdentity){.value = preprocess ? preprocess->tokens : 0};
 }
 
+CNumberFact c_source_number_fact(CPreprocessResult const* preprocess, CNumberFacts const* facts, u32 token_index)
+{
+    return c_number_fact(facts, preprocess ? preprocess->tokens : 0, token_index);
+}
+
 CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index)
 {
     CSourceAnchor result = {0};
