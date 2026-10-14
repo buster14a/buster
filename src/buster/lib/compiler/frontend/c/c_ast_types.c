@@ -3313,7 +3313,21 @@ BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParse
     CAst const* ast = machine->syntax_tree;
     CAstFactTypeReference answer = {.index = C_AST_FACT_NONE};
     u32 kind = ast->kinds[node];
-    if (result && (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_CALL))
+    if (result && kind == C_AST_DEREFERENCE)
+    {
+        CAstFactTypeReference base = c_ast_types_fact_node(facts, result, c_ast_child_at(ast, node, 0));
+        if (base.type && (base.type->kind == C_TYPE_POINTER || base.type->kind == C_TYPE_ARRAY))
+        {
+            answer = c_ast_types_fact_nested(facts, result, base, base.type->element_type);
+        }
+        else if (base.type && base.type->kind == C_TYPE_FUNCTION)
+        {
+            // A function designator decays for the next indirection, whose
+            // result is that same function designator.
+            answer = base;
+        }
+    }
+    else if (result && (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_CALL))
     {
         u32 child = c_ast_child_at(ast, node, 0);
         CAstFactTypeReference base = c_ast_types_fact_node(facts, result, child);

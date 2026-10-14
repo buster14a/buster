@@ -7365,6 +7365,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_names(UnitTestArgume
     return result;
 }
 
+// Completed indirection facts compose from their children. Query count is
+// bounded independently of the grouped function designator's input depth.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u32 depth = 4096;
+    String8 head = S8("int g(void);int f(void){int(*p)(void)=g;return ");
+    String8 tail = S8("();}");
+    u64 bytes = head.length + (u64)depth * 3 + 1 + tail.length;
+    char8* text = arena_allocate(temporary.arena, char8, bytes);
+    u64 cursor = 0;
+    memcpy(text + cursor, head.pointer, head.length);
+    cursor += head.length;
+    for (u32 index = 0; index < depth; index += 1)
+    {
+        text[cursor++] = '(';
+        text[cursor++] = '*';
+    }
+    text[cursor++] = 'p';
+    for (u32 index = 0; index < depth; index += 1) text[cursor++] = ')';
+    memcpy(text + cursor, tail.pointer, tail.length);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){.pointer = text, .length = bytes}, C_PREPROCESS_DIALECT_GNU17);
+    CParseResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !analysis.diagnostic_count && analysis.ast && analysis.ast_facts))
+    {
+        CAst const* ast = analysis.ast;
+        CAstFacts const* facts = analysis.ast_facts;
+        u32 found = 0;
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_DEREFERENCE)
+            {
+                found += 1;
+                BUSTER_TEST(arguments, (facts->flags[node] & C_AST_FACT_TYPED) && !(facts->flags[node] & C_AST_FACT_RECIPE));
+                BUSTER_TEST(arguments, facts->types[node] < analysis.type_count && analysis.types[facts->types[node]].kind == C_TYPE_FUNCTION);
+            }
+        }
+        BUSTER_TEST(arguments, found == depth && facts->statistics.completion_queries < 32);
+        BUSTER_TEST(arguments, !facts->statistics.gaps[C_AST_FACT_GAP_INVALID] && !facts->statistics.gaps[C_AST_FACT_GAP_APPENDS] && !facts->statistics.stale);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("retained-indirection.c"), preprocess, analysis, target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Reused scope bitsets may not turn a file-scope enum in the second comma
 // initializer into a prototype-scoped enum. Actual prototypes stay isolated.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_enum_scope_scratch_reuse(UnitTestArguments* arguments)
@@ -7461,6 +7508,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);

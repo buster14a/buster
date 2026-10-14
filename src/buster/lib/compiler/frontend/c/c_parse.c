@@ -9715,8 +9715,12 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 u32 recipe_mark = facts->recipe_count;
                 machine->committed_mutation_count = mutation_mark;
                 CTypeId type = C_TYPE_ID_INVALID;
-                bool valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
                 u32 derived_recipe = C_AST_FACT_NONE;
+                // Deep indirection chains already have their completed child
+                // fact. Re-reading every nested prefix would be quadratic.
+                bool derived = machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE &&
+                               c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
+                bool valid = derived || c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
                 if (!valid)
                 {
                     valid = c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
@@ -9725,7 +9729,7 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                         c_parse_expression_query_publish(machine, slot, end, node_scope, type, 0);
                     }
                 }
-                facts->statistics.completion_queries += 1;
+                facts->statistics.completion_queries += !derived;
                 // A valid root drops the records of the rows it mutated; they
                 // are still in place, so the rollback below can undo them.
                 bool mutated = machine->committed_mutation_count > mutation_mark;
