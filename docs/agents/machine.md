@@ -12,9 +12,10 @@ of semantic schema version 2. The generator transposes each block of up to 32
 fixed-width records by byte column, packs literal/repeated-byte packets, then
 base64-encodes each block with explicit offsets. Record bytes, IDs and Arm
 source identities do not change. `buster_aarch64_semantics_prewarm` restores
-the original row bytes serially and publishes readiness last; warmed readers
-retain direct byte access. Before prewarm, each block fills its disjoint part
-of those same buffers under a leaf-level once-claim, with acquire/release
+the original row bytes serially and publishes readiness last; packets decode
+directly into row storage without a temporary block or a second copy. Warmed
+readers retain direct byte access. Before prewarm, each block fills its disjoint
+part of those same buffers under a leaf-level once-claim, with acquire/release
 publication and no other claims or callbacks during decoding. The descriptor
 slot is checked against generated identity before using shared storage;
 temporary descriptors use pure bounded reads. Serial prewarm follows the

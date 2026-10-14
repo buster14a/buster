@@ -130,12 +130,17 @@ BUSTER_GLOBAL_LOCAL u32 buster_a64_semantic_packed_size(char8 const* encoded, u3
 
 // Packet bounds are checked before any write. A complete block must consume
 // its complete encoded payload; neither an overrun nor an ignored tail passes.
-BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_unpack_block(char8 const* encoded, u32 length, u8* output, u32 output_count)
+// Column packets write directly into row storage, including across packets.
+BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_unpack_block(char8 const* encoded, u32 length, u8* output, u32 output_count, u32 record_bytes)
 {
-    bool valid = (!length || encoded) && (!output_count || output) && length % 4 == 0;
+    bool valid = (!length || encoded) && (!output_count || output) && length % 4 == 0 && record_bytes && output_count % record_bytes == 0;
     u32 packed_size = valid ? buster_a64_semantic_packed_size(encoded, length) : 0;
+    u32 rows = valid ? output_count / record_bytes : 0;
     u32 input = 0;
     u32 written = 0;
+    u32 row = 0;
+    u32 column = 0;
+    u32 destination = 0;
     while (valid && written < output_count)
     {
         valid = input < packed_size;
@@ -150,7 +155,19 @@ BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_unpack_block(char8 const* encoded, 
                 u8 value = repeated ? buster_a64_semantic_base64_byte(encoded, packed_size, input++) : 0;
                 for (u32 index = 0; index < count; index += 1)
                 {
-                    output[written++] = repeated ? value : buster_a64_semantic_base64_byte(encoded, packed_size, input++);
+                    output[destination] = repeated ? value : buster_a64_semantic_base64_byte(encoded, packed_size, input++);
+                    written += 1;
+                    row += 1;
+                    if (row == rows)
+                    {
+                        row = 0;
+                        column += 1;
+                        destination = column;
+                    }
+                    else
+                    {
+                        destination += record_bytes;
+                    }
                 }
             }
         }
@@ -211,9 +228,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_a64_semantic_blob_decode(BusterA64SemanticGenerate
 
 BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_blob_fill_block(BusterA64SemanticGeneratedBlob const* blob, u32 blob_size, u32 block_index, u8* bytes)
 {
-    u8 block[BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_BYTES];
     bool valid = blob && blob->data && blob->blocks && blob->record_bytes &&
-                 blob->record_bytes <= sizeof(block) / BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS &&
+                 blob->record_bytes <= BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_BYTES / BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS &&
                  blob_size % blob->record_bytes == 0 && bytes;
     u32 block_bytes = valid ? blob->record_bytes * BUSTER_AARCH64_SEMANTIC_PACKED_BLOCK_RECORDS : 0;
     valid = valid && block_index < blob_size / block_bytes + (blob_size % block_bytes != 0);
@@ -224,18 +240,7 @@ BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_blob_fill_block(BusterA64SemanticGe
         u32 encoded_end = blob->blocks[block_index + 1];
         u32 remaining = blob_size - first;
         u32 size = BUSTER_MIN(block_bytes, remaining);
-        valid = encoded_end >= encoded_first && buster_a64_semantic_unpack_block(blob->data + encoded_first, encoded_end - encoded_first, block, size);
-        if (valid)
-        {
-            u32 rows = size / blob->record_bytes;
-            for (u32 column = 0; column < blob->record_bytes; column += 1)
-            {
-                for (u32 row = 0; row < rows; row += 1)
-                {
-                    bytes[row * blob->record_bytes + column] = block[column * rows + row];
-                }
-            }
-        }
+        valid = encoded_end >= encoded_first && buster_a64_semantic_unpack_block(blob->data + encoded_first, encoded_end - encoded_first, bytes, size, blob->record_bytes);
     }
     return valid;
 }
@@ -1333,40 +1338,63 @@ BusterA64SemanticStorageTestResult buster_aarch64_semantics_test_storage(Arena* 
     {
         guarded[index] = 0xa5;
     }
-    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(S8("/wA=").pointer, 4, guarded + 1, 130));
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(S8("/wA=").pointer, 4, guarded + 1, 130, 1));
     BUSTER_A64_STORAGE_EXPECT(guarded[0] == 0xa5 && guarded[131] == 0xa5);
     for (u32 index = 1; index <= 130; index += 1)
     {
         BUSTER_A64_STORAGE_EXPECT(guarded[index] == 0);
         guarded[index] = 0xa5;
     }
-    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("/wA=").pointer, 4, guarded + 1, 129));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("/wA=").pointer, 4, guarded + 1, 129, 1));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
     {
         BUSTER_A64_STORAGE_EXPECT(guarded[index] == 0xa5);
     }
     // Truncated run/literal, an ignored payload tail, and a non-group tail.
-    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gA==").pointer, 4, guarded, 3));
-    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AgE=").pointer, 4, guarded, 3));
-    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AAMAAA==").pointer, 8, guarded, 1));
-    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AAA").pointer, 3, guarded, 1));
-    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(0, 0, 0, 0));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gA==").pointer, 4, guarded, 3, 1));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AgE=").pointer, 4, guarded, 3, 1));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AAMAAA==").pointer, 8, guarded, 1, 1));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("AAA").pointer, 3, guarded, 1, 1));
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(0, 0, 0, 0, 1));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
     {
         guarded[index] = 0xa5;
     }
     String8 literal = S8("fwABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5/");
-    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(literal.pointer, (u32)literal.length, guarded + 1, 128));
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(literal.pointer, (u32)literal.length, guarded + 1, 128, 1));
     for (u32 index = 0; index < 128; index += 1)
     {
         BUSTER_A64_STORAGE_EXPECT(guarded[index + 1] == index);
     }
     BUSTER_A64_STORAGE_EXPECT(guarded[0] == 0xa5 && guarded[129] == 0xa5);
+    // A run crosses the column boundary and a following literal continues it.
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        guarded[index] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_unpack_block(S8("gVoBYmM=").pointer, 8, guarded + 1, 6, 2));
+    u8 const crossed[] = {0x5a, 0x5a, 0x5a, 0x62, 0x5a, 0x63};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(crossed); index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index + 1] == crossed[index]);
+        guarded[index + 1] = 0xa5;
+    }
+    BUSTER_A64_STORAGE_EXPECT(guarded[0] == 0xa5 && guarded[7] == 0xa5);
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gVoBYmM=").pointer, 8, guarded + 1, 6, 0));
+    BUSTER_A64_STORAGE_EXPECT(!buster_a64_semantic_unpack_block(S8("gVoBYmM=").pointer, 8, guarded + 1, 5, 2));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(guarded); index += 1)
+    {
+        BUSTER_A64_STORAGE_EXPECT(guarded[index] == 0xa5);
+    }
     // Two byte columns, one complete block followed by three final records.
     char8 const fixture_data[] = "PwACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+AQMFBwkLDQ8RExUXGRsdHyEjJScpKy0vMTM1Nzk7PT8=BUBCREFDRQ==";
     u32 const fixture_blocks[] = {0, 88, 100};
     BusterA64SemanticGeneratedBlob fixture = {fixture_data, fixture_blocks, 2, 0};
     u8 fixture_bytes[70];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixture_bytes); index += 1)
+    {
+        fixture_bytes[index] = 0xa5;
+    }
     BUSTER_A64_STORAGE_EXPECT(buster_a64_semantic_blob_fill(&fixture, fixture_bytes, sizeof(fixture_bytes)));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixture_bytes); index += 1)
     {
