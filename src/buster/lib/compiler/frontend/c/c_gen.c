@@ -49317,7 +49317,39 @@ BUSTER_C_INTERNAL bool c_ir_initializer_plan_label_difference(CIntegerIrBuilder*
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_initializer_plan_scalar(CIntegerIrBuilder* builder, u32 node, IrTypeId type_id, IrField* field,
+// A static pointer destination already owns the pointer type of a direct
+// function symbol. Replay explicit cast constructors, then retain its symbol
+// relocation without constructing an otherwise unused source pointer row.
+BUSTER_C_INTERNAL bool c_ir_initializer_function_symbol_node(CIntegerIrBuilder* builder, u32 node, IrTypeId destination,
+                                                             CIrConstantValue* value)
+{
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
+    u32 leaf = node;
+    bool valid = ast && facts && builder->entity_symbols;
+    while (valid && leaf < ast->node_count && (ast->kinds[leaf] == C_AST_CAST || ast->kinds[leaf] == C_AST_EXTENSION ||
+                                               ast->kinds[leaf] == C_AST_ADDRESS))
+        leaf = c_ast_child_at(ast, leaf, c_ast_child_count(ast, leaf) - 1);
+    valid = valid && leaf < ast->node_count && ast->kinds[leaf] == C_AST_IDENTIFIER && (facts->flags[leaf] & C_AST_FACT_BOUND);
+    u32 entity = valid ? facts->payloads[leaf] : C_ID_UNDERLYING_INVALID;
+    valid = valid && entity < builder->parse.entity_count && builder->parse.entities[entity].kind == C_ENTITY_FUNCTION &&
+            builder->entity_symbols[entity].value != IR_ID_UNDERLYING_INVALID;
+    while (valid && node != leaf)
+    {
+        if (ast->kinds[node] == C_AST_CAST)
+        {
+            IrTypeId cast_id = c_ir_initializer_plan_type_node(builder, c_ast_child_at(ast, node, 0), false);
+            IrType* cast = ir_type_from_id(&builder->program->types, cast_id);
+            valid = cast && cast->kind == IR_TYPE_POINTER;
+        }
+        node = c_ast_child_at(ast, node, c_ast_child_count(ast, node) - 1);
+    }
+    if (valid) *value = (CIrConstantValue){.type = destination, .symbol = builder->entity_symbols[entity],
+                                             .kind = C_IR_CONSTANT_POINTER, .function_designator = true};
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_initializer_plan_scalar(CIntegerIrBuilder* builder, u32 node, IrTypeId type_id, IrField* field, bool direct_symbol,
                                                     u8* bytes, u64 byte_count, u64 offset,
                                                     IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
 {
@@ -49380,7 +49412,8 @@ BUSTER_C_INTERNAL bool c_ir_initializer_plan_scalar(CIntegerIrBuilder* builder, 
     CIrConstantValue converted = {0};
     if (valid && !empty && !label_handled && !ext80_handled && !complex_handled)
     {
-        valid = c_ir_constant_evaluate_node(builder, node, &value);
+        bool function = direct_symbol && type->kind == IR_TYPE_POINTER && c_ir_initializer_function_symbol_node(builder, node, type_id, &value);
+        valid = function || (!builder->queries->has_request && c_ir_constant_evaluate_node(builder, node, &value));
         if (!valid && !builder->queries->has_request)
             valid = c_ir_global_complex_real_value_node(builder, type, type_id, node, &value);
         valid = valid && c_ir_constant_cast(builder, &value, type_id, &converted);
@@ -49737,6 +49770,7 @@ BUSTER_C_INTERNAL CIrInitializerPlanStep c_ir_initializer_plan_task_step(CIntege
                         valid = c_ir_initializer_plan_string(builder, item.node, selection.value_type, storage->bytes + selection.value_offset,
                             child->layout.size, &string);
                         if (valid && !string) valid = c_ir_initializer_plan_scalar(builder, item.node, selection.value_type, selection.value_field,
+                            context_count == 1 && !task->object && !item.path_plus_one && context->root_type.value == selection.value_type.value,
                             storage->bytes, storage->byte_count, selection.value_offset, storage->relocations, storage->relocation_count,
                             storage->relocation_capacity);
                     }
@@ -55396,8 +55430,9 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value_node(CIntegerIrBuilder* builde
     do
     {
         CIrConstantValue value = {0};
-        bool evaluated = c_ir_constant_evaluate_node(builder, node, &value);
-        if (!evaluated && type->kind != IR_TYPE_POINTER)
+        bool function = type->kind == IR_TYPE_POINTER && c_ir_initializer_function_symbol_node(builder, node, global->type, &value);
+        bool evaluated = function || (!builder->queries->has_request && c_ir_constant_evaluate_node(builder, node, &value));
+        if (!evaluated && !builder->queries->has_request && type->kind != IR_TYPE_POINTER)
         {
             evaluated = c_ir_global_complex_real_value_node(builder, type, global->type, node, &value);
         }
