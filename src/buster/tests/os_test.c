@@ -2216,6 +2216,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_cleanup_windows(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 os_test_shutdown_output_step(HANDLE pipe, bool* valid, u8* prefix, u64* prefix_length, u64 prefix_capacity)
+{
+    u64 result = 0;
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe, 0, 0, 0, &available, 0))
+    {
+        *valid = *valid && GetLastError() == ERROR_BROKEN_PIPE;
+    }
+    else if (available)
+    {
+        u8 buffer[16 * 1024];
+        DWORD requested = available < sizeof(buffer) ? available : (DWORD)sizeof(buffer);
+        DWORD read_count = 0;
+        bool read_ok = ReadFile(pipe, buffer, requested, &read_count, 0) != 0;
+        *valid = *valid && read_ok && read_count != 0;
+        if (read_ok)
+        {
+            result = read_count;
+            u64 copied = read_count < prefix_capacity - *prefix_length ? read_count : prefix_capacity - *prefix_length;
+            if (copied) memcpy(prefix + *prefix_length, buffer, (size_t)copied);
+            *prefix_length += copied;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2237,8 +2263,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
         BUSTER_TEST(arguments, os_file_delete(ready));
         if (BUSTER_REQUIRE(arguments, release != 0))
         {
-            String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CLEANUP_RELEASE_EVENT"), S8("BUSTER_TEST_JOBS"), S8("BUSTER_OS_PROCESS_READY")};
-            String8 values[] = {modes[index], event_name8, S8("1"), ready};
+            String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CLEANUP_RELEASE_EVENT"), S8("BUSTER_TEST_JOBS"), S8("BUSTER_OS_PROCESS_READY"), S8("BUSTER_TEST_MODULE_GROUP")};
+            String8 values[] = {modes[index], event_name8, S8("1"), ready, S8("")};
             OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
             u64 resources_before = os_process_spawn_test_resource_count();
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
@@ -2246,12 +2272,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
             {
                 DWORD available = 0;
-                u32 polls = 0;
-                while (polls < 30000 && !available && WaitForSingleObject((HANDLE)spawn.handle, 0) == WAIT_TIMEOUT)
+                bool output_valid = true;
+                u64 early_stdout_bytes = 0;
+                u8 stdout_prefix[512] = {0};
+                u64 stdout_prefix_length = 0;
+                u64 receipt_deadline = os_now_microseconds() + 30000000;
+                while (!available && os_now_microseconds() < receipt_deadline && WaitForSingleObject((HANDLE)spawn.handle, 0) == WAIT_TIMEOUT)
                 {
+                    // Normal-return suite setup can produce more than an
+                    // anonymous pipe holds. Keep stdout flowing while observing
+                    // stderr, without invoking parent process/job termination.
+                    early_stdout_bytes += os_test_shutdown_output_step((HANDLE)spawn.pipes[STANDARD_STREAM_OUTPUT][0], &output_valid,
+                        stdout_prefix, &stdout_prefix_length, sizeof(stdout_prefix));
                     if (!PeekNamedPipe((HANDLE)spawn.pipes[STANDARD_STREAM_ERROR][0], 0, 0, 0, &available, 0)) break;
                     os_test_sleep_milliseconds(1);
-                    polls += 1;
                 }
                 bool host_alive = WaitForSingleObject((HANDLE)spawn.handle, 0) == WAIT_TIMEOUT;
                 BUSTER_TEST(arguments, available != 0 && host_alive);
@@ -2269,11 +2303,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
                 bool queried = QueryInformationJobObject((HANDLE)spawn.process_tree, JobObjectBasicAccountingInformation,
                     &information, sizeof(information), 0) != 0;
                 BUSTER_TEST(arguments, queried && information.ActiveProcesses >= 2);
+                DWORD active_before = queried ? information.ActiveProcesses : 0;
                 BUSTER_TEST(arguments, SetEvent(release) != 0);
                 // Observe host exit and an empty outer job BEFORE the consuming
                 // parent wait can terminate descendants and mask a broken hook.
-                DWORD host_wait = WaitForSingleObject((HANDLE)spawn.handle, 30000);
-                BUSTER_TEST(arguments, host_wait == WAIT_OBJECT_0);
+                DWORD host_wait = WAIT_TIMEOUT;
+                u64 host_deadline = os_now_microseconds() + 30000000;
+                while (host_wait == WAIT_TIMEOUT && os_now_microseconds() < host_deadline)
+                {
+                    early_stdout_bytes += os_test_shutdown_output_step((HANDLE)spawn.pipes[STANDARD_STREAM_OUTPUT][0], &output_valid,
+                        stdout_prefix, &stdout_prefix_length, sizeof(stdout_prefix));
+                    host_wait = WaitForSingleObject((HANDLE)spawn.handle, 1);
+                }
+                BUSTER_TEST(arguments, host_wait == WAIT_OBJECT_0 && output_valid);
                 bool empty = false;
                 u64 cleanup_deadline = os_now_microseconds() + 5000000;
                 while (queried && !empty && os_now_microseconds() < cleanup_deadline)
@@ -2287,6 +2329,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
                 BUSTER_TEST(arguments, !waited.timed_out && !waited.process_tree_cleanup_failed && !waited.pending_windows_owner_id);
                 BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.platform_status == PROCESS_RESULT_FAILED);
+                if (string_equal(modes[index], S8("cleanup-exit-return")))
+                {
+                    ByteSlice tail = waited.streams[STANDARD_STREAM_OUTPUT];
+                    u64 copied = tail.length < sizeof(stdout_prefix) - stdout_prefix_length ? tail.length : sizeof(stdout_prefix) - stdout_prefix_length;
+                    if (copied) memcpy(stdout_prefix + stdout_prefix_length, tail.pointer, (size_t)copied);
+                    stdout_prefix_length += copied;
+                    String8 output = {(char8*)stdout_prefix, stdout_prefix_length};
+                    BUSTER_TEST(arguments, string_first_sequence(output, S8("Unit tests (1 of ")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(output, S8("modules selected)")) != BUSTER_STRING_NO_MATCH);
+                }
+                arguments->show(arguments, S8("WINDOWS_SHUTDOWN_CONTROL_V1 mode={S8} early_stdout_bytes={u64} receipt_bytes={u32} "
+                    "host_alive={u32} active_before={u32} host_wait={u32} empty_before_parent_wait={u32} timed_out={u32} status={u32}\n"),
+                    modes[index], early_stdout_bytes, read_count, (u32)host_alive, active_before,
+                    (u32)host_wait, (u32)empty, (u32)waited.timed_out, waited.platform_status);
             }
             BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
             BUSTER_TEST(arguments, CloseHandle(release) != 0);
