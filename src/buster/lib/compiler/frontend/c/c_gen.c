@@ -2565,6 +2565,8 @@ typedef struct CIrNodeQueryFrame CIrNodeQueryFrame;
 struct CIrNodeQueryFrame
 {
     CIrConstantComplexInitializerValue constant;
+    u32* offsetof_runtime_steps;
+    u32 offsetof_runtime_count;
     IrTypeId result_type;
     u32 node;
     CIrNodeQueryKind kind;
@@ -4682,7 +4684,8 @@ BUSTER_C_INTERNAL bool c_ir_node_query_request(CIntegerIrBuilder* builder, CIrNo
     return settled;
 }
 
-BUSTER_C_INTERNAL bool c_ir_node_query_execute(CIntegerIrBuilder* builder, CIrNodeQueryFrame key, CIrNodeQueryFrame* answer)
+BUSTER_C_INTERNAL bool c_ir_node_query_execute_with_runtime(CIntegerIrBuilder* builder, CIrNodeQueryFrame key,
+                                                             CIrNodeQueryFrame* answer, bool retain_runtime_steps)
 {
     CIrQueryFrame result = {0};
     u64 state_mark = builder->temporary_arena ? builder->temporary_arena->position : 0;
@@ -4692,10 +4695,30 @@ BUSTER_C_INTERNAL bool c_ir_node_query_execute(CIntegerIrBuilder* builder, CIrNo
     {
         *answer = result.node_task;
         answer->state = 0;
+        answer->offsetof_runtime_steps = 0;
+        if (retain_runtime_steps && result.node_task.offsetof_runtime_count)
+        {
+            u32 count = result.node_task.offsetof_runtime_count;
+            complete = builder->scratch_arena && builder->scratch_arena != builder->temporary_arena &&
+                       c_ir_lower_scratch_reservation(builder, sizeof(u32), count, BUSTER_ALIGN_OF(u32));
+            if (complete)
+            {
+                answer->offsetof_runtime_steps = arena_allocate(builder->scratch_arena, u32, count);
+                memcpy(answer->offsetof_runtime_steps, result.node_task.offsetof_runtime_steps, sizeof(u32) * (u64)count);
+            }
+            else if (!builder->failure_message.length)
+                builder->failure_message = S8("C runtime offsetof result requires distinct function scratch");
+        }
+        if (!retain_runtime_steps) answer->offsetof_runtime_count = 0;
     }
     if (builder->temporary_arena && builder->temporary_arena != builder->arena)
         arena_set_position(builder->temporary_arena, state_mark);
     return complete;
+}
+
+BUSTER_C_INTERNAL bool c_ir_node_query_execute(CIntegerIrBuilder* builder, CIrNodeQueryFrame key, CIrNodeQueryFrame* answer)
+{
+    return c_ir_node_query_execute_with_runtime(builder, key, answer, false);
 }
 
 // A retained semantic reference. Temporary query rows refer to their sparse
@@ -5254,38 +5277,6 @@ BUSTER_C_INTERNAL bool c_ir_query_offsetof(CIntegerIrBuilder* builder, u32 start
     }
     *offset_out = result.integer;
     return result.success;
-}
-
-// Runtime expressions enter the same query-frame walk used by static
-// initializer constants; its children resolve type names and array indexes.
-BUSTER_C_INTERNAL bool c_ir_offsetof_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
-{
-    CIrQueryFrame result = {0};
-    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_OFFSETOF}, &result) &&
-                   result.success;
-    if (success)
-    {
-        *offset_out = result.integer;
-    }
-    return success;
-}
-
-// The constant part of an offsetof designator with runtime subscripts, and
-// the `[` and element type of the first runtime subscript after `after`
-// (UINT32_MAX once none is left).
-BUSTER_C_INTERNAL bool c_ir_offsetof_runtime_index(CIntegerIrBuilder* builder, u32 start, u32 end, u32 after, u64* offset_out, IrTypeId* element_out,
-                                                   u32* open_out)
-{
-    CIrQueryFrame result = {0};
-    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .third = after, .kind = C_IR_QUERY_FRAME_OFFSETOF, .flag = true},
-                                      &result) && result.success;
-    if (success)
-    {
-        *offset_out = result.integer;
-        *element_out = result.result_type;
-        *open_out = result.fourth;
-    }
-    return success;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
@@ -18765,7 +18756,12 @@ struct CIrExpressionCoreState
     // last, and that chain's unit.
     u32 chain_first;
     u32 chain_unit;
-    // The token past a runtime __builtin_offsetof's `)`.
+    // Runtime offsetof keeps only the semantic path's selected step ordinals.
+    u32 offsetof_node;
+    u32* offsetof_runtime_steps;
+    u32 offsetof_runtime_count;
+    u32 offsetof_runtime_cursor;
+    u64 offsetof_element_size;
     u32 index;
     u32 pending_start;
     u32 pending_end;
@@ -37062,49 +37058,51 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_label_address(CIntegerIrBuilder* build
     return status;
 }
 
-// `__builtin_offsetof (type, designator)`, a CALL whose callee is the word.
+BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_offsetof_index_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state)
+{
+    CAstOffsetofPlan const* plan = c_ast_facts_offsetof(builder->syntax_facts, state->offsetof_node);
+    bool valid = plan && state->offsetof_runtime_cursor < state->offsetof_runtime_count;
+    u32 ordinal = valid ? state->offsetof_runtime_steps[state->offsetof_runtime_cursor] : 0;
+    valid = valid && ordinal < plan->step_count;
+    CAstOffsetofStep step = valid ? builder->syntax_facts->offsetof_steps[plan->first_step + ordinal] : (CAstOffsetofStep){0};
+    valid = valid && step.index_node != C_AST_NODE_INVALID && step.index_node < builder->syntax_tree->node_count;
+    CIrCoreStatus status = C_IR_CORE_FAILED;
+    if (valid)
+    {
+        state->offsetof_element_size = step.amount;
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX;
+        status = c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
+            .as.expression = {.node_plus_one = step.index_node + 1, .start = builder->syntax_spans->first[step.index_node],
+                              .end = builder->syntax_spans->end[step.index_node]}}) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
+    }
+    return status;
+}
+
+// The CALL's retained path supplies layout and exact runtime operand owners.
 BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_offsetof(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state, u32 node)
 {
-    u32 index = builder->syntax_spans->first[node];
-    u32 close = builder->syntax_spans->end[node] - 1;
-    CToken token = builder->preprocess.tokens[index];
-    IrSourceRange source = c_ir_token_source_range(builder, token);
-    CIrCoreStatus status = C_IR_CORE_NEXT;
-    u64 offset = 0;
-    bool constant = c_ir_offsetof_evaluate(builder, index + 2, close, &offset);
-    // Only a subscript that is not a constant expression takes the runtime
-    // route; constant refusals (negative, real, overflowing indices) stay
-    // refused in every context.
-    IrTypeId runtime_element = IR_TYPE_ID_INVALID;
-    u32 runtime_open = UINT32_MAX;
-    if (!constant && (!c_ir_offsetof_runtime_index(builder, index + 2, close, index + 2, &offset, &runtime_element, &runtime_open) ||
-                      runtime_open == UINT32_MAX))
+    u32 first = builder->syntax_spans->first[node];
+    CToken token = builder->preprocess.tokens[first];
+    CIrNodeQueryFrame answer = {0};
+    bool valid = c_ir_node_query_execute_with_runtime(builder, (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_CONSTANT}, &answer, true) &&
+                 answer.success && !answer.constant.is_complex;
+    CIrCoreStatus status = C_IR_CORE_FAILED;
+    if (!valid)
     {
-        builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
-        status = C_IR_CORE_FAILED;
+        if (!builder->failure_message.length) builder->failure_message = S8("invalid or unretained __builtin_offsetof type or member designator");
     }
-    else if (!c_ir_core_value_push(builder, state, c_ir_emit_integer_value_typed(builder, offset, false, token, builder->size_type)))
+    else if (c_ir_core_value_push(builder, state, c_ir_emit_integer_value_typed(builder, answer.constant.real.integer, false, token, builder->size_type)))
     {
-        status = C_IR_CORE_FAILED;
-    }
-    else if (!constant)
-    {
-        // GNU C and Clang evaluate runtime subscripts. Lower each as a child
-        // expression; the resume adds index * size and asks for the next one
-        // after it.
-        state->index = close + 1;
-        state->pending_type = runtime_element;
-        state->pending_source = source;
-        state->pending_start = index + 2;
-        state->pending_end = runtime_open;
-        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX;
-        u32 runtime_close = c_ir_matching_delimiter_cached(builder, runtime_open, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-        status = c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                    .as.expression = {.start = runtime_open + 1, .end = runtime_close},
-                                                })
-                     ? C_IR_CORE_SUSPENDED
-                     : C_IR_CORE_FAILED;
+        status = C_IR_CORE_NEXT;
+        if (answer.offsetof_runtime_count)
+        {
+            state->offsetof_node = node;
+            state->offsetof_runtime_steps = answer.offsetof_runtime_steps;
+            state->offsetof_runtime_count = answer.offsetof_runtime_count;
+            state->offsetof_runtime_cursor = 0;
+            state->pending_source = c_ir_token_source_range(builder, token);
+            status = c_ir_core_offsetof_index_push(builder, frame, state);
+        }
     }
     return status;
 }
@@ -37857,8 +37855,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
         bool done = false;
         u32 callee = kind == C_AST_CALL ? c_ir_tree_first_child(ast, node) : C_AST_NODE_INVALID;
         bool named_callee = callee != C_AST_NODE_INVALID && ast->kinds[callee] == C_AST_IDENTIFIER && !c_ir_core_wrapped(builder, callee);
-        if (named_callee && first + 4 < end &&
-            string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[first]), S8("__builtin_offsetof")))
+        if (kind == C_AST_CALL && c_ast_facts_offsetof(builder->syntax_facts, node))
         {
             state->walk_count -= 1;
             status = c_ir_core_offsetof(builder, frame, state, node);
@@ -38343,13 +38340,12 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_resume(CIntegerIrBuil
         IrType* subscript_type = subscript.value < builder->function->value_count
                                      ? ir_type_from_id(&builder->program->types, builder->function->values[subscript.value].canonical_type)
                                      : 0;
-        IrType* element = ir_type_from_id(&builder->program->types, state->pending_type);
         IrValueId result = IR_VALUE_ID_INVALID;
-        if (state->value_count && element && subscript_type && (subscript_type->kind == IR_TYPE_INTEGER || subscript_type->kind == IR_TYPE_BOOLEAN))
+        if (state->value_count && subscript_type && (subscript_type->kind == IR_TYPE_INTEGER || subscript_type->kind == IR_TYPE_BOOLEAN))
         {
             IrSourceRange source = state->pending_source;
             IrValueId converted = c_ir_emit_cast(builder, subscript, builder->size_type, source);
-            IrValueId size = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->size_type);
+            IrValueId size = c_ir_emit_integer_value_typed(builder, state->offsetof_element_size, false, (CToken){0}, builder->size_type);
             IrValueId scaled = converted.value != IR_ID_UNDERLYING_INVALID && size.value != IR_ID_UNDERLYING_INVALID
                                    ? c_ir_emit_binary_value(builder, converted, size, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, source)
                                    : IR_VALUE_ID_INVALID;
@@ -38357,9 +38353,6 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_resume(CIntegerIrBuil
                                                                                       builder->size_type, IR_BINARY_INTEGER_ADD, source)
                                                               : IR_VALUE_ID_INVALID;
         }
-        u64 constant_offset = 0;
-        IrTypeId next_element = IR_TYPE_ID_INVALID;
-        u32 next_open = UINT32_MAX;
         if (result.value == IR_ID_UNDERLYING_INVALID)
         {
             if (!builder->failure_message.length)
@@ -38371,27 +38364,9 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_resume(CIntegerIrBuil
         else
         {
             state->values[state->value_count - 1] = result;
-            // The saved resume index follows the offsetof's `)`.
-            if (!c_ir_offsetof_runtime_index(builder, state->pending_start, state->index - 1, state->pending_end, &constant_offset, &next_element,
-                                             &next_open))
-            {
-                builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
-                status = C_IR_CORE_FAILED;
-            }
-            else if (next_open != UINT32_MAX)
-            {
-                state->pending_type = next_element;
-                state->pending_end = next_open;
-                u32 next_close =
-                    c_ir_matching_delimiter_cached(builder, next_open, state->index - 1, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX;
-                status = c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                            .as.expression = {.start = next_open + 1, .end = next_close},
-                                                        })
-                             ? C_IR_CORE_SUSPENDED
-                             : C_IR_CORE_FAILED;
-            }
+            state->offsetof_runtime_cursor += 1;
+            if (state->offsetof_runtime_cursor < state->offsetof_runtime_count)
+                status = c_ir_core_offsetof_index_push(builder, frame, state);
         }
     }
     break;
@@ -59199,6 +59174,100 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_fact(CIntegerIrBuilder* builder, CAstC
     return valid;
 }
 
+typedef struct CIrConstantOffsetofNodeState CIrConstantOffsetofNodeState;
+struct CIrConstantOffsetofNodeState
+{
+    u32* runtime_steps;
+    u64 offset;
+    u64 maximum;
+    u32 cursor;
+    u32 runtime_count;
+};
+
+// The layout path belongs to semantics; the task visits only its exact index
+// children, in order, keeping their settled answers across suspension.
+BUSTER_C_INTERNAL bool c_ir_constant_offsetof_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    CAstOffsetofPlan const* plan = c_ast_facts_offsetof(facts, frame->node);
+    bool valid = plan && plan->valid && plan->first_step <= facts->offsetof_step_count &&
+                 plan->step_count <= facts->offsetof_step_count - plan->first_step;
+    CIrNodeQueryFrame type = {0};
+    valid = valid && c_ir_node_query_request(builder,
+        (CIrNodeQueryFrame){.node = c_ast_child_at(builder->syntax_tree, frame->node, 1), .kind = C_IR_NODE_QUERY_TYPE_NAME}, &type) && type.success;
+    IrType* row = valid ? ir_type_from_id(&builder->program->types, type.result_type) : 0;
+    valid = valid && row && (row->kind == IR_TYPE_STRUCT || row->kind == IR_TYPE_UNION);
+    CIrConstantOffsetofNodeState* state = (CIrConstantOffsetofNodeState*)frame->state;
+    if (valid && !state)
+    {
+        Arena* arena = builder->temporary_arena;
+        u64 position = arena ? arena->position : 0;
+        valid = arena && c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(*state), 1, BUSTER_ALIGN_OF(CIrConstantOffsetofNodeState)) &&
+                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(u32), plan->step_count, BUSTER_ALIGN_OF(u32));
+        if (valid)
+        {
+            state = arena_allocate_zeroed(arena, CIrConstantOffsetofNodeState, 1);
+            state->runtime_steps = arena_allocate(arena, u32, plan->step_count);
+            state->maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(builder->target).pointer.bit_width).low;
+            frame->state = state;
+        }
+        else
+        {
+            builder->failure_message = S8("C offsetof task exceeds the query scratch reservation");
+            builder->failure_token_index = builder->syntax_tree->tokens[frame->node];
+        }
+    }
+    while (valid && state->cursor < plan->step_count)
+    {
+        CAstOffsetofStep step = facts->offsetof_steps[plan->first_step + state->cursor];
+        if (step.index_node == C_AST_NODE_INVALID)
+        {
+            valid = step.amount <= state->maximum && state->offset <= state->maximum - step.amount;
+            if (valid) state->offset += step.amount;
+        }
+        else
+        {
+            CIrNodeQueryFrame index = {0};
+            bool settled = c_ir_constant_node_child(builder, step.index_node, &index);
+            valid = settled;
+            if (settled)
+            {
+                bool runtime = !index.success || (!index.constant.is_complex &&
+                    (index.constant.real.kind == C_IR_CONSTANT_UNKNOWN || index.constant.real.kind == C_IR_CONSTANT_LVALUE));
+                if (runtime)
+                {
+                    valid = c_ast_facts_constant(facts, step.index_node).status != C_AST_CONSTANT_INVALID;
+                    if (valid) state->runtime_steps[state->runtime_count++] = state->cursor;
+                }
+                else
+                {
+                    CIrConstantValue value = index.constant.real;
+                    IrType* scalar = !index.constant.is_complex && value.kind == C_IR_CONSTANT_INTEGER
+                                         ? ir_type_from_id(&builder->program->types, value.type) : 0;
+                    IrInteger bits = scalar && scalar->bit_width <= 128
+                                         ? ir_integer_mask((IrInteger){.low = value.integer, .high = value.integer_high}, scalar->bit_width) : (IrInteger){0};
+                    valid = scalar && c_ir_constant_type_is_integer(scalar) && scalar->bit_width && scalar->bit_width <= 128 && !bits.high &&
+                            !(scalar->is_signed && ir_integer_sign_bit(bits, scalar->bit_width)) &&
+                            (!step.amount || bits.low <= state->maximum / step.amount);
+                    u64 amount = valid ? bits.low * step.amount : 0;
+                    valid = valid && state->offset <= state->maximum - amount;
+                    if (valid) state->offset += amount;
+                }
+            }
+        }
+        if (valid) state->cursor += 1;
+    }
+    if (valid)
+    {
+        CIrConstantValue value = c_ir_constant_integer(builder->size_type, state->offset);
+        if (state->runtime_count) value.kind = C_IR_CONSTANT_UNKNOWN;
+        frame->constant = (CIrConstantComplexInitializerValue){.real = value, .type = value.type};
+        frame->offsetof_runtime_steps = state->runtime_steps;
+        frame->offsetof_runtime_count = state->runtime_count;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
 {
     CAst const* ast = builder->syntax_tree;
@@ -59438,6 +59507,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                         admitted = value.is_complex;
                     }
                 }
+            }
+            else if (c_ast_facts_offsetof(builder->syntax_facts, node) && arguments == 2)
+            {
+                admitted = c_ir_constant_offsetof_node_attempt(builder, frame);
+                if (admitted) value = frame->constant;
             }
             else if (builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P || builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE)
             {
