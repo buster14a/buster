@@ -25903,8 +25903,8 @@ BUSTER_C_INTERNAL u32 c_ir_tree_closing_group_open(CIntegerIrBuilder* builder, u
 }
 
 // The base a subscripted callee is read from, c_ir_subscript_callee_base on
-// the tree: down through `[ ]` suffixes, each opening after `start`, to a
-// name; that name's node, or C_AST_NODE_INVALID.
+// the tree: down through `[ ]` suffixes, each opening after `start`, to
+// a name or producing call; that base's node, or C_AST_NODE_INVALID.
 BUSTER_C_INTERNAL u32 c_ir_tree_subscript_base(CIntegerIrBuilder* builder, u32 node, u32 start)
 {
     CAst const* ast = builder->syntax_tree;
@@ -25917,8 +25917,9 @@ BUSTER_C_INTERNAL u32 c_ir_tree_subscript_base(CIntegerIrBuilder* builder, u32 n
         base = valid ? c_ir_tree_first_child(ast, base) : base;
     }
     u32 kind = ast->kinds[base];
-    bool named = valid && !c_ir_span_wrapped(ast, base) &&
-                 (kind == C_AST_IDENTIFIER || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW);
+    bool named = valid && (kind == C_AST_CALL ||
+                           (!c_ir_span_wrapped(ast, base) &&
+                            (kind == C_AST_IDENTIFIER || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW)));
     return named ? base : C_AST_NODE_INVALID;
 }
 
@@ -25963,6 +25964,11 @@ BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 ca
         if (base != C_AST_NODE_INVALID)
         {
             callee_start = ast->tokens[base];
+            if (ast->kinds[base] == C_AST_CALL && c_ir_span_wrapped(builder->syntax_spans, tokens, builder->syntax_matches, base))
+            {
+                u32 base_end = 0;
+                c_ir_span_expanded(builder->syntax_spans, tokens, builder->syntax_matches, base, &callee_start, &base_end);
+            }
             indexed = true;
             current = base;
         }

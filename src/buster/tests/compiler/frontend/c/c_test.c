@@ -44670,6 +44670,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             "#define RESET() factory_calls = 0; invoke_calls = 0; index_calls = 0; arg_calls = 0; trace = 0\n"
             "int shared_member(void) { RESET(); int value = get_holder()->callback(arg(4)); return value == 8 && factory_calls == 1 && invoke_calls == 1 && arg_calls == 1; }\n"
             "int shared_index(void) { RESET(); int value = table[index_once()](arg(5)); return value == 10 && factory_calls == 0 && invoke_calls == 1 && index_calls == 1 && arg_calls == 1; }\n"
+            // #4195: a returned table owns the producing call separately
+            // from the index, argument and final callback call.
+            "int shared_returned_index(void) { RESET(); int value = get_table()[index_once()](arg(5)); return value == 10 && factory_calls == 1 && invoke_calls == 1 && index_calls == 1 && arg_calls == 1; }\n"
+            "int shared_returned_index_group(void) { RESET(); int value = (get_table())[index_once()](arg(6)); return value == 12 && factory_calls == 1 && invoke_calls == 1 && index_calls == 1 && arg_calls == 1; }\n"
+            "int shared_returned_callee_group(void) { RESET(); int value = (get_table()[index_once()])(arg(7)); return value == 14 && factory_calls == 1 && invoke_calls == 1 && index_calls == 1 && arg_calls == 1; }\n"
+            "int shared_returned_lazy(int enabled) { RESET(); int value = enabled && get_table()[index_once()](arg(8)); return value == enabled && factory_calls == enabled && invoke_calls == enabled && index_calls == enabled && arg_calls == enabled; }\n"
             "int shared_designator(void) { RESET(); int value = ((twice))(arg(6)); return value == 12 && factory_calls == 0 && invoke_calls == 1 && arg_calls == 1; }\n"
             "int shared_sequence(void) { RESET(); int value = (get_holder()->callback(arg(3)), tget()(arg(4))); return value == 8 && factory_calls == 2 && invoke_calls == 2 && arg_calls == 2 && trace == 34; }\n"
             "int shared_lazy(int enabled) { RESET(); int value = enabled ? get_holder()->callback(arg(7)) : table[index_once()](arg(8)); return value == (enabled ? 14 : 16) && factory_calls == enabled && invoke_calls == 1 && arg_calls == 1 && index_calls == !enabled; }\n"
@@ -44679,6 +44685,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             "int main(void) {\n"
             " int failed = 0; int values[6] = { 17 };\n"
             " failed |= !shared_member(); failed |= !shared_index(); failed |= !shared_designator(); failed |= !shared_sequence();\n"
+            " failed |= !shared_returned_index(); failed |= !shared_returned_index_group(); failed |= !shared_returned_callee_group();\n"
+            " failed |= !shared_returned_lazy(0); failed |= !shared_returned_lazy(1);\n"
             " failed |= !shared_lazy(0); failed |= !shared_lazy(1); failed |= !shared_unevaluated(); failed |= !shared_type_replay();\n"
             " RESET(); int value = shared_parameter_vla(values); failed |= value != 17 || factory_calls != 1 || invoke_calls != 1;\n"
             " return failed;\n"
@@ -44727,6 +44735,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {4, S8("indexed_updates"), 1},
         {5, S8("shared_member"), 3},
         {5, S8("shared_index"), 3},
+        {5, S8("shared_returned_index"), 4},
+        {5, S8("shared_returned_index_group"), 4},
+        {5, S8("shared_returned_callee_group"), 4},
+        {5, S8("shared_returned_lazy"), 4},
         {5, S8("shared_designator"), 2},
         {5, S8("shared_sequence"), 6},
         {5, S8("shared_lazy"), 6},

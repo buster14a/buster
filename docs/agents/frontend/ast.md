@@ -2118,7 +2118,11 @@ byte.
   `c_ir_call_argument_separator` is deleted. `c_test_call_result_callees`
   checks call-result member/index callbacks, grouped designators, sequencing,
   lazy branches, unevaluated chains, `typeof` and parameter VLA bounds with
-  exact call counts and native effects.
+  exact call counts and native effects. A returned function-pointer table
+  (`get_table()[index_once()](argument_once())`, #4195) keeps its producing
+  CALL as the indexed base, including a grouped producer. The regression
+  checks that the factory, index, argument and callback each execute once,
+  and that a short-circuit branch skips all four.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment
