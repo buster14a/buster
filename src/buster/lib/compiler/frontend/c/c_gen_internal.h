@@ -28,6 +28,7 @@ struct CIrLowerCapacityPlan
     u32 symbol_capacity;
     u32 function_capacity;
     u32 query_frame_capacity;
+    u32 constant_shape_nodes;
 };
 BUSTER_F_DECL bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult parse, CIrLowerCapacityPlan* plan_out);
 
@@ -40,6 +41,7 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL u64 c_test_constant_shape_work_take(void);
 // Captures the three retained views in an actual function builder, after its
 // locals and C-to-IR map exist. Tests supply a poisoned provenance snapshot
 // and verified legacy shapes; neither the node nor query state enters IR.

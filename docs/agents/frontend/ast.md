@@ -3063,6 +3063,14 @@ Static compound objects suspend on retained initializer-plan leaves and are
 published only when their task completes. The scheduler releases any active
 object context arenas on failure, restoring nested guards from the inside out.
 
+A certified integer subtree may skip arithmetic only when its node kinds
+contain no type or object constructors. That property is propagated by exact
+child tasks and cached in two bits per AST node in checked unit query scratch;
+it does not consume a full completed numeric-answer row. The cache survives
+query-root rewinds because it depends only on immutable node kinds. A geometric
+array-bound regression checks the actual task attempts for 128, 256 and 512
+terms, including a nested cast whose constructor must still be materialized.
+
 Source-location constant CALLs use the normalized retained builtin identity
 and zero-argument child count. Their call anchor supplies the presumed line
 or mapped file name, and function names reuse the existing shared object.

@@ -1818,6 +1818,7 @@ typedef enum CIrNodeQueryKind
     C_IR_NODE_QUERY_COMPOUND_TYPE,
     C_IR_NODE_QUERY_EXPRESSION_TYPE,
     C_IR_NODE_QUERY_CONSTANT,
+    C_IR_NODE_QUERY_CONSTANT_SHAPE,
 } CIrNodeQueryKind;
 
 typedef struct CIrNodeQueryFrame CIrNodeQueryFrame;
@@ -1892,6 +1893,10 @@ struct CIrQueryMachine
     CIrConstantValue* values;
     CIrConstantOperator* operators;
     CIrQueryResume* resumes;
+    // AST-kind metadata is immutable across roots and uses two bits per node.
+    // 0 unqueried, 1 constructor-free, 2 constructor-bearing, 3 invalid.
+    u8* constant_shape_status;
+    u32 constant_shape_nodes;
     // Hash index over `completed`: chain_heads[bucket] holds the newest live
     // completed index plus one, chain_next[i] the next older entry of the same
     // bucket, chain_bucket[i] the bucket entry i was linked into. Completed
@@ -3581,6 +3586,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
 
 BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
+BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame);
 BUSTER_C_INTERNAL void c_ir_initializer_plan_node_state_release(CIntegerIrBuilder* builder, void* state);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_node(CIntegerIrBuilder* builder, u32 node, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate_node(CIntegerIrBuilder* builder, u32 node, u64* value_out);
@@ -3737,6 +3743,15 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
                 complete = true;
                 stopped = true;
             }
+            else if (frame->kind == C_IR_QUERY_FRAME_NODE_TASK && frame->node_task.kind == C_IR_NODE_QUERY_CONSTANT_SHAPE &&
+                     machine->constant_shape_status && frame->node_task.node < machine->constant_shape_nodes)
+            {
+                u32 node = frame->node_task.node;
+                u32 shift = (node & 3) * 2;
+                u32 status = frame->success ? (frame->node_task.constant.real.integer ? 1u : 2u) : 3u;
+                machine->constant_shape_status[node / 4] = (u8)((machine->constant_shape_status[node / 4] & ~(3u << shift)) | (status << shift));
+                machine->frame_count -= 1;
+            }
             else if (machine->completed_count >= machine->completed_capacity)
             {
                 builder->failure_message = S8("C query result count exceeds the query buffer capacity");
@@ -3781,8 +3796,21 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
 BUSTER_C_INTERNAL bool c_ir_node_query_request(CIntegerIrBuilder* builder, CIrNodeQueryFrame key, CIrNodeQueryFrame* answer)
 {
     CIrQueryFrame result = {0};
-    bool settled = c_ir_query_request(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_NODE_TASK, .node_task = key}, &result);
-    if (settled) *answer = result.node_task;
+    CIrQueryMachine* machine = builder->queries;
+    u32 status = key.kind == C_IR_NODE_QUERY_CONSTANT_SHAPE && machine && machine->constant_shape_status && key.node < machine->constant_shape_nodes
+        ? (machine->constant_shape_status[key.node / 4] >> ((key.node & 3) * 2)) & 3 : 0;
+    bool settled = status != 0;
+    if (settled)
+    {
+        *answer = key;
+        answer->success = status != 3;
+        answer->constant.real.integer = status == 1;
+    }
+    else
+    {
+        settled = c_ir_query_request(builder, (CIrQueryFrame){.kind = C_IR_QUERY_FRAME_NODE_TASK, .node_task = key}, &result);
+        if (settled) *answer = result.node_task;
+    }
     return settled;
 }
 
@@ -4481,6 +4509,7 @@ BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNo
     case C_IR_NODE_QUERY_COMPOUND_TYPE: success = c_ir_compound_literal_type_node_attempt(builder, frame); break;
     case C_IR_NODE_QUERY_EXPRESSION_TYPE: success = c_ir_expression_type_node_attempt(builder, frame); break;
     case C_IR_NODE_QUERY_CONSTANT: success = c_ir_constant_node_attempt(builder, frame); break;
+    case C_IR_NODE_QUERY_CONSTANT_SHAPE: success = c_ir_constant_node_shape_attempt(builder, frame); break;
     }
     return success;
 }
@@ -50203,6 +50232,7 @@ bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_
         CIrConstantValue query_values[16] = {0};
         CIrConstantOperator query_operators[16] = {0};
         CIrQueryResume query_resumes[16] = {0};
+        u8 query_constant_shape[3] = {0};
         u32 query_chain_heads[16] = {0};
         u32 query_chain_next[16] = {0};
         u32 query_chain_bucket[16] = {0};
@@ -50210,6 +50240,7 @@ bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_
             .chain_heads = query_chain_heads, .chain_next = query_chain_next, .chain_bucket = query_chain_bucket, .chain_mask = 15,
             .frames = query_frames, .completed = query_completed, .values = query_values,
             .operators = query_operators, .resumes = query_resumes,
+            .constant_shape_status = query_constant_shape, .constant_shape_nodes = 11,
             .frame_capacity = 16, .completed_capacity = 16, .value_capacity = 16, .operator_capacity = 16,
         };
         CIntegerIrBuilder builder = {
@@ -54596,17 +54627,40 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_fact(CIntegerIrBuilder* builder, CAstC
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_node_constructor_free(CAst const* ast, u32 node)
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_constant_shape_work;
+u64 c_test_constant_shape_work_take(void)
 {
-    bool pure = ast && node < ast->node_count;
-    u32 first = pure ? c_ast_subtree_begin(ast, node) : 0;
-    for (u32 cursor = first; pure && cursor <= node; cursor += 1)
+    u64 work = c_ir_constant_shape_work;
+    c_ir_constant_shape_work = 0;
+    return work;
+}
+#endif
+
+BUSTER_C_INTERNAL bool c_ir_constant_node_shape_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
+{
+#if BUSTER_INCLUDE_TESTS
+    c_ir_constant_shape_work += 1;
+#endif
+    CAst const* ast = builder->syntax_tree;
+    bool valid = ast && frame->node < ast->node_count;
+    bool pure = false;
+    if (valid)
     {
-        u32 kind = ast->kinds[cursor];
+        u32 kind = ast->kinds[frame->node];
         pure = kind != C_AST_TYPE_NAME && kind != C_AST_CAST && kind != C_AST_COMPOUND_LITERAL && kind != C_AST_CALL &&
                kind != C_AST_SIZEOF_TYPE && kind != C_AST_SIZEOF_EXPRESSION && kind != C_AST_ALIGNOF_TYPE && kind != C_AST_ALIGNOF_EXPRESSION;
+        u32 count = pure ? c_ast_child_count(ast, frame->node) : 0;
+        for (u32 child = 0; valid && pure && child < count; child += 1)
+        {
+            CIrNodeQueryFrame answer = {0};
+            valid = c_ir_node_query_request(builder,
+                (CIrNodeQueryFrame){.node = c_ast_child_at(ast, frame->node, child), .kind = C_IR_NODE_QUERY_CONSTANT_SHAPE}, &answer) && answer.success;
+            if (valid) pure = answer.constant.real.integer != 0;
+        }
     }
-    return pure;
+    if (valid) frame->constant.real.integer = pure;
+    return valid;
 }
 
 typedef struct CIrConstantOffsetofNodeState CIrConstantOffsetofNodeState;
@@ -54717,8 +54771,18 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
         u32 selected = c_ast_facts_selection(builder->syntax_facts, node);
         bool fact_leaf = kind == C_AST_NUMBER || kind == C_AST_CHARACTER || kind == C_AST_IDENTIFIER ||
                          kind == C_AST_BOOLEAN_CONSTANT;
-        if ((fact_leaf || (fact.status == C_AST_CONSTANT_INTEGER &&
-                          c_ir_constant_node_constructor_free(ast, node))) && c_ir_constant_node_fact(builder, fact, &value.real))
+        bool fact_pure = fact_leaf;
+        bool shape_wait = false;
+        if (!fact_leaf && fact.status == C_AST_CONSTANT_INTEGER)
+        {
+            CIrNodeQueryFrame shape = {0};
+            bool settled = c_ir_node_query_request(builder,
+                (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_CONSTANT_SHAPE}, &shape);
+            shape_wait = !settled && builder->queries->has_request;
+            fact_pure = settled && shape.success && shape.constant.real.integer;
+        }
+        if (shape_wait) admitted = false;
+        else if (fact_pure && c_ir_constant_node_fact(builder, fact, &value.real))
         {
             value.type = value.real.type;
         }
@@ -55275,6 +55339,8 @@ bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CA
         .resumes = arena_allocate(arena, CIrQueryResume, capacity), .chain_heads = arena_allocate_zeroed(arena, u32, buckets),
         .chain_next = arena_allocate(arena, u32, capacity), .chain_bucket = arena_allocate(arena, u32, capacity),
         .frame_capacity = capacity, .completed_capacity = capacity, .chain_mask = buckets - 1,
+        .constant_shape_status = arena_allocate_zeroed(arena, u8, ((u64)ast->node_count + 3) / 4),
+        .constant_shape_nodes = ast->node_count,
     };
     CIntegerIrBuilder builder = {
         .arena = arena, .temporary_arena = arena, .scratch_arena = arena, .program = &program, .queries = &queries,
@@ -56411,12 +56477,13 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
             .symbol_capacity = (u32)symbol_capacity,
             .function_capacity = (u32)function_capacity,
             .query_frame_capacity = (u32)query_frame_capacity,
+            .constant_shape_nodes = parse.ast ? parse.ast->node_count : 0,
         };
     }
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* position, u32 capacity)
+BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* position, u32 capacity, u32 constant_shape_nodes)
 {
     bool fits = c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
@@ -56424,7 +56491,8 @@ BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* po
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantOperator), capacity, BUSTER_ALIGN_OF(CIrConstantOperator)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryResume), capacity, BUSTER_ALIGN_OF(CIrQueryResume)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32));
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(u8), ((u64)constant_shape_nodes + 3) / 4, BUSTER_ALIGN_OF(u8));
     return fits;
 }
 
@@ -56505,12 +56573,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         .completed_capacity = (u32)query_frame_capacity,
         .value_capacity = (u32)query_frame_capacity,
         .operator_capacity = (u32)query_frame_capacity,
+        .constant_shape_nodes = plan.constant_shape_nodes,
     };
     queries.frames = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
     queries.completed = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
     queries.values = arena_allocate(temporary_arena, CIrConstantValue, query_frame_capacity);
     queries.operators = arena_allocate(temporary_arena, CIrConstantOperator, query_frame_capacity);
     queries.resumes = arena_allocate(temporary_arena, CIrQueryResume, query_frame_capacity);
+    queries.constant_shape_status = arena_allocate_zeroed(temporary_arena, u8, ((u64)plan.constant_shape_nodes + 3) / 4);
     u64 chain_bucket_count = 16;
     while (chain_bucket_count < query_frame_capacity)
     {
@@ -59574,7 +59644,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                    c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), child_count, BUSTER_ALIGN_OF(u32)) &&
                    c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), parse.scope_count, BUSTER_ALIGN_OF(u32));
         }
-        fits = fits && c_ir_query_scratch_reservation(reserved_size, &position, plan.query_frame_capacity);
+        fits = fits && c_ir_query_scratch_reservation(reserved_size, &position, plan.query_frame_capacity, plan.constant_shape_nodes);
         if (fits && !query_reservation_limit)
         {
             // Keep one ordinary arena's remaining workspace after the query

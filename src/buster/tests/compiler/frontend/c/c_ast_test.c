@@ -7085,6 +7085,46 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_node_tasks(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_shape_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 previous = 0;
+    for (u32 sample = 0; sample < 3; sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 terms = 128u << sample;
+        char8* expression = arena_allocate(temporary.arena, char8, (u64)terms * 2 + 8);
+        u32 length = 0;
+        for (u32 term = 0; term < terms; term += 1)
+        {
+            if (term) expression[length++] = '+';
+            if (term == terms / 2) { memcpy(expression + length, "(int)", 5); length += 5; }
+            expression[length++] = '1';
+        }
+        String8 source = string_format(temporary.arena, S8("static int values[{S8}]; int f(void) {{ return sizeof(values); }}"),
+            (String8){.pointer = expression, .length = length});
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+        c_test_constant_shape_work_take();
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("constant-shape-work.c"), preprocess, analysis, target_native);
+        u64 work = c_test_constant_shape_work_take();
+        BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+            lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("constant shape lowering"));
+        BUSTER_TEST_RAW(arguments, work >= terms && work <= (u64)terms * 16 && (!previous || work <= previous * 3),
+            string_format(arguments->arena, S8("constant shape: {u32} terms, {u64} task attempts"), terms, work));
+        if (lowered.program && lowered.program->module_count && lowered.program->modules[0].global_count)
+        {
+            IrGlobal const* global = lowered.program->modules[0].globals;
+            IrType const* type = ir_type_from_id(&lowered.program->types, global->type);
+            BUSTER_TEST(arguments, type && type->kind == IR_TYPE_ARRAY && type->element_count == terms);
+        }
+        previous = work;
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_object_context(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8732,6 +8772,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_bound_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_object_context);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
