@@ -24769,105 +24769,6 @@ BUSTER_C_INTERNAL bool c_ir_representation_types_compatible(CIntegerIrBuilder* b
     return compatible;
 }
 
-typedef struct CIrConstantConditionTask CIrConstantConditionTask;
-struct CIrConstantConditionTask
-{
-    u32 start;
-    u32 end;
-    bool waiting;
-    bool constant_probe;
-    u8 reserved[2];
-};
-
-BUSTER_C_INTERNAL bool c_ir_constant_condition_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out)
-{
-    u32 span = end >= start ? end - start : 0;
-    u32 capacity = span + 2;
-    CIrConstantConditionTask* tasks = arena_allocate(builder->temporary_arena, CIrConstantConditionTask, capacity ? capacity : 2);
-    u32 task_count = 1;
-    tasks[0] = (CIrConstantConditionTask){.start = start, .end = end};
-    u64 last_value = 0;
-    bool have_last = false;
-    while (task_count)
-    {
-        CIrConstantConditionTask task = tasks[task_count - 1];
-        if (task.waiting)
-        {
-            if (!have_last)
-            {
-                return false;
-            }
-            task_count -= 1;
-            last_value = last_value ? 1 : 0;
-            have_last = true;
-            continue;
-        }
-        while (task.start < task.end && c_token_is_punctuator(&builder->preprocess.tokens[task.start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-               c_ir_matching_delimiter_cached(builder, task.start, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == task.end - 1)
-        {
-            task.start += 1;
-            task.end -= 1;
-        }
-        if (task.start + 2 < task.end && builder->preprocess.tokens[task.start].kind == C_TOKEN_IDENTIFIER &&
-            string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[task.start]), S8("__builtin_constant_p")) &&
-            c_token_is_punctuator(&builder->preprocess.tokens[task.start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-            c_ir_matching_delimiter_cached(builder, task.start + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == task.end - 1)
-        {
-            if (task_count >= capacity)
-            {
-                return false;
-            }
-            tasks[task_count - 1] = (CIrConstantConditionTask){
-                .start = task.start,
-                .end = task.end,
-                .waiting = true,
-            };
-            tasks[task_count++] = (CIrConstantConditionTask){
-                .start = task.start + 2,
-                .end = task.end - 1,
-                .constant_probe = true,
-            };
-            have_last = false;
-            continue;
-        }
-        CIrConstantValue value = {0};
-        bool valid = task.start < task.end && c_ir_constant_evaluate(builder, task.start, task.end, &value) &&
-                     value.kind != C_IR_CONSTANT_INVALID && value.kind != C_IR_CONSTANT_UNKNOWN;
-        task_count -= 1;
-        if (!valid)
-        {
-            if (!task.constant_probe)
-            {
-                return false;
-            }
-            last_value = 0;
-            have_last = true;
-        }
-        else if (task.constant_probe)
-        {
-            last_value = 1;
-            have_last = true;
-        }
-        else if (value.kind == C_IR_CONSTANT_INTEGER)
-        {
-            // Every caller branches on the truth of the value, which for a
-            // 128-bit constant includes its high limb.
-            last_value = !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
-            have_last = true;
-        }
-        else
-        {
-            return false;
-        }
-    }
-    if (!have_last)
-    {
-        return false;
-    }
-    *value_out = last_value;
-    return true;
-}
-
 // These runtime builtin parameters preserve the existing low-word contract.
 // Their exact argument node is the constant query's only syntax authority.
 BUSTER_C_INTERNAL bool c_ir_integer_constant_node(CIntegerIrBuilder* builder, u32 node, u64* value_out)
@@ -35207,12 +35108,9 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             }
             if (task.start + 1 == task.end)
             {
-                CToken leaf = builder->preprocess.tokens[task.start];
-                bool literal = leaf.kind == C_TOKEN_PREPROCESSING_NUMBER ||
-                               (leaf.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("true")) ||
-                                                                    string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("false"))));
+                bool literal = kind == C_AST_NUMBER || kind == C_AST_BOOLEAN_CONSTANT;
                 u64 constant = 0;
-                if (literal && c_ir_constant_condition_evaluate(builder, task.start, task.end, &constant))
+                if (literal && c_ir_constant_condition_evaluate_node(builder, node, &constant))
                 {
                     IrBlockId target = constant ? task.true_block : task.false_block;
                     if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source))
@@ -35366,13 +35264,9 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             u32 left_end = left != C_AST_NODE_INVALID ? builder->syntax_spans->end[left] : operation;
             if (left_start + 1 == left_end)
             {
-                CToken leaf = builder->preprocess.tokens[left_start];
-                bool literal = leaf.kind == C_TOKEN_PREPROCESSING_NUMBER ||
-                               (leaf.kind == C_TOKEN_IDENTIFIER &&
-                                (string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("true")) ||
-                                 string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("false"))));
+                bool literal = left != C_AST_NODE_INVALID && (ast->kinds[left] == C_AST_NUMBER || ast->kinds[left] == C_AST_BOOLEAN_CONSTANT);
                 u64 constant = 0;
-                if (literal && c_ir_constant_condition_evaluate(builder, left_start, left_end, &constant))
+                if (literal && c_ir_constant_condition_evaluate_node(builder, left, &constant))
                 {
                     if ((constant != 0) == is_or)
                     {
@@ -39381,7 +39275,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
             result = c_ir_node_expression_provenance(builder, low, &low_first, &low_last);
             if (result && kind == C_AST_CASE)
             {
-                result = c_ir_constant_evaluate(builder, low_first, low_last + 1, &switch_case.low_constant) &&
+                result = c_ir_constant_evaluate_node(builder, low, &switch_case.low_constant) &&
                          switch_case.low_constant.kind == C_IR_CONSTANT_INTEGER;
                 switch_case.value = switch_case.low_constant.integer;
                 switch_case.high_value = switch_case.value;
@@ -39391,15 +39285,16 @@ BUSTER_C_INTERNAL bool c_ir_lower_switch_cases(CIntegerIrBuilder* builder, CIrLo
             {
                 u32 high_first = 0;
                 u32 high_last = 0;
-                result = c_ir_node_expression_provenance(builder, c_ast_child_at(ast, label, 1), &high_first, &high_last);
-                if (result && (!c_ir_constant_evaluate(builder, low_first, low_last + 1, &switch_case.low_constant) ||
+                u32 high = c_ast_child_at(ast, label, 1);
+                result = c_ir_node_expression_provenance(builder, high, &high_first, &high_last);
+                if (result && (!c_ir_constant_evaluate_node(builder, low, &switch_case.low_constant) ||
                                switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER))
                 {
                     builder->failure_message = S8("case range lower bound is not an integer constant expression");
                     builder->failure_token_index = label_start;
                     result = false;
                 }
-                if (result && (!c_ir_constant_evaluate(builder, high_first, high_last + 1, &switch_case.high_constant) ||
+                if (result && (!c_ir_constant_evaluate_node(builder, high, &switch_case.high_constant) ||
                                switch_case.high_constant.kind != C_IR_CONSTANT_INTEGER))
                 {
                     builder->failure_message = S8("case range upper bound is not an integer constant expression");
