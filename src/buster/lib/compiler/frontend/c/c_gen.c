@@ -32313,11 +32313,6 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_array(CIntegerIrBuilder* bu
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    return start + 1 == end && c_ir_sizeof_token_is_unmapped_array(builder, start, false);
-}
-
 // An incomplete `extern T a[];` never maps to an IR array type, and the strict
 // operand walk refuses it bare so that sizeof can diagnose the unsized array.
 // Used as a value -- a conditional arm or an additive operand -- it is only
