@@ -3093,6 +3093,9 @@ keep two component values; addressed scalar literals request static objects.
 Identifier and callable builtin identities come from BOUND facts and semantic
 recipes. Integer builtin operands remain child node tasks even when the call
 has an integer fact, preserving nested cast and sizeof constructor effects.
+The retired token constant identifier fallback and oldest-name index have no
+lowering or test facade. The scope regression checks static initializer images
+from a finished semantic unit, including a nearer enum shadow among 256 names.
 Static compound objects suspend on retained initializer-plan leaves and are
 published only when their task completes. The scheduler releases any active
 object context arenas on failure, restoring nested guards from the inside out.

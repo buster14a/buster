@@ -59295,183 +59295,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_range_designator_runtime(Uni
     return result;
 }
 
+// Constant lowering consumes semantic declaration-point bindings. This
+// source keeps a large enum and a nearer shadow, then checks the actual
+// static images rather than a retired token fallback's name-chain index.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_UNUSED(arguments);
-    TemporalArena temporary = scratch_begin(0, 0);
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
     String8 source_parts[600] = {0};
     u32 source_part_count = 0;
-    source_parts[source_part_count++] = S8("void constant_lookup(void) { enum { shadow = 1, ");
+    source_parts[source_part_count++] = S8("enum { shadow = 1, ");
     for (u32 index = 0; index < 256; index += 1)
     {
         source_parts[source_part_count++] = string_format(arena, S8("lookup_{u32} = {u32}"), index, index);
-        if (index + 1 < 256)
-        {
-            source_parts[source_part_count++] = S8(", ");
-        }
+        if (index + 1 < 256) source_parts[source_part_count++] = S8(", ");
     }
-    source_parts[source_part_count++] = S8(" }; { enum { shadow = 2 }; (void)shadow; } }\n");
+    source_parts[source_part_count++] = S8(" }; static int outer_value = shadow;"
+        "void constant_lookup(void) { enum { shadow = 2 }; static int inner_value = shadow; (void)inner_value; }\n");
     String8 source = c_test_concatenate(arena, source_parts, source_part_count);
-    CPreprocessResult preprocess = c_preprocess(arena, source,
-                                                (CPreprocessOptions){
-                                                    .target = target_native,
-                                                    .data_layout = target_data_layout(target_native),
-                                                });
-    CParseResult parse = c_parse(arena, preprocess);
-    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, parse.name_lookup_buckets != 0 && parse.entity_lookup_bucket_count != 0);
-
-    // The production array stores each entity id plus one so an unresolved
-    // token is zero; the oracle builds it in the same encoding.
-    u32* token_entities_plus_one = arena_allocate_zeroed(arena, u32, preprocess.token_count);
-
-    CEntityId oldest_shadow = C_ENTITY_ID_INVALID;
-    u32 shadow_count = 0;
-    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){
+        .target = target_native, .data_layout = target_data_layout(target_native),
+    });
+    CAnalysisResult parse = c_parse_for_lowering(arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(arena, S8("constant-entity-scope.c"), preprocess, parse, target_native);
+    if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && parse.analysis_complete && !parse.diagnostic_count &&
+        lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified))
     {
-        CEntity* entity = parse.entities + entity_index;
-        if (!string_equal(entity->name, S8("shadow")))
+        IrModule const* module = lowered.program->modules;
+        u32 checked = 0;
+        for (u32 index = 0; index < module->global_count; index += 1)
         {
-            continue;
-        }
-        if (oldest_shadow.value == C_ID_UNDERLYING_INVALID)
-        {
-            oldest_shadow = (CEntityId){.value = entity_index};
-        }
-        shadow_count += 1;
-    }
-    BUSTER_TEST(arguments, shadow_count == 2);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_index_equivalent(&parse, preprocess, token_entities_plus_one, (u32)preprocess.token_count));
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_index_lifetime(&parse, preprocess, token_entities_plus_one, (u32)preprocess.token_count));
-
-    // A forged nonzero token symbol must not turn an empty symbol bucket into
-    // an early invalid result. Validate the token spelling first, then keep
-    // the ascending compatibility scan authoritative for this malformed case.
-    CToken* malformed_symbol_tokens = arena_allocate(arena, CToken, preprocess.token_count);
-    memcpy(malformed_symbol_tokens, preprocess.tokens, sizeof(*malformed_symbol_tokens) * preprocess.token_count);
-    u32 shadow_token = UINT32_MAX;
-    u32 wrong_symbol = 0;
-    for (u32 token_index = 0; token_index < preprocess.token_count; token_index += 1)
-    {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
-        if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(spelling, S8("shadow")) && shadow_token == UINT32_MAX)
-        {
-            shadow_token = token_index;
-        }
-        if (preprocess.tokens[token_index].symbol && string_equal(spelling, S8("void")))
-        {
-            wrong_symbol = preprocess.tokens[token_index].symbol;
-        }
-    }
-    BUSTER_TEST(arguments, shadow_token != UINT32_MAX && wrong_symbol != 0);
-    if (shadow_token != UINT32_MAX && wrong_symbol != 0)
-    {
-        malformed_symbol_tokens[shadow_token].symbol = wrong_symbol;
-        CPreprocessResult malformed_symbol_preprocess = preprocess;
-        malformed_symbol_preprocess.tokens = malformed_symbol_tokens;
-        BUSTER_TEST(arguments,
-                    c_test_ir_constant_entity_at(&parse, malformed_symbol_preprocess, token_entities_plus_one, shadow_token).value == oldest_shadow.value);
-    }
-
-    bool saw_shadow_fallback = false;
-    for (u32 token_index = 0; token_index < preprocess.token_count; token_index += 1)
-    {
-        CToken token = preprocess.tokens[token_index];
-        if (token.kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        String8 name = c_token_spelling(preprocess.spelling_base, token);
-        CEntityId expected = C_ENTITY_ID_INVALID;
-        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
-        {
-            if (string_equal(parse.entities[entity_index].name, name))
+            IrGlobal const* global = module->globals + index;
+            IrSymbol const* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            bool outer = symbol && string_equal(symbol->name, S8("outer_value"));
+            bool inner = symbol && string_first_sequence(symbol->name, S8("inner_value")) != BUSTER_STRING_NO_MATCH;
+            if (outer || inner)
             {
-                expected = (CEntityId){.value = entity_index};
-                break;
+                checked += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == (outer ? 1u : 2u));
             }
         }
-        CEntityId actual = c_test_ir_constant_entity_at(&parse, preprocess, token_entities_plus_one, token_index);
-        BUSTER_TEST(arguments, actual.value == expected.value);
-        if (string_equal(name, S8("shadow")) && actual.value == oldest_shadow.value)
-        {
-            saw_shadow_fallback = true;
-        }
+        BUSTER_TEST(arguments, checked == 2);
     }
-    BUSTER_TEST(arguments, saw_shadow_fallback);
-
-    // A hand-built parse has no symbol table, so its name buckets use the
-    // spelling hash. Put two different names in the same one-slot bucket to
-    // exercise collision filtering independently of the real parse's dense
-    // symbol-id buckets.
-    String8 collision_spellings = S8("alpha beta");
-    CToken collision_tokens[] = {
-        {.offset = 0, .symbol = 0, .length = 5, .kind = C_TOKEN_IDENTIFIER},
-        {.offset = 6, .symbol = 0, .length = 4, .kind = C_TOKEN_IDENTIFIER},
-    };
-    CEntity collision_entities[] = {
-        {.name = S8("alpha"), .scope = {.value = 0}, .next_by_name = {.value = 1}},
-        {.name = S8("beta"), .scope = {.value = 0}, .next_by_name = C_ENTITY_ID_INVALID},
-    };
-    CScope collision_scopes[] = {{.parent = C_SCOPE_ID_INVALID}};
-    CEntityId collision_entity_buckets[] = {C_ENTITY_ID_INVALID};
-    CEntityId collision_name_buckets[] = {{.value = 1}};
-    u32 collision_token_entities_plus_one[] = {0, 0};
-    CPreprocessResult collision_preprocess = {
-        .tokens = collision_tokens,
-        .spelling_base = collision_spellings.pointer,
-        .token_count = BUSTER_ARRAY_LENGTH(collision_tokens),
-    };
-    CParseResult collision_parse = {
-        .entities = collision_entities,
-        .scopes = collision_scopes,
-        .entity_lookup_buckets = collision_entity_buckets,
-        .name_lookup_buckets = collision_name_buckets,
-        .entity_count = BUSTER_ARRAY_LENGTH(collision_entities),
-        .scope_count = BUSTER_ARRAY_LENGTH(collision_scopes),
-        .entity_lookup_bucket_count = 1,
-    };
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&collision_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&collision_parse, collision_preprocess, collision_token_entities_plus_one, 1).value == 1);
-
-    // Malformed hand-built chains must never dereference an out-of-range node
-    // or loop forever. In either case, discard the partial bucket answer and
-    // use the historical ascending entity scan.
-    CEntity malformed_bucket_entities[] = {
-        {.name = S8("alpha"), .next_by_name = {.value = 99}},
-        {.name = S8("beta"), .next_by_name = C_ENTITY_ID_INVALID},
-    };
-    CEntityId malformed_bucket_head[] = {{.value = 0}};
-    CParseResult malformed_bucket_parse = collision_parse;
-    malformed_bucket_parse.entities = malformed_bucket_entities;
-    malformed_bucket_parse.name_lookup_buckets = malformed_bucket_head;
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&malformed_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&malformed_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 1).value == 1);
-
-    CEntity cycle_bucket_entities[] = {
-        {.name = S8("alpha"), .next_by_name = {.value = 1}},
-        {.name = S8("beta"), .next_by_name = {.value = 0}},
-    };
-    CEntityId cycle_bucket_head[] = {{.value = 0}};
-    CParseResult cycle_bucket_parse = collision_parse;
-    cycle_bucket_parse.entities = cycle_bucket_entities;
-    cycle_bucket_parse.name_lookup_buckets = cycle_bucket_head;
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&cycle_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&cycle_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 1).value == 1);
-
-    CEntity unordered_bucket_entities[] = {
-        {.name = S8("alpha"), .next_by_name = {.value = 1}},
-        {.name = S8("alpha"), .next_by_name = C_ENTITY_ID_INVALID},
-    };
-    CEntityId unordered_bucket_head[] = {{.value = 0}};
-    CParseResult unordered_bucket_parse = collision_parse;
-    unordered_bucket_parse.entities = unordered_bucket_entities;
-    unordered_bucket_parse.entity_count = BUSTER_ARRAY_LENGTH(unordered_bucket_entities);
-    unordered_bucket_parse.name_lookup_buckets = unordered_bucket_head;
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&unordered_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
     c_test_scratch_end(temporary);
     return result;
 }
