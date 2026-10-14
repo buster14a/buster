@@ -18643,19 +18643,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
     String8 static_compound_literal_refused_tokens[] = {
         S8("static_compound_literal_call("),
         S8("static_compound_literal_call("),
-        S8("z;"),
+        S8("(struct StaticCompoundLiteral)"),
         S8("&(int){7}"),
         S8("[3]"),
-        S8("[1];"),
+        S8("(int[])"),
     };
     String8 static_compound_literal_refused_messages[] = {
         S8("C IR lowering: cannot fold the call to 'static_compound_literal_call' in a static initializer"),
         S8("C IR lowering: cannot fold the call to 'static_compound_literal_call' in a static initializer"),
-        S8("C IR lowering: a compound literal of type"),
+        S8("type 'StaticCompoundLiteral' has no member named '(' (2 fields available)"),
         S8("in function 'static_compound_literal_local': could not lower static initializer for local 'local': a compound literal inside a function "
            "body has automatic storage duration, so its address is not a constant expression"),
         S8("C IR lowering: a subscript after a compound literal in a static initializer must be a constant index within the literal"),
-        S8("C IR lowering: a subscripted compound literal without an '&' is a value rather than an address"),
+        S8("cannot convert from 'int' to 'int *'"),
     };
     for (u32 refusal_index = 0; refusal_index < BUSTER_ARRAY_LENGTH(static_compound_literal_refused_lines); refusal_index += 1)
     {
@@ -18672,6 +18672,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         BUSTER_TEST(arguments, refused_offset < refused_source.length);
         BUSTER_TEST(arguments, found);
     }
+    BUSTER_TEST(arguments, !static_compound_literal_ir.program && !static_compound_literal_ir.canonical_ir_certified);
+    // A full semantic refusal prevents all canonical publication. Prepare
+    // the accepted declarations separately so their object and conversion
+    // checks still execute under the required lowering authority.
+    String8 accepted_source = {0};
+    for (u32 line = 0; line < BUSTER_ARRAY_LENGTH(static_compound_literal_lines); line += 1)
+    {
+        bool refused = false;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(static_compound_literal_refused_lines); index += 1)
+        {
+            refused |= line + 1 == static_compound_literal_refused_lines[index];
+        }
+        if (!refused)
+        {
+            accepted_source = string_format(static_compound_literal_temporary.arena, S8("{S8}{S8}\n"), accepted_source,
+                                            static_compound_literal_lines[line]);
+        }
+    }
+    CPreprocessResult accepted_tokens = c_preprocess(static_compound_literal_temporary.arena, accepted_source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult accepted_analysis = c_parse_for_lowering(static_compound_literal_temporary.arena, accepted_tokens);
+    static_compound_literal_ir = c_lower_to_ir(static_compound_literal_temporary.arena, S8("static-compound-accepted.c"),
+                                              accepted_tokens, accepted_analysis, target_native);
+    BUSTER_TEST(arguments, !accepted_tokens.diagnostic_count && accepted_analysis.analysis_complete && !accepted_analysis.diagnostic_count);
+    BUSTER_TEST(arguments, !static_compound_literal_ir.diagnostic_count && static_compound_literal_ir.program &&
+                           static_compound_literal_ir.canonical_ir_certified);
     // The address form synthesizes an object and holds its symbol; the value
     // form folds the literal's bytes into the object being initialized and
     // must synthesize nothing.  Six literals are addressed above -- the
@@ -51426,14 +51452,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                                 .dialect = C_PREPROCESS_DIALECT_C23,
                                                             });
             CParseResult invalid_parse = c_parse(invalid_temporary.arena, invalid_tokens);
-            CIRLowerResult invalid_ir = c_lower_to_ir(invalid_temporary.arena, S8("invalid-constexpr.c"), invalid_tokens, c_parse_for_lowering(invalid_temporary.arena, invalid_tokens), target_native);
+            CAnalysisResult invalid_analysis = c_parse_for_lowering(invalid_temporary.arena, invalid_tokens);
+            CIRLowerResult invalid_ir = c_lower_to_ir(invalid_temporary.arena, S8("invalid-constexpr.c"), invalid_tokens, invalid_analysis, target_native);
             BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 0);
+            // The full semantic authority already rejects both sources with
+            // this diagnostic, as the frozen CLI and C23 native oracle do.
+            BUSTER_TEST(arguments, invalid_analysis.analysis_complete && invalid_analysis.diagnostic_count == 1);
             BUSTER_TEST(arguments, invalid_ir.diagnostic_count == 1);
             if (invalid_ir.diagnostic_count == 1)
             {
-                BUSTER_TEST(arguments, invalid_ir.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CONSTEXPR);
+                BUSTER_TEST(arguments, invalid_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                BUSTER_STRING_TEST(arguments, invalid_ir.diagnostics[0].message,
+                    S8("C IR lowering: constexpr initializer is not a permitted constant expression"));
             }
+            BUSTER_TEST(arguments, !invalid_ir.program && !invalid_ir.canonical_ir_certified);
             c_test_scratch_end(invalid_temporary);
         }
     }
@@ -53057,8 +53090,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
                 {
                     BUSTER_TEST(arguments, parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_INTEGER_LITERAL);
                 }
-                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
-                BUSTER_TEST(arguments, lowered.program == 0);
+                // The required lowering authority carries the same basic
+                // spelling refusal as the independent model parser.
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+                if (parse.diagnostic_count == 1 && lowered.diagnostic_count == 1)
+                {
+                    CDiagnostic model = parse.diagnostics[0];
+                    CDiagnostic prepared = lowered.diagnostics[0];
+                    BUSTER_TEST(arguments, model.kind == prepared.kind && model.severity == prepared.severity &&
+                                           model.location.line == prepared.location.line && model.location.column == prepared.location.column &&
+                                           model.location.offset == prepared.location.offset);
+                    BUSTER_STRING_TEST(arguments, model.message, prepared.message);
+                }
+                BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
             }
             else
             {
@@ -68133,9 +68177,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
                     BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
                     BUSTER_TEST(arguments, diagnostic.location.line == 1 && diagnostic.location.column == rejections[index].column &&
                                            diagnostic.location.offset == rejections[index].column - 1);
-                    BUSTER_STRING_TEST(arguments, diagnostic.message, string_format(temporary.arena,
-                        S8("in function 'reject': switch controlling type '{S8}' is unsupported; integer switch dispatch supports at most 64 bits"),
-                        rejections[index].type));
+                    // The full semantic refusal precedes the lowering-only
+                    // wide-dispatch check, preserving the frozen CLI report.
+                    BUSTER_STRING_TEST(arguments, diagnostic.message,
+                        S8("in function 'reject': unsupported C function-body statement or expression near 'value'"));
                 }
             }
             c_test_scratch_end(temporary);
