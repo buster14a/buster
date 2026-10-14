@@ -2068,8 +2068,8 @@ struct CParserResult
     // Share the primitive and pointer rows the file-scope initializer and
     // function-body queries mint (CTypeInterning in c_internal.h), which the
     // tree's answers for casts and `&` need. The driver asks for it with the
-    // tree (-fc-ast-pilot); without it every row is appended, as the tree-free
-    // path (-fno-c-ast-pilot) always has.
+    // tree. The explicit token-reference semantic oracle appends its rows
+    // independently; ordinary compiler invocations always prepare the tree.
     bool type_interning;
     // Nothing will lower this unit (the driver's -fsyntax-only), so no
     // consumer reads the bytes of a string literal: the literal memo records

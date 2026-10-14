@@ -743,40 +743,23 @@ disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
 
-`-fc-ast-pilot[=implicit|hybrid|explicit]` (default `implicit` since the
-[owner decision of 2026-10-13](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845);
-the bare flag is `implicit`) builds the [implicit postorder syntax
-tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
-`c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
-unit's declaration records then come from the tree
-([`c_parse_ast_from_tree`](frontend/ast.md#declaration-split-from-the-tree)),
-which hands any unit that `c_parse_ast` would diagnose or read differently
-back to `c_parse_ast`. Semantic analysis answers function-body
-expression-type queries from the tree where it can (the
-[tree expression typer](frontend/ast.md#tree-expression-typer)), its body
-binder follows each function body's
-[statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
-answers its root-conditional splits from it
-([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
-stage reads it. Only with the tree does analysis share the primitive and
-pointer type rows those queries mint
-([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical to the tree-free path's. A builder that
-cannot reserve its storage fails the unit with the parse error class; a unit
-whose tree the builder rejects on syntax compiles without a tree, so it reports what
-`-fno-c-ast-pilot` reports; `-v` counts it in a `C_AST_REJECTED` row. It does nothing for `-E`, assembly inputs or the other
-languages. Any other layout value is an argument error
-(`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
+`-fc-ast-pilot[=implicit|hybrid|explicit]` selects the retained C syntax
+layout; the bare flag and the default are `implicit`. Every ordinary C
+compile builds the [postorder tree](frontend/ast.md#driver-pilot-hook) after
+preprocessing, inside the parse phase. Parsing and semantics retain the
+completed node ownership and facts that lowering consumes. `-fsyntax-only`
+also prepares syntax, while avoiding facts and decoded literal bytes needed
+only by lowering. `-E` and assembly inputs do not reach this C parse hook.
+
+The production `-fno-c-ast-pilot` switch is retired and rejected as an
+unsupported option in any ordering. Independent model/reference parser APIs
+remain available to tests and direct callers; a model-only result cannot
+lower. A builder reservation failure is a parse error, and a syntax rejection
+retains the builder diagnostics while semantic checking preserves diagnostic
+precedence. Any unknown layout is an argument error
+(`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation retains the
 `C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
-`C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
-Except under `-fsyntax-only`, the tree also retains semantic analysis's
-per-node facts for lowering
-([retained facts](frontend/ast.md#retained-facts)). `-fno-c-ast-pilot` selects
-the tree-free path: analysis and lowering answer every question from tokens,
-as they did before the switch, and no facts are retained. It is the reference
-arm for differentials and bisection, and
-[#4058](https://github.com/buster14a/buster/issues/4058) removes it once
-lowering reads only the tree. The last of the two flags wins.
+`C_AST_LOWER` and `C_AST_FACTS` telemetry rows.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`

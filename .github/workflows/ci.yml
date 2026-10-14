@@ -154,6 +154,12 @@ jobs:
           # tools/c_vendor_builtin.*.in otherwise pass every hosted check (#3392).
           python3 -B tools/generate_c_vendor_builtins.py --check
           python3 -B tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2 > /dev/null
+      - name: Enforce C lowering source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/check_c_lowering_provenance_test.py -v
+          python3 -B tools/check_c_lowering_provenance.py
       - name: Check bounded string sequence search work
         shell: bash
         run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
@@ -328,6 +334,12 @@ jobs:
           # tools/c_vendor_builtin.*.in otherwise pass every hosted check (#3392).
           python3 -B tools/generate_c_vendor_builtins.py --check
           python3 -B tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2 > /dev/null
+      - name: Enforce C lowering source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/check_c_lowering_provenance_test.py -v
+          python3 -B tools/check_c_lowering_provenance.py
       - name: Check bounded string sequence search work
         shell: bash
         run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"

@@ -2119,9 +2119,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
-        // The syntax tree is built ahead of analysis on every compile
-        // (GitHub #3102); -fno-c-ast-pilot is the tree-free reference path
-        // until #4058 deletes it.
+        // Every C unit prepares the retained syntax before analysis (#3102).
         .c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
         // Source debug information is opt-in; ordinary artifact generation
         // should not construct debug models or pay their output cost.
@@ -2961,9 +2959,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
             continue;
         }
-        if (string_equal(argument, S8("-fc-ast-pilot")) || string_equal(argument, S8("-fno-c-ast-pilot")))
+        if (string_equal(argument, S8("-fc-ast-pilot")))
         {
-            invocation.c_ast_pilot = string_equal(argument, S8("-fc-ast-pilot")) ? COMPILER_DRIVER_C_AST_PILOT_IMPLICIT : COMPILER_DRIVER_C_AST_PILOT_OFF;
+            invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fc-ast-pilot="));
@@ -7538,10 +7536,9 @@ String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot)
     case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
         name = S8("explicit");
         break;
-    case COMPILER_DRIVER_C_AST_PILOT_OFF:
     case COMPILER_DRIVER_C_AST_PILOT_COUNT:
     default:
-        name = S8("off");
+        name = S8("unknown");
         break;
     }
     return name;
@@ -7558,7 +7555,6 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
     case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
         layout = C_AST_LAYOUT_EXPLICIT;
         break;
-    case COMPILER_DRIVER_C_AST_PILOT_OFF:
     case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
     case COMPILER_DRIVER_C_AST_PILOT_COUNT:
     default:
@@ -9244,13 +9240,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     bool pilot_tree_built = false;
     CDiagnostic* pilot_tree_diagnostics = 0;
     u32 pilot_tree_diagnostic_count = 0;
-    if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
-        // A unit the builder rejects on syntax passes no tree, so lowering
-        // builds its own and reports the same rejection as under
-        // -fno-c-ast-pilot (#3102 step 3: the tree is mandatory); analysis
-        // diagnoses what it can first.
-        // A builder that could not reserve its storage still fails the unit.
+        // Syntax failures retain their diagnostics while the independent
+        // semantic parser preserves its established diagnostic precedence.
+        // A missing completed tree never reaches lowering. Reservation
+        // failures fail immediately with the parse error class.
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
         bool exhausted = !tree.complete && tree.diagnostic_count && tree.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
         if (exhausted)
@@ -9274,7 +9268,6 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // back to c_parse_ast's token walker for any unit the walker would read
     // differently or diagnose, so the records are the walker's either way.
     CParserResult syntax = pilot_tree_built ? c_parse_ast_from_tree(arena, preprocess, &pilot_tree, &result.c_ast.split) : c_parse_ast_reference(arena, preprocess);
-    syntax.reference_tokens = invocation.c_ast_pilot == COMPILER_DRIVER_C_AST_PILOT_OFF && invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY;
     syntax.ast_diagnostics = pilot_tree_diagnostics;
     syntax.ast_diagnostic_count = pilot_tree_diagnostic_count;
     if (pilot_tree_built)

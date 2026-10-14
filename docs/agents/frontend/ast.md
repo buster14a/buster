@@ -12,31 +12,20 @@ included. **Status: default since 2026-10-13.** The
 [owner decision](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845)
 that put the switch ahead of steps 3 and 4 of the
 [lowering direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034).
-`-fno-c-ast-pilot` keeps the tree-free path as a reference arm until
-[#4058](https://github.com/buster14a/buster/issues/4058) deletes it. Lowering
-has the tree on that path as well: it builds one itself when the caller passes
-none ([retained facts](#retained-facts-for-lowering)). Five consumers read the
-tree:
-- the [declaration split](#declaration-split-from-the-tree) publishes
-  `c_parse_ast`'s top-level records from its declaration nodes;
-- the [tree expression typer](#tree-expression-typer) answers function-body
-  and file-scope initializer expression-type queries during semantic analysis;
-- the [statement plan](#statement-plan-from-the-tree) gives the body binder
-  each function body's statement boundaries and block declaration ends;
-- [lowering](#lowering-from-the-tree) answers its root-conditional splits from
-  the conditional nodes;
-- lowering's [statement walker](#statements-from-nodes-in-lowering) reads
-  every function body's statements from their statement nodes, by default
-  and under the pilot alike: lowering builds the tree itself when the driver
-  passes none.
+Every ordinary C compile prepares the tree before semantic analysis and
+retains the completed facts needed by lowering. The production
+`-fno-c-ast-pilot` switch is retired; selecting it is an unsupported-option
+error. `-fc-ast-pilot=implicit|hybrid|explicit` remains a layout selector.
+The explicit `c_parse_ast_reference` and model-only `c_parse` APIs preserve
+independent parser and semantic controls. They do not provide a lowering
+fallback: direct callers use `c_parse_for_lowering`, and lowering refuses an
+unvalidated model or missing completed tree/facts.
 
-With the tree, analysis also retains per-node semantic facts (types,
-bindings, bit-field widths) for lowering ([retained facts](#retained-facts)),
-which no lowering consumer reads yet. Otherwise `c_analyze_semantics_only` and
-`c_lower_to_ir_with_options` still rediscover syntax from token ranges, as described in the
-[foundations guide](foundations.md). The consumer map below lists which
-walkers this tree is meant to retire, and what has to be shown before any of
-them move.
+The declaration split, semantic expression typer and statement plan consume
+this syntax during analysis. Lowering reads completed nodes, operands,
+declaration and initializer ownership, selections and numeric facts. Tokens
+remain available to preprocessing and semantics; lowering receives source
+spelling and diagnostic sites through `CSourceAnchor`.
 
 ## Representation
 
@@ -554,34 +543,23 @@ The tree accepts two attribute placements that need node slots of their own:
 
 ## Driver pilot hook
 
-`ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` (see the
-[driver guide](../driver.md)) is on by default with the implicit layout;
-`-fno-c-ast-pilot` turns it off. When on, the C compile path
-calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
-phase boundary, so the build's time is part of `parse_ns` and of the `parse`
-phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree's
-storage record lives in the unit's arena and its columns in their own arenas,
-which the unit releases when it ends. The driver then takes the unit's
-declaration records from `c_parse_ast_from_tree` in place of `c_parse_ast`
-([declaration split](#declaration-split-from-the-tree)), and hands the tree to
-semantic analysis in `CParserResult.ast`, where the
-[tree expression typer](#tree-expression-typer) and the body binder's
-[statement plan](#statement-plan-from-the-tree) read it, and to lowering in
-`CIRLowerOptions.syntax_tree` ([lowering from the tree](#lowering-from-the-tree)).
-With it the driver sets `CParserResult.type_interning`, which the typer's
-answers for casts and `&` need ([interned rows](#interned-rows)). The object,
-every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
-given one either), so the builder creates and retires its own. A builder that
-cannot reserve its storage fails the unit with the parse error class and its
-diagnostic. A build the builder rejects on syntax passes no tree: parsing and
-analysis run as under `-fno-c-ast-pilot`, so their diagnostics come first, and
-the driver counts the unit in `CompilerDriverCAstPilotResult.rejections`. A
-unit analysis accepts then fails in lowering, which builds the tree itself and
-reports the builder's diagnostic: the tree is mandatory since step 3
-([#4059](https://github.com/buster14a/buster/issues/4059)). On the corpus at
-the switch, every rejected unit was invalid input that also fails without the
-tree (missing `-std=c23` or `-D` options, deliberate syntax errors).
-`-E` and assembly inputs never reach the hook.
+Every ordinary C compile builds its retained tree inside the parse phase,
+after preprocessing. `ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` selects
+the layout; the bare flag and an invocation with no flag use `implicit`.
+`-fno-c-ast-pilot` is retired and rejected. `-E` and assembly inputs never
+reach the hook.
+
+The driver lends the completed tree to `c_parse_ast_from_tree` and semantic
+analysis, creates facts for units that will lower, and retires the private
+owners after all consumers finish. A syntax rejection retains the builder's
+diagnostics while the independent semantic parser preserves existing
+precedence. Reservation failure is an immediate parse error. No incomplete
+syntax reaches lowering, and lowering never rebuilds a missing tree.
+
+The model-only `c_parse` and explicit `c_parse_ast_reference` oracle APIs
+remain separate controls for parser/semantic differentials. Production
+invocations always prepare syntax, including `-fsyntax-only`; that action
+avoids retained lowering facts and decoded literal bytes.
 
 Under `-v` the driver prints these rows with the other verbose counters, plus
 `C_AST_REJECTED units=<n>` when the builder refused a unit:
@@ -2424,7 +2402,7 @@ No code from this step lands before step 1. Step 1
 ([retained facts](#retained-facts)) retains F1's types, the bindings and
 bit-field widths per node, under `-fc-ast-pilot` (the default since
 2026-10-13). Beyond that:
-- under `-fno-c-ast-pilot` lowering builds its own tree
+- direct lowering receives a completed tree from `c_parse_for_lowering`
   (`c_lower_to_ir_tree_run`), but the facts are not retained;
 - semantic analysis's initializer, declaration and `offsetof` answers are
   not published to lowering yet; F3's existing queried roots now have a
@@ -3302,7 +3280,7 @@ the tree's build cost. Hosted measurements are diagnostic. Acceptance needs the 
 **Since the default switch** (2026-10-13), the arms are renamed, not
 re-budgeted. The sections below were measured when the tree-free path was the
 default, so their "default path" and "D against A" mean the path that is now
-`-fno-c-ast-pilot`; they stay as recorded. Under the
+the historical tree-free driver path; they stay as recorded. Under the
 [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034),
 lowering slices carry no per-slice budget. Work after the switch reports
 correctness and counters, the opt-out is the no-added-work reference arm
@@ -6105,3 +6083,22 @@ layouts. VLA operand evaluation hands the same node to call preparation and
 expression lowering. The previous prefix/subscript token walk, type-name probe,
 statement-tail scans and core fallback classifier are removed. The legacy
 whole SIZEOF callback and its constant-parser callers are also removed.
+
+## Lowering provenance boundary
+
+`CSourceAnchor` in `c_source_internal.h` contains a resolved byte offset and
+length. Lowering can obtain the spelling, mapped source site or location
+through `c_source_anchor_*`; oversized spelling lengths retain their exact
+value. The API exposes no token kind, punctuator or symbol classification.
+Owned AST token indices may select source anchors, but source ranges never
+recover a structural node.
+
+`python3 -B tools/check_c_lowering_provenance.py` checks `c_gen.c` and every
+implementation it includes. The required CI lint and queue-lint jobs run that
+guard and `check_c_lowering_provenance_test.py`. The regression plants direct,
+aliased and included-unit token grammar reads and requires command failure;
+comments and string literals remain prose. The guard rejects token types and
+getters, raw preprocessing token columns, range-to-node recovery and parser
+grammar helpers. Its named model-helper allowlist consists only of audited
+target layouts and finished semantic tables. It has no test-build exception
+inside lowering.
