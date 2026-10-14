@@ -1715,10 +1715,10 @@ verdict), the token scan it fell back to (`c_ir_root_conditional_scan`) and the
 ## Expression lowering from the tree
 
 **Status: (a) to (c), CALL record identity and control group identity are
-implemented. The statement-expression owner takes
-its node directly, and the `EXPRESSION` owner retains its current subtree
-through root splits and continuations. The remaining owner frames still take their
-subtree's token range, and the step-4 callers read operand extents through
+implemented. Statement-expression, place, `EXPRESSION`, evaluator-core,
+condition, logical-value and conditional-value owners retain their exact nodes
+through their child handoffs and continuations. The type and initializer
+owners still take their subtree's token range, and the step-4 callers read operand extents through
 marked temporary adapters.** This is
 step 3 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
 ([#4059](https://github.com/buster14a/buster/issues/4059)). It lands as a
@@ -2135,13 +2135,24 @@ byte.
   `!` over a chain, reads the `__builtin_expect` hint, and splits the
   `&&`/`||` spine from the node. A spine is split once, into an array of its
   left-nested operators (`CIrConditionTask.spine`), so a long chain costs its
-  length. A condition whose root is an assignment of a logical value,
+  length. Each ordinary task retains its exact node; a spine suffix has no
+  single subtree and retains its spine/cursor instead. Its next left operand
+  is the right child of the preceding deeper operator, and its final right
+  operand is the right child of the current operator. Negation and hint
+  unwrapping retain their exact child, with the original range kept for
+  prepared-group reuse and source provenance. A condition whose root is an assignment of a logical value,
   `if (x = a || b)`, is a leaf: the token path split it at the `||` and
   lowered `x = a` as its left operand
   ([#4162](https://github.com/buster14a/buster/issues/4162),
   `c_test_condition_assignment_of_logical`).
-- **Logical and conditional values** ask `c_ir_range_has_root_assignment` and
-  the node's `ANY_ASSIGNMENT` bit.
+- **Logical and conditional values** ask their retained node's root-assignment
+  and `ANY_ASSIGNMENT` facts. Conditional type tasks retain the actual
+  conditional node and hand its true/false child nodes over in the same
+  pre-emission query order. Omitted middles capture their first operand once.
+- **The evaluator core** retains its original node and a separate preparation
+  node. Leading EXTENSION nodes are stripped for preparation alone; control
+  preparation, call preparation and the original-node walk keep their order.
+  The two prepasses and their filters take that preparation node directly.
 - **Places.** The owner keeps its exact subtree. `c_ir_place_node_begin`
   reads prefix dereferences, groups, casts and prepared-call bases from the
   node kinds; `c_ir_place_path` collects member and INDEX suffixes into a
@@ -2153,8 +2164,8 @@ byte.
   takes the preceding access token as provenance. The member-chain token
   probe and place/VLA delimiter walks are deleted. Type-name queries retain
   their marked step-4 boundary and their original row-creation order.
-- **Prepass filters.** `c_ir_range_may_prepare_control` and
-  `c_ir_range_may_prepare_calls` read the node's `ANY` and `HOLDS_CALL` bits.
+- **Prepass filters.** `c_ir_node_may_prepare_control` and
+  `c_ir_node_may_prepare_calls` read the node's `ANY` and `HOLDS_CALL` bits.
   The per-body token prefix table (`c_ir_token_prefix_build`) is deleted.
 - **Deleted token walkers.** `c_ir_group_fact` and its classifying pass,
   `c_ir_group_is_logical_chain`, `c_ir_has_root_assignment`,

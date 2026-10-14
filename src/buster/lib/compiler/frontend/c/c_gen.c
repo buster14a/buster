@@ -43,8 +43,8 @@
 // (c_ir_tree_control_groups, c_ir_tree_calls_discover; GitHub #3102 step 3),
 // and the core then evaluates the node in postorder
 // (c_ir_lower_expression_core_walk). The EXPRESSION, condition, logical- and
-// conditional-value frames split a range at its node's root operator
-// (c_ir_root_first_token, c_ir_range_has_root_assignment, c_ir_root_conditional,
+// conditional-value frames retain their exact root and split its operands
+// (c_ir_root_first_node, c_ir_node_has_root_assignment, c_ir_node_root_conditional,
 // from the node and its CIrHoistFact byte), and prepared calls split their
 // arguments from their CALL node (c_ir_call_arguments_counted). Prepared
 // calls are indexed by that node (c_ir_prepared_call_find); distinct calls
@@ -69,7 +69,7 @@
 // across a typeof replay; source tokens remain provenance.
 // The range's node and its CIrHoistFact bits let
 // c_ir_lower_expression_core_step skip a control
-// prepass (c_ir_range_may_prepare_control) or a call prepass
+// prepass (c_ir_node_may_prepare_control) or a call prepass
 // (c_ir_range_may_prepare_calls) that cannot find anything.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
@@ -4879,12 +4879,13 @@ BUSTER_C_INTERNAL u32 c_ir_tree_range_node(CIntegerIrBuilder* builder, u32 start
 // `&&`, `||` or an assignment operator, which the range's node records as
 // CIrHoistFact's ANY bits; it fails when no node spans the range or the
 // lowering machine has no frame left for it.
-BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_node_may_prepare_control(CIntegerIrBuilder* builder, u32 node)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
-    u32 node = !machine->failed && machine->frame_count < machine->frame_capacity ? c_ir_tree_range_node(builder, start, end) : C_AST_NODE_INVALID;
+    node = !machine->failed && machine->frame_count < machine->frame_capacity ? node : C_AST_NODE_INVALID;
     return node == C_AST_NODE_INVALID || (builder->syntax_hoist[node] & C_IR_HOIST_ANY_BITS) != 0;
 }
+
 
 // Whether c_ir_prepare_calls_step over [start, end) can do more than succeed
 // having prepared nothing. A nested run, under preparing_calls, finishes at
@@ -4892,7 +4893,7 @@ BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control(CIntegerIrBuilder* builder
 // CIrHoistFact's HOLDS_CALL, and it fails when no node spans the range or its
 // scratch reservation does not fit; the frame push fails only when the machine
 // has no frame left.
-BUSTER_C_INTERNAL bool c_ir_range_may_prepare_calls(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_node_may_prepare_calls(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     bool result = true;
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -4904,7 +4905,6 @@ BUSTER_C_INTERNAL bool c_ir_range_may_prepare_calls(CIntegerIrBuilder* builder, 
         }
         else
         {
-            u32 node = c_ir_tree_range_node(builder, start, end);
             u64 position = builder->temporary_arena->position;
             result = node == C_AST_NODE_INVALID || (builder->syntax_hoist[node] & C_IR_HOIST_HOLDS_CALL) ||
                      !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), (u64)end - start + 1,
@@ -4913,6 +4913,7 @@ BUSTER_C_INTERNAL bool c_ir_range_may_prepare_calls(CIntegerIrBuilder* builder, 
     }
     return result;
 }
+
 
 typedef enum CIrGroupScan
 {
@@ -18767,6 +18768,7 @@ struct CIrLowerFrame
         {
             u32 start;
             u32 end;
+            u32 node_plus_one;
             u32 question;
             u32 colon;
             IrBlockId block;
@@ -18802,6 +18804,9 @@ struct CIrLowerFrame
             CIrExpressionCoreState* state;
             u32 start;
             u32 end;
+            u32 node_plus_one;
+            u32 preparation_node_plus_one;
+            u32 preparation_start;
         } expression_core;
         struct
         {
@@ -18813,6 +18818,7 @@ struct CIrLowerFrame
             u32 visited_count;
             u32 start;
             u32 end;
+            u32 node_plus_one;
             u32 count;
             u32 cursor;
             u32 expression_index;
@@ -18822,6 +18828,7 @@ struct CIrLowerFrame
             u32* emission_order;
             u32 start;
             u32 end;
+            u32 node_plus_one;
             u32 emission_count;
             u32 emission_index;
             u32 first_new;
@@ -18843,6 +18850,7 @@ struct CIrLowerFrame
             IrSourceRange source;
             u32 start;
             u32 end;
+            u32 node_plus_one;
         } logical;
         struct
         {
@@ -18854,6 +18862,7 @@ struct CIrLowerFrame
             IrSourceRange source;
             u32 start;
             u32 end;
+            u32 node_plus_one;
             u32 task_count;
             u32 task_capacity;
         } condition;
@@ -18932,6 +18941,7 @@ struct CIrLowerFrame
             CConditionalOperator operation;
             u32 start;
             u32 end;
+            u32 node_plus_one;
             bool simple;
             u8 reserved[3];
         } condition_leaf;
@@ -18952,8 +18962,10 @@ struct CIrLowerFrame
             IrSourceRange source;
             u32 start;
             u32 end;
+            u32 node_plus_one;
             u32 leaf_start;
             u32 leaf_end;
+            u32 leaf_node_plus_one;
             u32 task_count;
             u32 task_capacity;
         } conditional;
@@ -19039,13 +19051,65 @@ BUSTER_C_INTERNAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowe
     // owners still hand their expression operands over as token ranges.
     // Resolve those ranges at this boundary once. Tree-owned expressions
     // pass the exact node, including each comma and assignment continuation.
-    if (frame.kind == C_IR_LOWER_FRAME_EXPRESSION && !frame.as.expression.node_plus_one && frame.as.expression.argument_count <= 1)
+    u32* node_plus_one = 0;
+    u32 first = 0;
+    u32 end = 0;
+    switch (frame.kind)
     {
-        frame.as.expression.node_plus_one = c_ir_tree_range_node(builder, frame.as.expression.start, frame.as.expression.end) + 1;
+    case C_IR_LOWER_FRAME_EXPRESSION:
+        if (frame.as.expression.argument_count <= 1)
+        {
+            node_plus_one = &frame.as.expression.node_plus_one;
+        }
+        first = frame.as.expression.start;
+        end = frame.as.expression.end;
+        break;
+    case C_IR_LOWER_FRAME_EXPRESSION_CORE:
+        node_plus_one = &frame.as.expression_core.node_plus_one;
+        first = frame.as.expression_core.start;
+        end = frame.as.expression_core.end;
+        break;
+    case C_IR_LOWER_FRAME_LOGICAL_VALUE:
+        node_plus_one = &frame.as.logical.node_plus_one;
+        first = frame.as.logical.start;
+        end = frame.as.logical.end;
+        break;
+    case C_IR_LOWER_FRAME_CONDITION:
+        node_plus_one = &frame.as.condition.node_plus_one;
+        first = frame.as.condition.start;
+        end = frame.as.condition.end;
+        break;
+    case C_IR_LOWER_FRAME_CONDITION_LEAF:
+        node_plus_one = &frame.as.condition_leaf.node_plus_one;
+        first = frame.as.condition_leaf.start;
+        end = frame.as.condition_leaf.end;
+        break;
+    case C_IR_LOWER_FRAME_CONDITIONAL_VALUE:
+        node_plus_one = &frame.as.conditional.node_plus_one;
+        first = frame.as.conditional.start;
+        end = frame.as.conditional.end;
+        break;
+    case C_IR_LOWER_FRAME_PLACE:
+        node_plus_one = &frame.as.place.node_plus_one;
+        first = frame.as.place.start;
+        end = frame.as.place.end;
+        break;
+    case C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS:
+        node_plus_one = &frame.as.prepare_control.node_plus_one;
+        first = frame.as.prepare_control.start;
+        end = frame.as.prepare_control.end;
+        break;
+    case C_IR_LOWER_FRAME_PREPARE_CALLS:
+        node_plus_one = &frame.as.prepare_calls.node_plus_one;
+        first = frame.as.prepare_calls.start;
+        end = frame.as.prepare_calls.end;
+        break;
+    default:
+        break;
     }
-    if (frame.kind == C_IR_LOWER_FRAME_PLACE && !frame.as.place.node_plus_one)
+    if (node_plus_one && !*node_plus_one)
     {
-        frame.as.place.node_plus_one = c_ir_tree_range_node(builder, frame.as.place.start, frame.as.place.end) + 1;
+        *node_plus_one = c_ir_tree_range_node(builder, first, end) + 1;
     }
     frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
     machine->frames[machine->frame_count++] = frame;
@@ -19884,7 +19948,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_frame_push(CIntegerIrBuilder* builder, CD
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_expression_core_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_lower_expression_core_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_EXPRESSION_CORE,
@@ -19892,11 +19956,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_expression_core_frame_push(CIntegerIrBuilder* 
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_condition_leaf_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+
+
+BUSTER_C_INTERNAL bool c_ir_lower_condition_leaf_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_CONDITION_LEAF,
@@ -19904,11 +19971,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_leaf_frame_push(CIntegerIrBuilder* b
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_condition_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end, IrBlockId true_block,
+
+
+BUSTER_C_INTERNAL bool c_ir_lower_condition_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end, IrBlockId true_block,
                                                          IrBlockId false_block, IrSourceRange source)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
@@ -19920,11 +19990,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_frame_push(CIntegerIrBuilder* builde
                                                       .source = source,
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_logical_value_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+
+
+BUSTER_C_INTERNAL bool c_ir_lower_logical_value_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_LOGICAL_VALUE,
@@ -19932,11 +20005,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_logical_value_frame_push(CIntegerIrBuilder* bu
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_lower_conditional_value_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+
+
+BUSTER_C_INTERNAL bool c_ir_lower_conditional_value_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_CONDITIONAL_VALUE,
@@ -19944,9 +20020,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_conditional_value_frame_push(CIntegerIrBuilder
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
 }
+
+
 
 BUSTER_C_INTERNAL bool c_ir_lower_statement_expression_frame_push(CIntegerIrBuilder* builder, u32 node)
 {
@@ -19959,7 +20038,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_statement_expression_frame_push(CIntegerIrBuil
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_prepare_control_expressions_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_prepare_control_expressions_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS,
@@ -19967,11 +20046,14 @@ BUSTER_C_INTERNAL bool c_ir_prepare_control_expressions_frame_push(CIntegerIrBui
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
 }
 
-BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+
+
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                               .kind = C_IR_LOWER_FRAME_PREPARE_CALLS,
@@ -19979,8 +20061,15 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder,
                                                   {
                                                       .start = start,
                                                       .end = end,
+                                                      .node_plus_one = node + 1,
                                                   },
                                           });
+}
+
+
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_frame_push(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return c_ir_prepare_calls_node_frame_push(builder, C_AST_NODE_INVALID, start, end);
 }
 
 BUSTER_C_INTERNAL bool c_ir_lower_place_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
@@ -24858,7 +24947,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     bool failed = false;
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        u32 node = c_ir_tree_range_node(builder, frame->as.prepare_control.start, frame->as.prepare_control.end);
+        u32 node = frame->as.prepare_control.node_plus_one - 1;
         failed = node == C_AST_NODE_INVALID ||
                  !c_ir_tree_control_groups(builder, node, frame->as.prepare_control.start, &frame->as.prepare_control.groups,
                                            &frame->as.prepare_control.count, &frame->as.prepare_control.visited,
@@ -29511,7 +29600,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLo
             builder->failure_message = S8("C call preparation scratch reservation exceeded");
             builder->failure_token_index = frame->as.prepare_calls.start;
         }
-        u32 call_node = discover_fits ? c_ir_tree_range_node(builder, frame->as.prepare_calls.start, frame->as.prepare_calls.end) : C_AST_NODE_INVALID;
+        u32 call_node = discover_fits ? frame->as.prepare_calls.node_plus_one - 1 : C_AST_NODE_INVALID;
         if (discover_fits && call_node == C_AST_NODE_INVALID)
         {
             builder->failure_message = S8("no syntax tree node spans this expression");
@@ -37840,7 +37929,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_identifier(CIntegerIrBuilder* builder,
     }
     else if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        u32 call_node = c_ir_tree_range_node(builder, index, end);
+        u32 call_node = node;
         CIrPreparedCall* prepared = c_ir_prepared_call_find(builder, call_node);
         value = prepared && prepared->emitted ? prepared->result : IR_VALUE_ID_INVALID;
     }
@@ -38538,7 +38627,7 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_begin(CIntegerIrBuild
     frame->as.expression_core.state = state;
     frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     CIrCoreStatus status = C_IR_CORE_NEXT;
-    u32 root = c_ir_tree_range_node(builder, start, end);
+    u32 root = frame->as.expression_core.node_plus_one - 1;
     if (root == C_AST_NODE_INVALID)
     {
         builder->failure_message = S8("no syntax tree node spans this expression");
@@ -38822,11 +38911,20 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     // statement expression this way; preparing the unstripped outer range
     // can otherwise hoist the noreturn __assert_fail call out of its else
     // branch.
-    u32 preparation_start = start;
-    while (preparation_start < end && builder->preprocess.tokens[preparation_start].kind == C_TOKEN_IDENTIFIER &&
-           string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[preparation_start]), S8("__extension__")))
+    u32 preparation_start = frame->as.expression_core.preparation_start;
+    u32 preparation_node = frame->as.expression_core.preparation_node_plus_one - 1;
+    if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
-        preparation_start += 1;
+        preparation_start = start;
+        preparation_node = frame->as.expression_core.node_plus_one - 1;
+        while (preparation_node != C_AST_NODE_INVALID && builder->syntax_tree->kinds[preparation_node] == C_AST_EXTENSION &&
+               builder->syntax_spans->first[preparation_node] == preparation_start)
+        {
+            preparation_start += 1;
+            preparation_node = c_ast_child_at(builder->syntax_tree, preparation_node, 0);
+        }
+        frame->as.expression_core.preparation_start = preparation_start;
+        frame->as.expression_core.preparation_node_plus_one = preparation_node + 1;
     }
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
@@ -38841,7 +38939,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             // it, and the stage below reads the success it would have
             // finished with. On the self-host about 94% of the ranges hold
             // no control token (#3445).
-            if (!c_ir_range_may_prepare_control(builder, preparation_start, end))
+            if (!c_ir_node_may_prepare_control(builder, preparation_node))
             {
                 machine->child_result = (CIrLowerFrameResult){.value = IR_VALUE_ID_INVALID, .index = UINT32_MAX, .success = true};
             }
@@ -38855,7 +38953,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
                 // continuation on the machine stack and resumes through the
                 // loop unchanged.
                 u32 mark = machine->frame_count;
-                if (!c_ir_prepare_control_expressions_frame_push(builder, preparation_start, end))
+                if (!c_ir_prepare_control_expressions_node_frame_push(builder, preparation_node, preparation_start, end))
                 {
                     status = C_IR_CORE_FAILED;
                 }
@@ -38883,14 +38981,14 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             // The same for the call prepass: about 72% of the self-host's
             // ranges hold no call, and a nested range under preparing_calls
             // has nothing to discover at all.
-            if (!c_ir_range_may_prepare_calls(builder, preparation_start, end))
+            if (!c_ir_node_may_prepare_calls(builder, preparation_node, preparation_start, end))
             {
                 machine->child_result = (CIrLowerFrameResult){.value = IR_VALUE_ID_INVALID, .index = UINT32_MAX, .success = true};
             }
             else
             {
                 u32 mark = machine->frame_count;
-                if (!c_ir_prepare_calls_frame_push(builder, preparation_start, end))
+                if (!c_ir_prepare_calls_node_frame_push(builder, preparation_node, preparation_start, end))
                 {
                     status = C_IR_CORE_FAILED;
                 }
@@ -39249,6 +39347,7 @@ struct CIrConditionTask
 {
     u32 start;
     u32 end;
+    u32 node_plus_one;
     IrBlockId block;
     IrBlockId true_block;
     IrBlockId false_block;
@@ -39278,7 +39377,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT;
         if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_EXPRESSION,
-            .as.expression = {.start = frame->as.condition_leaf.start, .end = frame->as.condition_leaf.end},
+            .as.expression = {.start = frame->as.condition_leaf.start, .end = frame->as.condition_leaf.end, .node_plus_one = frame->as.condition_leaf.node_plus_one},
         }))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -39322,7 +39421,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     // the leaf's root assignment: the full expression machine splits those and
     // preserves the store before lowering the boolean tail (Lua's luaV_fastget
     // uses the comma shape).
-    u32 node = c_ir_tree_range_node(builder, start, end);
+    u32 node = frame->as.condition_leaf.node_plus_one - 1;
     bool unwrapped = node != C_AST_NODE_INVALID && !c_ir_core_wraps(builder, node, start);
     u32 assignment = unwrapped && c_ir_hoist_assignment_kind(builder->syntax_tree->kinds[node]) ? builder->syntax_tree->tokens[node] : end;
     CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
@@ -39346,6 +39445,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
                                                             {
                                                                 .start = start,
                                                                 .end = end,
+                                                                .node_plus_one = node + 1,
                                                             },
                                                     }))
             {
@@ -39356,7 +39456,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         // Run the core now, off the dispatch loop; a completion is the
         // CONDITION_LEAF_CORE resume above, inlined: a plain forward.
         u32 mark = machine->frame_count;
-        if (!c_ir_lower_expression_core_frame_push(builder, start, end))
+        if (!c_ir_lower_expression_core_node_frame_push(builder, node, start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -39408,6 +39508,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
                                                     {
                                                         .start = frame->as.condition_leaf.start,
                                                         .end = frame->as.condition_leaf.end,
+                                                        .node_plus_one = node + 1,
                                                     },
                                             }))
         {
@@ -39415,9 +39516,10 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         }
         return;
     }
+    frame->as.condition_leaf.node_plus_one = c_ast_child_at(builder->syntax_tree, node, 1) + 1;
     frame->as.condition_leaf.start = assignment + 1;
     frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE;
-    if (!c_ir_lower_place_frame_push(builder, start, assignment))
+    if (!c_ir_lower_place_node_frame_push(builder, place, start, assignment))
     {
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
     }
@@ -39486,6 +39588,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             frame->as.condition.tasks[0] = (CIrConditionTask){
                 .start = frame->as.condition.start,
                 .end = frame->as.condition.end,
+                .node_plus_one = frame->as.condition.node_plus_one,
                 .block = builder->current_block,
                 .true_block = frame->as.condition.true_block,
                 .false_block = frame->as.condition.false_block,
@@ -39509,11 +39612,17 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         CAst const* ast = builder->syntax_tree;
         u8 const* hoist = builder->syntax_hoist;
         u32 operation = UINT32_MAX;
+        u32 operation_node = C_AST_NODE_INVALID;
+        u32 left_node = C_AST_NODE_INVALID;
+        u32 right_node = C_AST_NODE_INVALID;
         u32* spine = 0;
         u32 spine_index = 0;
         if (task.spine)
         {
-            operation = ast->tokens[task.spine[task.spine_index - 1]];
+            operation_node = task.spine[task.spine_index - 1];
+            operation = ast->tokens[operation_node];
+            left_node = c_ast_child_at(ast, task.spine[task.spine_index], 1);
+            right_node = c_ast_child_at(ast, operation_node, 1);
             spine = task.spine_index > 1 ? task.spine : 0;
             spine_index = task.spine_index - 1;
         }
@@ -39526,7 +39635,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             }
             continue;
         }
-        u32 node = operation == UINT32_MAX ? c_ir_tree_range_node(builder, task.start, task.end) : C_AST_NODE_INVALID;
+        u32 node = operation == UINT32_MAX ? task.node_plus_one - 1 : C_AST_NODE_INVALID;
         if (operation == UINT32_MAX && node == C_AST_NODE_INVALID)
         {
             builder->failure_message = S8("no syntax tree node spans this expression");
@@ -39595,6 +39704,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                     .start = task.start + 1,
                     .end = task.end,
+                    .node_plus_one = negated + 1,
                     .block = task.block,
                     .true_block = task.false_block,
                     .false_block = task.true_block,
@@ -39617,11 +39727,12 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                                  c_ir_call_arguments_counted(builder, &hint, starts, ends, BUSTER_ARRAY_LENGTH(starts), &count, true) && count >= 2;
                 if (unwrapped_hint)
                 {
-                    node = c_ir_tree_range_node(builder, starts[0], ends[0]);
+                    node = c_ast_child_at(ast, node, 1);
                     unwrapped_hint = node != C_AST_NODE_INVALID;
                 }
                 if (unwrapped_hint)
                 {
+                    task.node_plus_one = node + 1;
                     kind = ast->kinds[node];
                     task.start = builder->syntax_spans->first[node];
                     task.end = builder->syntax_spans->end[node];
@@ -39670,7 +39781,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
                 if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                         .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                        .as.expression = {.start = task.start, .end = task.end},
+                                                        .as.expression = {.start = task.start, .end = task.end, .node_plus_one = node + 1},
                                                     }))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -39682,15 +39793,16 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         u32 conditional_question = 0;
         u32 conditional_colon = 0;
         u32 conditional_end = 0;
+        u32 conditional_node = C_AST_NODE_INVALID;
         if (operation == UINT32_MAX &&
-            c_ir_root_conditional(builder, task.start, task.end, &conditional_start, &conditional_question, &conditional_colon, &conditional_end))
+            c_ir_node_root_conditional(builder, node, &conditional_start, &conditional_question, &conditional_colon, &conditional_end, &conditional_node))
         {
             if (c_preprocess_dialect_is_gnu(builder->preprocess.dialect) && conditional_colon == conditional_question + 1)
             {
                 frame->as.condition.leaf_true_block = task.true_block;
                 frame->as.condition.leaf_false_block = task.false_block;
                 frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
-                if (!c_ir_lower_conditional_value_frame_push(builder, task.start, task.end))
+                if (!c_ir_lower_conditional_value_node_frame_push(builder, node, task.start, task.end))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 }
@@ -39711,21 +39823,21 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = conditional_colon + 1,
                 .end = conditional_end,
-                .block = false_expression,
+                .node_plus_one = c_ast_child_at(ast, conditional_node, 2) + 1,                .block = false_expression,
                 .true_block = task.true_block,
                 .false_block = task.false_block,
             };
             tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = conditional_question + 1,
                 .end = conditional_colon,
-                .block = true_expression,
+                .node_plus_one = c_ast_child_at(ast, conditional_node, 1) + 1,                .block = true_expression,
                 .true_block = task.true_block,
                 .false_block = task.false_block,
             };
             tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = conditional_start,
                 .end = conditional_question,
-                .block = task.block,
+                .node_plus_one = c_ast_child_at(ast, conditional_node, 0) + 1,                .block = task.block,
                 .true_block = true_expression,
                 .false_block = false_expression,
             };
@@ -39765,11 +39877,14 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 operation = level == depth ? ast->tokens[cursor] : operation;
                 cursor = level < depth ? c_ir_tree_first_child(ast, cursor) : cursor;
             }
+            operation_node = cursor;
+            left_node = c_ast_child_at(ast, cursor, 0);
+            right_node = c_ast_child_at(ast, cursor, 1);
             spine_index = depth;
         }
         if (operation != UINT32_MAX)
         {
-            bool is_or = builder->preprocess.tokens[operation].punctuator == C_PUNCTUATOR_PIPE_PIPE;
+            bool is_or = ast->kinds[operation_node] == C_AST_LOGICAL_OR;
             if (operation == task.start || operation + 1 == task.end || frame->as.condition.task_count + 2 > capacity)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -39779,7 +39894,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             // reached. Avoid creating and lowering a disconnected right block:
             // its edge into the join would make a value defined only on the
             // live path appear to be used before its definition in machine IR.
-            u32 left = c_ir_tree_range_node(builder, task.start, operation);
+            u32 left = left_node;
             u32 left_start = left != C_AST_NODE_INVALID ? builder->syntax_spans->first[left] : task.start;
             u32 left_end = left != C_AST_NODE_INVALID ? builder->syntax_spans->end[left] : operation;
             if (left_start + 1 == left_end)
@@ -39806,7 +39921,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                         tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                             .start = operation + 1,
                             .end = task.end,
-                            .block = task.block,
+                            .node_plus_one = spine ? 0 : right_node + 1,                            .block = task.block,
                             .true_block = task.true_block,
                             .false_block = task.false_block,
                             .spine = spine,
@@ -39825,6 +39940,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = operation + 1,
                 .end = task.end,
+                .node_plus_one = spine ? 0 : right_node + 1,
                 .block = right,
                 .true_block = task.true_block,
                 .false_block = task.false_block,
@@ -39834,6 +39950,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             tasks[frame->as.condition.task_count++] = (CIrConditionTask){
                 .start = task.start,
                 .end = operation,
+                .node_plus_one = left_node + 1,
                 .block = task.block,
                 .true_block = is_or ? task.true_block : right,
                 .false_block = is_or ? right : task.false_block,
@@ -39846,7 +39963,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         // Run the leaf now, off the dispatch loop; a completion branches on
         // its value here and continues the task walk without a loop trip.
         u32 mark = machine->frame_count;
-        if (!c_ir_lower_condition_leaf_frame_push(builder, task.start, task.end))
+        if (!c_ir_lower_condition_leaf_node_frame_push(builder, node, task.start, task.end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -40939,9 +41056,8 @@ BUSTER_C_INTERNAL u32 c_ir_root_first_token(CIntegerIrBuilder* builder, u32 node
 // redundant parentheses, holds a `&&` or `||` (GitHub #3102 step 3c). A root
 // region without a conditional or logical operator holds none
 // (CIrHoistFact's ROOT_CONTROL); otherwise its in-order walk looks.
-BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_node_has_root_logical(CIntegerIrBuilder* builder, u32 node)
 {
-    u32 node = c_ir_tree_range_node(builder, start, end);
     u32 kind = node != C_AST_NODE_INVALID ? builder->syntax_tree->kinds[node] : C_AST_KIND_COUNT;
     bool result = node != C_AST_NODE_INVALID && (builder->syntax_hoist[node] & C_IR_HOIST_ROOT_CONTROL) &&
                   (kind == C_AST_LOGICAL_AND || kind == C_AST_LOGICAL_OR || c_ir_root_first_token(builder, node, C_IR_ROOT_TOKEN_LOGICAL) != UINT32_MAX);
@@ -40951,10 +41067,15 @@ BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* build
 // Whether [start, end) has a root assignment before any root `?`, as the
 // range's node says: a node no parenthesis of the range wraps, with
 // CIrHoistFact's ROOT_ASSIGNMENT.
+BUSTER_C_INTERNAL bool c_ir_node_has_root_assignment(CIntegerIrBuilder* builder, u32 node, u32 start)
+{
+    return node != C_AST_NODE_INVALID && !c_ir_core_wraps(builder, node, start) && (builder->syntax_hoist[node] & C_IR_HOIST_ROOT_ASSIGNMENT);
+}
+
+// Temporary type-query boundary; lowering owners retain their exact node.
 BUSTER_C_INTERNAL bool c_ir_range_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    u32 node = c_ir_tree_range_node(builder, start, end);
-    return node != C_AST_NODE_INVALID && !c_ir_core_wraps(builder, node, start) && (builder->syntax_hoist[node] & C_IR_HOIST_ROOT_ASSIGNMENT);
+    return c_ir_node_has_root_assignment(builder, c_ir_tree_range_node(builder, start, end), start);
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
@@ -40974,12 +41095,13 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     }
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
+        u32 node = frame->as.logical.node_plus_one - 1;
         // Conditional branches may themselves be assignment expressions
         // (the cJSON boolean macro assigns the object's type in its true
         // arm).  The expression-core fast path intentionally excludes
         // assignment operators; route these ranges through the full
         // expression machine so the store and resulting value are preserved.
-        if (c_ir_range_has_root_assignment(builder, frame->as.logical.start, frame->as.logical.end))
+        if (c_ir_node_has_root_assignment(builder, node, frame->as.logical.start))
         {
             frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CORE;
             if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
@@ -40988,6 +41110,7 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
                                                             {
                                                                 .start = frame->as.logical.start,
                                                                 .end = frame->as.logical.end,
+                                                                .node_plus_one = node + 1,
                                                             },
                                                     }))
             {
@@ -40995,14 +41118,14 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
             }
             return;
         }
-        if (!c_ir_expression_has_root_logical(builder, frame->as.logical.start, frame->as.logical.end))
+        if (!c_ir_node_has_root_logical(builder, node))
         {
             frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CORE;
             // Run the core now, off the dispatch loop; a suspension resumes
             // through the loop, and a completion is the LOGICAL_CORE resume
             // above, inlined: this frame only forwards the core's result.
             u32 mark = machine->frame_count;
-            if (!c_ir_lower_expression_core_frame_push(builder, frame->as.logical.start, frame->as.logical.end))
+            if (!c_ir_lower_expression_core_node_frame_push(builder, node, frame->as.logical.start, frame->as.logical.end))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
@@ -41034,7 +41157,7 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CONDITION;
-        if (!c_ir_lower_condition_frame_push(builder, frame->as.logical.start, frame->as.logical.end, frame->as.logical.true_block,
+        if (!c_ir_lower_condition_node_frame_push(builder, node, frame->as.logical.start, frame->as.logical.end, frame->as.logical.true_block,
                                              frame->as.logical.false_block, frame->as.logical.source))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -41854,12 +41977,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* build
 // Type immediate conditional children in postorder before flattening their
 // control flow. Reuse the selection task storage, then retain only one type
 // per question token; no general query result survives a lowering mutation.
-BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLowerFrame* tasks, u32 capacity, u32 start, u32 end, IrTypeId* types)
+BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLowerFrame* tasks, u32 capacity, u32 node, u32 start, u32 end, IrTypeId* types)
 {
     u32 count = 1;
     IrTypeId last = IR_TYPE_ID_INVALID;
     bool success = true;
-    tasks[0] = (CIrLowerFrame){.as.selection = {.start = start, .end = end}};
+    tasks[0] = (CIrLowerFrame){.as.selection = {.start = start, .end = end, .node_plus_one = node + 1}};
     while (count && success)
     {
         CIrLowerFrame* task = tasks + count - 1;
@@ -41867,9 +41990,11 @@ BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLower
         {
             u32 expression_start = 0;
             u32 expression_end = 0;
-            if (c_ir_root_conditional(builder, task->as.selection.start, task->as.selection.end, &expression_start,
-                                       &task->as.selection.question, &task->as.selection.colon, &expression_end))
+            u32 conditional = C_AST_NODE_INVALID;
+            if (c_ir_node_root_conditional(builder, task->as.selection.node_plus_one - 1, &expression_start,
+                                            &task->as.selection.question, &task->as.selection.colon, &expression_end, &conditional))
             {
+                task->as.selection.node_plus_one = conditional + 1;
                 task->as.selection.start = expression_start;
                 task->as.selection.end = expression_end;
                 task->stage = 1;
@@ -41879,7 +42004,8 @@ BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLower
                 if (count < capacity)
                 {
                     tasks[count++] = (CIrLowerFrame){.as.selection = {.start = omitted ? expression_start : task->as.selection.question + 1,
-                                                                      .end = omitted ? task->as.selection.question : task->as.selection.colon}};
+                                                                      .end = omitted ? task->as.selection.question : task->as.selection.colon,
+                                                                      .node_plus_one = c_ast_child_at(builder->syntax_tree, conditional, omitted ? 0u : 1u) + 1}};
                 }
                 else
                 {
@@ -41903,7 +42029,9 @@ BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLower
             task->stage = 2;
             if (count < capacity)
             {
-                tasks[count++] = (CIrLowerFrame){.as.selection = {.start = task->as.selection.colon + 1, .end = task->as.selection.end}};
+                tasks[count++] = (CIrLowerFrame){.as.selection = {.start = task->as.selection.colon + 1, .end = task->as.selection.end,
+                                                                  .node_plus_one = c_ast_child_at(builder->syntax_tree, task->as.selection.node_plus_one - 1,
+                                                                                                    builder->syntax_tree->kinds[task->as.selection.node_plus_one - 1] == C_AST_CONDITIONAL ? 2u : 1u) + 1}};
             }
             else
             {
@@ -42047,10 +42175,11 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         u32 expression_end = 0;
         u32 start = frame->as.conditional.start;
         u32 end = frame->as.conditional.end;
-        if (!c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+        u32 node = frame->as.conditional.node_plus_one - 1;
+        if (!c_ir_node_root_conditional(builder, node, &expression_start, &question, &colon, &expression_end, 0))
         {
             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT;
-            if (!c_ir_lower_logical_value_frame_push(builder, start, end))
+            if (!c_ir_lower_logical_value_node_frame_push(builder, node, start, end))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -42073,7 +42202,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         frame->as.conditional.task_capacity = (u32)task_capacity;
         frame->as.conditional.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.conditional.task_capacity);
         frame->as.conditional.types = arena_allocate(builder->temporary_arena, IrTypeId, end - start);
-        if (!c_ir_selection_types(builder, frame->as.conditional.tasks, frame->as.conditional.task_capacity, start, end, frame->as.conditional.types))
+        if (!c_ir_selection_types(builder, frame->as.conditional.tasks, frame->as.conditional.task_capacity, node, start, end, frame->as.conditional.types))
         {
             if (!builder->failure_message.length)
             {
@@ -42104,6 +42233,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 {
                     .start = expression_start,
                     .end = expression_end,
+                    .node_plus_one = node + 1,
                     .block = builder->current_block,
                     .continuation = frame->as.conditional.final_block,
                     .place = frame->as.conditional.place,
@@ -42145,11 +42275,13 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         u32 nested_question = 0;
         u32 nested_colon = 0;
         u32 nested_end = 0;
-        if (!c_ir_root_conditional(builder, task.as.selection.start, task.as.selection.end, &nested_start, &nested_question, &nested_colon,
-                                   &nested_end))
+        u32 node = task.as.selection.node_plus_one - 1;
+        u32 conditional = C_AST_NODE_INVALID;
+        if (!c_ir_node_root_conditional(builder, node, &nested_start, &nested_question, &nested_colon, &nested_end, &conditional))
         {
             frame->as.conditional.leaf_start = task.as.selection.start;
             frame->as.conditional.leaf_end = task.as.selection.end;
+            frame->as.conditional.leaf_node_plus_one = node + 1;
             frame->as.conditional.leaf_continuation = task.as.selection.continuation;
             frame->as.conditional.leaf_place = task.as.selection.place;
             frame->as.conditional.leaf_type = task.as.selection.type;
@@ -42160,7 +42292,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             // ranges may retain redundant outer parentheses, so inspect the
             // unwrapped range while preserving the original range for the
             // expression frame (which performs the same unwrapping).
-            u32 leaf = c_ir_tree_range_node(builder, task.as.selection.start, task.as.selection.end);
+            u32 leaf = node;
             // A branch may carry an assignment in a comma expression rather
             // than at the leaf's root (Lua's luaV_fastget macro uses exactly
             // `(slot = lookup(...), !isempty(slot))`).  The logical-value
@@ -42176,9 +42308,10 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                                                                         {
                                                                             .start = task.as.selection.start,
                                                                             .end = task.as.selection.end,
+                                                                            .node_plus_one = leaf + 1,
                                                                         },
                                                                 })
-                                  : c_ir_lower_logical_value_frame_push(builder, task.as.selection.start, task.as.selection.end)))
+                                  : c_ir_lower_logical_value_node_frame_push(builder, leaf, task.as.selection.start, task.as.selection.end)))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -42192,11 +42325,12 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             // both before the enclosing selection stores the value.
             frame->as.conditional.leaf_start = nested_start;
             frame->as.conditional.leaf_end = nested_end;
+            frame->as.conditional.leaf_node_plus_one = node + 1;
             frame->as.conditional.leaf_continuation = task.as.selection.continuation;
             frame->as.conditional.leaf_place = task.as.selection.place;
             frame->as.conditional.leaf_type = task.as.selection.type;
             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK;
-            if (!c_ir_lower_conditional_value_frame_push(builder, nested_start, nested_end))
+            if (!c_ir_lower_conditional_value_node_frame_push(builder, node, nested_start, nested_end))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -42246,6 +42380,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 {
                     .start = nested_colon + 1,
                     .end = nested_end,
+                    .node_plus_one = c_ast_child_at(builder->syntax_tree, conditional,
+                                                        builder->syntax_tree->kinds[conditional] == C_AST_CONDITIONAL ? 2u : 1u) + 1,
                     .block = false_block,
                     .continuation = merge_block,
                     .place = nested_place,
@@ -42260,7 +42396,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             frame->as.conditional.omitted_merge_block = merge_block;
             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_OMITTED_VALUE;
             if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                               .as.expression = {.start = nested_start, .end = nested_question}}))
+                                                               .as.expression = {.start = nested_start, .end = nested_question,
+                                                                                 .node_plus_one = c_ast_child_at(builder->syntax_tree, conditional, 0) + 1}}))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -42272,6 +42409,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 {
                     .start = nested_question + 1,
                     .end = nested_colon,
+                    .node_plus_one = c_ast_child_at(builder->syntax_tree, conditional, 1) + 1,
                     .block = true_block,
                     .continuation = merge_block,
                     .place = nested_place,
@@ -42280,7 +42418,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 },
         };
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_CONDITION;
-        if (!c_ir_lower_condition_frame_push(builder, nested_start, nested_question, true_block, false_block, task.as.selection.source))
+        if (!c_ir_lower_condition_node_frame_push(builder, c_ast_child_at(builder->syntax_tree, conditional, 0), nested_start, nested_question, true_block, false_block, task.as.selection.source))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
@@ -42829,7 +42967,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 frame->as.expression.node_plus_one = c_ast_child_at(builder->syntax_tree, middle, 0) + 1;
                 frame->as.expression.pending_true_block = true_block;
                 frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CONDITION;
-                if (!c_ir_lower_condition_frame_push(builder, conditional_start, conditional_question, true_block, false_block, source))
+                if (!c_ir_lower_condition_node_frame_push(builder, c_ast_child_at(builder->syntax_tree, conditional, 0), conditional_start, conditional_question, true_block, false_block, source))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 }
@@ -42979,7 +43117,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             frame->as.expression.pending_assignment = assignment;
             frame->as.expression.pending_operation = assignment_operation;
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_ASSIGNMENT_CALLS;
-            if (!c_ir_prepare_calls_frame_push(builder, start, assignment))
+            if (!c_ir_prepare_calls_node_frame_push(builder, c_ast_child_at(builder->syntax_tree, node, 0), start, assignment))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -42992,7 +43130,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VALUE;
         if (c_ir_node_root_conditional(builder, node, &expression_start, &question, &colon, &expression_end, 0))
         {
-            if (!c_ir_lower_conditional_value_frame_push(builder, start, end))
+            if (!c_ir_lower_conditional_value_node_frame_push(builder, node, start, end))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }
@@ -43002,7 +43140,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         // the EXPRESSION_VALUE resume above, inlined: record the value and
         // let the next iteration unwind the task list with it.
         u32 mark = machine->frame_count;
-        if (!c_ir_lower_logical_value_frame_push(builder, start, end))
+        if (!c_ir_lower_logical_value_node_frame_push(builder, node, start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -43034,10 +43172,11 @@ struct CIrBodyTask
 {
     CIrBodyTaskKind kind;
     // The task's tokens, kept as provenance: cleanup and loop targets ask the
-    // parse result's scopes about them (c_ir_cleanup_target_for_task), and a
-    // condition task's frame still reads its range (#4058).
+    // parse result's scopes about them (c_ir_cleanup_target_for_task). Condition
+    // tasks hand their exact expression node to the condition owner.
     u32 start;
     u32 end;
+    u32 condition_node_plus_one;
     // The statements left to lower, in order: the comma operands of a split
     // expression statement from `operand`, then the statement at head_plus_one
     // - 1, which ends at head_end, then items [item, item_count) of `list`.
@@ -47949,6 +48088,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                            .source = declaration_source,
                                                            .start = task.start,
                                                            .end = task.end,
+                                                           .node_plus_one = task.condition_node_plus_one,
                                                        },
                                                });
                 return false;
@@ -48209,6 +48349,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                            .source = condition_source,
                                                            .start = anchor + 2,
                                                            .end = condition_close,
+                                                           .node_plus_one = c_ast_child_at(ast, node, 0) + 1,
                                                        },
                                                });
                 return false;
@@ -48243,6 +48384,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .kind = C_IR_BODY_TASK_CONDITION,
                     .start = condition_open + 1,
                     .end = condition_close,
+                    .condition_node_plus_one = c_ast_child_at(ast, node, 1) + 1,
                     .block = condition_block,
                     .true_block = body_block,
                     .false_block = exit_block,
@@ -48332,6 +48474,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .kind = C_IR_BODY_TASK_CONDITION,
                     .start = separators[0] + 1,
                     .end = separators[1],
+                    .condition_node_plus_one = parts[1] + 1,
                     .block = condition_block,
                     .true_block = body_block,
                     .false_block = exit_block,
@@ -48401,6 +48544,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                            .source = condition_source,
                                                            .start = anchor + 2,
                                                            .end = condition_close,
+                                                           .node_plus_one = c_ast_child_at(ast, node, 0) + 1,
                                                        },
                                                });
                 return false;
