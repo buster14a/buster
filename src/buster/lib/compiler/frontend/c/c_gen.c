@@ -23605,13 +23605,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     {
         if (continuation != C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION && continuation != C_IR_PREPARED_CALL_CONTINUATION_VA_COPY)
         {
-            // MSVC's header passes the address to __va_start; recover the
-            // same destination expression without re-evaluating its effects.
+            // The Windows address bridge owns its ADDRESS operand. Its
+            // place request keeps that child identity and runs its effects once.
+            u32 destination_node = c_ir_call_argument_node(builder, selected, 0);
             if (addressed_start)
             {
+                destination_node = c_ast_child_at(builder->syntax_tree, destination_node, 0);
                 starts[0] += 1;
             }
-            step = c_ir_prepared_call_request_place_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION, c_ir_call_argument_node(builder, selected, 0), starts[0], ends[0]);
+            step = c_ir_prepared_call_request_place_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION, destination_node, starts[0], ends[0]);
         }
         else
         {

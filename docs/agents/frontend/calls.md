@@ -435,6 +435,13 @@ in both frontend forms.
   formatting witnesses remain unchanged. This fixture is a validation contract,
   not evidence of an executed or passing repair.
 
+The addressed Windows `__va_start` bridge passes the ADDRESS node's exact
+operand to its place frame. The argument's source range remains provenance;
+removing its leading address anchor cannot change the node identity. This
+keeps member, indexed, volatile and indirect cursor destinations modifiable
+and evaluates their index/callee effects once. The live-cursor fixture covers
+both Windows architectures and both SSA modes alongside invalid cursor forms.
+
 ## Declarator constraints
 
 Semantic expression queries type a string literal through its target and dialect
