@@ -342,20 +342,42 @@ BUSTER_C_INTERNAL u64 c_declaration_well_known_set(CPreprocessResult preprocess,
     return result;
 }
 
-// Every well-known specifier word of every declaration, answered once: the
-// lowering asks c_declaration_well_known_set about the same declaration from
-// ten passes, and the scan is a pure function of the token stream, so one
-// walk with every bit interesting and a mask at each reader is the same
-// answer.  Bit 0 is C_SYMBOL_WELL_KNOWN_NONE, whose empty spelling nothing
-// can match, and it stays out of the walk's set.  Measured on the stage-1
-// self-host: the repeated scans were 0,5% of the compile's instructions.
-BUSTER_C_INTERNAL u64* c_declaration_specifier_sets_build(Arena* arena, CPreprocessResult preprocess, CAnalysisResult parse)
+// Storage and inline requests come from normalized specifier nodes. Only
+// __inline's ABI-relevant original spelling is read at its known leaf.
+BUSTER_C_INTERNAL u64* c_declaration_specifier_sets_build(Arena* arena, CPreprocessResult preprocess, CAnalysisResult parse, CAst const* ast)
 {
-    u64* sets = arena_allocate(arena, u64, parse.declaration_count ? parse.declaration_count : 1);
-    u64 every_word = ((u64)1 << C_SYMBOL_WELL_KNOWN_COUNT) - 2;
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    u64* sets = arena_allocate_zeroed(arena, u64, parse.declaration_count ? parse.declaration_count : 1);
+    for (u32 index = 0; index < parse.declaration_count; index += 1)
     {
-        sets[declaration_index] = c_declaration_well_known_set(preprocess, parse.declarations[declaration_index], every_word);
+        u32 owner = parse.declarations[index].declaration_node_plus_one - 1;
+        if (owner < ast->node_count && (ast->kinds[owner] == C_AST_DECLARATION || ast->kinds[owner] == C_AST_FUNCTION_DEFINITION))
+        {
+            u32 specifiers = c_ast_child_at(ast, owner, 0);
+            u32 item = specifiers - 1;
+            u32 count = c_ast_list_count(ast, specifiers);
+            for (u32 word = 0; word < count; word += 1)
+            {
+                if (ast->kinds[item] == C_AST_SPECIFIER_WORD)
+                {
+                    switch (ast->data[item])
+                    {
+                        case C_AST_WORD_STATIC: sets[index] |= C_SYMBOL_WELL_KNOWN_BIT(STATIC); break;
+                        case C_AST_WORD_EXTERN: sets[index] |= C_SYMBOL_WELL_KNOWN_BIT(EXTERN); break;
+                        case C_AST_WORD_INLINE:
+                        {
+                            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[item]]);
+                            sets[index] |= string_equal(spelling, S8("__inline")) ? C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)
+                                           : string_equal(spelling, S8("__inline__")) ? C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT)
+                                           : C_SYMBOL_WELL_KNOWN_BIT(INLINE);
+                            break;
+                        }
+                        case C_AST_WORD_THREAD_LOCAL: sets[index] |= C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL); break;
+                        default: break;
+                    }
+                }
+                item -= ast->extents[item];
+            }
+        }
     }
     return sets;
 }
@@ -44037,7 +44059,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
             .is_definition = true,
             .is_constexpr = local_entity->is_constexpr,
         };
-        if (!c_ir_global_initializer(builder, local_declaration, local_type_value, &global) || !ir_module_add_global(builder->arena, builder->module, global))
+        if (!c_ir_global_initializer(builder, local_declaration, state->initializer_node, local_type_value, &global) || !ir_module_add_global(builder->arena, builder->module, global))
         {
             builder->failure_message = builder->failure_message.length
                                            ? string_format(builder->arena, S8("could not lower static initializer for local '{S8}': {S8}"), c_token_spelling(builder->preprocess.spelling_base, name),
@@ -44127,7 +44149,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
                                          .is_definition = true,
                                          .is_constexpr = true,
                                      },
-                                     local_type_value, &constant_initializer) ||
+                                     state->initializer_node, local_type_value, &constant_initializer) ||
             !c_ir_constexpr_initializer_valid(local_type_value, &constant_initializer))
         {
             builder->failure_message =
@@ -47798,7 +47820,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                     .token_start = start,
                                                     .token_count = end - start,
                                                     },
-                                                type_value, &global);
+                                                initializer_node, type_value, &global);
                     if (!initialized || (builder->parse.entities[entity.value].is_constexpr && !c_ir_constexpr_initializer_valid(type_value, &global)) ||
                         !ir_module_add_global(builder->arena, builder->module, global))
                     {
@@ -47877,7 +47899,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                          .is_definition = true,
                                                          .is_constexpr = true,
                                                      },
-                                                     local_type_value, &constant_initializer) ||
+                                                     initializer_node, local_type_value, &constant_initializer) ||
                             !c_ir_constexpr_initializer_valid(local_type_value, &constant_initializer))
                         {
                             builder->failure_message = string_format(
@@ -61324,6 +61346,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                              u64 function_reservation_limit, Arena* tree_arena, u32 body_function_count)
 {
     CIRLowerResult result = {0};
+    CAst const* unit_ast = options.syntax_tree;
     u32 type_capacity = plan.type_capacity;
     u32 symbol_capacity = plan.symbol_capacity;
     u32 function_capacity = plan.function_capacity;
@@ -62826,7 +62849,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     c_parse_index_declarations(&parse, temporary_arena);
     u32* declarations_by_entity_offsets = parse.declarations_by_entity_offsets;
     u32* declarations_by_entity = parse.declarations_by_entity;
-    u64* declaration_specifier_sets = c_declaration_specifier_sets_build(temporary_arena, preprocess, parse);
+    u64* declaration_specifier_sets = c_declaration_specifier_sets_build(temporary_arena, preprocess, parse, unit_ast);
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
     {
         CEntity* entity = parse.entities + entity_index;
@@ -62856,7 +62879,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) |
                               C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL));
             bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
-            bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
+            bool initialized = declaration->initializer_node_plus_one != 0;
             internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 || declaration->is_constexpr;
             is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL))) != 0;
             if (initialized || (!is_extern && !definition))
@@ -63197,7 +63220,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             u64 specifiers = declaration_specifier_sets[declarations_by_entity[bucket_index]] &
                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC));
             bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
-            bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
+            bool initialized = declaration->initializer_node_plus_one != 0;
             internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
             if (initialized || (!is_extern && !definition))
             {
@@ -63300,7 +63323,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         };
         constant_builder.failure_message = (String8){0};
         constant_builder.failure_token_index = UINT32_MAX;
-        bool initialized = c_ir_global_initializer(&constant_builder, *definition, type_value, &global);
+        bool initialized = c_ir_global_initializer(&constant_builder, *definition, definition->initializer_node_plus_one - 1, type_value, &global);
         if (!initialized)
         {
             // The aggregate folders record which element they stopped at, and
@@ -63309,17 +63332,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             // from a dozen places, so the initializer they were handed is
             // named here rather than the object it belongs to -- which for a
             // scalar is the whole construct anyway.
-            u32 initializer_start = 0;
-            u32 initializer_end = 0;
-            if (!constant_builder.failure_message.length && !definition->is_constexpr &&
-                c_ir_declaration_initializer_range(preprocess, *definition, &initializer_start, &initializer_end) &&
-                !c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE))
+            u32 initializer = definition->initializer_node_plus_one - 1;
+            if (!constant_builder.failure_message.length && !definition->is_constexpr && initializer < unit_ast->node_count &&
+                unit_ast->kinds[initializer] != C_AST_INITIALIZER_LIST)
             {
-                String8 element = c_ir_constant_initializer_element_name(&constant_builder, initializer_start, initializer_end);
+                String8 element = c_ir_constant_initializer_element_name_node(&constant_builder, initializer);
                 if (element.length)
                 {
                     constant_builder.failure_message = string_format(arena, S8("cannot fold {S8} in a static initializer"), element);
-                    constant_builder.failure_token_index = initializer_start;
+                    constant_builder.failure_token_index = unit_ast->tokens[initializer];
                 }
             }
             CSourceLocation failure_location = c_preprocess_site_location(&preprocess, definition->location);
