@@ -8384,6 +8384,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         frame->expression_tasks[0] = (CParseExpressionTypeTask){
             .start = start,
             .end = end,
+            .operators_checked = frame->expression_operators_checked,
         };
         frame->type = C_TYPE_ID_INVALID;
         frame->expression_nonplace_projection = false;
@@ -8593,6 +8594,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             u32 colon = task->end;
             u32 nested_questions = 0;
             u32 cast_prefix_close = UINT32_MAX;
+            CParseResult cast_scan_checkpoint = *result;
+            u32 cast_scan_mutations = machine->mutation_count;
             // Every top-level operator at the loosest left-associative
             // precedence, recorded downward from the top of this frame's
             // free task slots (operator i at tasks[capacity - 1 - i]) so the
@@ -8781,6 +8784,20 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 };
                 continue;
             }
+            // A cast operand is an unchanged suffix at this same delimiter
+            // level. Reuse the completed scan only when its type probes left
+            // every semantic row inventory and mutation record unchanged.
+            // Constructor-bearing scans retain their original emission order.
+            task->operators_checked = task->operators_checked ||
+                (cast_prefix_close != UINT32_MAX && machine->mutation_count == cast_scan_mutations &&
+                 result->type_count == cast_scan_checkpoint.type_count && result->array_bound_count == cast_scan_checkpoint.array_bound_count &&
+                 result->type_alignment_count == cast_scan_checkpoint.type_alignment_count &&
+                 result->interned_type_count == cast_scan_checkpoint.interned_type_count &&
+                 result->interned_qualified_count == cast_scan_checkpoint.interned_qualified_count &&
+                 result->member_count == cast_scan_checkpoint.member_count && result->enum_member_count == cast_scan_checkpoint.enum_member_count &&
+                 result->parameter_count == cast_scan_checkpoint.parameter_count && result->alignment_count == cast_scan_checkpoint.alignment_count &&
+                 result->entity_count == cast_scan_checkpoint.entity_count && result->scope_count == cast_scan_checkpoint.scope_count &&
+                 result->diagnostic_count == cast_scan_checkpoint.diagnostic_count);
             if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
                 c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) || c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION) ||
                 c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
@@ -8890,6 +8907,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                                                       .start = task->start,
                                                       .end = task->end,
                                                       .kind = C_TYPE_PARSE_FRAME_EXPRESSION_LEAF,
+                                                      .expression_operators_checked = task->operators_checked,
                                                   }))
             {
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
@@ -19981,7 +19999,8 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
                 frame->stage = C_TYPE_PARSE_STAGE_FINISH;
                 if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                     .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
-                    .start = initializer, .end = frame->end, .kind = C_TYPE_PARSE_FRAME_SIZEOF}))
+                    .start = initializer, .end = frame->end, .kind = C_TYPE_PARSE_FRAME_SIZEOF,
+                    .expression_operators_checked = frame->expression_operators_checked}))
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                 return;
             }
@@ -48204,7 +48223,32 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_analysis_failure(&result, S8("C semantic analysis delimiter capacity exceeded"));
         return result;
     }
-    u32 type_frame_capacity = maximum_delimiter_depth * 4 + 32;
+    // A sequence of casts closes each type-name group before the next
+    // operand starts. It can retain checked expression frames without adding
+    // delimiter depth. Consecutive postorder unary roots bound that pending
+    // cast work; a model-only caller has the conservative source group count.
+    u32 pending_cast_depth = 0;
+    if (syntax.ast)
+    {
+        u32 pending = 0;
+        for (u32 node = 0; node < syntax.ast->node_count; node += 1)
+        {
+            u32 kind = syntax.ast->kinds[node];
+            bool prefix = kind == C_AST_CAST || kind == C_AST_EXTENSION || kind == C_AST_NEGATE || kind == C_AST_PLUS ||
+                          kind == C_AST_DEREFERENCE || kind == C_AST_ADDRESS || kind == C_AST_LOGICAL_NOT || kind == C_AST_BIT_NOT ||
+                          kind == C_AST_REAL || kind == C_AST_IMAG;
+            pending = prefix ? pending + (kind == C_AST_CAST) : 0;
+            pending_cast_depth = BUSTER_MAX(pending_cast_depth, pending);
+        }
+    }
+    else pending_cast_depth = open_parenthesis_count;
+    u64 frame_depth = (u64)maximum_delimiter_depth + pending_cast_depth;
+    if (frame_depth > (UINT32_MAX - 32) / 4)
+    {
+        c_analysis_failure(&result, S8("C semantic analysis pending cast capacity exceeded"));
+        return result;
+    }
+    u32 type_frame_capacity = (u32)frame_depth * 4 + 32;
     u32 type_mutation_capacity = maximum_delimiter_depth * 8 + 64;
     u32 expression_task_capacity = token_count + 1;
     u64 promoted_member_capacity_u64 = (u64)token_count * 2 + 1;

@@ -1349,6 +1349,9 @@ struct CTypeParseFrame
     bool is_packed;
     // Query-local category fact for a GNU imaginary projection of a real value.
     bool expression_nonplace_projection;
+    // The parent operator scan proved this cast operand suffix has no
+    // top-level operator, without constructing or mutating semantic rows.
+    bool expression_operators_checked;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;

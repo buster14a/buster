@@ -8714,6 +8714,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_fact_intervals(UnitTestAr
     return result;
 }
 
+// Consecutive casts retain semantic frames after each type-name delimiter
+// closes. Their workspace and operator work follow input prefixes rather than
+// delimiter depth, with the same model in tree and model-only entrypoints.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_cast_prefix_machine_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const depths[] = {63, 64, 8192};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(depths); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = depths[index];
+        String8 head = S8("static int value=");
+        String8 cast = S8("(int)");
+        String8 tail = S8("1;int main(void){return value-1;}");
+        u64 bytes = head.length + (u64)depth * cast.length + tail.length;
+        char8* text = arena_allocate(temporary.arena, char8, bytes);
+        memcpy(text, head.pointer, head.length);
+        for (u32 step = 0; step < depth; step += 1) memcpy(text + head.length + (u64)step * cast.length, cast.pointer, cast.length);
+        memcpy(text + head.length + (u64)depth * cast.length, tail.pointer, tail.length);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){.pointer = text, .length = bytes}, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.type_interning = true;
+            u64 before = c_test_assignment_chain_work();
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 plain_work = c_test_assignment_chain_work() - before;
+            syntax.ast = &built.ast;
+            syntax.ast_facts = &facts;
+            before = c_test_assignment_chain_work();
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 tree_work = c_test_assignment_chain_work() - before;
+            BUSTER_TEST(arguments, plain.analysis_complete && !plain.diagnostic_count && analysis.analysis_complete && !analysis.diagnostic_count);
+            BUSTER_TEST_RAW(arguments, plain_work < (u64)depth * 64 && tree_work < (u64)depth * 64,
+                string_format(temporary.arena, S8("cast depth={u32} model work={u64} tree work={u64}"), depth, plain_work, tree_work));
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("cast-prefix-capacity.c"), preprocess, analysis, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical cast-prefix program"));
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Completed indirection facts compose from their children. Query count is
 // bounded independently of the grouped function designator's input depth.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
@@ -8927,6 +8978,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_fact_intervals);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_cast_prefix_machine_capacity);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
