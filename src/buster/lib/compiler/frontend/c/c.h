@@ -1784,7 +1784,7 @@ typedef enum CAstFactFlag
     // The machine's nonplace-projection fact (`__real__`/`__imag__` of a real
     // operand).
     C_AST_FACT_NONPLACE = 1u << 3,
-    // An IDENTIFIER or DECLARATOR_NAME: `payloads` holds its entity.
+    // An IDENTIFIER, TYPEDEF_NAME or DECLARATOR_NAME: `payloads` holds its entity.
     C_AST_FACT_BOUND = 1u << 4,
     // A MEMBER or MEMBER_ARROW of a bit-field: `payloads` holds its width.
     C_AST_FACT_BIT_FIELD = 1u << 5,

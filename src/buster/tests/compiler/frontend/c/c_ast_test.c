@@ -7890,6 +7890,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_names(UnitTestArgume
     return result;
 }
 
+// Type-name source facts preserve alias identity and base/constructor
+// separation. Unevaluated compound literals still own completed array bounds.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_projection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("typedef _Atomic(int) Atomic __attribute__((aligned(32)));"
+           "int f(void){return sizeof(void(*(*)(void*,const char*))(void)) + sizeof((int[]){1,2,3})"
+           " + _Alignof(_Atomic Atomic) + sizeof((char*[]){\"x\"});}"), C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+    {
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        syntax.ast = &built.ast;
+        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        syntax.ast_facts = &facts;
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count);
+        String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+        difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+        BUSTER_TEST_RAW(arguments, !difference.length, difference);
+        u32 aliases = 0;
+        u32 arrays = 0;
+        u32 void_bases = 0;
+        u64 const expected[] = {3, 1};
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_TYPEDEF_NAME)
+            {
+                BUSTER_TEST(arguments, (facts.flags[node] & (C_AST_FACT_TYPED | C_AST_FACT_BOUND)) == (C_AST_FACT_TYPED | C_AST_FACT_BOUND));
+                BUSTER_TEST(arguments, facts.types[node] < analysis.type_count && analysis.types[facts.types[node]].is_atomic);
+                aliases += 1;
+            }
+            else if (built.ast.kinds[node] == C_AST_COMPOUND_LITERAL)
+            {
+                u32 index = facts.types[node];
+                CAstTypeRecipe const* recipe = (facts.flags[node] & C_AST_FACT_RECIPE) && index < facts.recipe_count ? facts.recipes + index : 0;
+                BUSTER_TEST(arguments, recipe && recipe->form == C_AST_TYPE_RECIPE_DERIVATION && recipe->type.kind == C_TYPE_ARRAY);
+                BUSTER_TEST(arguments, recipe && recipe->bound.has_inferred_count && arrays < BUSTER_ARRAY_LENGTH(expected) && recipe->bound.inferred_count == expected[arrays]);
+                arrays += 1;
+            }
+            else if (built.ast.kinds[node] == C_AST_TYPE_NAME && c_ast_child_count(&built.ast, node) == 2)
+            {
+                u32 base = c_ast_child_at(&built.ast, node, 0);
+                u32 index = facts.types[base];
+                CType const* type = facts.flags[base] & C_AST_FACT_RECIPE ? index < facts.recipe_count ? &facts.recipes[index].type : 0
+                                                                        : index < analysis.type_count ? analysis.types + index : 0;
+                void_bases += type && type->kind == C_TYPE_VOID;
+            }
+        }
+        BUSTER_TEST(arguments, aliases == 1 && arrays == BUSTER_ARRAY_LENGTH(expected) && void_bases == 1);
+        u32 type_count = analysis.type_count;
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("retained-type-projection.c"), preprocess, analysis, target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified && analysis.type_count == type_count);
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Completed indirection facts compose from their children. Query count is
 // bounded independently of the grouped function designator's input depth.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
@@ -8089,6 +8152,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);

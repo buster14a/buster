@@ -2961,6 +2961,23 @@ node references for nonconstant bounds. Completion runs use the protected TYPE
 constant-evaluation mode and restore the full semantic checkpoint after
 publication. No new C row or IR type is emitted by this producer.
 
+The node type-name consumer now reads this graph with an explicit resumable
+stack and asks the shared node scheduler for bound constants. Source typedef
+identity is retained on TYPEDEF_NAME separately from the completed qualified
+TYPE_NAME. It preserves the established layout projection of already atomic,
+over-aligned aliases. Source function parameter tasks are memoized separately
+from return-declarator constructor effects, preserving the prior IR type
+inventory and order. Compound literal array counts are published even under
+unevaluated `sizeof`/`typeof` regions where no initializer execution plan is
+required. These producers still restore their semantic checkpoints completely.
+
+The obsolete token TYPE_NAME, COMPOUND_TYPE and COMPOUND_ELEMENT_COUNT frame
+families and declarator walkers are removed. Transitional range callers locate
+an exact retained TYPE_NAME boundary; their remaining expression/operand and
+VLA readers are still an explicit retirement task. TYPEOF source expression
+projection is pending the EXPRESSION_TYPE consumer; this checkpoint does not
+claim complete query-machine retirement or a green full object comparison.
+
 On frozen main `2c2c46fc9` unity input, the current producer census describes
 all 1,787,510 typed-region expression candidates with zero missing, appended
 state or stale gaps, and all 60,387 TYPE_NAME nodes. The 29 uncovered function

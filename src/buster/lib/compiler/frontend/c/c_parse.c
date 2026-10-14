@@ -10361,12 +10361,44 @@ BUSTER_C_SHARED void c_sizeof_handoff_compare(CParseResult* result, CPreprocessR
 // `int (*[3])(void)` and `int (*(*)[4])[5]` are read by the same loop that
 // reads `int (*)[3]`. A `(` opens a group when a pointer, another group or an
 // array bound follows it; otherwise it starts a parameter list. The mirror of
-// this reader in lowering is c_ir_type_name_declarator.
+// this producer publishes its source base separately from the retained
+// declarator graph consumed by c_ir_type_name_node_attempt.
 BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name_detail(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                            CScopeId scope, u32 start, u32 end, CTypeId* base_out)
+                                                            CScopeId scope, u32 start, u32 end, CTypeId* base_out, u32 retained_type_name)
 {
     u32 cursor = start;
-    CTypeId type = c_parse_type_name_specifiers(machine, result, preprocess, scope, start, end, &cursor);
+    bool retained_specifiers = retained_type_name != C_AST_NODE_INVALID;
+    u32 specifiers = retained_specifiers ? c_ast_child_at(machine->syntax_tree, retained_type_name, 0) : C_AST_NODE_INVALID;
+    u32 specifier_end = end;
+    if (retained_specifiers)
+    {
+        CAst const* ast = machine->syntax_tree;
+        u32 first = c_ast_subtree_begin(ast, specifiers);
+        bool plain = first < specifiers;
+        for (u32 child = first; child < specifiers && plain; child += 1)
+        {
+            plain = ast->kinds[child] == C_AST_SPECIFIER_WORD || ast->kinds[child] == C_AST_TYPEDEF_NAME;
+        }
+        specifier_end = plain ? ast->tokens[specifiers - 1] + 1 : end;
+    }
+    CTypeId type = c_parse_type_name_specifiers(machine, result, preprocess, scope, start, specifier_end, &cursor);
+    if (retained_specifiers && type.value < result->type_count)
+    {
+        // Tag readers stop after their tag. The retained source projection
+        // also includes qualifiers written after it, before a declarator.
+        CType qualifiers = {0};
+        bool advancing = true;
+        while (cursor < end && advancing)
+        {
+            u32 after = c_parse_skip_attributes(preprocess, cursor, end);
+            bool qualifier = after == cursor && preprocess.tokens[cursor].kind == C_TOKEN_IDENTIFIER &&
+                             c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]), &qualifiers);
+            advancing = after != cursor || qualifier;
+            cursor = after + (qualifier ? 1u : 0u);
+        }
+        if (qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict || qualifiers.is_atomic)
+            type = c_parse_add_qualified_type(result, type, qualifiers);
+    }
     *base_out = type;
     u64 mark = machine->scratch_arena->position;
     u32 level_end = end;
@@ -10424,7 +10456,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name(CTypeParseMachine* machine,
                                                      CScopeId scope, u32 start, u32 end)
 {
     CTypeId base = C_TYPE_ID_INVALID;
-    return c_parse_identity_type_name_detail(machine, result, preprocess, scope, start, end, &base);
+    return c_parse_identity_type_name_detail(machine, result, preprocess, scope, start, end, &base, C_AST_NODE_INVALID);
 }
 
 BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMachine* machine, Arena* arena,
@@ -10459,6 +10491,86 @@ BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CP
     }
 }
 
+BUSTER_C_INTERNAL bool c_parse_result_reserve_array_bounds(CParseResult* result, u32 additional);
+BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                               CParseResult* result, CScopeId scope, CTypeId element_type, u32 start, u32 end,
+                                                               u64* count_out);
+
+// Unevaluated compound literals still have a complete array type. Their
+// initializer plan need not be emitted, but their semantic count belongs to
+// the literal's row-free fact rather than a lowering brace walk.
+BUSTER_C_INTERNAL void c_parse_compound_array_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
+                                                     CScopeId scope, u32 node, u32 name)
+{
+    CAstFacts* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    CParseResult checkpoint = *result;
+    u32 mutation_mark = machine->mutation_count;
+    u64 scratch_mark = machine->scratch_arena->position;
+    u32 first = ast->tokens[name];
+    u32 after = ast->data[name];
+    CTypeId base = C_TYPE_ID_INVALID;
+    CScopeId literal_scope = c_parse_scope_for_token(result, scope, first);
+    CTypeId type = c_parse_identity_type_name_detail(machine, result, preprocess, literal_scope, first, after, &base, name);
+    u32 list = c_ast_child_at(ast, node, 1);
+    u32 open = facts->spans->first[list];
+    u32 end = facts->spans->end[list];
+    CType array = type.value < result->type_count ? result->types[type.value] : (CType){0};
+    bool valid = type.value < result->type_count && array.kind == C_TYPE_ARRAY && array.array_bound < result->array_bound_count;
+    CArrayBound bound = valid ? result->array_bounds[array.array_bound] : (CArrayBound){0};
+    if (valid && !bound.token_count && !bound.has_inferred_count)
+    {
+        CInitializerPlan const* plan = c_initializer_plan_find(result, list);
+        u64 count = plan && plan->complete && !plan->failed ? plan->inferred_count : 0;
+        bool counted = plan && plan->complete && !plan->failed;
+        if (!counted)
+        {
+            u32 body_end = end > open + 2 && c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_COMMA) ? end - 2 : end - 1;
+            CTypeId element = array.element_type;
+            u32 remaining = result->type_count;
+            while (element.value < result->type_count && result->types[element.value].has_unqualified_type && remaining)
+            {
+                element = result->types[element.value].unqualified_type;
+                remaining -= 1;
+            }
+            bool pointer_string = element.value < result->type_count && result->types[element.value].kind == C_TYPE_POINTER &&
+                                  open + 1 < body_end && c_ir_tokens_are_string_literals(preprocess, open + 1, body_end);
+            counted = pointer_string || c_parse_infer_initializer_array_count(machine, result->arena, preprocess, result, literal_scope,
+                                                                               array.element_type, open, end, &count);
+            count = pointer_string ? 1 : count;
+        }
+        valid = counted && c_parse_result_reserve_array_bounds(result, 1);
+        if (valid)
+        {
+            array.array_bound = result->array_bound_count;
+            bound.inferred_count = count;
+            bound.has_inferred_count = true;
+            result->array_bounds[result->array_bound_count++] = bound;
+            type = c_parse_add_type(result, array);
+        }
+    }
+    valid = valid && type.value < result->type_count && !machine->failed &&
+            c_parse_region_facts_sound(machine, result, &checkpoint, mutation_mark);
+    if (valid)
+    {
+        bool recipe = type.value >= checkpoint.type_count;
+        u32 snapshot = recipe ? c_ast_types_facts_snapshot(facts, result, &preprocess, &checkpoint) : C_AST_FACT_NONE;
+        valid = !recipe || snapshot != C_AST_FACT_NONE;
+        if (valid && recipe) c_parse_type_recipe_bounds(machine, preprocess, result, literal_scope, snapshot, facts->recipe_count);
+        if (valid)
+        {
+            bool completed = (facts->flags[node] & (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED)) == C_AST_FACT_EXPRESSION;
+            facts->statistics.completed += completed;
+            facts->statistics.recipes += completed && recipe;
+            facts->types[node] = recipe ? snapshot + type.value - checkpoint.type_count : type.value;
+            facts->flags[node] = (u8)((facts->flags[node] & ~(u32)(C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE)) |
+                                     C_AST_FACT_TYPED | (recipe ? C_AST_FACT_RECIPE : 0u));
+        }
+    }
+    c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+    arena_set_position(machine->scratch_arena, scratch_mark);
+}
+
 // TYPE_NAME keeps both its specifier base and its final abstract declarator
 // type. The semantic parser remains their producer; the whole completion is
 // undone once its row-free graph and parameter rows have been published.
@@ -10484,6 +10596,24 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
         u64 scratch_mark = machine->scratch_arena->position;
         for (u32 node = begin; node < end; node += 1)
         {
+            // A typedef's source identity is independent of the completed
+            // qualified type-name. Lowering needs that identity when applying
+            // a source qualifier preserves an already qualified alias layout.
+            if (ast->kinds[node] == C_AST_TYPEDEF_NAME)
+            {
+                u32 token = ast->tokens[node];
+                u32 use = c_parse_identifier_use_index(result, token);
+                CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity : C_ENTITY_ID_INVALID;
+                if (entity.value >= result->entity_count && token < preprocess.token_count)
+                    entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, scope, token), &preprocess.tokens[token]);
+                if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF &&
+                    result->entities[entity.value].type.value < result->type_count)
+                {
+                    facts->types[node] = result->entities[entity.value].type.value;
+                    facts->payloads[node] = entity.value;
+                    facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_BOUND;
+                }
+            }
             if (ast->kinds[node] == C_AST_TYPE_NAME && !(facts->flags[node] & C_AST_FACT_TYPED) && !machine->failed)
             {
                 u32 first = ast->tokens[node];
@@ -10512,7 +10642,7 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                 facts->recipe_failed = facts->recipe_failed || (refused_parameters && !c_parse_body_scratch_exhausted());
                 machine->failed = machine->failed || refused_parameters;
                 CTypeId base = C_TYPE_ID_INVALID;
-                CTypeId type = machine->failed ? C_TYPE_ID_INVALID : c_parse_identity_type_name_detail(machine, result, preprocess, node_scope, first, after, &base);
+                CTypeId type = machine->failed ? C_TYPE_ID_INVALID : c_parse_identity_type_name_detail(machine, result, preprocess, node_scope, first, after, &base, node);
                 bool sound = type.value < result->type_count && base.value < result->type_count && !machine->failed &&
                              result->diagnostic_count == checkpoint.diagnostic_count && result->member_count == checkpoint.member_count &&
                              result->enum_member_count == checkpoint.enum_member_count && result->entity_count == checkpoint.entity_count &&
@@ -10578,7 +10708,11 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                 bool recipe = (flags & C_AST_FACT_RECIPE) != 0;
                 CType const* type = recipe ? facts->types[name] < facts->recipe_count ? &facts->recipes[facts->types[name]].type : 0
                                           : facts->types[name] < result->type_count ? result->types + facts->types[name] : 0;
-                if ((flags & C_AST_FACT_TYPED) && type && type->kind != C_TYPE_ARRAY)
+                if ((flags & C_AST_FACT_TYPED) && type && type->kind == C_TYPE_ARRAY)
+                {
+                    c_parse_compound_array_facts(machine, preprocess, result, scope, node, name);
+                }
+                else if ((flags & C_AST_FACT_TYPED) && type && type->kind != C_TYPE_ARRAY)
                 {
                     bool completed = (facts->flags[node] & (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED)) == C_AST_FACT_EXPRESSION;
                     facts->statistics.completed += completed;
