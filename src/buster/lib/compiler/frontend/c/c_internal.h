@@ -359,6 +359,7 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
                                               CAnalysisResult parse, Target target);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
+BUSTER_C_EXTERN CEntityId c_parse_lookup_existing_entity(CParseResult const* result, CScopeId scope, String8 name);
 // A stamp that changes whenever c_parse_lookup_entity_token's answer could;
 // false outside the validation families, where no stamp is kept.
 BUSTER_C_EXTERN bool c_parse_lookup_generation(CParseResult const* result, u64* generation_out);

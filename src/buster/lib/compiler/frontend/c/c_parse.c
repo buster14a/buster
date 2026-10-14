@@ -27534,7 +27534,7 @@ BUSTER_C_SHARED bool c_parse_lookup_generation(CParseResult const* result, u64* 
 // of what a name resolves to, and what every lookup outside the scope the
 // binding array stands for still asks.
 // `hops` receives the scopes walked, which only the work counters read.
-BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name, u32* hops)
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult const* result, CScopeId scope, u32 symbol, String8 name, u32* hops)
 {
     CEntityId found = C_ENTITY_ID_INVALID;
     *hops = 0;
@@ -27546,7 +27546,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
         CEntityId entity = result->entity_lookup_buckets[bucket];
         while (entity.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
         {
-            CEntity* candidate = &result->entities[entity.value];
+            CEntity const* candidate = &result->entities[entity.value];
             found = candidate->scope.value == scope.value && candidate->symbol == symbol && (symbol || string_equal(candidate->name, name))
                         ? entity
                         : C_ENTITY_ID_INVALID;
@@ -27590,6 +27590,22 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, C
 CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name)
 {
     return c_parse_lookup_entity_symbol(result, scope, c_parse_name_symbol(result, name), name);
+}
+
+BUSTER_C_SHARED CEntityId c_parse_lookup_existing_entity(CParseResult const* result, CScopeId scope, String8 name)
+{
+    CEntityId found = C_ENTITY_ID_INVALID;
+    u32 symbol = result && result->symbols ? c_symbol_find(result->symbols, name) : 0;
+    if (result && scope.value < result->scope_count && result->entity_lookup_buckets && result->entity_lookup_bucket_count &&
+        (!result->symbols || symbol))
+    {
+        // Finished bindings only: no interning, scope cursor movement,
+        // speculative state or source-token inspection.
+        u32 hops = 0;
+        found = c_parse_lookup_entity_chain(result, scope, symbol, name, &hops);
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, hops);
+    }
+    return found;
 }
 
 // The innermost step of c_parse_lookup_entity_symbol on its own: one bucket
@@ -49215,3 +49231,61 @@ CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult pr
 {
     return c_analyze_with_options(arena, source_path, preprocess, syntax, target, (CIRLowerOptions){0});
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
+                                             bool* old_tag_restored_out, bool* grown_tag_preserved_out)
+{
+    bool complete = false;
+    CType* checkpoint_types = arena ? arena_allocate(arena, CType, 1) : 0;
+    if (checkpoint_types)
+    {
+        checkpoint_types[0] = (CType){.tag = S8("RollbackTag"), .kind = C_TYPE_STRUCT};
+        CParseResult result = {.arena = arena, .types = checkpoint_types, .type_count = 1, .type_capacity = 1};
+        CParseResult checkpoint = result;
+        CType previous = checkpoint_types[0];
+        // A speculative completion predates growth. Rollback must restore
+        // the old checkpoint storage while preserving the abandoned copy.
+        checkpoint_types[0].is_complete = true;
+        checkpoint_types[0].member_count = 1;
+        if (c_parse_result_reserve_types(&result, 1))
+        {
+            CType* grown_types = result.types;
+            bool grew = grown_types != checkpoint_types;
+            CTypeMutation mutation = {.id = (CTypeId){.value = 0}, .previous = previous};
+            CTypeParseMachine machine = {.mutations = &mutation, .mutation_count = 1, .mutation_capacity = 1};
+            c_type_parse_rollback(&machine, &result, &checkpoint, 0);
+            bool restored_pointer = result.types == checkpoint_types && result.type_count == 1;
+            bool old_tag_restored = !checkpoint_types[0].is_complete && checkpoint_types[0].member_count == 0 &&
+                                   string_equal(checkpoint_types[0].tag, S8("RollbackTag"));
+            bool grown_tag_preserved = grown_types[0].is_complete && grown_types[0].member_count == 1 &&
+                                       string_equal(grown_types[0].tag, S8("RollbackTag"));
+            if (grew_out) *grew_out = grew;
+            if (restored_pointer_out) *restored_pointer_out = restored_pointer;
+            if (old_tag_restored_out) *old_tag_restored_out = old_tag_restored;
+            if (grown_tag_preserved_out) *grown_tag_preserved_out = grown_tag_preserved;
+            complete = machine.mutation_count == 0 && grew && restored_pointer && old_tag_restored && grown_tag_preserved;
+        }
+    }
+    return complete;
+}
+#endif
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_existing_entity_lookup_read_only(CParseResult const* result, String8 name, CEntityKind kind)
+{
+    u32 symbols = result->symbols ? result->symbols->count : 0;
+    u32 types = result->type_count;
+    u32 entities = result->entity_count;
+    u32 scopes = result->scope_count;
+    CEntityId known = c_parse_lookup_existing_entity(result, (CScopeId){0}, name);
+    CEntityId absent = c_parse_lookup_existing_entity(result, (CScopeId){0}, S8("buster_never_intern_this_lookup"));
+    CEntityId repeated = c_parse_lookup_existing_entity(result, (CScopeId){0}, name);
+    CEntityId invalid_scope = c_parse_lookup_existing_entity(result, C_SCOPE_ID_INVALID, name);
+    bool complete = known.value < entities && known.value == repeated.value && result->entities[known.value].kind == kind &&
+                    string_equal(result->entities[known.value].name, name) && absent.value == C_ID_UNDERLYING_INVALID &&
+                    invalid_scope.value == C_ID_UNDERLYING_INVALID && types == result->type_count && entities == result->entity_count &&
+                    scopes == result->scope_count && symbols == (result->symbols ? result->symbols->count : 0);
+    return complete;
+}
+#endif

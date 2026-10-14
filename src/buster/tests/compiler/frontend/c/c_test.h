@@ -33,8 +33,6 @@ BUSTER_F_DECL u64 c_test_number_facts_bytes(CNumberFacts const* facts);
 BUSTER_F_DECL bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preprocess, u32* recorded_out);
 BUSTER_F_DECL u64 c_test_lex_punctuator_nfa_mismatches(void);
 BUSTER_F_DECL u64 c_test_lex_mask_below_mismatches(void);
-BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
-                                                           bool* old_tag_restored_out, bool* grown_tag_preserved_out);
 BUSTER_F_DECL void c_parse_index_scope_children(CParseResult* result, Arena* arena);
 BUSTER_F_DECL CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 BUSTER_F_DECL CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index);

@@ -138,6 +138,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_source_anchors(UnitTestArguments* 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_existing_entity_lookup(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+            S8("int target; void function(void){}"), C_PREPROCESS_DIALECT_GNU17);
+        if (form)
+        {
+            preprocess.symbols = 0;
+            for (u32 token = 0; token < preprocess.token_count; token += 1) preprocess.tokens[token].symbol = 0;
+        }
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        if (BUSTER_REQUIRE(arguments, !preprocess.error_count && !parsed.diagnostic_count))
+        {
+            BUSTER_TEST(arguments, c_test_existing_entity_lookup_read_only(&parsed, S8("target"), C_ENTITY_OBJECT));
+            BUSTER_TEST(arguments, c_test_existing_entity_lookup_read_only(&parsed, S8("function"), C_ENTITY_FUNCTION));
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // The two trees are one tree: the same kinds, extents, anchors and payloads,
 // where a LIST node's payload is compared through its list count (HYBRID
 // replaces it with a slice offset), and the same children from every
@@ -8664,6 +8688,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
         c_test_scratch_end(temporary);
     }
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_source_anchors);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_existing_entity_lookup);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_expressions);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declarations);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_dialects);

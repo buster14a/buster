@@ -182,6 +182,9 @@ BUSTER_F_DECL bool c_test_constraint_expression_ends_agree(Arena* arena, CPrepro
 BUSTER_F_DECL void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type);
 BUSTER_F_DECL u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start);
 
+// Existing binding probes must not intern absent names or mutate model rows.
+BUSTER_F_DECL bool c_test_existing_entity_lookup_read_only(CParseResult const* result, String8 name, CEntityKind kind);
+
 // A single file-scope expression-type query, reported field by field; see
 // c_test_expression_type_query in c_parse.c. `machine_only` forces the type
 // machine even for a lone literal token, as the differential oracle.
@@ -464,6 +467,10 @@ BUSTER_F_DECL bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessRe
 
 // Bytes one type-machine frame row copies on every push.
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
+
+// Rollback restores a speculative tag even after geometric type-row growth.
+BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
+                                                           bool* old_tag_restored_out, bool* grown_tag_preserved_out);
 
 // Whether nested frames' rollback snapshots stay independent; see c_parse.c.
 BUSTER_F_DECL bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth);

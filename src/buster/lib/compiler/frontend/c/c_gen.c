@@ -46501,63 +46501,7 @@ bool c_test_ir_constant_entity_index_lifetime(CParseResult* parse, CPreprocessRe
     return result && destroyed;
 }
 
-bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
-                                             bool* old_tag_restored_out, bool* grown_tag_preserved_out)
-{
-    if (!arena)
-    {
-        return false;
-    }
-    CType* checkpoint_types = arena_allocate(arena, CType, 1);
-    if (!checkpoint_types)
-    {
-        return false;
-    }
-    checkpoint_types[0] = (CType){
-        .tag = S8("RollbackTag"),
-        .kind = C_TYPE_STRUCT,
-        .member_start = 0,
-        .member_count = 0,
-        .is_complete = false,
-    };
-    CParseResult result = {
-        .arena = arena,
-        .types = checkpoint_types,
-        .type_count = 1,
-        .type_capacity = 1,
-    };
-    CParseResult checkpoint = result;
-    CType previous = checkpoint_types[0];
-    // Model a speculative tag completion recorded before a geometric reserve.
-    // The old rollback order restored the new copy and then selected this old
-    // checkpoint pointer, leaving the completed tag visible here.
-    checkpoint_types[0].is_complete = true;
-    checkpoint_types[0].member_count = 1;
-    if (!c_parse_result_reserve_types(&result, 1))
-    {
-        return false;
-    }
-    CType* grown_types = result.types;
-    bool grew = grown_types != checkpoint_types;
-    CTypeMutation mutation = {
-        .id = (CTypeId){.value = 0},
-        .previous = previous,
-    };
-    CTypeParseMachine machine = {
-        .mutations = &mutation,
-        .mutation_count = 1,
-        .mutation_capacity = 1,
-    };
-    c_type_parse_rollback(&machine, &result, &checkpoint, 0);
-    bool restored_pointer = result.types == checkpoint_types && result.type_count == 1;
-    bool old_tag_restored = !checkpoint_types[0].is_complete && checkpoint_types[0].member_count == 0 && string_equal(checkpoint_types[0].tag, S8("RollbackTag"));
-    bool grown_tag_preserved = grown_types[0].is_complete && grown_types[0].member_count == 1 && string_equal(grown_types[0].tag, S8("RollbackTag"));
-    if (grew_out) *grew_out = grew;
-    if (restored_pointer_out) *restored_pointer_out = restored_pointer;
-    if (old_tag_restored_out) *old_tag_restored_out = old_tag_restored;
-    if (grown_tag_preserved_out) *grown_tag_preserved_out = grown_tag_preserved;
-    return machine.mutation_count == 0 && grew && restored_pointer && old_tag_restored && grown_tag_preserved;
-}
+
 #endif
 
 BUSTER_C_INTERNAL u32 c_ir_constant_initializer_value_end(CIntegerIrBuilder* builder, u32 start, u32 limit)
@@ -57816,7 +57760,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        CEntityId alias_target = parse.scope_count ? c_parse_lookup_entity(&parse,
+        CEntityId alias_target = parse.scope_count ? c_parse_lookup_existing_entity(&parse,
                                                                            (CScopeId){
                                                                                .value = 0,
                                                                            },
