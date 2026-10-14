@@ -1194,6 +1194,9 @@ one lane publishes alternating states and another reads them; serial builds
 exercise the same publication path with one lane. Rejected snapshots are never
 used to read string bytes. The slot keeps the single-writer sequence check,
 with atomic pointer, length and scalar fields on every supported compiler (#4175).
+The focused `Watchdog ThreadSanitizer` hosted job requires five consecutive
+`test_tsan` passes. The PIE fixture qualifies child ASLR from the kernel sysctl
+and inherited process personality, which a sanitizer runtime may change (#4179).
 `os_tests` also runs a real `ide test` child through the private
 `BUSTER_TEST_WATCHDOG_CHILD_MODE` payload. That payload spins in one fixture
 under a one-second override. The child must exit with status 124, print the
