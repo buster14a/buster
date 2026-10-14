@@ -41831,6 +41831,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
 // First-party GNU17/GNU23 witnesses: typeof's operand is not the outer
 // cast's type-word grammar. Conjunction and sizeof/alignof neighbors still
 // resolve the next name as an ordinary identifier, even when it is a label.
+#include <buster/tests/compiler/frontend/c/label_comparison_test.c>
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -69949,6 +69951,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lex_row_trim);
     C_TEST_FIXTURE(arguments, c_test_label_address_prefix_indexed_paths);
     C_TEST_FIXTURE(arguments, c_test_label_constraint_authority);
+    C_TEST_FIXTURE(arguments, c_test_label_comparison_logicals);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
