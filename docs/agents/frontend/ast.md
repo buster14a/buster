@@ -2401,7 +2401,12 @@ ordered member offsets and index operand nodes with their element sizes;
 an absent plan differs from a recorded invalid designator. The semantic
 validator publishes the path from its already parsed type, including runtime
 index operands, anonymous promoted members and the one parse of an inline
-type definition. F6 lowering still consumes the legacy walker until its node
+type definition. The numeric descriptor may publish during a protected TYPE
+query: its offsets, element sizes and operand nodes survive semantic model
+rollback without retaining a CTypeId or binding. Constant value rows keep
+their separate checkpoint guard. Repeated publication keeps one descriptor
+per call and preserves the facts-disabled model inventory. F6 lowering
+still consumes the legacy walker until its node
 consumer replaces it. An x87 initializer annotation retains the
 semantic destination significand and exponent independently of the source
 arithmetic fact. `c_parse_validate_static_scalar` publishes that annotation

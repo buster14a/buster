@@ -36773,6 +36773,17 @@ bool c_test_member_offset(Arena* arena, CPreprocessResult preprocess, CParseResu
 }
 #endif
 
+#if BUSTER_INCLUDE_TESTS
+// Force completion to supply numeric descriptors that normal validation
+// would otherwise have published first, without changing any C answer.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_offsetof_completion_only;
+void c_test_offsetof_completion_only_set(bool enabled)
+{
+    c_parse_offsetof_completion_only = enabled;
+    return;
+}
+#endif
+
 // The validator already owns the parsed type. Retain only its semantic
 // numeric path and the AST index operands; no queried CType row escapes.
 BUSTER_C_INTERNAL void c_parse_ast_offsetof_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
@@ -36780,7 +36791,12 @@ BUSTER_C_INTERNAL void c_parse_ast_offsetof_publish(CTypeParseMachine* machine, 
 {
     CAstFacts* facts = machine->ast_facts;
     CAst const* ast = machine->syntax_tree;
-    bool publish = facts && ast && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE && !result->protected_type_constant_query;
+    // Numeric layout descriptions contain no rows from the checkpointed
+    // model, so TYPE-mode queries may publish them before rollback.
+    bool publish = facts && ast;
+#if BUSTER_INCLUDE_TESTS
+    publish = publish && (!c_parse_offsetof_completion_only || machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE);
+#endif
     u32 node = publish ? c_ast_facts_locate(facts, &preprocess, start, end) : C_AST_NODE_INVALID;
     publish = node != C_AST_NODE_INVALID && ast->kinds[node] == C_AST_CALL && c_ast_child_count(ast, node) == 3 &&
               !c_ast_facts_offsetof(facts, node);

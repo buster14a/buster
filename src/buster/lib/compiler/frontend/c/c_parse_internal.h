@@ -438,6 +438,7 @@ struct CTestTypeConstantQuery
     CIntegerConstant constant;
     bool model_unchanged;
 };
+BUSTER_F_DECL void c_test_offsetof_completion_only_set(bool enabled);
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
 // Runs the same protected reader without full-capacity snapshots. The caller

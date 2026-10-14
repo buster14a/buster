@@ -7027,6 +7027,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* 
            " __builtin_offsetof(struct S, promoted) +\n"
            " __builtin_offsetof(struct S, a[__builtin_offsetof(struct Leaf, b) / sizeof(int)].b[1]); }\n"),
         S8("struct Bad { int bit : 3; }; unsigned long value = __builtin_offsetof(struct Bad, bit);\n"),
+        S8("struct Protected { char c; int a[4]; };\n"
+           "typedef __typeof__(int[__builtin_offsetof(struct Protected, a[2]) + sizeof(int)]) ProtectedArray;\n"
+           "int f(void) { return sizeof(__typeof__(int[__builtin_offsetof(struct Protected, a[1])])) + sizeof(ProtectedArray); }\n"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
     {
@@ -7042,8 +7045,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* 
                 syntax.ast = &built.ast;
                 CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
                 syntax.ast_facts = &facts;
+                c_test_offsetof_completion_only_set(index == 2);
                 CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
-                BUSTER_TEST(arguments, analysis.analysis_complete && (index ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
+                c_test_offsetof_completion_only_set(false);
+                BUSTER_TEST(arguments, analysis.analysis_complete && (index == 1 ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
                 String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
                 u64 rows = 0;
                 difference = difference.length ? difference : c_ast_corpus_models_differ(temporary.arena, &plain, &analysis, &rows);
@@ -7058,7 +7063,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* 
                     if (plan)
                     {
                         plans += 1;
-                        BUSTER_TEST(arguments, built.ast.kinds[node] == C_AST_CALL && plan->valid == !index);
+                        BUSTER_TEST(arguments, built.ast.kinds[node] == C_AST_CALL && plan->valid == (index != 1));
                         BUSTER_TEST(arguments, plan->first_step <= facts.offsetof_step_count &&
                                                plan->step_count <= facts.offsetof_step_count - plan->first_step);
                         if (plan->valid && plan->step_count == 4)
@@ -7087,8 +7092,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_facts(UnitTestArguments* 
                         }
                     }
                 }
-                BUSTER_TEST(arguments, index ? plans == 1 : plans == 6 && indexed == 3 && promoted && inline_member);
+                BUSTER_TEST(arguments, index == 1 ? plans == 1 : index == 2 ? plans == 2 : plans == 6 && indexed == 3 && promoted && inline_member);
                 BUSTER_TEST(arguments, facts.offsetof_plan_count == plans && facts.offsetof_step_count <= facts.node_count);
+                if (index == 2)
+                {
+                    u32 constants = facts.constant_count;
+                    u32 steps = facts.offsetof_step_count;
+                    c_test_offsetof_completion_only_set(true);
+                    CAnalysisResult repeated = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                    c_test_offsetof_completion_only_set(false);
+                    difference = c_ast_corpus_analyses_differ(temporary.arena, &analysis, &repeated);
+                    difference = difference.length ? difference : c_ast_corpus_models_differ(temporary.arena, &analysis, &repeated, &rows);
+                    BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+                    BUSTER_TEST(arguments, facts.constant_count == constants && facts.offsetof_plan_count == plans && facts.offsetof_step_count == steps);
+                    for (u32 node = 0; node < built.ast.node_count; node += 1)
+                    {
+                        CAstOffsetofPlan const* plan = c_ast_facts_offsetof(&facts, node);
+                        if (plan)
+                        {
+                            BUSTER_TEST(arguments, plan->valid && plan->step_count == 2);
+                            CAstOffsetofStep const* parts = facts.offsetof_steps + plan->first_step;
+                            BUSTER_TEST(arguments, parts[0].amount == 4 && parts[0].index_node == C_AST_NODE_INVALID &&
+                                                   parts[1].amount == 4 && parts[1].index_node != C_AST_NODE_INVALID);
+                            BUSTER_TEST(arguments, c_ast_facts_constant(&facts, node).type.value < analysis.type_count ||
+                                                   c_ast_facts_constant(&facts, node).type.value == C_TYPE_ID_INVALID.value);
+                        }
+                    }
+                }
             }
             c_ast_facts_release(&facts);
             c_ast_release(&built.ast);
