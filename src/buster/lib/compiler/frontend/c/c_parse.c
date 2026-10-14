@@ -9699,6 +9699,58 @@ BUSTER_C_INTERNAL void c_parse_type_recipe_bounds(CTypeParseMachine* machine, CP
                                                   CScopeId scope, u32 begin, u32 end);
 BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult preprocess, CArrayBound bound);
 
+// Storage half has a semantic object layout but no runtime scalar IR
+// representation. Retain that numeric answer from completed type authority,
+// without constructing a C row or running another semantic query.
+BUSTER_C_INTERNAL void c_parse_ast_storage_half_layout_publish(CTypeParseMachine* machine, CParseResult* result, Target target, u32 parent)
+{
+    CAst const* ast = machine->syntax_tree;
+    CAstFacts* facts = machine->ast_facts;
+    bool valid = ast && facts && parent < ast->node_count && !result->diagnostic_count &&
+        (ast->kinds[parent] == C_AST_SIZEOF_EXPRESSION || ast->kinds[parent] == C_AST_SIZEOF_TYPE ||
+         ast->kinds[parent] == C_AST_ALIGNOF_EXPRESSION || ast->kinds[parent] == C_AST_ALIGNOF_TYPE);
+    u32 operand = valid ? c_ast_child_at(ast, parent, 0) : C_AST_NODE_INVALID;
+    u32 flags = valid ? facts->flags[operand] : 0;
+    bool recipe = (flags & C_AST_FACT_RECIPE) != 0;
+    u32 index = valid ? facts->types[operand] : C_AST_FACT_NONE;
+    CAstTypeRecipe const* derivation = recipe && index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
+                                         ? facts->recipes + index : 0;
+    CType const* type = (flags & C_AST_FACT_TYPED) ? recipe ? derivation ? &derivation->type : 0
+                                                      : index < result->type_count ? result->types + index : 0 : 0;
+    valid = valid && type && type->kind == C_TYPE_FP16_STORAGE && c_ast_facts_constant(facts, parent).status != C_AST_CONSTANT_INVALID;
+    bool alignment = valid && (ast->kinds[parent] == C_AST_ALIGNOF_EXPRESSION || ast->kinds[parent] == C_AST_ALIGNOF_TYPE);
+    u64 size = 0;
+    u32 natural = 0;
+    if (valid) valid = c_parse_builtin_type_layout(target, C_TYPE_FP16_STORAGE, &size, &natural);
+    bool alias = valid && (derivation ? derivation->has_alignment : c_parse_type_alignment(result, (CTypeId){.value = index}) != 0);
+    if (valid && alias)
+    {
+        CTypeLayoutCache const* cache = &machine->layout_cache;
+        valid = !recipe && index < cache->capacity && cache->states[index] != 0;
+        if (valid)
+        {
+            size = cache->sizes[index];
+            natural = cache->alignments[index];
+        }
+    }
+    else if (valid && type->is_atomic) c_atomic_promoted_layout(target_data_layout(target).atomic_max_width, &size, &natural);
+    // GNU object alignment can differ from the type's alignment. Its existing
+    // certified answer owns that case; this descriptor covers type operands.
+    valid = valid && (!alignment || ast->kinds[operand] == C_AST_TYPE_NAME || ast->kinds[operand] == C_AST_CAST || ast->kinds[operand] == C_AST_CALL);
+    if (valid && c_ast_facts_constant(facts, parent).status != C_AST_CONSTANT_INTEGER)
+    {
+        bool stored = c_ast_facts_store_constant(facts, parent, (CAstConstantFact){.low = alignment ? natural : size,
+            .type = C_TYPE_ID_INVALID, .primitive_kind = c_parse_size_type_kind(target), .status = C_AST_CONSTANT_INTEGER});
+        if (!stored)
+        {
+            facts->recipe_failed = true;
+            machine->failed = true;
+            c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                S8("could not reserve storage-half layout facts"));
+        }
+    }
+}
+
 // One retained expression completion, shared by typed regions and the
 // required unevaluated operands outside them. All transient model changes
 // are captured before the same checkpoint rollback.
@@ -9776,6 +9828,7 @@ BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine
                                                                                   : C_AST_FACT_GAP_INVALID;
         facts->statistics.gaps[gap] += 1;
     }
+    c_parse_ast_storage_half_layout_publish(machine, result, preprocess.target, node + 1);
     if (facts->recipe_count > recipe_mark)
     {
         bool saved_checkpoint = machine->fact_checkpoint_active;
@@ -10844,6 +10897,7 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                 c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
                 arena_set_position(machine->scratch_arena, scratch_mark);
             }
+            c_parse_ast_storage_half_layout_publish(machine, result, preprocess.target, node);
         }
         machine->fact_checkpoint_active = saved_checkpoint;
         machine->expression_queries = saved_queries;
