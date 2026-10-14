@@ -1726,19 +1726,52 @@ typedef enum CAstFactFlag
     // row is kept for it: unless a validator's query already minted one,
     // minting it would give lowering an IR type of its own and change -g.
     C_AST_FACT_STRING = 1u << 6,
+    // `types` names a sparse CAstTypeRecipe, including a derivation that a
+    // rolled-back completion query built, or an explicit builtin/name form.
+    C_AST_FACT_RECIPE = 1u << 7,
 } CAstFactFlag;
+
+typedef enum CAstTypeRecipeForm
+{
+    C_AST_TYPE_RECIPE_DERIVATION,
+    // No callable CType row exists: builtin records retain its semantic
+    // identity. A call's own result is a separate ordinary type fact.
+    C_AST_TYPE_RECIPE_BUILTIN,
+    // The implicit function-name object: const char[name length + 1].
+    C_AST_TYPE_RECIPE_FUNCTION_NAME,
+} CAstTypeRecipeForm;
+
+// A row-free semantic type. All rows appended by its query are copied into
+// one contiguous recipe run before rollback. A CType reference below
+// row_begin is an existing published row; a later one names
+// recipe_begin + reference - row_begin. Bounds and alignment inheritance
+// are copied too, so no recipe points into rolled-back rows or bound tables.
+typedef struct CAstTypeRecipe CAstTypeRecipe;
+struct CAstTypeRecipe
+{
+    CType type;
+    CArrayBound bound;
+    CTypeAlignment alignment;
+    u32 bound_node;
+    u32 row_begin;
+    u32 recipe_begin;
+    u32 declaration;
+    u32 builtin;
+    CAstTypeRecipeForm form;
+    bool has_alignment;
+};
 
 // Why a fact candidate has no type.
 typedef enum CAstFactGap
 {
     // The span rules give the node no token range.
     C_AST_FACT_GAP_UNSPANNED,
-    // The machine types its range to nothing (`__func__`, an unbound
-    // `__builtin_expect(...)`, a void-typed failure).
+    // The machine types its range to nothing, and no explicit semantic
+    // identity or implicit object form describes it.
     C_AST_FACT_GAP_INVALID,
-    // The machine's answer is a type row its own run appended (an appended
-    // row would get an IR type and change -g), or the run mutated a row or
-    // raised a diagnostic; the run is rolled back.
+    // The run changed semantic state outside a describable temporary type
+    // graph: a row mutation, member/parameter addition or diagnostic. The
+    // run is rolled back.
     C_AST_FACT_GAP_APPENDS,
     // The machine had failed or had no capacity left.
     C_AST_FACT_GAP_BUSY,
@@ -1767,12 +1800,75 @@ struct CAstFactStatistics
     u64 bound;
     u64 bit_fields;
     u64 strings;
+    u64 recipes;
+    u64 builtin_identities;
+    u64 function_names;
     u64 gaps[C_AST_FACT_GAP_COUNT];
     u64 uncovered;
     u64 outside;
     u64 stale;
     u64 completion_queries;
     u64 retained_bytes;
+};
+
+// A semantic constant query has a separate result from the expression's
+// type. A fold that does not model a shape is UNSUPPORTED, not proof that
+// the source is nonconstant; INVALID means an evaluated C operation faulted.
+typedef enum CAstConstantStatus
+{
+    C_AST_CONSTANT_UNQUERIED,
+    C_AST_CONSTANT_INTEGER,
+    C_AST_CONSTANT_FLOAT,
+    C_AST_CONSTANT_NONCONSTANT,
+    C_AST_CONSTANT_UNSUPPORTED,
+    C_AST_CONSTANT_INVALID,
+    C_AST_CONSTANT_STATUS_COUNT,
+} CAstConstantStatus;
+
+typedef struct CAstConstantFact CAstConstantFact;
+struct CAstConstantFact
+{
+    u64 low;
+    u64 high;
+    f64 floating;
+    // An already committed source type, or invalid when the query appended
+    // it. The primitive semantic kind remains stable across a rollback.
+    CTypeId type;
+    CTypeKind primitive_kind;
+    CAstConstantStatus status;
+    // Narrow floats use `floating`, wide floats retain their target image in
+    // low/high. Initializer destination conversions have separate records.
+    u8 float_width;
+    u8 reserved[3];
+    u32 offsetof_plus_one;
+    u32 ext80_initializer_plus_one;
+};
+
+typedef struct CAstOffsetofStep CAstOffsetofStep;
+struct CAstOffsetofStep
+{
+    u32 node;
+    // Invalid for a member (amount is its semantic offset); otherwise this
+    // is the index operand node and amount is its element byte size.
+    u32 index_node;
+    u64 amount;
+};
+
+typedef struct CAstOffsetofPlan CAstOffsetofPlan;
+struct CAstOffsetofPlan
+{
+    u32 first_step;
+    u32 step_count;
+    bool valid;
+    u8 reserved[3];
+};
+
+typedef struct CAstExt80InitializerFact CAstExt80InitializerFact;
+struct CAstExt80InitializerFact
+{
+    u64 significand;
+    u16 exponent_sign;
+    u8 reserved[6];
 };
 
 // The retained columns: `types` (a CTypeId value or C_AST_FACT_NONE),
@@ -1788,8 +1884,29 @@ struct CAstFacts
     // The producer range-to-node index, computed before semantic queries and
     // retained with the facts. Its delimiter rows belong to CParseResult.
     Arena* index_arena;
+    // F3's dense node slots and sparse query results have their own lifetime
+    // and reservation; they never repurpose the type/payload/flag columns.
+    Arena* constants_arena;
+    u32* constant_slots;
+    CAstConstantFact* constants;
+    u32 constant_count;
+    u32 constant_capacity;
+    CAstOffsetofPlan* offsetof_plans;
+    CAstOffsetofStep* offsetof_steps;
+    CAstExt80InitializerFact* ext80_initializers;
+    u32 offsetof_plan_count;
+    u32 offsetof_plan_capacity;
+    u32 offsetof_step_count;
+    u32 offsetof_step_capacity;
+    u32 ext80_initializer_count;
+    u32 ext80_initializer_capacity;
     CAstSpans* spans;
     u32 const* matches;
+    // Sparse completion descriptions, appended in place in their own arena.
+    Arena* recipe_arena;
+    CAstTypeRecipe* recipes;
+    u32 recipe_count;
+    bool recipe_failed;
     u32* types;
     u32* payloads;
     u8* flags;
@@ -2097,6 +2214,80 @@ struct CSizeofOperandType
 };
 #endif
 
+// Semantic initializer selections retained through lowering (#4061). Paths
+// project a root object through member or array edges; member indices are
+// relative to the container's member list, UINT32_MAX names an array edge.
+// A ranged edge selects [first,last], evaluating its value only once.
+typedef struct CInitializerPath CInitializerPath;
+struct CInitializerPath
+{
+    CTypeId container;
+    u64 first;
+    u64 last;
+    u32 parent_plus_one;
+    u32 member;
+    // UINT32_MAX uses the current value anchor; other rows retain the
+    // member/bracket source needed by the original FIELD/INDEX emission.
+    u32 source_token;
+};
+
+typedef enum CInitializerItemFlag
+{
+    C_INITIALIZER_ITEM_VALUE = 1,
+    C_INITIALIZER_ITEM_LIST_BEGIN = 2,
+    C_INITIALIZER_ITEM_LIST_END = 4,
+    C_INITIALIZER_ITEM_DESIGNATED = 8,
+    // Complex brace components use the parent type's primitive real kind,
+    // with member 0/1 paths, without appending semantic scalar rows.
+    C_INITIALIZER_ITEM_COMPLEX_COMPONENT = 16,
+} CInitializerItemFlag;
+
+typedef struct CInitializerItem CInitializerItem;
+struct CInitializerItem
+{
+    CTypeId type;
+    u32 node;
+    u32 path_plus_one;
+    // Value and range-copy anchors preserve the original debug emission.
+    u32 source_token;
+    u32 range_source_token;
+    // Exact value provenance; parentheses are absent from syntax topology.
+    u32 value_start;
+    u32 value_end;
+    // Matched list entry/exit event, plus one; zero for a value event.
+    u32 paired_item_plus_one;
+    u8 flags;
+};
+
+typedef enum CInitializerPlanFlag
+{
+    // `{0}` retains the original zero-constructor emission. `{0,}` does not.
+    C_INITIALIZER_PLAN_SINGLE_ZERO = 1,
+} CInitializerPlanFlag;
+
+typedef struct CInitializerPlan CInitializerPlan;
+struct CInitializerPlan
+{
+    CInitializerPlan* next;
+    CInitializerPlan* hash_next;
+    CInitializerPath* paths;
+    CInitializerItem* items;
+    CTypeId type;
+    u64 inferred_count;
+    // The existing positional flexible-tail extension's object count; the
+    // shared omitted C array bound remains unchanged.
+    u64 flexible_count;
+    u32 flexible_member_plus_one;
+    u32 node;
+    u32 path_count;
+    u32 item_count;
+    u32 path_capacity;
+    u32 item_capacity;
+    u8 flags;
+    bool complete;
+    bool failed;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -2107,6 +2298,11 @@ struct CParseResult
     // the parse intern names on demand so entity lookups key on symbol ids.
     CSymbolTable* symbols;
     CDeclaration* declarations;
+    // Published by the initializer validator; never rewound with body scratch.
+    CInitializerPlan* initializer_plans;
+    CInitializerPlan** initializer_plan_buckets;
+    u32 initializer_plan_bucket_count;
+    u32 initializer_plan_count;
     CType* types;
     // Borrowed only while semantic constraints are checked. Scalar query
     // results share immutable types; declarator types remain independent.
@@ -2593,6 +2789,14 @@ BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
 BUSTER_F_DECL bool c_ast_facts_prepare(CAstFacts* facts, CAst const* ast, CPreprocessResult const* preprocess, CParseResult* result);
 // The same span lookup every producer uses; C_AST_NODE_INVALID on a miss.
 BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preprocess, u32 start, u32 end);
+// Sparse semantic constant results. Missing nodes answer UNQUERIED; integer
+// bits and fault status are retained independently of type-query recipes.
+BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
+BUSTER_F_DECL CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid);
+BUSTER_F_DECL CAstExt80InitializerFact const* c_ast_facts_ext80_initializer(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_ext80_initializer(CAstFacts* facts, u32 node, u64 significand, u16 exponent_sign);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

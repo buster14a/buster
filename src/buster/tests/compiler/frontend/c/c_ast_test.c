@@ -75,7 +75,13 @@ BUSTER_GLOBAL_LOCAL CPreprocessResult c_ast_test_preprocess(Arena* arena, String
 // accessor.
 BUSTER_GLOBAL_LOCAL bool c_ast_test_same_tree(CAst const* left, CAst const* right, bool compare_children)
 {
-    bool same = left->node_count == right->node_count && left->root == right->root;
+    bool same = left->node_count == right->node_count && left->root == right->root && left->parenthesis_count == right->parenthesis_count;
+    for (u32 index = 0; index < left->parenthesis_count && same; index += 1)
+    {
+        CAstParenthesis a = left->parentheses[index];
+        CAstParenthesis b = right->parentheses[index];
+        same = a.node == b.node && a.open == b.open && a.close == b.close && a.flags == b.flags;
+    }
     for (u32 node = 0; node < left->node_count && same; node += 1)
     {
         same = left->kinds[node] == right->kinds[node] && left->extents[node] == right->extents[node] && left->tokens[node] == right->tokens[node];
@@ -1141,7 +1147,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_options_and_statistics(UnitTestArg
     {
         CAstStatistics statistics = implicit_result.statistics;
         BUSTER_TEST(arguments, statistics.node_count == implicit_result.ast.node_count);
-        BUSTER_TEST(arguments, statistics.retained_bytes == (u64)implicit_result.ast.node_count * 13);
+        BUSTER_TEST(arguments, statistics.retained_bytes == (u64)implicit_result.ast.node_count * 13 +
+                                                           (u64)implicit_result.ast.parenthesis_count * sizeof(CAstParenthesis));
         // The columns are written where the tree keeps them: nothing is copied.
         BUSTER_TEST(arguments, statistics.column_copy_bytes == 0);
         BUSTER_TEST(arguments, statistics.transient_high_water > 0);
@@ -1188,6 +1195,161 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_options_and_statistics(UnitTestArg
         }
     }
     c_ast_release(&implicit_result.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// Exact group roots and provenance are specified independently of the
+// builder's lookup: call argument delimiters and statement condition
+// delimiters are owned by their syntax nodes, not expression groups.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_parentheses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_retained_parenthesis_navigation());
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("void f(void) { (a + (b * c)); ((d)); f((e)); (f)(g); }"), C_PREPROCESS_DIALECT_GNU17);
+    CAstParenthesis const expected[] = {{11, 9, 13}, {12, 6, 14}, {14, 17, 19}, {14, 16, 20}, {17, 24, 26}, {20, 29, 31}, {24, 5, 36, C_AST_DELIMITER_BLOCK}};
+    for (u32 batch = 0; batch < BUSTER_ARRAY_LENGTH(c_ast_test_batches); batch += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            CAstResult built = c_ast_build(temporary.arena, preprocess,
+                (CAstOptions){.layout = c_ast_test_layouts[layout], .refill_batch = c_ast_test_batches[batch],
+                              .column_capacity = c_ast_test_capacities[batch], .parenthesis_capacity = 1});
+            if (BUSTER_REQUIRE(arguments, built.complete && built.ast.parenthesis_count == BUSTER_ARRAY_LENGTH(expected)))
+            {
+                BUSTER_TEST(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID);
+                BUSTER_TEST(arguments, built.statistics.parenthesis_copy_bytes == 7 * sizeof(CAstParenthesis));
+                BUSTER_TEST(arguments, built.statistics.parenthesis_committed_bytes == 8 * sizeof(CAstParenthesis));
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                {
+                    CAstParenthesis actual = built.ast.parentheses[index];
+                    BUSTER_TEST(arguments, actual.node == expected[index].node && actual.open == expected[index].open &&
+                                               actual.close == expected[index].close && actual.flags == expected[index].flags);
+                }
+                CAstParentheses pair = c_ast_parentheses(&built.ast, 14);
+                BUSTER_TEST(arguments, pair.first == 2 && pair.count == 2);
+                BUSTER_TEST(arguments, c_ast_parenthesis_at(&built.ast, 14, 1) == built.ast.parentheses + 2);
+                BUSTER_TEST(arguments, c_ast_parenthesis_at(&built.ast, 14, 2) == built.ast.parentheses + 3);
+                BUSTER_TEST(arguments, !c_ast_parenthesis_at(&built.ast, 14, 0) && !c_ast_parenthesis_at(&built.ast, 14, 3));
+                BUSTER_TEST(arguments, c_ast_parentheses(&built.ast, 21).count == 0);
+                BUSTER_TEST(arguments, c_ast_parentheses(&built.ast, C_AST_NODE_INVALID).count == 0);
+                CAstParenthesis saved = built.ast.parentheses[0];
+                built.ast.parentheses[0].node = C_AST_NODE_INVALID;
+                BUSTER_TEST(arguments, c_ast_validate(&built.ast) == built.ast.root);
+                built.ast.parentheses[0] = saved;
+                CAst copy = built.ast;
+                u64 live = arena_test_live_reserved_bytes();
+                c_ast_release(&built.ast);
+                BUSTER_TEST(arguments, !built.ast.parentheses && !built.ast.parenthesis_count && arena_test_live_reserved_bytes() < live);
+                c_ast_release(&copy);
+            }
+            c_ast_release(&built.ast);
+        }
+    }
+    u32 depth = 8192;
+    CPreprocessResult deep = c_ast_test_preprocess(temporary.arena,
+        c_ast_test_nest(temporary.arena, S8("void f(void) { "), S8("("), S8("a"), S8(")"), depth, S8("; }")),
+        C_PREPROCESS_DIALECT_GNU17);
+    CAstResult nested = c_ast_build(temporary.arena, deep, (CAstOptions){.parenthesis_capacity = 3, .column_capacity = 3, .refill_batch = 3});
+    if (BUSTER_REQUIRE(arguments, nested.complete && nested.ast.parenthesis_count == depth + 1))
+    {
+        BUSTER_TEST(arguments, c_ast_validate(&nested.ast) == C_AST_NODE_INVALID);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            CAstParenthesis row = nested.ast.parentheses[level];
+            BUSTER_TEST(arguments, row.node == 8 && row.open == 5 + depth - level && row.close == 7 + depth + level);
+        }
+    }
+    c_ast_release(&nested.ast);
+    CPreprocessResult skew = c_ast_test_preprocess(temporary.arena,
+        c_ast_test_nest(temporary.arena, S8("void f(void) { "), S8("(a+"), S8("a"), S8(")"), depth, S8("; }")),
+        C_PREPROCESS_DIALECT_GNU17);
+    CAstResult chain = c_ast_build(temporary.arena, skew, (CAstOptions){.parenthesis_capacity = 7, .column_capacity = 7, .refill_batch = 1});
+    if (BUSTER_REQUIRE(arguments, chain.complete && chain.ast.parenthesis_count == depth + 1))
+    {
+        BUSTER_TEST(arguments, c_ast_validate(&chain.ast) == C_AST_NODE_INVALID);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            CAstParenthesis row = chain.ast.parentheses[level];
+            BUSTER_TEST(arguments, row.node == 9 + depth + level && row.open == 6 + 3 * (depth - level - 1) && row.close == 7 + 3 * depth + level);
+        }
+    }
+    c_ast_release(&chain.ast);
+    CPreprocessResult context = c_ast_test_preprocess(temporary.arena,
+        S8("void f(void) { __extension__ (a); sizeof (a); ((a)); }"), C_PREPROCESS_DIALECT_GNU17);
+    CAstResult contexts = c_ast_build(temporary.arena, context, (CAstOptions){.parenthesis_capacity = 1});
+    if (BUSTER_REQUIRE(arguments, contexts.complete && contexts.ast.parenthesis_count == 5))
+    {
+        BUSTER_TEST(arguments, contexts.ast.parentheses[0].flags == C_AST_PARENTHESIS_AFTER_IDENTIFIER);
+        BUSTER_TEST(arguments, contexts.ast.parentheses[1].flags == C_AST_PARENTHESIS_AFTER_IDENTIFIER);
+        BUSTER_TEST(arguments, !contexts.ast.parentheses[2].flags && !contexts.ast.parentheses[3].flags);
+    }
+    c_ast_release(&contexts.ast);
+    CPreprocessResult failed = c_ast_test_preprocess(temporary.arena, S8("void f(void) { ((a)); ((b)"), C_PREPROCESS_DIALECT_GNU17);
+    u64 live = arena_test_live_reserved_bytes();
+    CAstResult rollback = c_ast_build(temporary.arena, failed, (CAstOptions){.parenthesis_capacity = 1});
+    BUSTER_TEST(arguments, !rollback.complete && !rollback.ast.parentheses && !rollback.ast.parenthesis_count && !rollback.ast.node_count);
+    BUSTER_TEST(arguments, rollback.diagnostic_count == 1 && arena_test_live_reserved_bytes() == live);
+    c_ast_release(&rollback.ast);
+    for (u32 ordinal = 6; ordinal <= 9; ordinal += 1)
+    {
+        live = arena_test_live_reserved_bytes();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, ordinal);
+        CAstResult refused = c_ast_build(temporary.arena, preprocess, (CAstOptions){.parenthesis_capacity = 1});
+        bool pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 0);
+        BUSTER_TEST(arguments, !pending && !refused.complete && !refused.ast.storage && !refused.ast.parenthesis_count);
+        BUSTER_TEST(arguments, refused.diagnostic_count == 1 && arena_test_live_reserved_bytes() == live);
+        c_ast_release(&refused.ast);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_owned_delimiters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("void f(void) { if ((a)) ; while(b) ; do ; while(c); for(;;) ; switch(d); }"), C_PREPROCESS_DIALECT_GNU17);
+    CAstParenthesis const expected[] = {
+        {8, 8, 10, 0}, {8, 7, 11, C_AST_DELIMITER_CONDITION}, {11, 14, 16, C_AST_DELIMITER_CONDITION},
+        {15, 21, 23, C_AST_DELIMITER_CONDITION}, {18, 26, 29, C_AST_DELIMITER_FOR_HEADER},
+        {19, 32, 34, C_AST_DELIMITER_CONDITION}, {22, 5, 36, C_AST_DELIMITER_BLOCK},
+    };
+    for (u32 batch = 0; batch < BUSTER_ARRAY_LENGTH(c_ast_test_batches); batch += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            CAstResult built = c_ast_build(temporary.arena, preprocess,
+                (CAstOptions){.layout = c_ast_test_layouts[layout], .refill_batch = c_ast_test_batches[batch],
+                              .column_capacity = c_ast_test_capacities[batch], .parenthesis_capacity = 1});
+            if (BUSTER_REQUIRE(arguments, built.complete && built.ast.parenthesis_count == BUSTER_ARRAY_LENGTH(expected)))
+            {
+                BUSTER_TEST(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID);
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                {
+                    CAstParenthesis actual = built.ast.parentheses[index];
+                    BUSTER_TEST(arguments, actual.node == expected[index].node && actual.open == expected[index].open &&
+                                               actual.close == expected[index].close && actual.flags == expected[index].flags);
+                }
+                BUSTER_TEST(arguments, c_ast_parentheses(&built.ast, 8).count == 1 && !c_ast_parenthesis_at(&built.ast, 8, 2));
+                CAstParenthesis const* condition = c_ast_owned_delimiter(&built.ast, 8, C_AST_DELIMITER_CONDITION);
+                BUSTER_TEST(arguments, condition && condition->open == 7 && condition->close == 11);
+                BUSTER_TEST(arguments, !c_ast_owned_delimiter(&built.ast, 8, C_AST_DELIMITER_FOR_HEADER));
+                BUSTER_TEST(arguments, c_ast_parentheses(&built.ast, 18).count == 0 && c_ast_parentheses(&built.ast, 22).count == 0);
+            }
+            c_ast_release(&built.ast);
+        }
+    }
+    CPreprocessResult failed = c_ast_test_preprocess(temporary.arena, S8("void f(void) { if(a)"), C_PREPROCESS_DIALECT_GNU17);
+    u64 live = arena_test_live_reserved_bytes();
+    CAstResult rollback = c_ast_build(temporary.arena, failed, (CAstOptions){.parenthesis_capacity = 1});
+    BUSTER_TEST(arguments, !rollback.complete && !rollback.ast.node_count && !rollback.ast.parenthesis_count && rollback.diagnostic_count == 1);
+    BUSTER_TEST(arguments, arena_test_live_reserved_bytes() == live);
+    c_ast_release(&rollback.ast);
     c_test_scratch_end(temporary);
     return result;
 }
@@ -1260,7 +1422,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_columns(UnitTestArguments* argumen
             {
                 BUSTER_TEST(arguments, c_ast_validate(&reference.ast) == C_AST_NODE_INVALID);
                 BUSTER_TEST(arguments, reference.statistics.column_copy_bytes == 0);
-                BUSTER_TEST(arguments, reference.statistics.retained_bytes == (u64)sizes[size] * 13);
+                BUSTER_TEST(arguments, reference.statistics.retained_bytes == (u64)sizes[size] * 13 + (u64)reference.ast.parenthesis_count * sizeof(CAstParenthesis));
                 // Frames, stacks and bindings only: the same for every size.
                 small_transient = size ? small_transient : reference.statistics.transient_high_water;
                 BUSTER_TEST(arguments, reference.statistics.transient_high_water == small_transient);
@@ -6244,10 +6406,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments
             BUSTER_TEST(arguments, spans.first[ast->root] == C_AST_SPAN_NONE);
         }
     }
+    // Type names keep the producer's complete boundary; optional, nested and
+    // variably modified declarators are checked against literal spellings.
+    String8 type_source = S8("int f(int n) { return sizeof(int) + sizeof(int (*)[n]) + sizeof(__typeof__(__typeof__(int)) *) + sizeof(int (*)(void)); }");
+    String8 const type_names[] = {S8("int"), S8("int ( * ) [ n ]"), S8("int"), S8("__typeof__ ( int )"),
+                                 S8("__typeof__ ( __typeof__ ( int ) ) *"), S8("int ( * ) ( void )")};
+    CPreprocessResult type_preprocess = c_ast_test_preprocess(temporary.arena, type_source, C_PREPROCESS_DIALECT_GNU17);
+    for (u32 batch = 0; batch < 8; batch += 1)
+    {
+        CAstResult type_tree = c_ast_build(temporary.arena, type_preprocess, (CAstOptions){.refill_batch = batch});
+        u32* type_matches = c_ast_test_matches(temporary.arena, type_preprocess);
+        CAstSpans type_spans = {0};
+        bool ready = BUSTER_REQUIRE(arguments, type_tree.complete && c_ast_validate(&type_tree.ast) == C_AST_NODE_INVALID) &&
+                     BUSTER_REQUIRE(arguments, c_ast_spans_build(temporary.arena, &type_tree.ast, type_preprocess.tokens,
+                                                                    (u32)type_preprocess.token_count, type_matches, &type_spans));
+        if (ready)
+        {
+            u32 seen = 0;
+            for (u32 node = 0; node < type_tree.ast.node_count; node += 1)
+            {
+                if (type_tree.ast.kinds[node] == C_AST_TYPE_NAME)
+                {
+                    BUSTER_TEST(arguments, c_ast_child_count(&type_tree.ast, node) >= 1 && c_ast_child_count(&type_tree.ast, node) <= 2);
+                    BUSTER_TEST(arguments, type_spans.first[node] == type_tree.ast.tokens[node] && type_spans.end[node] == type_tree.ast.data[node]);
+                    if (BUSTER_REQUIRE(arguments, seen < BUSTER_ARRAY_LENGTH(type_names)))
+                    {
+                        BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, type_preprocess, type_spans.first[node], type_spans.end[node]),
+                                           type_names[seen]);
+                    }
+                    seen += 1;
+                }
+            }
+            BUSTER_TEST(arguments, seen == BUSTER_ARRAY_LENGTH(type_names));
+        }
+        c_ast_release(&type_tree.ast);
+    }
     // Without a delimiter index there are no spans.
     CAstSpans none = {.spanned = 1};
     BUSTER_TEST(arguments, !c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, 0, &none) &&
                                none.spanned == 0 && !none.first);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// The initializer validator publishes its selections, including paths that
+// brace elision and anonymous-member continuations make implicit in syntax.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = S8("struct S { int : 0; int x; struct { int y, z; }; char text[4]; };\n"
+                        "struct S object = { .y = 4, 5, .text = {\"abc\"}, .x = 2 };\n"
+                        "int table[] = { [2 ... 4] = 1, [3] = 9, 7 };\n"
+                        "int matrix[2][2] = { 1, 2, 3, 4 };\n"
+                        "char* names[] = { \"argument\" }; char letters[] = { \"abc\" };\n"
+                        "double _Complex complex_value = { 1.0, 2.0 };\n"
+                        "struct F { int head; char tail[]; }; struct F flex = { 9, { -1, -1, -1 } };\n"
+                        "struct F text_flex = { 7, \"abc\" };\n"
+                        "typedef unsigned int V __attribute__((vector_size(32))); union U { V v; unsigned int lanes[8]; };\n"
+                        "unsigned int g(unsigned int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
+                        "union U u = { .v = __builtin_va_arg(ap, V) }; __builtin_va_end(ap); return u.lanes[0]; }\n"
+                        "int f(void) { struct S local = { .y = 1, 2 }; int conditional[] = { 1 ? 2, 3 : 4, 5 };\n"
+                        "return ((int[]){ 3, 4 })[0] + local.z + conditional[1]; }\n");
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    bool ready = BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete) &&
+                 BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast));
+    if (ready)
+    {
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        syntax.ast = &built.ast;
+        syntax.ast_facts = &facts;
+        syntax.type_interning = true;
+        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+        BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+        u32 plans = 0;
+        u32 values = 0;
+        u32 ranged = 0;
+        u32 promoted = 0;
+        u32 nested = 0;
+        u32 flexible = 0;
+        for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
+        {
+            BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
+            plans += plan->complete;
+            if (plan->flexible_count)
+            {
+                flexible += 1;
+                BUSTER_TEST(arguments, plan->flexible_member_plus_one == 2 &&
+                    (plan->flexible_count == 3 || plan->flexible_count == 4));
+                CType tail = analysis.types[analysis.members[analysis.types[plan->type.value].member_start + 1].type.value];
+                BUSTER_TEST(arguments, !analysis.array_bounds[tail.array_bound].has_inferred_count);
+            }
+            if (plan->type.value < analysis.type_count && analysis.types[plan->type.value].kind == C_TYPE_ARRAY)
+            {
+                CType array = analysis.types[plan->type.value];
+                if (array.element_type.value < analysis.type_count && analysis.types[array.element_type.value].kind == C_TYPE_POINTER)
+                    BUSTER_TEST(arguments, plan->item_count == 1 && plan->items[0].path_plus_one != 0 && plan->inferred_count == 1);
+            }
+            for (u32 path = 0; path < plan->path_count; path += 1)
+            {
+                CInitializerPath edge = plan->paths[path];
+                BUSTER_TEST(arguments, edge.container.value < analysis.type_count && edge.parent_plus_one <= plan->path_count);
+                ranged += edge.first != edge.last;
+                if (edge.member != UINT32_MAX && edge.container.value < analysis.type_count)
+                {
+                    CType container = analysis.types[edge.container.value];
+                    BUSTER_TEST(arguments, c_type_kind_is_complex(container.kind) ? edge.member < 2 : edge.member < container.member_count);
+                    promoted += edge.parent_plus_one != 0;
+                }
+                else nested += edge.parent_plus_one != 0;
+            }
+            for (u32 item = 0; item < plan->item_count; item += 1)
+            {
+                CInitializerItem value = plan->items[item];
+                BUSTER_TEST(arguments, value.node < built.ast.node_count && value.type.value < analysis.type_count &&
+                                       value.path_plus_one <= plan->path_count);
+                values += (value.flags & C_INITIALIZER_ITEM_VALUE) != 0;
+                if ((value.flags & C_INITIALIZER_ITEM_VALUE) && value.type.value < analysis.type_count && analysis.types[value.type.value].kind == C_TYPE_VECTOR)
+                    BUSTER_TEST(arguments, value.path_plus_one && plan->paths[value.path_plus_one - 1].member != UINT32_MAX);
+                if (value.flags & (C_INITIALIZER_ITEM_LIST_BEGIN | C_INITIALIZER_ITEM_LIST_END))
+                    BUSTER_TEST(arguments, value.paired_item_plus_one != 0 && value.paired_item_plus_one <= plan->item_count &&
+                        plan->items[value.paired_item_plus_one - 1].node == value.node);
+            }
+            if (plan->type.value < analysis.type_count && analysis.types[plan->type.value].kind == C_TYPE_ARRAY &&
+                plan->inferred_count == 5)
+                BUSTER_TEST(arguments, plan->item_count >= 3 && plan->path_count >= 3);
+        }
+        BUSTER_TEST(arguments, plans >= 5 && values >= 14 && ranged > 0 && promoted > 0 && nested > 0);
+        BUSTER_TEST(arguments, flexible == 2);
+    }
+    c_ast_facts_release(&facts);
     c_ast_release(&built.ast);
     c_test_scratch_end(temporary);
     return result;
@@ -6264,6 +6556,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments
 // initializer no query typed. `__func__` and a builtin's callee name are
 // gaps: the machine types them to nothing. Every candidate is accounted for
 // once, and no published row is past the type table.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 valid_source = S8("enum { A = 1 + 2 * 3, B = 0 && (1 / 0), C = 1 ? 9 : (1 / 0) };\n"
+           "static int values[sizeof(unsigned long) + A];\n"
+           "static int object; static int *address = &object;\n"
+           "static double real = 1.25 + 2.5;\n"
+           "static long double extended = 0x1.8p0L;\n"
+           "int f(void) { return values[0] + (address != 0); }\n");
+    String8 sources[] = {
+        valid_source,
+        valid_source,
+        S8("enum { invalid = 1 / 0 };\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        Target target = target_native;
+        if (index == 1) target.cpu_arch = CPU_ARCH_AARCH64;
+        bool invalid = index + 1 == BUSTER_ARRAY_LENGTH(sources);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){
+            .source_path = S8("ast-test.c"), .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.ast_facts = &facts;
+            syntax.type_interning = true;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && (invalid ? analysis.diagnostic_count != 0 : analysis.diagnostic_count == 0));
+            bool seven = false;
+            bool zero = false;
+            bool nine = false;
+            bool fault = false;
+            bool real = false;
+            bool wide = false;
+            bool extended = false;
+            for (u32 node = 0; node < built.ast.node_count; node += 1)
+            {
+                CAstConstantFact value = c_ast_facts_constant(&facts, node);
+                BUSTER_TEST(arguments, value.type.value == C_ID_UNDERLYING_INVALID || value.type.value < analysis.type_count);
+                if (value.status == C_AST_CONSTANT_INTEGER)
+                {
+                    seven |= value.low == 7 && !value.high;
+                    zero |= value.low == 0 && !value.high;
+                    nine |= value.low == 9 && !value.high;
+                }
+                if (value.status == C_AST_CONSTANT_FLOAT)
+                {
+                    real |= value.float_width == 64 && value.floating == 3.75;
+                    wide |= value.float_width == 128 && !value.low && value.high == UINT64_C(0x3fff800000000000);
+                }
+                CAstExt80InitializerFact const* initializer = c_ast_facts_ext80_initializer(&facts, node);
+                if (initializer)
+                {
+                    extended |= initializer->significand == UINT64_C(0xc000000000000000) && initializer->exponent_sign == UINT16_C(0x3fff);
+                    BUSTER_TEST(arguments, !value.offsetof_plus_one);
+                }
+                fault |= value.status == C_AST_CONSTANT_INVALID;
+            }
+            bool native_ext80 = target_data_layout(preprocess.target).long_double_type.bit_width == 80;
+            bool native_float128 = target_data_layout(preprocess.target).long_double_type.bit_width == 128;
+            BUSTER_TEST(arguments, invalid ? fault : seven && zero && nine && real && (!native_float128 || wide) && (!native_ext80 || extended) && !fault);
+            BUSTER_TEST(arguments, facts.constant_count && facts.constant_count <= facts.node_count && facts.constants_arena);
+            BUSTER_TEST(arguments, c_ast_facts_constant(&facts, C_AST_NODE_INVALID).status == C_AST_CONSTANT_UNQUERIED);
+            BUSTER_TEST(arguments, !c_ast_facts_ext80_initializer(&facts, C_AST_NODE_INVALID));
+            BUSTER_TEST(arguments, !c_ast_facts_offsetof(&facts, C_AST_NODE_INVALID));
+            c_ast_facts_release(&facts);
+            BUSTER_TEST(arguments, !facts.constants_arena && !facts.constant_slots && !facts.constants &&
+                                   !facts.offsetof_plans && !facts.offsetof_steps && !facts.ext80_initializers);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6321,7 +6694,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
         BUSTER_TEST(arguments, statistics.regions == 3 && statistics.candidates);
         BUSTER_TEST(arguments, statistics.tree + statistics.machine + statistics.completed + gaps == statistics.candidates);
         BUSTER_TEST(arguments, statistics.stale == 0 && statistics.bit_fields == 1 && statistics.strings == 4 && statistics.bound);
-        BUSTER_TEST(arguments, statistics.gaps[C_AST_FACT_GAP_INVALID] >= 2 && statistics.gaps[C_AST_FACT_GAP_APPENDS] == 0);
+        BUSTER_TEST(arguments, statistics.gaps[C_AST_FACT_GAP_INVALID] == 0 && statistics.gaps[C_AST_FACT_GAP_APPENDS] == 0 &&
+                                   statistics.builtin_identities == 1 && statistics.function_names == 1);
         u32 checked = 0;
         for (u32 node = 0; node < ast->node_count; node += 1)
         {
@@ -6329,8 +6703,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
             u32 type = facts.types[node];
             u32 kind = ast->kinds[node];
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[node]]);
-            BUSTER_TEST(arguments, !(flags & C_AST_FACT_TYPED) || type < analysis.type_count);
-            CTypeKind type_kind = (flags & C_AST_FACT_TYPED) && type < analysis.type_count ? analysis.types[type].kind : C_TYPE_COUNT;
+            BUSTER_TEST(arguments, !(flags & C_AST_FACT_TYPED) || ((flags & C_AST_FACT_RECIPE) ? type < facts.recipe_count : type < analysis.type_count));
+            CTypeKind type_kind = (flags & C_AST_FACT_TYPED) && !(flags & C_AST_FACT_RECIPE) && type < analysis.type_count ? analysis.types[type].kind : C_TYPE_COUNT;
             if (kind == C_AST_STRING && string_equal(spelling, S8("\"abc\"")))
             {
                 BUSTER_TEST(arguments, (flags & C_AST_FACT_STRING) && type_kind == C_TYPE_CHAR && facts.payloads[node] == 4);
@@ -6356,7 +6730,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
             }
             if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("__func__")))
             {
-                BUSTER_TEST(arguments, (flags & C_AST_FACT_EXPRESSION) && !(flags & C_AST_FACT_TYPED));
+                bool recipe = (flags & (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED | C_AST_FACT_RECIPE)) ==
+                              (C_AST_FACT_EXPRESSION | C_AST_FACT_TYPED | C_AST_FACT_RECIPE) && type < facts.recipe_count;
+                BUSTER_TEST(arguments, recipe);
+                if (recipe)
+                {
+                    CAstTypeRecipe const* description = facts.recipes + type;
+                    BUSTER_TEST(arguments, description->form == C_AST_TYPE_RECIPE_FUNCTION_NAME && description->bound.has_inferred_count &&
+                                               description->bound.inferred_count == 2 && description->type.kind == C_TYPE_ARRAY && description->type.is_const &&
+                                               description->type.element_type.value < analysis.type_count &&
+                                               analysis.types[description->type.element_type.value].kind == C_TYPE_CHAR);
+                }
+                checked += 1;
+            }
+            if (kind == C_AST_IDENTIFIER && string_equal(spelling, S8("__builtin_expect")))
+            {
+                bool recipe = (flags & C_AST_FACT_RECIPE) && type < facts.recipe_count;
+                BUSTER_TEST(arguments, recipe);
+                if (recipe)
+                {
+                    BUSTER_TEST(arguments, facts.recipes[type].form == C_AST_TYPE_RECIPE_BUILTIN && facts.recipes[type].builtin != 0 &&
+                                               facts.recipes[type].type.kind == C_TYPE_INVALID);
+                }
                 checked += 1;
             }
             if (kind == C_AST_DECLARATOR_NAME && string_equal(spelling, S8("x")))
@@ -6377,15 +6772,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_facts(UnitTestArguments* 
                 checked += 1;
             }
         }
-        // "abc", its `[]`, s->a, the two uses of `s`, __func__, x and table's 2.
-        BUSTER_TEST(arguments, checked == 8);
+        // "abc", its `[]`, s->a, two uses of s, the builtin, __func__, x and table's 2.
+        BUSTER_TEST(arguments, checked == 9);
         c_ast_facts_release(&facts);
         c_ast_facts_release(&facts);
-        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.index_arena == 0 && facts.spans == 0 && facts.statistics.stale == 0);
+        BUSTER_TEST(arguments, facts.flags == 0 && facts.arena == 0 && facts.index_arena == 0 && facts.spans == 0 && facts.recipe_arena == 0 && facts.recipes == 0 && facts.statistics.stale == 0);
     }
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);
     c_test_scratch_end(temporary);
+    return result;
+}
+
+// Completion descriptions remain independent of the type table they were
+// queried against, including a qualified element and an array-decay pointer.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_recipes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("struct S { int v[4]; }; void f(struct S const* p, int i) { __builtin_constant_p(p->v[i]); }"),
+        S8("int b[4]; void f(void) { __builtin_constant_p(b + 1); }"),
+        S8("void f(int c, int* p, int* q) { __builtin_constant_p(c ? p : q); }"),
+        S8("void f(void) { __builtin_constant_p(\"ab\" + 1); }"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[source_index], C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = false;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.ast_facts = &facts;
+            c_test_ast_fact_uncached_set(true);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            c_test_ast_fact_uncached_set(false);
+            BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0);
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+            BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+            BUSTER_TEST(arguments, facts.statistics.recipes && facts.recipe_count && !facts.recipe_failed);
+            for (u32 index = 0; index < facts.recipe_count; index += 1)
+            {
+                CAstTypeRecipe const* recipe = facts.recipes + index;
+                BUSTER_TEST(arguments, recipe->form == C_AST_TYPE_RECIPE_BUILTIN ||
+                                           (recipe->form == C_AST_TYPE_RECIPE_DERIVATION && recipe->recipe_begin <= index));
+                CTypeId const references[] = {recipe->type.element_type, recipe->type.return_type, recipe->type.unqualified_type};
+                for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+                {
+                    u32 row = references[reference].value;
+                    BUSTER_TEST(arguments, row == C_ID_UNDERLYING_INVALID || row < recipe->row_begin ||
+                                               (u64)recipe->recipe_begin + row - recipe->row_begin < facts.recipe_count);
+                }
+                if (recipe->type.kind == C_TYPE_ARRAY && recipe->bound.has_inferred_count)
+                {
+                    BUSTER_TEST(arguments, recipe->bound.inferred_count == (source_index == 3 ? 3u : 4u) && recipe->bound_node == C_AST_NODE_INVALID);
+                }
+            }
+            BUSTER_TEST(arguments, facts.statistics.gaps[C_AST_FACT_GAP_APPENDS] == 0 && facts.statistics.stale == 0);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
@@ -6411,6 +6864,8 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_attribute_arguments);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_options_and_statistics);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_columns);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_parentheses);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_owned_delimiters);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_oracle);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_uninterned);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_types);
@@ -6422,7 +6877,10 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_recipes);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_facts);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);

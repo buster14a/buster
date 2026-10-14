@@ -7581,6 +7581,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* tot
     total->bound += unit.bound;
     total->bit_fields += unit.bit_fields;
     total->strings += unit.strings;
+    total->recipes += unit.recipes;
+    total->builtin_identities += unit.builtin_identities;
+    total->function_names += unit.function_names;
     for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
     {
         total->gaps[gap] += unit.gaps[gap];
@@ -7620,6 +7623,8 @@ BUSTER_GLOBAL_LOCAL CAstResult compiler_driver_c_ast_pilot_run(Arena* arena, Com
         pilot->retained_bytes += built.statistics.retained_bytes;
         pilot->transient_high_water += built.statistics.transient_high_water;
         pilot->column_copy_bytes += built.statistics.column_copy_bytes;
+        pilot->parenthesis_copy_bytes += built.statistics.parenthesis_copy_bytes;
+        pilot->parenthesis_committed_bytes += built.statistics.parenthesis_committed_bytes;
         pilot->finalize_child_entries += built.statistics.finalize_child_entries;
         if (invocation->verbose)
         {
@@ -11728,6 +11733,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.retained_bytes += unit.c_ast.retained_bytes;
         result.c_ast.transient_high_water += unit.c_ast.transient_high_water;
         result.c_ast.column_copy_bytes += unit.c_ast.column_copy_bytes;
+        result.c_ast.parenthesis_copy_bytes += unit.c_ast.parenthesis_copy_bytes;
+        result.c_ast.parenthesis_committed_bytes += unit.c_ast.parenthesis_committed_bytes;
         result.c_ast.finalize_child_entries += unit.c_ast.finalize_child_entries;
         result.c_ast.walk_nanoseconds += unit.c_ast.walk_nanoseconds;
         result.c_ast.walk_steps += unit.c_ast.walk_steps;

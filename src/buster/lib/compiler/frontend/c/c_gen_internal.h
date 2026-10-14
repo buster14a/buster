@@ -44,6 +44,8 @@ struct CIrExt80Big
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
 // Token-free structural groups, replayed row reuse and restored node heads.
 BUSTER_F_DECL bool c_test_prepared_control_identity_replay(void);
+// Wrapper levels and hoist facts with no token stream or delimiter index.
+BUSTER_F_DECL bool c_test_retained_parenthesis_navigation(void);
 // Calling-thread reference lookups plus scanned rows, and scanned rows alone.
 BUSTER_F_DECL u64 c_test_logical_call_reference_work(void);
 BUSTER_F_DECL u64 c_test_logical_call_reference_rows(void);

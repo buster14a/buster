@@ -2181,9 +2181,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         {
             CompilerDriverCAstPilotResult tree = compile.c_ast;
             string_print(S8("C_AST nodes={u64} tokens={u64} build_ns={u64} retained_bytes={u64} transient_high_water={u64} column_copy_bytes={u64} "
-                            "finalize_child_entries={u64} layout={S8}\n"),
+                            "parenthesis_copy_bytes={u64} parenthesis_committed_bytes={u64} finalize_child_entries={u64} layout={S8}\n"),
                          tree.nodes, tree.tokens, tree.build_nanoseconds, tree.retained_bytes, tree.transient_high_water, tree.column_copy_bytes,
-                         tree.finalize_child_entries, compiler_driver_c_ast_pilot_name(invocation.c_ast_pilot));
+                         tree.parenthesis_copy_bytes, tree.parenthesis_committed_bytes, tree.finalize_child_entries,
+                         compiler_driver_c_ast_pilot_name(invocation.c_ast_pilot));
             string_print(S8("C_AST_WALK walk_ns={u64} walk_steps={u64} scan_ns={u64} children_ns={u64} child_entries={u64} scan_calls={u64}\n"),
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
             // Counts, not times: what the tree expression typer did for the unit's function bodies and file-scope initializers.
@@ -2244,13 +2245,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             }
             string_print(S8("C_AST_FACTS nodes={u64} retained_bytes={u64} regions={u64} candidates={u64} tree={u64} machine={u64} completed={u64} "
                             "missing={u64} {S8}={u64} {S8}={u64} {S8}={u64} {S8}={u64} bound={u64} bit_fields={u64} strings={u64} uncovered={u64} outside={u64} "
-                            "stale={u64} completion_queries={u64}\n"),
+                            "stale={u64} completion_queries={u64} recipes={u64} builtin_identities={u64} function_names={u64}\n"),
                          facts.nodes, facts.retained_bytes, facts.regions, facts.candidates, facts.tree, facts.machine, facts.completed, missing,
                          c_ast_fact_gap_name(C_AST_FACT_GAP_UNSPANNED), facts.gaps[C_AST_FACT_GAP_UNSPANNED],
                          c_ast_fact_gap_name(C_AST_FACT_GAP_INVALID), facts.gaps[C_AST_FACT_GAP_INVALID],
                          c_ast_fact_gap_name(C_AST_FACT_GAP_APPENDS), facts.gaps[C_AST_FACT_GAP_APPENDS],
                          c_ast_fact_gap_name(C_AST_FACT_GAP_BUSY), facts.gaps[C_AST_FACT_GAP_BUSY], facts.bound, facts.bit_fields, facts.strings, facts.uncovered,
-                         facts.outside, facts.stale, facts.completion_queries);
+                         facts.outside, facts.stale, facts.completion_queries, facts.recipes, facts.builtin_identities, facts.function_names);
         }
         // Also report disabled passes: -O0 must expose its selected policy.
         {

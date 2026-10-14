@@ -70,12 +70,14 @@
 // Ownership: the four node columns are written once, in place, where the
 // published tree keeps them: each grows in its own private arena (CAstStorage)
 // that reserves address space and commits it as the builder appends, so no
-// node is staged and copied. The tree owns those arenas until c_ast_release;
+// node is staged and copied. Sparse expression groups use an independent
+// retained arena, append-built in node order at each grammar commitment.
+// The tree owns those arenas until c_ast_release;
 // the storage record, the diagnostics and the HYBRID/EXPLICIT slices live in
 // the caller's arena. Builder frames, stacks and bindings live in the phase
 // arena (CAstOptions.phase_arena, else a private one created and retired by
 // the build) and are released before return. A failed build releases its
-// columns itself. The tree references the preprocessing result's tokens and
+// columns and groups itself. The tree references the preprocessing result's tokens and
 // symbols by index and requires that result to stay alive.
 //
 // Scope: the builder resolves the names that change the parse at their
@@ -110,6 +112,11 @@
 // Nodes every column commits at a time; the one predictable branch per append
 // is reaching the committed end. C_AST_NODE_LIMIT is a multiple of it.
 #define C_AST_COLUMN_STEP (1u << 16)
+
+// Sparse expression groups reserve and commit independently of the node
+// columns. Tests can force reservation moves through parenthesis_capacity.
+#define C_AST_PARENTHESIS_CAPACITY (1u << 20)
+#define C_AST_PARENTHESIS_STEP 4096u
 
 #define C_AST_PRESENCE_MASK 0xffu
 
@@ -164,7 +171,7 @@
     X(PARAMETER_LIST_VARIADIC, LIST, 0, 0) /* PARAMETER* followed by `...`; token: `(` */                                                   \
     X(IDENTIFIER_LIST, LIST, 0, 0)         /* K&R DECLARATOR_NAME*; token: `(` */                                                           \
     X(PARAMETER, PRESENCE, 1, 0)           /* DECL_SPECIFIERS, bits 0 declarator, 1 trailing ATTRIBUTE_LIST; token: first token */          \
-    X(TYPE_NAME, PRESENCE, 1, 0)           /* DECL_SPECIFIERS, bit 0 abstract declarator; token: first token */                             \
+    X(TYPE_NAME, RANGE, 1, 2)              /* DECL_SPECIFIERS, [abstract declarator]; token: first token; data: end token */                             \
     /* ---- attributes ---- */                                                                                                              \
     X(ATTRIBUTE_LIST, LIST, 0, 0)          /* consecutive ATTRIBUTE_GNU/_STANDARD/_DECLSPEC groups; token: first group's first token */  \
     X(ATTRIBUTE_GNU, LIST, 0, 0)           /* `__attribute__ (( ... ))`: ATTRIBUTE*; token: keyword */                                      \
@@ -379,6 +386,7 @@ struct CAstOptions
     // C_AST_COLUMN_CAPACITY; tests set a small value so ordinary trees outgrow
     // it and move.
     u32 column_capacity;
+    u32 parenthesis_capacity;
 };
 
 // Work counts. Counters are live only when C_AST_COUNTERS is nonzero (test
@@ -389,9 +397,11 @@ struct CAstStatistics
 {
     // Always reported.
     u64 node_count;
-    u64 retained_bytes;      // the columns (13 bytes per node), plus children/slices in HYBRID and EXPLICIT
+    u64 retained_bytes;      // logical node/group rows, plus children/slices in HYBRID and EXPLICIT
     u64 transient_high_water; // peak builder bytes in the phase arena: frames, stacks, bindings, refill ring
     u64 column_copy_bytes;   // bytes copied moving the columns to larger reservations; 0 below C_AST_COLUMN_CAPACITY
+    u64 parenthesis_copy_bytes; // sparse group rows copied when their reservation grows
+    u64 parenthesis_committed_bytes; // committed sparse row capacity, including unused rows
     u64 finalize_child_entries; // slice entries written by HYBRID/EXPLICIT finalization
     // Counted only under C_AST_COUNTERS.
     u64 tokens_consumed;
@@ -409,6 +419,32 @@ struct CAstStatistics
 // points at it, so c_ast_release through any copy retires them once.
 typedef struct CAstStorage CAstStorage;
 
+// A redundant expression group, or syntax-owned delimiter provenance.
+// Groups commit at their closing `)`; condition roles commit at their
+// closer, and blocks/for headers publish their saved closer with the owner.
+// Rows are ordered by node, true groups inner to outer followed by an owned
+// role when present. They add no punctuation nodes or second syntax tree.
+typedef struct CAstParenthesis CAstParenthesis;
+#define C_AST_PARENTHESIS_AFTER_IDENTIFIER 1u
+#define C_AST_DELIMITER_CONDITION (1u << 1)
+#define C_AST_DELIMITER_FOR_HEADER (1u << 2)
+#define C_AST_DELIMITER_BLOCK (1u << 3)
+#define C_AST_DELIMITER_OWNED_MASK (C_AST_DELIMITER_CONDITION | C_AST_DELIMITER_FOR_HEADER | C_AST_DELIMITER_BLOCK)
+struct CAstParenthesis
+{
+    u32 node;
+    u32 open;
+    u32 close;
+    u32 flags; // parser-known opening context or C_AST_DELIMITER_* role
+};
+
+typedef struct CAstParentheses CAstParentheses;
+struct CAstParentheses
+{
+    u32 first;
+    u32 count;
+};
+
 struct CAst
 {
     // In the arenas of `storage`, not in the caller's arena.
@@ -416,6 +452,8 @@ struct CAst
     u32* extents;
     u32* tokens;
     u32* data;
+    CAstParenthesis* parentheses;
+    u32 parenthesis_count;
     // HYBRID and EXPLICIT: slice storage. EXPLICIT also fills `slices`.
     u32* children;
     u32* slices;
@@ -449,6 +487,13 @@ BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess,
 // record and any HYBRID/EXPLICIT slices. Idempotent through any copy, and a
 // no-op for an empty tree.
 BUSTER_F_DECL void c_ast_release(CAst* ast);
+
+// The sparse slice belonging to a node, and a level in that slice (1 is the
+// innermost group). An absent level returns null. No tokens are inspected.
+BUSTER_F_DECL CAstParentheses c_ast_parentheses(CAst const* ast, u32 node);
+BUSTER_F_DECL CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level);
+// Syntax-owned delimiter provenance is separate from true wrapping levels.
+BUSTER_F_DECL CAstParenthesis const* c_ast_owned_delimiter(CAst const* ast, u32 node, u32 role);
 
 // Checks every node's contract, extent tiling and containment, layout slices
 // against the implicit topology, and that the root spans the tree. Returns
