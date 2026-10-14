@@ -6463,6 +6463,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "int matrix[2][2] = { 1, 2, 3, 4 };\n"
                         "char* names[] = { \"argument\" }; char letters[] = { \"abc\" };\n"
                         "double _Complex complex_value = { 1.0, 2.0 };\n"
+                        "struct F { int head; char tail[]; }; struct F flex = { 9, { -1, -1, -1 } };\n"
+                        "struct F text_flex = { 7, \"abc\" };\n"
                         "typedef unsigned int V __attribute__((vector_size(32))); union U { V v; unsigned int lanes[8]; };\n"
                         "unsigned int g(unsigned int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
                         "union U u = { .v = __builtin_va_arg(ap, V) }; __builtin_va_end(ap); return u.lanes[0]; }\n"
@@ -6486,10 +6488,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
         u32 ranged = 0;
         u32 promoted = 0;
         u32 nested = 0;
+        u32 flexible = 0;
         for (CInitializerPlan const* plan = analysis.initializer_plans; plan; plan = plan->next)
         {
             BUSTER_TEST(arguments, plan->complete && !plan->failed && plan->node < built.ast.node_count);
             plans += plan->complete;
+            if (plan->flexible_count)
+            {
+                flexible += 1;
+                BUSTER_TEST(arguments, plan->flexible_member_plus_one == 2 &&
+                    (plan->flexible_count == 3 || plan->flexible_count == 4));
+                CType tail = analysis.types[analysis.members[analysis.types[plan->type.value].member_start + 1].type.value];
+                BUSTER_TEST(arguments, !analysis.array_bounds[tail.array_bound].has_inferred_count);
+            }
             if (plan->type.value < analysis.type_count && analysis.types[plan->type.value].kind == C_TYPE_ARRAY)
             {
                 CType array = analysis.types[plan->type.value];
@@ -6526,6 +6537,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                 BUSTER_TEST(arguments, plan->item_count >= 3 && plan->path_count >= 3);
         }
         BUSTER_TEST(arguments, plans >= 5 && values >= 14 && ranged > 0 && promoted > 0 && nested > 0);
+        BUSTER_TEST(arguments, flexible == 2);
     }
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);

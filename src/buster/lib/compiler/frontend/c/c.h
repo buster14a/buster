@@ -2272,6 +2272,10 @@ struct CInitializerPlan
     CInitializerItem* items;
     CTypeId type;
     u64 inferred_count;
+    // The existing positional flexible-tail extension's object count; the
+    // shared omitted C array bound remains unchanged.
+    u64 flexible_count;
+    u32 flexible_member_plus_one;
     u32 node;
     u32 path_count;
     u32 item_count;

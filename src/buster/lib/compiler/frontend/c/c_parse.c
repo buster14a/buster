@@ -12442,6 +12442,48 @@ BUSTER_C_SHARED CInitializerPlan const* c_initializer_plan_find(CParseResult con
     return plan;
 }
 
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_count_walk(CParseResult* result, CType* type);
+
+// Keep the count that the existing global flexible-tail extension used: all
+// initializable struct slots must be positional, and the last slot is its
+// own brace list or a byte string. Counting syntax children is the semantic
+// publication of that shallow source count, without completing a shared type.
+BUSTER_C_INTERNAL void c_parse_initializer_plan_flexible(CTypeParseMachine* machine, CParseResult* result,
+                                                        CPreprocessResult const* preprocess, CInitializerPlan* plan)
+{
+    CType root = result->types[plan->type.value];
+    CAst const* tree = machine->syntax_tree;
+    if (root.kind == C_TYPE_STRUCT && root.member_count && tree->kinds[plan->node] == C_AST_INITIALIZER_LIST)
+    {
+        CMember member = result->members[root.member_start + root.member_count - 1];
+        u32 child_count = c_ast_child_count(tree, plan->node);
+        bool positional = child_count && child_count == c_parse_initializer_member_count_walk(result, &root);
+        for (u32 child = 0; positional && child < child_count; child += 1)
+            positional = tree->kinds[c_ast_child_at(tree, plan->node, child)] != C_AST_DESIGNATION;
+        if (positional && member.type.value < result->type_count)
+        {
+            CType tail = result->types[member.type.value];
+            bool omitted = tail.kind == C_TYPE_ARRAY && tail.array_bound < result->array_bound_count &&
+                !result->array_bounds[tail.array_bound].token_count && !result->array_bounds[tail.array_bound].has_inferred_count;
+            u32 last = c_ast_child_at(tree, plan->node, child_count - 1);
+            if (omitted && tree->kinds[last] == C_AST_INITIALIZER_LIST)
+                plan->flexible_count = c_ast_child_count(tree, last);
+            else if (omitted && tree->kinds[last] == C_AST_STRING && tail.element_type.value < result->type_count)
+            {
+                u64 element_size = 0;
+                u32 alignment = 0;
+                CIrDecodedString decoded = {0};
+                if (c_parse_builtin_type_layout(preprocess->target, result->types[tail.element_type.value].kind, &element_size, &alignment) &&
+                    element_size == 1 && c_ir_count_string_literal_range_for_target(machine->scratch_arena, *preprocess,
+                        preprocess->target, tree->tokens[last], tree->tokens[last] + tree->data[last], result->string_literals, &decoded) &&
+                    decoded.element_count != UINT64_MAX)
+                    plan->flexible_count = decoded.element_count + 1;
+            }
+            if (plan->flexible_count) plan->flexible_member_plus_one = root.member_count;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL CInitializerPlan* c_parse_initializer_plan_begin(CTypeParseMachine* machine, CParseResult* result,
                                                                    CPreprocessResult const* preprocess, CTypeId type, u32 start, u32 end)
 {
@@ -12458,6 +12500,7 @@ BUSTER_C_INTERNAL CInitializerPlan* c_parse_initializer_plan_begin(CTypeParseMac
                 plan->node = node;
                 plan->type = type;
                 plan->flags = c_parse_initializer_plan_flags(preprocess, start, end);
+                c_parse_initializer_plan_flexible(machine, result, preprocess, plan);
                 c_parse_initializer_plan_publish(result, plan);
             }
         }
@@ -12482,6 +12525,7 @@ struct CParseInitializerInferenceFrame
     u32 source_token_plus_one;
     u32 begin_item_plus_one;
     bool designated;
+    bool producer_extension;
 };
 
 typedef struct CParseInitializerInferenceDesignator CParseInitializerInferenceDesignator;
@@ -13055,6 +13099,11 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
                                                          CScopeId scope, CParseInitializerSlotCache* slot_cache,
                                                          CParseInitializerInferenceFrame* frame, u64* slots_out)
 {
+    if (frame->producer_extension)
+    {
+        *slots_out = frame->slots;
+        return true;
+    }
     if (frame->root)
     {
         *slots_out = UINT64_MAX;
@@ -13312,6 +13361,8 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                 }
                 CParseInitializerInferenceFrame nested = {
                     .type = current,
+                    .producer_extension = first && frame->producer_extension,
+                    .slots = frame->slots,
                 };
                 u64 slots = 0;
                 if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, slot_cache, &nested, &slots))
@@ -14019,6 +14070,11 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             }
             u32 begin_item_plus_one = c_parse_initializer_plan_item(machine, result, &preprocess, plan, designator.value_type, designator.path_plus_one,
                 designator.value_start, close + 1, item_source, C_INITIALIZER_ITEM_LIST_BEGIN | (designator.has_designator ? C_INITIALIZER_ITEM_DESIGNATED : 0));
+            bool flexible = plan && plan->flexible_count && designator.path_plus_one &&
+                plan->paths[designator.path_plus_one - 1].container.value == plan->type.value &&
+                !plan->paths[designator.path_plus_one - 1].parent_plus_one &&
+                plan->paths[designator.path_plus_one - 1].member + 1 == plan->flexible_member_plus_one;
+            if (flexible && log) log->replayable = false;
             frames[frame_count++] = (CParseInitializerInferenceFrame){
                 .type = designator.value_type,
                 .cursor = designator.value_start + 1,
@@ -14027,6 +14083,9 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                 .begin_item_plus_one = begin_item_plus_one,
                 .path_plus_one = designator.path_plus_one,
                 .designated = frame->designated || designator.has_designator,
+                .producer_extension = flexible,
+                .slots_known = flexible,
+                .slots = flexible ? plan->flexible_count : 0,
             };
             continue;
         }
@@ -14093,7 +14152,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             else
                 log->replayable = false;
         }
-        if (diagnostic && machine->semantic_constant_queries && !(log && log->record_only) &&
+        if (diagnostic && machine->semantic_constant_queries && !frame->producer_extension && !(log && log->record_only) &&
             !c_parse_initializer_expression_constraint(machine, result, preprocess, scope, designator.value_type, designator.value_start, value_end, diagnostic))
         {
             return false;
