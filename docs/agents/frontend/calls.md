@@ -11,7 +11,9 @@ expression queries, including under address-of. `char *argv[]` therefore
 permits `char ***p = &argv`, while the address of a local `char *a[3]` retains
 pointer-to-array type. `c_parse_expression_entity_type` supplies this rule to
 both the token query and tree expression typer; declaration/entity rows keep
-the array bounds for signature and VLA ownership. Element qualifiers and the
+the array bounds for signature and VLA ownership. The tree only reads existing
+interned pointer rows and declines to the query when a row is unavailable.
+Element qualifiers and the
 parameter's bracket `const` are retained. The registered
 `c_test_array_parameter_expression_type` checks accepted and rejected pointer
 conversions in semantic-only analysis and both canonical frontend forms;

@@ -4652,8 +4652,14 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("int f(int* a, int i) { return a[i++]; }"), S8_INITIALIZER("a"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p) { return *p++ + 1; }"), S8_INITIALIZER("*"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("void f(int a[4]) { a++; }"), S8_INITIALIZER("a"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
-    {S8_INITIALIZER("char** f(char* a[]) { return a; }"), S8_INITIALIZER("a"), 1, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
-    {S8_INITIALIZER("char*** f(char* a[]) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("void consume(char***); void f(char* a[]) { consume(&a); }"), S8_INITIALIZER("a"), 1, 1,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("void consume(char***); void f(char* a[]) { consume(&a); }"), S8_INITIALIZER("&"), 0, 2,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    // A return alone has not interned the pointer-to-adjusted-pointer row;
+    // the read-only tree answer declines, and the ordinary query owns it.
+    {S8_INITIALIZER("char*** f(char* a[]) { return &a; }"), S8_INITIALIZER("&"), 0, 2,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("void f(void) { int a[4]; (void)a; }"), S8_INITIALIZER("a"), 1, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_ARRAY},
     // Over a qualified aggregate's member, which the pass now types through
     // its shared qualified copy, and over an element of a qualified array
