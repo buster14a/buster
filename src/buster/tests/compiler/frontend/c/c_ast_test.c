@@ -7534,7 +7534,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTest
             BUSTER_TEST(arguments, total_work <= (u64)depth * 9 && (!previous_work || total_work <= previous_work * (sample == 3 ? 4 : 2) + 32));
             previous_work = total_work;
             syntax.ast_facts = 0;
+            syntax.reference_tokens = true;
             CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, plain.ast_facts == 0 && retained.ast_facts == &facts);
             u64 rows = 0;
             String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
             if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
@@ -7584,9 +7586,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTest
                 CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
                 syntax.ast = &built.ast;
                 syntax.type_interning = policy != 0;
+                syntax.reference_tokens = true;
                 CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                syntax.reference_tokens = false;
                 syntax.ast_facts = &facts;
                 CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                BUSTER_TEST(arguments, plain.ast_facts == 0 && retained.ast_facts == &facts);
                 u64 rows = 0;
                 String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
                 if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
@@ -7603,6 +7608,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_array_dependencies(UnitTest
             c_ast_release(&built.ast);
             c_test_scratch_end(temporary);
         }
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = 128;
+        String8 prefix = S8("typedef int Earlier[");
+        String8 open = S8("sizeof(char[");
+        String8 close = S8("])");
+        String8 suffix = S8("]; _Static_assert(sizeof(Earlier)==4,\"earlier\"); int f(void){return sizeof(Earlier)!=4;}");
+        u64 length = prefix.length + (u64)depth * (open.length + close.length) + 1 + suffix.length;
+        char8* source = arena_allocate(temporary.arena, char8, length);
+        u64 at = 0;
+        memcpy(source + at, prefix.pointer, prefix.length); at += prefix.length;
+        for (u32 index = 0; index < depth; index += 1) { memcpy(source + at, open.pointer, open.length); at += open.length; }
+        source[at++] = '1';
+        for (u32 index = 0; index < depth; index += 1) { memcpy(source + at, close.pointer, close.length); at += close.length; }
+        memcpy(source + at, suffix.pointer, suffix.length); at += suffix.length;
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){source, at}, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            syntax.reference_tokens = true;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.reference_tokens = false;
+            syntax.ast_facts = &facts;
+            CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 rows = 0;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
+            if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
+            BUSTER_TEST(arguments, plain.ast_facts == 0 && retained.ast_facts == &facts);
+            BUSTER_TEST_RAW(arguments, !plain.diagnostic_count && !retained.diagnostic_count && !difference.length, difference);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("earlier-array-bound.c"), preprocess, retained, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("earlier array canonical validation"));
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    String8 const narrow[] = {
+        S8("unsigned n=sizeof(char[sizeof(int[2])]);"),
+        S8("unsigned n=sizeof(char[sizeof(int[1073741824U])]);"),
+        S8("unsigned n=sizeof(int[sizeof(char[1073741824U])]);"),
+        S8("unsigned n=sizeof(int[0][sizeof(char[4294967295U])]);"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(narrow); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = target_native;
+        target.cpu_arch = CPU_ARCH_I386;
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, narrow[index], (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            syntax.reference_tokens = true;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.reference_tokens = false;
+            syntax.ast_facts = &facts;
+            CAnalysisResult retained = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 rows = 0;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &retained);
+            if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &retained, &rows);
+            BUSTER_TEST(arguments, plain.ast_facts == 0 && retained.ast_facts == &facts);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            BUSTER_TEST_RAW(arguments, index ? retained.diagnostic_count != 0 : !retained.diagnostic_count, narrow[index]);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
     }
     return result;
 }

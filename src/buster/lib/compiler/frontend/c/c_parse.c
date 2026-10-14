@@ -40054,9 +40054,11 @@ struct CParseConstantTask
 {
     u32 start;
     u32 end;
-    u32 split;
-    u32 colon;
-    CTypeId cast_type;
+    union
+    {
+        struct { u32 split; u32 colon; CTypeId cast_type; };
+        struct { CTypeId* array_types; u32 array_count; };
+    };
     CParseConstant left;
     u8 state;
 };
@@ -40965,6 +40967,11 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         {
             value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
         }
+        if (array_query && machine->sizeof_array_answers && value.valid &&
+            size > c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width))
+        {
+            value.valid = false;
+        }
         if (!value.valid && array_query) *array_type_out = type;
         value.integer = is_alignof ? alignment : size;
 #if BUSTER_INCLUDE_TESTS
@@ -41169,8 +41176,13 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
     // asks whether all of it is one constant), and sizing for every token
     // took 72 bytes per token of a 230,000-entry table, past the thread
     // scratch (#3254). Each iteration pushes at most one task.
-    u32 maximum = end > start ? end - start + 1 : 1;
-    u32 capacity = BUSTER_MIN(maximum, C_PARSE_CONSTANT_TASK_INITIAL_CAPACITY);
+    u32 initial_maximum = end > start ? end - start + 1 : 1;
+    // An array typedef's bound may precede this sizeof range. Preserve the
+    // small initial allocation; actual pending children can grow the stack
+    // toward the unit's token bound without an input-dependent C call chain.
+    u32 maximum = (u32)BUSTER_MIN((u64)UINT32_MAX, preprocess.token_count + 1);
+    maximum = BUSTER_MAX(maximum, initial_maximum);
+    u32 capacity = BUSTER_MIN(initial_maximum, C_PARSE_CONSTANT_TASK_INITIAL_CAPACITY);
     // Guarded while a function body is validated (#1256): a miss answers
     // "not a constant" and the caller reports the exhausted body.
     CParseConstantTask* tasks = retained_size ? 0 : C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseConstantTask, capacity);
@@ -41477,15 +41489,18 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     CTypeId element = array_type;
                     u32 remaining = result->type_count;
+                    u32 dimensions = 0;
                     while (remaining && element.value < result->type_count && result->types[element.value].kind == C_TYPE_ARRAY)
                     {
                         element = result->types[element.value].element_type;
                         remaining -= 1;
+                        dimensions += 1;
                     }
                     u64 size = 0;
                     u32 alignment = 0;
                     CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
-                    if (remaining && c_parse_type_layout(layout_machine, arena, preprocess, result, element, &size, &alignment))
+                    if (remaining && c_parse_type_layout(layout_machine, arena, preprocess, result, element, &size, &alignment) &&
+                        size <= c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width))
                     {
                         // Reuse the type already parsed by the leaf. Each
                         // array dimension suspends on one bound task, so nested
@@ -41493,9 +41508,21 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
 #if BUSTER_INCLUDE_TESTS
                         c_parse_sizeof_array_work.dependency_tasks += 1;
 #endif
+                        CTypeId* arrays = C_PARSE_BODY_SCRATCH_ARRAY(arena, CTypeId, dimensions);
+                        if (!arrays)
+                        {
+                            count -= 1;
+                            continue;
+                        }
+                        CTypeId current = array_type;
+                        for (u32 index = 0; index < dimensions; index += 1)
+                        {
+                            arrays[index] = current;
+                            current = result->types[current.value].element_type;
+                        }
                         task->state = 11;
-                        task->cast_type = array_type;
-                        task->colon = 0;
+                        task->array_types = arrays;
+                        task->array_count = dimensions;
                         task->left = last;
                         task->left.valid = true;
                         task->left.integer = size;
@@ -41506,31 +41533,37 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             }
             count -= 1;
         }
-        else if (task->state == 11)
+        else if (task->state == 11 || task->state == 12)
         {
-            if (task->colon)
+            u64 maximum_size = preprocess.target.cpu_arch == CPU_ARCH_I386 ? UINT32_MAX : UINT64_MAX;
+            u64 maximum_product = c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width);
+            if (task->state == 12)
             {
                 IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, last.type);
                 bool integral = scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN;
                 bool nonnegative = !scalar.is_signed || !ir_integer_sign_bit((IrInteger){.low = last.integer, .high = last.integer_high}, scalar.bit_width);
                 task->left.valid &= last.valid && !last.is_float && integral && nonnegative && !last.integer_high &&
-                                    (!last.integer || task->left.integer <= UINT64_MAX / last.integer);
+                                    last.integer <= maximum_size &&
+                                    (!last.integer || task->left.integer <= maximum_product / last.integer);
                 task->left.faulted |= last.faulted;
                 if (task->left.valid) task->left.integer *= last.integer;
-                task->cast_type = result->types[task->cast_type.value].element_type;
-                task->colon = 0;
+                task->array_count -= 1;
+                task->state = 11;
             }
             bool pending = false;
-            while (task->left.valid && task->cast_type.value < result->type_count && result->types[task->cast_type.value].kind == C_TYPE_ARRAY)
+            while (task->left.valid && task->array_count)
             {
-                CType array = result->types[task->cast_type.value];
+                // Inner arrays must fit before an outer zero bound can
+                // multiply their complete object layout by zero.
+                CType array = result->types[task->array_types[task->array_count - 1].value];
                 task->left.valid = array.array_bound < result->array_bound_count;
                 CArrayBound bound = task->left.valid ? result->array_bounds[array.array_bound] : (CArrayBound){0};
                 if (task->left.valid && bound.has_inferred_count)
                 {
-                    task->left.valid = !bound.inferred_count || task->left.integer <= UINT64_MAX / bound.inferred_count;
+                    task->left.valid = bound.inferred_count <= maximum_size &&
+                                       (!bound.inferred_count || task->left.integer <= maximum_product / bound.inferred_count);
                     if (task->left.valid) task->left.integer *= bound.inferred_count;
-                    task->cast_type = array.element_type;
+                    task->array_count -= 1;
                 }
                 else
                 {
@@ -41542,7 +41575,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
 #if BUSTER_INCLUDE_TESTS
                         c_parse_sizeof_array_work.bound_requests += 1;
 #endif
-                        task->colon = 1;
+                        task->state = 12;
                         tasks[count++] = (CParseConstantTask){.start = child_start, .end = child_end, .cast_type = C_TYPE_ID_INVALID};
                         pending = true;
                     }

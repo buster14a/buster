@@ -2515,6 +2515,14 @@ same interning policy, scoped enum bounds, width/sign controls and unevaluated
 calls. Its counters measure dependency tasks, bound requests, numeric receipts
 and certified reads; dependency/receipt work is bounded linearly in depth.
 
+The reference comparisons explicitly set `reference_tokens` and verify that
+facts stay absent; omitting a supplied sidecar otherwise requests automatic
+retention. An earlier array typedef can move a pending bound outside the
+query's source range, so constant tasks keep their small initial allocation
+and grow toward the unit token bound only as needed. Dimension layouts settle
+from inner to outer, with checked target size_t counts and object-size products;
+a zero outer dimension cannot conceal an oversized inner array.
+
 ### Type queries
 
 The node task scheduler checkpoint uses exact `(kind, node, view)` keys for
