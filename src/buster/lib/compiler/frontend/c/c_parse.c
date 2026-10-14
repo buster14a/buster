@@ -38400,7 +38400,10 @@ BUSTER_C_INTERNAL void c_parse_ast_constant_publish(CTypeParseMachine* machine, 
 BUSTER_C_INTERNAL void c_parse_ast_bound_owners_publish(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult const* result)
 {
     CAstFacts* facts = machine->ast_facts;
-    if (facts && c_ast_facts_prepare_bound_nodes(facts, result->array_bound_count))
+    u32 widths = 0;
+    for (u32 index = 0; facts && index < result->member_count; index += 1)
+        widths += result->members[index].is_bit_field && result->members[index].bit_width_token_count;
+    if (facts && c_ast_facts_prepare_value_owners(facts, result->array_bound_count, result->alignment_count, widths))
     {
         for (u32 index = 0; index < result->array_bound_count; index += 1)
         {
@@ -38408,6 +38411,28 @@ BUSTER_C_INTERNAL void c_parse_ast_bound_owners_publish(CTypeParseMachine* machi
             facts->bound_nodes[index] = bound.token_count && !bound.is_star && bound.token_start <= preprocess.token_count &&
                                        bound.token_count <= preprocess.token_count - bound.token_start
                 ? c_ast_facts_locate(facts, &preprocess, c_parse_array_bound_expression_start(preprocess, bound), bound.token_start + bound.token_count) : C_AST_NODE_INVALID;
+        }
+        if (facts->alignment_count) memset(facts->alignment_standard, 0, ((u64)facts->alignment_count + 7) / 8);
+        for (u32 index = 0; index < result->alignment_count; index += 1)
+        {
+            CAlignmentSpecifier specifier = result->alignments[index];
+            facts->alignment_nodes[index] = specifier.token_start <= preprocess.token_count &&
+                                            specifier.token_count <= preprocess.token_count - specifier.token_start
+                ? c_ast_facts_locate(facts, &preprocess, specifier.token_start, specifier.token_start + specifier.token_count) : C_AST_NODE_INVALID;
+            if (c_alignment_specifier_is_standard(preprocess, specifier)) facts->alignment_standard[index / 8] |= 1u << (index % 8);
+        }
+        u32 width = 0;
+        for (u32 index = 0; index < result->member_count; index += 1)
+        {
+            CMember const* member = result->members + index;
+            if (member->is_bit_field && member->bit_width_token_count)
+            {
+                u32 node = member->bit_width_token_start <= preprocess.token_count &&
+                           member->bit_width_token_count <= preprocess.token_count - member->bit_width_token_start
+                    ? c_ast_facts_locate(facts, &preprocess, member->bit_width_token_start,
+                                         member->bit_width_token_start + member->bit_width_token_count) : C_AST_NODE_INVALID;
+                facts->member_widths[width++] = (CAstMemberWidthOwner){.member = index, .node = node};
+            }
         }
     }
     return;

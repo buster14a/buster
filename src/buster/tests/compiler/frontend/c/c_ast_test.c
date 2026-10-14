@@ -6919,6 +6919,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_bound_owners(UnitTestArguments* ar
 {
     UnitTestResult result = {0};
     String8 source = S8("typedef int A[3]; static int a[sizeof(int) + 1];\n"
+        "_Alignas(sizeof(long)) static int aligned; _Alignas(long) static int typed;\n"
+        "struct __attribute__((aligned(sizeof(int (*)(int))))) Bits { unsigned x : sizeof(int); int y; };\n"
         "void f(int n, int p[static n + 1], int (*q)[n + 2]) {\n"
         " int v[n + 3]; int (*r)[sizeof(int (*)(int)) + n]; (void)p; (void)q; (void)v; (void)r; }\n");
     for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
@@ -6954,9 +6956,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_bound_owners(UnitTestArguments* ar
                 else BUSTER_TEST(arguments, node == C_AST_NODE_INVALID);
             }
             BUSTER_TEST(arguments, owners == 6 && c_ast_facts_bound_node(&facts, facts.bound_count) == C_AST_NODE_INVALID);
+            BUSTER_TEST(arguments, facts.alignment_count == analysis.alignment_count && facts.alignment_count >= 3 && facts.member_width_count == 1);
+            u32 standard = 0;
+            for (u32 index = 0; index < analysis.alignment_count; index += 1)
+            {
+                u32 node = c_ast_facts_alignment_node(&facts, index);
+                BUSTER_TEST(arguments, node < built.ast.node_count);
+                standard += c_ast_facts_alignment_is_standard(&facts, index);
+            }
+            BUSTER_TEST(arguments, standard == 2 && c_ast_facts_alignment_node(&facts, facts.alignment_count) == C_AST_NODE_INVALID);
+            u32 width_member = facts.member_width_count ? facts.member_widths[0].member : UINT32_MAX;
+            u32 width_node = c_ast_facts_member_width_node(&facts, width_member);
+            BUSTER_TEST(arguments, width_member < analysis.member_count && width_node < built.ast.node_count &&
+                                   built.ast.kinds[width_node] == C_AST_SIZEOF_TYPE &&
+                                   c_ast_facts_member_width_node(&facts, analysis.member_count) == C_AST_NODE_INVALID);
             u32 count = facts.bound_count;
             u32* snapshot = arena_allocate(temporary.arena, u32, count);
             memcpy(snapshot, facts.bound_nodes, sizeof(u32) * count);
+            u32* alignment_snapshot = arena_allocate(temporary.arena, u32, facts.alignment_count);
+            memcpy(alignment_snapshot, facts.alignment_nodes, sizeof(u32) * facts.alignment_count);
+            u64 standard_bytes = ((u64)facts.alignment_count + 7) / 8;
+            u8* standard_snapshot = arena_allocate(temporary.arena, u8, standard_bytes);
+            memcpy(standard_snapshot, facts.alignment_standard, standard_bytes);
             CAnalysisResult repeated = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
             difference = c_ast_corpus_models_differ(temporary.arena, &analysis, &repeated, &rows);
             BUSTER_TEST_RAW(arguments, !difference.length, difference);
@@ -6965,9 +6986,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_bound_owners(UnitTestArguments* ar
             BUSTER_TEST(arguments, copied >= sizeof(u32) * count && !facts.bound_arena && facts.bound_count == count &&
                                    !memcmp(snapshot, facts.bound_nodes, sizeof(u32) * count));
             BUSTER_TEST(arguments, !c_ast_facts_prepare_bound_nodes(&facts, count));
+            BUSTER_TEST(arguments, !c_ast_facts_prepare_value_owners(&facts, count, facts.alignment_count, facts.member_width_count));
+            BUSTER_TEST(arguments, c_ast_facts_member_width_node(&facts, width_member) == width_node && facts.alignment_count == analysis.alignment_count);
+            BUSTER_TEST(arguments, !memcmp(alignment_snapshot, facts.alignment_nodes, sizeof(u32) * facts.alignment_count) &&
+                                   !memcmp(standard_snapshot, facts.alignment_standard, standard_bytes));
         }
         c_ast_facts_release(&facts);
-        BUSTER_TEST(arguments, !facts.bound_nodes && !facts.bound_count && !facts.bound_arena);
+        BUSTER_TEST(arguments, !facts.bound_nodes && !facts.bound_count && !facts.bound_arena && !facts.alignment_nodes &&
+                               !facts.alignment_standard && !facts.alignment_count && !facts.member_widths && !facts.member_width_count);
         c_ast_release(&built.ast);
         c_test_scratch_end(temporary);
     }

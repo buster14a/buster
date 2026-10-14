@@ -2738,27 +2738,65 @@ u32 c_ast_facts_bound_node(CAstFacts const* facts, u32 bound_index)
     return facts && facts->bound_nodes && bound_index < facts->bound_count ? facts->bound_nodes[bound_index] : C_AST_NODE_INVALID;
 }
 
-bool c_ast_facts_prepare_bound_nodes(CAstFacts* facts, u32 count)
+u32 c_ast_facts_alignment_node(CAstFacts const* facts, u32 index)
+{
+    return facts && facts->alignment_nodes && index < facts->alignment_count ? facts->alignment_nodes[index] : C_AST_NODE_INVALID;
+}
+
+bool c_ast_facts_alignment_is_standard(CAstFacts const* facts, u32 index)
+{
+    return facts && facts->alignment_standard && index < facts->alignment_count &&
+           (facts->alignment_standard[index / 8] & (1u << (index % 8)));
+}
+
+u32 c_ast_facts_member_width_node(CAstFacts const* facts, u32 member)
+{
+    u32 first = 0;
+    u32 end = facts ? facts->member_width_count : 0;
+    while (first < end)
+    {
+        u32 middle = first + (end - first) / 2;
+        if (facts->member_widths[middle].member < member) first = middle + 1;
+        else end = middle;
+    }
+    return facts && first < facts->member_width_count && facts->member_widths[first].member == member
+               ? facts->member_widths[first].node : C_AST_NODE_INVALID;
+}
+
+bool c_ast_facts_prepare_value_owners(CAstFacts* facts, u32 bounds, u32 alignments, u32 widths)
 {
     bool prepared = facts && facts->constants_arena;
-    if (prepared && count != facts->bound_count)
+    if (prepared && (bounds != facts->bound_count || alignments != facts->alignment_count || widths != facts->member_width_count))
     {
-        u64 reserved = (u64)count * sizeof(u32) + C_AST_FACT_HEADROOM;
-        Arena* arena = count && reserved <= ARENA_MAX_RESERVATION
+        u64 bits = ((u64)alignments + 7) / 8;
+        u64 reserved = ((u64)bounds + alignments) * sizeof(u32) + bits + (u64)widths * sizeof(CAstMemberWidthOwner) + C_AST_FACT_HEADROOM;
+        bool populated = bounds || alignments || widths;
+        Arena* arena = populated && reserved <= ARENA_MAX_RESERVATION
             ? c_frontend_arena_create((ArenaCreation){.reserved_size = reserved, .initial_size = C_AST_FACT_HEADROOM,
                                                       .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
-        prepared = !count || arena != 0;
+        prepared = !populated || arena != 0;
         if (prepared)
         {
             if (facts->bound_arena) arena_destroy(facts->bound_arena, 1);
             facts->bound_arena = arena;
-            facts->bound_nodes = count ? arena_allocate(arena, u32, count) : 0;
-            facts->bound_count = count;
-            if (count) memset(facts->bound_nodes, 0xff, sizeof(u32) * count);
+            facts->bound_nodes = bounds ? arena_allocate(arena, u32, bounds) : 0;
+            facts->bound_count = bounds;
+            if (bounds) memset(facts->bound_nodes, 0xff, sizeof(u32) * bounds);
+            facts->alignment_nodes = alignments ? arena_allocate(arena, u32, alignments) : 0;
+            facts->alignment_standard = alignments ? arena_allocate_zeroed(arena, u8, bits) : 0;
+            facts->alignment_count = alignments;
+            if (alignments) memset(facts->alignment_nodes, 0xff, sizeof(u32) * alignments);
+            facts->member_widths = widths ? arena_allocate(arena, CAstMemberWidthOwner, widths) : 0;
+            facts->member_width_count = widths;
             facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
         }
     }
     return prepared;
+}
+
+bool c_ast_facts_prepare_bound_nodes(CAstFacts* facts, u32 count)
+{
+    return c_ast_facts_prepare_value_owners(facts, count, facts ? facts->alignment_count : 0, facts ? facts->member_width_count : 0);
 }
 
 BUSTER_GLOBAL_LOCAL u32 c_ast_facts_constant_slot(CAstFacts* facts, u32 node)
@@ -2936,6 +2974,11 @@ void c_ast_facts_release(CAstFacts* facts)
     facts->bound_arena = 0;
     facts->bound_nodes = 0;
     facts->bound_count = 0;
+    facts->alignment_nodes = 0;
+    facts->alignment_standard = 0;
+    facts->alignment_count = 0;
+    facts->member_widths = 0;
+    facts->member_width_count = 0;
     if (facts->constants_arena)
     {
         arena_destroy(facts->constants_arena, 1);
@@ -3022,6 +3065,13 @@ u64 c_ast_facts_retain_in_arena(Arena* arena, CAstFacts* facts)
         retained.constant_capacity = facts->constant_count;
         retained.bound_nodes = facts->bound_count ? arena_allocate(arena, u32, facts->bound_count) : 0;
         if (facts->bound_count) memcpy(retained.bound_nodes, facts->bound_nodes, sizeof(u32) * facts->bound_count);
+        retained.alignment_nodes = facts->alignment_count ? arena_allocate(arena, u32, facts->alignment_count) : 0;
+        u64 alignment_bits = ((u64)facts->alignment_count + 7) / 8;
+        retained.alignment_standard = alignment_bits ? arena_allocate(arena, u8, alignment_bits) : 0;
+        if (facts->alignment_count) memcpy(retained.alignment_nodes, facts->alignment_nodes, sizeof(u32) * facts->alignment_count);
+        if (alignment_bits) memcpy(retained.alignment_standard, facts->alignment_standard, alignment_bits);
+        retained.member_widths = facts->member_width_count ? arena_allocate(arena, CAstMemberWidthOwner, facts->member_width_count) : 0;
+        if (facts->member_width_count) memcpy(retained.member_widths, facts->member_widths, sizeof(CAstMemberWidthOwner) * facts->member_width_count);
         retained.offsetof_plans = facts->offsetof_plan_count ? arena_allocate(arena, CAstOffsetofPlan, facts->offsetof_plan_count) : 0;
         if (facts->offsetof_plan_count)
         {

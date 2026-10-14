@@ -1972,6 +1972,13 @@ struct CAstExt80InitializerFact
 // reserves it, c_ast_facts_release retires it once lowering is done.
 typedef struct CAstSpans CAstSpans;
 typedef struct CAstFacts CAstFacts;
+typedef struct CAstMemberWidthOwner CAstMemberWidthOwner;
+struct CAstMemberWidthOwner
+{
+    u32 member;
+    u32 node;
+};
+
 struct CAstFacts
 {
     Arena* arena;
@@ -1990,6 +1997,11 @@ struct CAstFacts
     Arena* bound_arena;
     u32* bound_nodes;
     u32 bound_count;
+    u32* alignment_nodes;
+    u8* alignment_standard;
+    u32 alignment_count;
+    CAstMemberWidthOwner* member_widths;
+    u32 member_width_count;
     CAstOffsetofPlan* offsetof_plans;
     CAstOffsetofStep* offsetof_steps;
     CAstExt80InitializerFact* ext80_initializers;
@@ -2929,6 +2941,10 @@ BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult c
 BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
 BUSTER_F_DECL u32 c_ast_facts_bound_node(CAstFacts const* facts, u32 bound_index);
 BUSTER_F_DECL bool c_ast_facts_prepare_bound_nodes(CAstFacts* facts, u32 count);
+BUSTER_F_DECL bool c_ast_facts_prepare_value_owners(CAstFacts* facts, u32 bounds, u32 alignments, u32 widths);
+BUSTER_F_DECL u32 c_ast_facts_alignment_node(CAstFacts const* facts, u32 index);
+BUSTER_F_DECL bool c_ast_facts_alignment_is_standard(CAstFacts const* facts, u32 index);
+BUSTER_F_DECL u32 c_ast_facts_member_width_node(CAstFacts const* facts, u32 member);
 BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
 BUSTER_F_DECL u32 c_ast_facts_selection(CAstFacts const* facts, u32 node);
 // Normalized semantic builtin family on a CALL; zero for an ordinary call

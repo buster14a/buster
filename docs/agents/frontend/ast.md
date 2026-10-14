@@ -3031,6 +3031,13 @@ runtime core, and the private node metadata never reaches canonical IR. The
 old constant range evaluator and its offsetof query family remain migration
 residuals until their remaining callers move.
 
+Committed array-bound and alignment indices retain exact operand nodes in one
+private owner arena. Alignment spelling is retained as a packed standard-form
+bitset; GNU `aligned` arguments have ordinary expression children. Width-bearing
+members retain sorted sparse member/node pairs. Publication follows protected
+query rollback, without adding semantic rows. The sidecar is charged at its
+actual retained size, compact-copied with the unit, and sealed before lowering.
+
 The scalar node API reads a certified literal/enumerator leaf directly when
 it has no constructor effects. A pointer-valued scalar place can read its
 matching read-only global initializer; array/string places stay addresses.
