@@ -453,6 +453,11 @@ key. Their child tasks follow AST topology and the finished facts; sparse type
 recipes are materialized without appending a semantic model row. Private graph
 and projection state survives a child yield and is rewound only after its root
 finishes. Canonical IR stores the resulting IR types, never the node or state.
+`c_parse_for_lowering` selects the production driver's type-interning policy
+for its full semantic queries. `c_parse` keeps its historical model-only
+policy; explicit semantic callers continue to select their parser option.
+Independent full-authority comparisons match the interning option explicitly.
+
 Compact direct-call publication preflights the exact aligned AST and fact
 arrays, including sparse recipes, constants and source-owner sidecars. It
 returns `C_AST_RETAIN_FAILED` before copying or retiring an owner when the

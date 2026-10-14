@@ -51591,6 +51591,9 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
 CAnalysisResult c_parse_for_lowering(Arena* arena, CPreprocessResult preprocess)
 {
     CParserResult syntax = c_parse_ast(arena, preprocess);
+    // This full lowering endpoint follows the production driver's query
+    // policy; the historical model-only endpoint retains its own method.
+    syntax.type_interning = true;
     return c_analyze_semantics_only(arena, preprocess, syntax);
 }
 

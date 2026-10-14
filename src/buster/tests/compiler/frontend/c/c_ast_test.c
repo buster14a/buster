@@ -9051,7 +9051,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_conditional_recipe_growth
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
         // The historical control disables automatic facts preparation while
-        // preserving the same syntax and default type-interning policy.
+        // matching this full endpoint's production type-interning policy.
+        syntax.type_interning = true;
         syntax.reference_tokens = true;
         syntax.ast = analysis.ast;
         CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
