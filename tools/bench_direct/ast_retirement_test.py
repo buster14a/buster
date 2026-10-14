@@ -121,7 +121,7 @@ def evidence() -> tuple:
         labs, variants, summary_variants, reference = {}, {}, {}, {}
         for key, role in (("a", "baseline"), ("b", "candidate")):
             path = "/bin/ide-" + role
-            variants[key] = {"ide": path, **BINARIES[role]}
+            variants[key] = {"role": role, "ide": path, **BINARIES[role]}
             labs[key] = {"config": {"ast_retirement_cell": cell, "extra": [], "cpu": 2, "ide": path,
                                    "command": " ".join([path, *command]), "fresh_copy": True, "repo_root": "/repo", "role": role},
                          "capabilities": {"perf_stat": {"usable": True, "reason": "usable"}},
@@ -192,6 +192,13 @@ class RetirementPublisherTest(unittest.TestCase):
                        {"binaries": dict(BINARIES, candidate=dict(BINARIES["candidate"], sha256="7" * 64))}):
             with self.subTest(change=change):
                 self.assertTrue(self.validate(*copy.deepcopy(self.good), **change))
+
+    def test_raw_variant_manifest_must_bind_the_timed_role_hash_size_and_path(self) -> None:
+        for field, value in (("sha256", "7" * 64), ("size_bytes", 17), ("ide", "/other/ide"), ("role", "candidate")):
+            record, bundle = copy.deepcopy(self.good)
+            mutate_document(bundle, "unity-syntax-only_meta", lambda d: d["variants"]["a"].update({field: value}))
+            with self.subTest(field=field):
+                self.assertTrue(self.validate(record, bundle))
 
     def test_raw_pair_counter_reference_and_probe_tampering_is_rejected(self) -> None:
         cell = "unity-syntax-only"

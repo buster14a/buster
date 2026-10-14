@@ -367,6 +367,13 @@ def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dic
     if summary.get("host", {}).get("cpu_model") != cpu_model or not APPROVED_HOST.search(cpu_model):
         raise ValueError(f"{cell} raw summary host differs from the approved receipt host")
     for key, role in (("a", "baseline"), ("b", "candidate")):
+        variant = (meta.get("variants") or {}).get(key)
+        observed, lab_config = summary[role], labs[key]["config"]
+        if not isinstance(variant, dict) or variant.get("role") != role or \
+                variant.get("ide") != lab_config.get("ide") or observed.get("path") != variant.get("ide") or \
+                any(variant.get(field) != binaries[role][field] for field in ("sha256", "size_bytes")) or \
+                observed.get("identical_runs") != AST_RETIREMENT_PROFILE["pairs"]:
+            raise ValueError(f"{cell} {key} raw variant identity or population differs from the prepared binary")
         environment = sampling_json(files, prefix + key + "/env/env.json")
         if environment.get("cpu_model") != cpu_model or environment.get("cpu") != AST_RETIREMENT_PROFILE["cpu"] or \
                 environment.get("ide_sha256") != binaries[role]["sha256"] or \
