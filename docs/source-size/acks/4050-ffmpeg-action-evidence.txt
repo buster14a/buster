@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 38928
+reason Native pinned FFmpeg full-census routing and H.264 action/resource evidence with C controls and exact artifact policy for #4050 (PR #4150); measured by hosted source-size report for f69a1db38b46421af1b73560e698db8561f469a3 against 8f2a6b11f1cfb22c478e7ca48e375215e76280ac.

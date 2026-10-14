@@ -2172,9 +2172,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         // Counts and sizes: the facts lowering retained for the unit (GitHub #3102 step 1), with or without the pilot.
         {
             CAstLowerStatistics retained = compile.c_ast.lower;
-            string_print(S8("C_AST_RETAINED trees_built={u64} tree_rejections={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64}\n"),
+            string_print(S8("C_AST_RETAINED trees_built={u64} tree_rejections={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64} "
+                            "hoist_steps={u64} evaluator_steps={u64}\n"),
                          retained.trees_built, retained.tree_rejections, retained.tree_nodes, retained.tree_bytes, retained.span_nodes,
-                         retained.span_bytes);
+                         retained.span_bytes, retained.hoist_steps, retained.evaluator_steps);
         }
         if (compile.c_ast.units)
         {
@@ -2229,12 +2230,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
-            // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended, and the bodies and
-            // statements the statement walker lowered from their nodes with the token ranges its adapter derived.
-            string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64} "
-                            "statement_bodies={u64} statements={u64} range_adapters={u64}\n"),
-                         tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks,
-                         tree.lower.statement_bodies, tree.lower.statements, tree.lower.range_adapters);
+            // Counts: lowering's root-conditional queries, by how each ended, and the bodies and statements the statement
+            // walker lowered from their nodes with the token ranges its adapter derived.
+            string_print(S8("C_AST_LOWER steps={u64} answers={u64} negatives={u64} statement_bodies={u64} statements={u64} range_adapters={u64}\n"),
+                         tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.statement_bodies, tree.lower.statements,
+                         tree.lower.range_adapters);
             // Counts and bytes: the facts analysis retained for lowering, and the fact candidates left without a type, by reason.
             CAstFactStatistics facts = tree.facts;
             u64 missing = 0;

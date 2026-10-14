@@ -1654,13 +1654,11 @@ struct CAstSpecifierStatistics
     u32 fallback_token;
 };
 
-// What lowering read from the tree (GitHub #3102) over one lowering: the
-// top-level function bodies whose conditional nodes it indexed, the nodes, and
-// how each root-conditional query inside an indexed body ended. An answer is
-// a root `?:` the tree reported; a negative is a range holding no `?`; a
-// fallback went to the token scan. Steps are the nodes and parentheses the
-// index build's walks and widening visited, a work count that must stay linear
-// in the input; it leaves out the memo's binary-search comparisons.
+// What lowering read from the tree (GitHub #3102) over one lowering: how each
+// root-conditional query (c_ir_root_conditional) ended, an answer being a
+// root `?:` the range's node holds and a negative any other range, and the
+// nodes those queries' descents visited, a work count that must stay linear in
+// the input.
 // The retained facts (GitHub #3102 step 1): trees_built counts the units whose
 // tree lowering built itself because the caller passed none, with that tree's
 // nodes and retained bytes (CAstStatistics.retained_bytes); tree_rejections
@@ -1671,12 +1669,9 @@ struct CAstSpecifierStatistics
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
-    u64 bodies;
-    u64 conditionals;
     u64 steps;
     u64 answers;
     u64 negatives;
-    u64 fallbacks;
     // The statement walker (#4060): bodies and statements it lowered from
     // their statement nodes, and the token ranges it derived at the
     // temporary expression and declaration adapter (#4058). It has no token
@@ -1690,6 +1685,12 @@ struct CAstLowerStatistics
     u64 tree_bytes;
     u64 span_nodes;
     u64 span_bytes;
+    // The nodes the control-group walk visited (c_ir_tree_control_groups), a
+    // work count that must stay linear in the input.
+    u64 hoist_steps;
+    // The evaluator's walk steps and name-chain descents
+    // (c_ir_lower_expression_core_walk), linear in the input as well.
+    u64 evaluator_steps;
 };
 
 // The semantic facts semantic analysis retains for lowering (GitHub #4062,

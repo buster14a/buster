@@ -314,12 +314,14 @@ object against `libc-buster.a` passed, which named the one translation unit in
 a single link rather than a bisect over members.
 
 Two prepasses run over a statement before its expression is lowered — one
-hoists calls (`c_ir_prepare_calls_discover`), one lowers parenthesized control
+hoists calls (then `c_ir_prepare_calls_discover`), one lowers parenthesized control
 groups (`c_ir_prepare_control_expressions_step`) — and either one runs an
 operand that only a taken branch should run. Only the call prepass had that
-rule; they share one `CIrLazyOperandScan` now, and a prepass that jumps past a
-group it will not enter folds the close it never sees back into the scan so
-the depth it carries stays the group's own. A call argument is where this was
+rule. The fix gave both one shared token scan. Since
+[#4059](https://github.com/buster14a/buster/issues/4059) both prepasses read
+the syntax tree instead (`c_ir_tree_calls_discover`,
+`c_ir_tree_control_groups`), and neither enters a lazy operand's node
+([Hoisting from the tree](../frontend/ast.md#hoisting-from-the-tree)). A call argument is where this was
 visible at all: an argument is lowered by the arithmetic core, which is what
 runs the control prepass, while an assignment, an `if` or a `while` condition
 reaches the condition machine directly and was always lazy — so

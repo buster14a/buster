@@ -203,6 +203,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 nested_sizeof_unary_source = S8(
+        "int main(void) {\n"
+        "    static unsigned long long nested_size = sizeof sizeof + 1;\n"
+        "    static unsigned long long nested_dereference = sizeof sizeof *(int*)0;\n"
+        "    static unsigned long long nested_alignof = sizeof _Alignof + 1;\n"
+        "    static int nested_extension = sizeof __extension__ + 1;\n"
+        "    static int nested_extension_cast = sizeof __extension__ (int)+1;\n"
+        "    static int nested_cast = sizeof +(int)+1;\n"
+        "    static unsigned long long nested_parenthesized = sizeof +(sizeof(int));\n"
+        "    static unsigned long long nested_type_name = sizeof sizeof(int);\n"
+        "    static unsigned long long nested_type_name_plus = sizeof sizeof(int) + 1;\n"
+        "    static unsigned long long nested_sizeof_statement = sizeof sizeof +({ int x = 0; x; });\n"
+        "    static unsigned long long nested_alignof_statement = sizeof _Alignof +({ int x = 0; x; });\n"
+        "    static int nested_extension_statement = sizeof __extension__ +({ int x = 0; x; });\n"
+        "    int side_effect = 0;\n"
+        "    int unevaluated_update = sizeof side_effect++;\n"
+        "    return nested_size != sizeof(void*) || nested_dereference != sizeof(void*) ||\n"
+        "           side_effect != 0 || unevaluated_update != sizeof(int) ||\n"
+        "           nested_alignof != sizeof(void*) || nested_extension != sizeof(int) ||\n"
+        "           nested_extension_cast != sizeof(int) || nested_cast != sizeof(int) ||\n"
+        "           nested_parenthesized != sizeof(void*) || nested_type_name != sizeof(void*) ||\n"
+        "           nested_type_name_plus != sizeof(void*) + 1 ||\n"
+        "           nested_sizeof_statement != sizeof(void*) || nested_alignof_statement != sizeof(void*) ||\n"
+        "           nested_extension_statement != sizeof(int);\n"
+        "}\n");
     struct
     {
         String8 source;
@@ -234,6 +259,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    _Static_assert(sizeof (values) == 4 * sizeof(int), \"parenthesized array\");\n"
             "    return sizeof values;\n"
             "}\n"), true, {0}},
+        {nested_sizeof_unary_source, true, {0}},
+        {S8("struct Incomplete;\n"
+            "int f(void) {\n"
+            "    static int invalid = sizeof sizeof(struct Incomplete);\n"
+            "    return invalid;\n"
+            "}\n"), false, {0}},
         {S8("int f(int n) {\n"
             "    _Static_assert(sizeof n == n, \"runtime value\");\n"
             "    return n;\n"
@@ -373,6 +404,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         }
         scratch_end(temporary);
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena runtime_temporary = arena_begin_temporal(arguments->arena);
+    Arena* runtime_arena = runtime_temporary.arena;
+    String8 runtime_input = buster_test_temporary_path(runtime_arena, S8("buster-nested-sizeof-unary-runtime"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(runtime_input, BUSTER_SLICE_TO_BYTE_SLICE(nested_sizeof_unary_source)));
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        String8 executable = buster_test_temporary_path(
+            runtime_arena, string_format(runtime_arena, S8("buster-nested-sizeof-unary-{u32}"), form), S8(".exe"));
+        String8 link_command[] = {
+            S8("-nostdinc"), S8("-g0"), S8("-std=gnu23"), forms[form], S8("-o"), executable, runtime_input,
+        };
+        CompilerDriverInvocation link_invocation = compiler_driver_parse_arguments(
+            runtime_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command));
+        BUSTER_TEST(arguments, link_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        CompilerDriverResult linked = compiler_driver_execute_invocation(runtime_arena, link_invocation);
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {executable};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(runtime_arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+    scratch_end(runtime_temporary);
+#endif
     return result;
 }
 

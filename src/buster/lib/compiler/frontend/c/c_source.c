@@ -4914,6 +4914,15 @@ bool c_semantic_math_link_is_long_double(String8 link_name)
            c_semantic_math_special_value(link_name).kind == C_TYPE_LONG_DOUBLE || (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
 }
 
+bool c_semantic_math_long_double_builtin_supported_on_target(Target target, String8 name)
+{
+    String8 link_name = string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name;
+    bool long_double = c_semantic_math_link_is_long_double(link_name) || string_equal(link_name, S8("huge_vall"));
+    bool native = target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
+    bool supported = !long_double || native;
+    return supported;
+}
+
 // The constant-valued special-float builtins by link name: the census every
 // result-type query, arity check, constant folder and runtime lowering reads.
 // c_ir_math_builtin_link_name folds the spellings onto six link names:
@@ -5811,6 +5820,8 @@ struct CMacroExpansionStorage
 {
     Arena* argument_arena;
     Arena* expansion_arena;
+    // Conditional expressions have a post-rescan defined-operator extension.
+    bool conditional_expression;
     // Stop retrying after a resource failure until this storage is destroyed.
     bool failed;
 };
@@ -5822,12 +5833,20 @@ struct CMacroExpansionMark
     u64 expansion;
 };
 
+typedef enum CMacroExpansionDefinedState
+{
+    C_MACRO_EXPANSION_DEFINED_NONE,
+    C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN,
+    C_MACRO_EXPANSION_DEFINED_NAME,
+} CMacroExpansionDefinedState;
+
 typedef struct CMacroExpansionContext CMacroExpansionContext;
 struct CMacroExpansionContext
 {
     CMacroExpansionContext* parent;
     CMacroExpansionContinuation* continuation;
     u64 task_base;
+    CMacroExpansionDefinedState defined_state;
     // The root context's rescan output is the line's node list, which the
     // caller consumes. An argument context (one with a continuation) writes
     // `output_tokens` instead: one contiguous run in the expansion arena that
@@ -7871,6 +7890,38 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
             else
             {
                 CPpToken token = task.token;
+                if (storage->conditional_expression)
+                {
+                    if (context->defined_state == C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN)
+                    {
+                        if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NAME;
+                        }
+                        else if (token.token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            token.no_expand = true;
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                        }
+                        else
+                        {
+                            context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                        }
+                    }
+                    else if (context->defined_state == C_MACRO_EXPANSION_DEFINED_NAME)
+                    {
+                        if (token.token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            token.no_expand = true;
+                        }
+                        context->defined_state = C_MACRO_EXPANSION_DEFINED_NONE;
+                    }
+                    else if (token.token.kind == C_TOKEN_IDENTIFIER &&
+                             c_token_spelling_equal(space->base, token.token, S8("defined")))
+                    {
+                        context->defined_state = C_MACRO_EXPANSION_DEFINED_NAME_OR_OPEN;
+                    }
+                }
                 if (token.token.kind == C_TOKEN_PRAGMA && !context->parent &&
                     c_preprocess_expansion_pragma(pragma_context, space->base, token, stamps, &tasks))
                 {
@@ -8675,6 +8726,11 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
+    if (result && c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_MATH &&
+        !c_semantic_math_long_double_builtin_supported_on_target((Target){.cpu_arch = cpu_arch, .os = os}, name))
+    {
+        result = false;
+    }
     return result;
 }
 
@@ -8987,7 +9043,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     u64 expanded_count = 0;
     if (valid && preprocessor_arithmetic)
     {
-        CMacroExpansionStorage expansion_storage = {0};
+        CMacroExpansionStorage expansion_storage = {.conditional_expression = true};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
