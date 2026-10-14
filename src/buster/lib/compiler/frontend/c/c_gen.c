@@ -20685,7 +20685,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start,
 
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
 
-BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global);
+BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, u32 initializer_node, IrType* type, IrGlobal* global);
 BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
@@ -49794,6 +49794,36 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_fail(CIntegerIrBuilder* builder
 // shapes named here are the ones a static initializer is actually refused
 // for; anything else is named by the token the element begins with, which is
 // what c_ir_ext80_fold_initializer already does for the x87 grammar.
+BUSTER_C_INTERNAL String8 c_ir_constant_initializer_element_name_node(CIntegerIrBuilder* builder, u32 node)
+{
+    String8 name = {0};
+    CAst const* ast = builder->syntax_tree;
+    if (ast && node < ast->node_count)
+    {
+        CInitializerPlan const* plan = c_initializer_plan_find(&builder->parse, node);
+        u32 first = plan && plan->item_count ? plan->items[0].value_start : ast->tokens[node];
+        bool address = ast->kinds[node] == C_AST_ADDRESS;
+        u32 base = address ? node - 1 : node;
+        while (ast->kinds[base] == C_AST_MEMBER || ast->kinds[base] == C_AST_INDEX)
+            base = c_ir_tree_first_child(ast, base);
+        if (ast->kinds[base] == C_AST_COMPOUND_LITERAL)
+            name = address ? S8("the address of a compound literal") : S8("a compound literal");
+        else if (ast->kinds[node] == C_AST_CALL)
+        {
+            u32 callee = c_ir_tree_first_child(ast, node);
+            if (ast->kinds[callee] == C_AST_IDENTIFIER && first == ast->tokens[callee])
+                name = string_format(builder->arena, S8("the call to '{S8}'"),
+                    c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[first]));
+        }
+        if (!name.length && first < builder->preprocess.token_count)
+        {
+            String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[first]);
+            if (spelling.length) name = string_format(builder->arena, S8("'{S8}'"), spelling);
+        }
+    }
+    return name;
+}
+
 BUSTER_C_INTERNAL String8 c_ir_constant_initializer_element_name(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     CPreprocessResult preprocess = builder->preprocess;
@@ -59779,7 +59809,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_flexible_initializer_type(CIntegerIrBuilder* bui
     return ir_program_add_type(program, clone);
 }
 
-BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
+BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, CDeclaration declaration, u32 initializer_node, IrType* type, IrGlobal* global)
 {
     Arena* arena = builder->arena;
     IrProgram* program = builder->program;
@@ -59787,13 +59817,20 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
     CPreprocessResult preprocess = builder->preprocess;
     CParseResult parse = builder->parse;
     IrSymbolId* entity_symbols = builder->entity_symbols;
-    u32 start = 0;
-    u32 end = 0;
-    if (!c_ir_declaration_initializer_range(preprocess, declaration, &start, &end))
+    if (initializer_node == C_AST_NODE_INVALID)
     {
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
         return true;
     }
+    CInitializerPlan const* plan = c_initializer_plan_find(&parse, initializer_node);
+    if (!plan || !plan->item_count)
+        return c_ir_constant_initializer_fail(builder, S8("missing retained static initializer plan"),
+            initializer_node < builder->syntax_tree->node_count ? builder->syntax_tree->tokens[initializer_node] : 0);
+    // Staged F5 owner boundary: source extent is immutable provenance from the
+    // semantic plan. The scalar/aggregate token routing below is retired with
+    // the resumable plan executor after F2/F3 node requests are callable.
+    u32 start = plan->items[0].value_start;
+    u32 end = plan->items[0].value_end;
     builder->static_initializer_token_plus_one = start + 1;
     for (u32 index = start; index < end; index += 1)
     {
@@ -60349,13 +60386,13 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
+BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, u32 initializer_node, IrType* type, IrGlobal* global)
 {
     u32 previous_initializer = builder->static_initializer_token_plus_one;
     CIrLabelDifferenceSink* previous_differences = builder->label_differences;
     builder->static_initializer_token_plus_one = 0;
     builder->label_differences = 0;
-    bool result = c_ir_global_initializer_impl(builder, declaration, type, global);
+    bool result = c_ir_global_initializer_impl(builder, declaration, initializer_node, type, global);
     builder->static_initializer_token_plus_one = previous_initializer;
     builder->label_differences = previous_differences;
     return result;
