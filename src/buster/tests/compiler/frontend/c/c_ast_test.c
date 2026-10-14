@@ -5694,6 +5694,113 @@ BUSTER_GLOBAL_LOCAL u64 c_ast_test_instruction_total(CIRLowerResult const* lower
     return total;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_assembly_nodes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena,
+        S8("asm(\"nop\"); int f(int x) {{ register int r asm(\"{S8}\") = x;"
+           " asm goto __inline __volatile(\"\" : [out] \"+r\" (r) : [in] \"r\" (x) : \"cc\" : done);"
+           " done: return r; }}"), cpu_arch_is_x86(target_native.cpu_arch) ? S8("eax") : S8("x0"));
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+    if (BUSTER_REQUIRE(arguments, !preprocess.error_count && analysis.analysis_complete && !analysis.diagnostic_count))
+    {
+        CIRLowerResult ordinary = c_lower_to_ir(temporary.arena, S8("asm-node-provenance.c"), preprocess, analysis, target_native);
+        CPreprocessResult poisoned = preprocess;
+        poisoned.tokens = arena_allocate(temporary.arena, CToken, preprocess.token_count);
+        memcpy(poisoned.tokens, preprocess.tokens, sizeof(CToken) * preprocess.token_count);
+        CAst const* ast = analysis.ast;
+        u32 changed = 0;
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            u32 kind = ast->kinds[node];
+            if (kind == C_AST_ASM || kind == C_AST_ASM_TOP_LEVEL || kind == C_AST_ASM_LABEL)
+            {
+                u32 first = ast->tokens[node];
+                // The fixture's asm expressions are single identifiers, and
+                // each asm ends at this first semicolon. This test-only scan
+                // locates the grammar bytes to corrupt after analysis.
+                u32 end = first;
+                while (end < preprocess.token_count && preprocess.tokens[end].punctuator != C_PUNCTUATOR_SEMICOLON) end += 1;
+                for (u32 index = first; index < end; index += 1)
+                {
+                    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+                    if (!string_equal(spelling, S8("r")) && !string_equal(spelling, S8("x")))
+                    {
+                        poisoned.tokens[index].kind = C_TOKEN_INVALID;
+                        poisoned.tokens[index].punctuator = C_PUNCTUATOR_NONE;
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, changed >= 30);
+        CIRLowerResult retained = c_lower_to_ir(temporary.arena, S8("asm-node-provenance.c"), poisoned, analysis, target_native);
+        BUSTER_TEST(arguments, !ordinary.diagnostic_count && ordinary.canonical_ir_certified);
+        BUSTER_TEST(arguments, !retained.diagnostic_count && retained.canonical_ir_certified);
+        BUSTER_TEST(arguments, c_ast_test_instruction_total(&ordinary) == c_ast_test_instruction_total(&retained));
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            CIRLowerResult const* lowered = form ? &retained : &ordinary;
+            if (BUSTER_REQUIRE(arguments, lowered->program && lowered->program->module_count == 1))
+            {
+                IrModule* module = lowered->program->modules;
+                BUSTER_TEST(arguments, module->assembly_count == 1 && string_equal(module->assemblies[0].source, S8("nop")));
+                u32 assemblies = 0;
+                for (u32 function = 0; function < module->function_count; function += 1)
+                {
+                    IrFunction* body = module->functions + function;
+                    for (u32 index = 0; index < body->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = body->instructions + index;
+                        if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                        {
+                            IrInstructionExtra extra = ir_instruction_extra(body, (IrInstructionId){.value = index});
+                            assemblies += 1;
+                            BUSTER_TEST(arguments, instruction->volatile_access && instruction->operand_count == 2 && instruction->target_count == 2);
+                            BUSTER_TEST(arguments, instruction->immediate_count == 2 &&
+                                                   (instruction->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+                                                   (instruction->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE));
+                            BUSTER_TEST(arguments, cpu_arch_is_x86(target_native.cpu_arch)
+                                ? (instruction->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A
+                                : IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(instruction->immediates[0]) &&
+                                  IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(instruction->immediates[0]) == 0);
+                            BUSTER_TEST(arguments, extra.operand_name_count == 2 && string_equal(extra.operand_names[0], S8("out")) &&
+                                                   string_equal(extra.operand_names[1], S8("in")));
+                            BUSTER_TEST(arguments, extra.clobber_count == 1 && string_equal(extra.clobbers[0], S8("cc")));
+                            BUSTER_TEST(arguments, extra.label_name_count == 1 && string_equal(extra.label_names[0], S8("done")));
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, assemblies == 1);
+            }
+        }
+    }
+    String8 invalid[] = {
+        S8("int f(void) { asm goto __inline __volatile(\"\" : : : : missing); return 0; }"),
+        S8("int f(void) { asm goto __inline __volatile(\"\" : : : : done); done: goto missing; }"),
+        S8("int f(void) { asm(\"\" : : \"r\" (({ goto missing; 0; }))); return 0; }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        CPreprocessResult rejected = c_ast_test_preprocess(temporary.arena, invalid[index], C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult checked = c_parse_for_lowering(temporary.arena, rejected);
+        BUSTER_TEST(arguments, !rejected.error_count && checked.diagnostic_count && checked.lowering_validated);
+        bool undefined = false;
+        for (u32 diagnostic = 0; diagnostic < checked.diagnostic_count; diagnostic += 1)
+        {
+            String8 message = checked.diagnostics[diagnostic].message;
+            undefined |= string_first_sequence(message, S8("label 'missing' is not defined")) < message.length;
+        }
+        BUSTER_TEST(arguments, undefined);
+        CIRLowerResult failed = c_lower_to_ir(temporary.arena, S8("asm-invalid-label.c"), rejected, checked, target_native);
+        BUSTER_TEST(arguments, failed.diagnostic_count && !failed.canonical_ir_certified);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statement_nodes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7598,6 +7705,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_split);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statements);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statement_nodes);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_assembly_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_specifiers);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_hints);

@@ -44770,36 +44770,38 @@ BUSTER_C_SHARED u64 c_semantic_asm_bound_register(Target target, String8 label)
     return result;
 }
 
-// The assembler label of a declaration, read from the declaration's own tokens.
+// The assembler label belongs to the entity's retained init-declarator.
 // A label on a function or a file-scope object renames the symbol and is read
 // by c_declaration_link_name; on a `register` local it names a machine register
 // instead, which is what this reads back.
-BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, u32 start, u32 end, String8* label_out)
+BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, CEntity const* entity, String8* label_out)
 {
-    for (u32 index = start; index + 3 < end + 1 && index + 3 <= builder->preprocess.token_count; index += 1)
+    CAst const* ast = builder->syntax_tree;
+    u32 node = entity->init_declarator_plus_one - 1;
+    bool found = false;
+    if (node < ast->node_count && ast->kinds[node] == C_AST_INIT_DECLARATOR)
     {
-        CToken keyword = builder->preprocess.tokens[index];
-        if (keyword.kind != C_TOKEN_IDENTIFIER ||
-            !c_token_in_well_known_set(builder->preprocess.spelling_base, keyword,
-                                       C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)) ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-            builder->preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
-            !c_token_is_punctuator(&builder->preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        u32 children[5] = {0};
+        u32 count = c_ast_child_count(ast, node);
+        BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(children));
+        c_ast_children(ast, node, children, count);
+        for (u32 index = 0; index < count && !found; index += 1)
         {
-            continue;
-        }
-        ByteSlice decoded = {0};
-        if (c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2]), '"', &decoded) &&
-            decoded.length)
-        {
-            *label_out = (String8){
-                .pointer = (char8*)decoded.pointer,
-                .length = decoded.length,
-            };
-            return true;
+            u32 label = children[index];
+            if (ast->kinds[label] == C_AST_ASM_LABEL)
+            {
+                u32 spelling = c_ast_child_at(ast, label, 0);
+                ByteSlice decoded = {0};
+                // Preserve the existing register-binding admission: exactly
+                // one string fragment, rather than a concatenated label.
+                found = ast->kinds[spelling] == C_AST_STRING && ast->data[spelling] == 1 &&
+                        c_ir_decode_quoted(builder->arena, c_ir_source_spelling(&builder->preprocess, ast->tokens[spelling]), '"', &decoded) &&
+                        decoded.length != 0;
+                if (found) *label_out = (String8){.pointer = (char8*)decoded.pointer, .length = decoded.length};
+            }
         }
     }
-    return false;
+    return found;
 }
 
 // GNU guarantees a local register variable only where the standard leaves the
@@ -44819,7 +44821,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
         return false;
     }
     u32 identifier_index = ast->tokens[node];
-    CEntityId entity_id = c_ir_identifier_entity(builder, identifier_index);
+    CAstFacts const* facts = builder->syntax_facts;
+    CEntityId entity_id = C_ENTITY_ID_INVALID;
+    if (node < facts->node_count && (facts->flags[node] & C_AST_FACT_BOUND)) entity_id.value = facts->payloads[node];
     if (entity_id.value >= builder->parse.entity_count)
     {
         return false;
@@ -44829,9 +44833,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
     {
         return false;
     }
-    u32 declaration_end = entity->declaration_token_start + entity->declaration_token_count;
     String8 label = {0};
-    if (!c_ir_declaration_asm_label(builder, entity->declaration_token_start, declaration_end, &label))
+    if (!c_ir_declaration_asm_label(builder, entity, &label))
     {
         return false;
     }

@@ -39958,10 +39958,28 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
             }
         }
         CParseCandidates jumps = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_GOTO, C_PARSE_POPULATION_LABEL_ADDRESSES, start);
+        CParseCandidates assemblies = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_ASM, C_PARSE_POPULATION_NONE, start);
+        u32 assembly = c_parse_candidates_next(&assemblies, start, end);
+        u32 qualifier_start = 0;
+        u32 qualifier_end = 0;
         for (u32 index = c_parse_candidates_next(&jumps, start, end); index + 1 < end; index = c_parse_candidates_next(&jumps, index + 1, end))
         {
+            while (assembly <= index && assembly < end)
+            {
+                qualifier_start = assembly + 1;
+                qualifier_end = qualifier_start;
+                while (qualifier_end < end && preprocess.tokens[qualifier_end].kind == C_TOKEN_IDENTIFIER &&
+                       c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[qualifier_end], C_PARSE_ASM_QUALIFIER_KEYWORDS))
+                {
+                    qualifier_end += 1;
+                }
+                assembly = c_parse_candidates_next(&assemblies, assembly + 1, end);
+            }
             CToken token = preprocess.tokens[index];
-            bool named_goto = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO);
+            // The goto qualifier is not a jump to the next qualifier. Keep
+            // jumps within asm operand statement expressions in this walk.
+            bool named_goto = !(index >= qualifier_start && index < qualifier_end) && token.kind == C_TOKEN_IDENTIFIER &&
+                              c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO);
             bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
                                  c_parse_label_address_prefix_proven_indexed(result, &preprocess, start, index);
             if (named_goto && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_SEMICOLON))
