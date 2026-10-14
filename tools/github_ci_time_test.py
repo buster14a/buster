@@ -306,6 +306,155 @@ class ReconciledInventoryTests(unittest.TestCase):
         self.assertTrue(any("check read unresolved" in error for error in result["errors"]))
 
 
+
+class CompilerSamplingInventoryTests(unittest.TestCase):
+    """#4209: replay sampling metadata attached to #4207's CI inventory."""
+
+    RUN, HEAD = ReconciledInventoryTests.RUN, ReconciledInventoryTests.HEAD
+    gate = ReconciledInventoryTests.gate
+
+    def setUp(self):
+        ReconciledInventoryTests.setUp(self)
+        self.benchmark_reads = {}
+
+    def sampling(self, status="queued"):
+        payload = (ROOT / "tools/fixtures/compiler_sampling_inventory.json").read_text(encoding="utf-8")
+        fixture = json.loads(payload.replace("bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd", self.HEAD))
+        check = fixture["checks"][status]
+        self.jobs.append(dict(fixture["job"], run_id=self.RUN, status=check["status"],
+                              conclusion=check["conclusion"]))
+        self.checks.append(check)
+        self.benchmark_reads = fixture["reads"]
+        batch = self.benchmark_reads["actions/runs/38566978972/attempts/1/jobs?per_page=100"]
+        # Only the writer for this state can prove the report. A queued writer
+        # alone cannot stand in for terminal research publication.
+        wanted = "Validate sampling packet evidence" if status == "completed" else "Queue sampling qualification packet"
+        batch["jobs"] = [job for job in batch["jobs"] if job["name"] == wanted]
+        batch["total_count"] = len(batch["jobs"])
+
+    def test_queued_and_completed_fixture_rows_are_retained_outside_workloads(self):
+        for status in ("queued", "completed"):
+            for conclusion in ((None,) if status == "queued" else ("success", "failure", "cancelled", "neutral")):
+                for details in ("default", "workflow"):
+                    with self.subTest(status=status, conclusion=conclusion, details=details):
+                        self.setUp()
+                        self.sampling(status)
+                        self.jobs[-1]["conclusion"] = self.checks[-1]["conclusion"] = conclusion
+                        if details == "workflow":
+                            self.checks[-1]["details_url"] = "https://github.com/buster14a/buster/actions/runs/38566978972/attempts/1"
+                        result = self.gate()
+                        self.assertTrue(result["success"], result["errors"])
+                        self.assertEqual(len(result["jobs"]), len(github_ci_time.combination_jobs()))
+                        metadata = result["reconciled_checks"][-1]
+                        self.assertEqual(metadata["job"], self.jobs[-1])
+                        self.assertEqual(metadata["raw_check"], self.checks[-1])
+                        self.assertEqual(metadata["publisher_provenance"]["sampling"]["phase"], "pilot")
+                        self.assertEqual(metadata["publisher_provenance"]["sampling"]["packet"], 2)
+                        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
+
+    def test_sampling_contract_matches_the_existing_publisher_and_workflow(self):
+        publisher = (ROOT / "tools/bench_direct/compiler_publish.py").read_text(encoding="utf-8")
+        self.assertIn('SAMPLING_CHECK_NAME = "' + github_ci_time.COMPILER_SAMPLING_CHECK + '"', publisher)
+        self.assertIn('"buster-main-sampling-v1:"', publisher)
+        workflow = (ROOT / github_ci_time.COMPILER_BENCHMARK_WORKFLOW).read_text(encoding="utf-8")
+        for state, (job_key, job_name, step_name) in github_ci_time.COMPILER_SAMPLING_WRITERS.items():
+            with self.subTest(state=state):
+                block = workflow.split("\n  " + job_key + ":\n", 1)[1]
+                boundary = re.search(r"(?m)^  [A-Za-z0-9_-]+:\s*$", block)
+                block = block[:boundary.start()] if boundary else block
+                self.assertIn("    name: " + job_name + "\n", block)
+                self.assertIn("      - name: " + github_ci_time.COMPILER_SAMPLING_CHECKOUT + "\n", block)
+                self.assertIn("      - name: " + step_name + "\n", block)
+                self.assertIn("run: python3 -B tools/bench_direct/compiler_publish.py sampling-" +
+                              ("publish" if state == "completed" else "queue"), block)
+
+    def test_sampling_requires_exact_check_and_marker_proof(self):
+        for field, value in (("id", 1), ("name", "Unknown sampling research"), ("head_sha", "b" * 40),
+                             ("app", {"id": 1}), ("external_id", None), ("status", "waiting"),
+                             ("external_id", "buster-main-sampling-v1:" + "f" * 64 + ":pilot:3:38566941159:38566978972:1"),
+                             ("external_id", "buster-main-sampling-v1:" + "f" * 64 + ":pilot:2:38566941159:38566978972:2"),
+                             ("external_id", "buster-main-sampling-v1:" + "f" * 64 + ":pilot:2:38566941159:1:1")):
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                self.sampling()
+                self.checks[-1][field] = value
+                self.assertFalse(self.gate()["success"])
+        self.setUp()
+        self.sampling()
+        self.assertFalse(self.gate(checks=self.checks[:-1])["success"])
+        self.assertFalse(self.gate(checks=self.checks + [dict(self.checks[-1], id=9999)])["success"])
+        self.assertFalse(self.gate(jobs=self.jobs + [dict(self.jobs[-1], id=9999)])["success"])
+
+    def test_sampling_rejects_untrusted_request_executor_and_writer(self):
+        controls = {
+            "request": (("id", 1), ("head_sha", "b" * 40), ("run_attempt", 2), ("event", "push"),
+                        ("path", ".github/workflows/ci.yml"), ("conclusion", "failure"),
+                        ("head_repository", {"id": 1, "full_name": "foreign/repo"}),
+                        ("actor", {"id": 1, "login": "other"}), ("triggering_actor", None)),
+            "publisher": (("id", 1), ("run_attempt", 2), ("event", "pull_request"), ("head_branch", "feature"),
+                          ("path", ".github/workflows/ci.yml"), ("display_title", "unbound request"),
+                          ("repository", {"id": 1, "full_name": "foreign/repo"}),
+                          ("actor", None), ("triggering_actor", {"id": 1, "login": "other"})),
+            "writer": (("run_id", 1), ("run_attempt", 2), ("head_sha", self.HEAD), ("status", "queued"),
+                       ("name", "Untrusted sampling writer"), ("steps", [])),
+        }
+        for status in ("queued", "completed"):
+            for kind, changes in controls.items():
+                for field, value in changes:
+                    with self.subTest(status=status, kind=kind, field=field):
+                        self.setUp()
+                        self.sampling(status)
+                        reads = self.benchmark_reads
+                        row = (reads["actions/runs/38566941159/attempts/1"] if kind == "request" else
+                               reads["actions/runs/38566978972/attempts/1"] if kind == "publisher" else
+                               reads["actions/runs/38566978972/attempts/1/jobs?per_page=100"]["jobs"][0])
+                        row[field] = value
+                        self.assertFalse(self.gate()["success"])
+
+    def test_sampling_requires_checkout_and_write_execution_with_complete_inventory(self):
+        for status in ("queued", "completed"):
+            for case in ("checkout", "write", "duplicate-writer", "duplicate-step", "incomplete"):
+                with self.subTest(status=status, case=case):
+                    self.setUp()
+                    self.sampling(status)
+                    batch = self.benchmark_reads["actions/runs/38566978972/attempts/1/jobs?per_page=100"]
+                    writer = batch["jobs"][0]
+                    if case in ("checkout", "write"):
+                        writer["steps"][0 if case == "checkout" else 1]["conclusion"] = "skipped"
+                    elif case == "duplicate-writer":
+                        batch["jobs"].append(dict(writer, id=9999))
+                        batch["total_count"] = 2
+                    elif case == "duplicate-step":
+                        writer["steps"].append(copy.deepcopy(writer["steps"][1]))
+                    else:
+                        batch["total_count"] = 2
+                    self.assertFalse(self.gate()["success"])
+
+    def test_sampling_default_url_requires_one_consistent_current_executor_link(self):
+        for case in ("missing", "duplicate", "foreign", "disagree", "wrong-attempt"):
+            with self.subTest(case=case):
+                self.setUp()
+                self.sampling()
+                check = self.checks[-1]
+                summary = check["output"]["summary"]
+                if case == "missing": summary = ""
+                elif case == "duplicate": summary *= 2
+                elif case == "foreign": summary = summary.replace("buster14a/buster", "foreign/repo")
+                elif case == "disagree": summary = summary.replace("Workflow run 38566978972", "Workflow run 1")
+                else: summary = summary.replace("attempt 1", "attempt 2").replace("/attempts/1", "/attempts/2")
+                check["output"]["summary"] = summary
+                self.assertFalse(self.gate()["success"])
+
+    def test_sampling_never_hides_missing_or_failed_workloads_or_unavailable_provenance(self):
+        self.sampling()
+        self.assertFalse(self.gate(jobs=self.jobs[1:])["success"])
+        jobs = copy.deepcopy(self.jobs)
+        jobs[0]["conclusion"] = "failure"
+        self.assertFalse(self.gate(jobs=jobs)["success"])
+        with mock.patch.object(github_ci_time, "_gate_metadata", side_effect=ValueError("sampling API unavailable")):
+            self.assertFalse(self.gate()["success"])
+
+
 class CompilerBenchmarkInventoryTests(unittest.TestCase):
     """#3030: benchmark display metadata needs independent trusted-writer proof."""
 
