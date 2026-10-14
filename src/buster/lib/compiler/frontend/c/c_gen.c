@@ -55008,16 +55008,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
             CIrNodeQueryFrame operand = {0};
             bool probe = builtin == C_SYMBOL_BUILTIN_CONSTANT_P && arguments == 1;
             admitted = probe && c_ir_constant_node_child(builder, c_ast_child_at(ast, node, 1), &operand);
-            else if (c_semantic_source_location_builtin(builtin) && !arguments)
-            {
-                u32 source_anchor = ast->tokens[callee];
-                value.real = c_ir_constant_integer(builder->s32_type, c_semantic_source_line(&builder->preprocess, source_anchor));
-                admitted = true;
-                if (builtin != C_SYMBOL_BUILTIN_SOURCE_LINE)
-                {
-                    CIrConstantValue object = c_ir_source_name_object(builder, source_anchor, builtin);
-                    admitted = object.kind == C_IR_CONSTANT_LVALUE;
-                    if (admitted)
+            if (admitted)
                         value.real = (CIrConstantValue){
                             .type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[C_TYPE_CHAR]),
                             .symbol = object.symbol, .kind = C_IR_CONSTANT_POINTER,
@@ -55033,7 +55024,16 @@ BUSTER_C_INTERNAL bool c_ir_constant_node_attempt(CIntegerIrBuilder* builder, CI
                 value.real = c_ir_constant_integer(builder->s32_type, constant);
                 value.type = value.real.type;
             }
-            else if (builtin == C_SYMBOL_BUILTIN_COMPLEX && arguments == 2)
+            else if (c_semantic_source_location_builtin(builtin) && !arguments)
+            {
+                u32 source_anchor = ast->tokens[callee];
+                value.real = c_ir_constant_integer(builder->s32_type, c_semantic_source_line(&builder->preprocess, source_anchor));
+                admitted = true;
+                if (builtin != C_SYMBOL_BUILTIN_SOURCE_LINE)
+                {
+                    CIrConstantValue object = c_ir_source_name_object(builder, source_anchor, builtin);
+                    admitted = object.kind == C_IR_CONSTANT_LVALUE;
+                    else if (builtin == C_SYMBOL_BUILTIN_COMPLEX && arguments == 2)
             {
                 CIrNodeQueryFrame real = {0};
                 CIrNodeQueryFrame imaginary = {0};
