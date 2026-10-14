@@ -7219,6 +7219,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_pointer_probe(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_declaration_point(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const bounds[] = {S8("N"), S8("N+1"), S8("(int)N")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bounds); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("enum{{N=1}}; int f(void) {{ if (sizeof(struct S {{ int a[{S8}];"
+            " enum{{N=4}} e; int b[{S8}]; unsigned bit:1; }})) return sizeof(struct S)+N; return 0; }}"), bounds[index], bounds[index]);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAstFacts facts = {0};
+        if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            syntax.ast_facts = &facts;
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            u64 rows = 0;
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            if (!difference.length) difference = c_ast_corpus_models_differ(temporary.arena, &plain, &analysis, &rows);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !analysis.diagnostic_count && !difference.length, source);
+            u64 increment = index == 1;
+            for (u32 bound = 0; bound < 2; bound += 1)
+            {
+                u32 node = c_ast_facts_bound_node(&facts, bound);
+                CAstConstantFact value = c_ast_facts_constant(&facts, node);
+                BUSTER_TEST_RAW(arguments, node != C_AST_NODE_INVALID && value.status == C_AST_CONSTANT_INTEGER &&
+                    value.low == (bound ? 4u : 1u) + increment && !value.high, source);
+            }
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("constant-declaration-point.c"), preprocess, analysis, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified, source);
+        }
+        c_ast_facts_release(&facts);
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_offsetof_enum_scope(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9032,6 +9073,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_shape_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_pointer_probe);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_offsetof_enum_scope);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_declaration_point);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_constant_node_tasks);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);

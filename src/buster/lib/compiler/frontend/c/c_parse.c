@@ -40398,7 +40398,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             }
             else
             {
-                CEntityId id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &first);
+                CEntityId id = c_parse_lookup_entity_at_token(result, preprocess, scope, start);
                 if (id.value < result->entity_count)
                 {
                     CEntity entity = result->entities[id.value];

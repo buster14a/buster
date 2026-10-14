@@ -3082,6 +3082,11 @@ enum definitions use their unpublished suffix until the enclosing declaration
 publishes it. Completed nested enum lists can therefore shadow a global enum
 without exposing later declarations or sibling scopes. Retained offsetof paths
 carry the resulting numeric offsets, with no lower-time scope reconstruction.
+Typed semantic constant leaves use the same declaration-point lookup when
+late validation revisits a bound. A later enum in an inline record must not
+replace an earlier reference's value while its BOUND fact still names the
+original declaration; direct, arithmetic and casted bound facts retain that
+source-order distinction.
 
 Exact-node constant tasks distinguish ordinary values from addressed compound
 objects with `C_IR_AST_CONSTANT_LVALUE`. A direct whole initializer's literal
