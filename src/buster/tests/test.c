@@ -302,20 +302,29 @@ enum
 #define BUSTER_TEST_WATCHDOG_SUPPORTED 0
 #endif
 
+// Names are static tokens, like the arena records'. Both slice components
+// must be atomic: a sequence check cannot make racing plain accesses legal.
+typedef struct TestWatchName TestWatchName;
+struct TestWatchName
+{
+    AtomicU64 pointer;
+    AtomicU64 length;
+};
+
 // A seqlock with one writer, the thread running the module: sequence is odd
 // while it rewrites the fields, and a reader trusts only fields read between
-// two equal even values. Names are static tokens, like the arena records'.
+// two equal even values. All accesses use sequentially consistent atomics so
+// an accepted snapshot belongs to one complete publication, including MSVC.
 struct TestWatchSlot
 {
     AtomicU64 sequence;
-    String8 module;
+    TestWatchName module;
     // Empty while no scope of the module is open.
-    String8 fixture;
-    String8 last_completed;
-    u64 index;
-    u64 since_microseconds;
-    bool module_scope;
-    u8 reserved[7];
+    TestWatchName fixture;
+    TestWatchName last_completed;
+    AtomicU64 index;
+    AtomicU64 since_microseconds;
+    AtomicU64 module_scope;
 };
 
 typedef struct TestWatchSnapshot TestWatchSnapshot;
@@ -354,33 +363,42 @@ BUSTER_GLOBAL_LOCAL TestFixtureDeadline test_fixture_deadline_parse(String8 text
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void test_watch_name_store(TestWatchName* name, String8 value)
+{
+    atomic_u64_store(&name->pointer, (u64)(uintptr_t)value.pointer);
+    atomic_u64_store(&name->length, value.length);
+}
+
+BUSTER_GLOBAL_LOCAL String8 test_watch_name_load(TestWatchName* name)
+{
+    String8 result = {(char8*)(uintptr_t)atomic_u64_load(&name->pointer), atomic_u64_load(&name->length)};
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void test_watch_publish(TestWatchSlot* slot, String8 module, String8 fixture, u64 index, bool module_scope, String8 last_completed)
 {
-    // Sequentially consistent read-modify-writes keep the plain stores between
-    // them on every compiler, including MSVC's Interlocked implementation.
     atomic_u64_increment(&slot->sequence);
-    slot->module = module;
-    slot->fixture = fixture;
-    slot->last_completed = last_completed;
-    slot->index = index;
-    slot->module_scope = module_scope;
-    slot->since_microseconds = os_now_microseconds();
+    test_watch_name_store(&slot->module, module);
+    test_watch_name_store(&slot->fixture, fixture);
+    test_watch_name_store(&slot->last_completed, last_completed);
+    atomic_u64_store(&slot->index, index);
+    atomic_u64_store(&slot->module_scope, module_scope);
+    atomic_u64_store(&slot->since_microseconds, os_now_microseconds());
     atomic_u64_increment(&slot->sequence);
 }
 
 BUSTER_GLOBAL_LOCAL TestWatchSnapshot test_watch_snapshot(TestWatchSlot* slot)
 {
-    // Adding zero is the sequentially consistent load every AtomicU64 build has.
-    u64 before = atomic_u64_add(&slot->sequence, 0);
+    u64 before = atomic_u64_load(&slot->sequence);
     TestWatchSnapshot result = {
-        .module = slot->module,
-        .fixture = slot->fixture,
-        .last_completed = slot->last_completed,
-        .index = slot->index,
-        .since_microseconds = slot->since_microseconds,
-        .module_scope = slot->module_scope,
+        .module = test_watch_name_load(&slot->module),
+        .fixture = test_watch_name_load(&slot->fixture),
+        .last_completed = test_watch_name_load(&slot->last_completed),
+        .index = atomic_u64_load(&slot->index),
+        .since_microseconds = atomic_u64_load(&slot->since_microseconds),
+        .module_scope = atomic_u64_load(&slot->module_scope) != 0,
     };
-    u64 after = atomic_u64_add(&slot->sequence, 0);
+    u64 after = atomic_u64_load(&slot->sequence);
     result.consistent = before == after && !(before & 1);
     return result;
 }
@@ -463,11 +481,13 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
     TestWatchSlot* watch = arguments->watch_slot;
     if (watch)
     {
-        // This thread is the slot's only writer, so reading it back is plain.
-        result.watch_parent = watch->fixture;
-        result.watch_parent_index = watch->index;
-        result.watch_parent_module = watch->module_scope;
-        test_watch_publish(watch, arguments->memory_module, name, result.index, module, module ? (String8){0} : watch->last_completed);
+        // This thread is the slot's only writer; the snapshot cannot overlap a
+        // publication, and still uses atomic accesses on every compiler.
+        TestWatchSnapshot parent = test_watch_snapshot(watch);
+        result.watch_parent = parent.fixture;
+        result.watch_parent_index = parent.index;
+        result.watch_parent_module = parent.module_scope;
+        test_watch_publish(watch, arguments->memory_module, name, result.index, module, module ? (String8){0} : parent.last_completed);
     }
 #if BUSTER_IOS
     // Pair module-named observations with the ending scope clock. Process CPU
@@ -3061,6 +3081,13 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_watchdog_self_test(void)
     passed = passed && closed.consistent && !closed.fixture.length && string_equal(closed.last_completed, S8("body")) &&
              !test_watch_expired(closed, UINT64_MAX, 0);
 
+    // An in-progress publication stays unusable even if both sequence reads
+    // see the same odd value. Never dereference names in a rejected snapshot.
+    atomic_u64_increment(&slot.sequence);
+    TestWatchSnapshot updating = test_watch_snapshot(&slot);
+    passed = passed && !updating.consistent && !test_watch_expired(updating, UINT64_MAX, 0);
+    atomic_u64_increment(&slot.sequence);
+
     // A start record precedes everything its scope reports.
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     u64 inner_start = string_first_sequence(text, S8("TEST_FIXTURE_START_V1 kind=fixture module=watchdog_self_test fixture=inner index=1\n"));
@@ -3082,6 +3109,76 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_watchdog_self_test(void)
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
     return passed;
+}
+
+typedef struct TestWatchContention TestWatchContention;
+struct TestWatchContention
+{
+    TestWatchSlot slot;
+    AtomicU64 reader_ready;
+    AtomicU64 writer_done;
+    bool passed;
+};
+
+BUSTER_GLOBAL_LOCAL bool test_watch_contention_snapshot_valid(TestWatchSnapshot snapshot)
+{
+    // Distinct pointers, lengths, index and kind expose a mixed publication.
+    bool first = snapshot.index == 11 && snapshot.module_scope && string_equal(snapshot.module, S8("a")) &&
+                 string_equal(snapshot.fixture, S8("first_scope")) && string_equal(snapshot.last_completed, S8("x"));
+    bool second = snapshot.index == 29 && !snapshot.module_scope && string_equal(snapshot.module, S8("second_module")) &&
+                  string_equal(snapshot.fixture, S8("b")) && string_equal(snapshot.last_completed, S8("last_completed"));
+    return (first || second) && snapshot.since_microseconds != 0;
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType test_watch_contention_lane(void* argument)
+{
+    TestWatchContention* state = (TestWatchContention*)argument;
+    if (lane_count() == 1 || lane_index() == 0)
+    {
+        if (lane_count() > 1)
+        {
+            while (!atomic_u64_load(&state->reader_ready))
+            {
+            }
+        }
+        for (u64 index = 0; index < 4096; index += 1)
+        {
+            test_watch_publish(&state->slot, S8("a"), S8("first_scope"), 11, true, S8("x"));
+            test_watch_publish(&state->slot, S8("second_module"), S8("b"), 29, false, S8("last_completed"));
+            if (lane_count() == 1)
+            {
+                TestWatchSnapshot snapshot = test_watch_snapshot(&state->slot);
+                state->passed = state->passed && snapshot.consistent && test_watch_contention_snapshot_valid(snapshot);
+            }
+        }
+        atomic_u64_store(&state->writer_done, 1);
+    }
+    else
+    {
+        TestWatchSnapshot initial = test_watch_snapshot(&state->slot);
+        state->passed = initial.consistent && test_watch_contention_snapshot_valid(initial);
+        atomic_u64_store(&state->reader_ready, 1);
+        do
+        {
+            TestWatchSnapshot snapshot = test_watch_snapshot(&state->slot);
+            // A rejected slice may mix pointer and length. Check consistency
+            // before inspecting any bytes, just as the watchdog does.
+            if (snapshot.consistent)
+            {
+                state->passed = state->passed && test_watch_contention_snapshot_valid(snapshot);
+            }
+        } while (!atomic_u64_load(&state->writer_done));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool test_watch_contention_self_test(void)
+{
+    TestWatchContention state = {.passed = true};
+    test_watch_publish(&state.slot, S8("a"), S8("first_scope"), 11, true, S8("x"));
+    lane_run(2, &test_watch_contention_lane, &state);
+    lane_release();
+    TestWatchSnapshot final = test_watch_snapshot(&state.slot);
+    return state.passed && final.consistent && final.index == 29 && test_watch_contention_snapshot_valid(final);
 }
 
 BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
@@ -4184,6 +4281,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BUSTER_VALIDATE(test_require_self_test());
     BUSTER_CHECK(test_fixture_timing_self_test());
     BUSTER_CHECK(test_fixture_watchdog_self_test());
+    BUSTER_CHECK(test_watch_contention_self_test());
     BUSTER_CHECK(test_module_selection_self_test());
     BUSTER_CHECK(test_module_group_self_test());
     BUSTER_VALIDATE(test_parallel_gang_report_self_test());
