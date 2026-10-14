@@ -207,6 +207,8 @@ class RetirementPublisherTest(unittest.TestCase):
             "missing pairs": lambda b: b["files"].pop(prefix + "pairs.json"),
             "counter NA": lambda b: b["files"].__setitem__(prefix + "pairs/0001-a.csv", b"<not counted>,,instructions:u,,,\n"),
             "wrong counter privilege": lambda b: b["files"].__setitem__(prefix + "pairs/0001-a.csv", b"100,,instructions,,,\n"),
+            "counter privilege alias": lambda b: b["files"].__setitem__(prefix + "pairs/0001-a.csv",
+                b["files"][prefix + "pairs/0001-a.csv"] + b"100000000.0,,instructions:k,2000000000,100.00,,\n"),
             "counter changes inference": lambda b: b["files"].__setitem__(prefix + "pairs/0001-a.csv",
                 b["files"][prefix + "pairs/0001-a.csv"].replace(b"100000000.0,,instructions:u", b"200000000.0,,instructions:u")),
             "missing reference chunk": lambda b: b["files"].pop(prefix + "a/reference.001.bin"),

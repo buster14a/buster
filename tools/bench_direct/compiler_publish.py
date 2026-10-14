@@ -391,8 +391,10 @@ def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dic
         csv_bytes = files.get(prefix + f"pairs/{number:04d}-{key}.csv")
         if not isinstance(csv_bytes, bytes):
             raise ValueError(f"{cell} raw retired-instruction counter file is missing")
-        counters = [row for row in _lab.parse_stat(csv_bytes.decode("utf-8")) if row.get("event") == "instructions:u"]
-        if len(counters) != 1 or not _number(counters[0].get("value")) or counters[0]["value"] <= 0:
+        counters = [row for row in _lab.parse_stat(csv_bytes.decode("utf-8"))
+                    if _lab.normalize_event(row.get("event", "")) == "instructions"]
+        if len(counters) != 1 or counters[0].get("event") != "instructions:u" or \
+                not _number(counters[0].get("value")) or counters[0]["value"] <= 0:
             raise ValueError(f"{cell} raw pair {number} {key} lacks positive retired instructions:u")
     if type(config.get("seed")) is not int or not _number(config.get("min_effect_percent")) or \
             not 0 <= config["min_effect_percent"] < 100:
