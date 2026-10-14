@@ -32,7 +32,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_conditional_work_growth(UnitTest
                 for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(slots); slot += 1) work += c_test_parse_nesting_count(slots[slot]);
                 work -= before;
                 if (!size) shallow = work;
-                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && semantic.analysis_complete &&
+                    (semantic.diagnostic_count != 0) == (shape == 1));
                 BUSTER_TEST(arguments, work && work <= (u64)sizes[size] * 96 + 64 && work <= shallow * (size == 2 ? 5 : 3));
                 arguments->show(arguments, S8("LABEL_CONDITIONAL_WORK_V1 shape={u32} reference={u32} terms={u32} work={u64}\n"),
                     shape, reference, sizes[size], work);
@@ -71,6 +72,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
         S8("int main(void) { int n=0; void *p=&&done; done: int value=p==&&done ? ++n : ++n; return value!=1 || n!=1; }"),
         S8("int main(void) { void *p=&&done; done: return (p==&&done ?: 0)!=1; }"),
         S8("int main(void) { void *p=&&done; done: return (p!=&&done ? 0 : ((p==&&done ? 7 : 9)))!=7; }"),
+        S8("int main(void) { void *p=&&done; done: return (p?1:0)!=1; }"),
+        S8("int main(void) { void *p=&&done; done: p?1:0; &&done?1:0; int x=p?1:0; if(p?1:0) { if(&&done?1:0) return 0; } return 1; }"),
         S8("int saved; int take(int x) { saved=x; return x; } int main(void) { void *p=&&done; done: saved=p==&&done ? 7 : 9; return take(p==&&done ? 7 : 9)!=7 || saved!=7; }"),
     };
     String8 escapes[] = {
@@ -88,6 +91,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
         S8("void *saved; void f(void) { void *p=&&done; done: saved=p==&&done ? p : 0; }"),
         S8("int f(void) { void *p=&&done; done: return p==&&done ? 0 : (p,p==&&done ? 0 : 1); }"),
         S8("long f(void) { void *p=&&done; done: return (long)(p==&&done ? p : 0); }"),
+        S8("int f(void) { void *p=&&done; done: return p?1:0; }"),
+        S8("int f(void) { done: return &&done?1:0; }"),
+        S8("int f(void) { void *p=&&done; done: return (p?1:0)?1:0; }"),
+        S8("int f(void) { done: return (&&done?1:0)?1:0; }"),
+        S8("int saved; int f(void) { void *p=&&done; done: saved=p?1:0; return 0; }"),
+        S8("int saved; int f(void) { done: saved=&&done?1:0; return 0; }"),
+        S8("int take(int); int f(void) { void *p=&&done; done: return take(p?1:0); }"),
+        S8("int take(int); int f(void) { done: return take(&&done?1:0); }"),
+        S8("int f(void) { void *p=&&done; done:; int x=p?1:0; return x; }"),
+        S8("int f(void) { done:; int x=&&done?1:0; return x; }"),
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
     Target targets[] = {

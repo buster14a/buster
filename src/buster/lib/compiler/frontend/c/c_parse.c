@@ -48727,13 +48727,17 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
                     u32 colon = 0;
                     bool split = indexed && c_ir_ext80_fold_root_conditional(&conditional, preprocess, range.first, range.limit,
                         &range.first, &question, &colon, &range.limit);
-                    if (split && count + 2 <= capacity)
+                    bool omitted = split && question + 1 == colon;
+                    if (split && count + (omitted ? 2u : 3u) <= capacity)
                     {
                         u32 owner_depth = conditional.depths[range.first - conditional.base];
                         work[count++] = (CParseLabelRange){.first = colon + 1, .limit = range.limit, .conditional_depth = owner_depth};
-                        work[count++] = question + 1 == colon
-                            ? (CParseLabelRange){.first = range.first, .limit = question, .conditional_depth = owner_depth}
-                            : (CParseLabelRange){.first = question + 1, .limit = colon, .conditional_depth = owner_depth};
+                        if (!omitted)
+                            work[count++] = (CParseLabelRange){.first = question + 1, .limit = colon, .conditional_depth = owner_depth};
+                        // Preserve escaped-taint policy for direct label-pointer
+                        // truth. A comparison/logical boolean condition is a
+                        // sink; an omitted true arm reuses this condition once.
+                        work[count++] = (CParseLabelRange){.first = range.first, .limit = question, .conditional_depth = owner_depth};
                     }
                     else
                     {

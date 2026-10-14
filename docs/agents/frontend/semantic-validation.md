@@ -680,8 +680,14 @@ operand's label provenance is consumed by a comparison. An explicit guarded
 worklist splits top-level logical operands once and uses indexed delimiter
 jumps for nested groups; it never recurses. Direct label-pointer truth
 conversion and comma and cast transports retain the conservative policy.
-A conditional consumes its condition as control and transports only its result
-arms. The GNU omitted true arm still transports the condition's value. The
+A conditional transports its result arms after the condition's provenance
+has been consumed by a comparison or valid logical boolean composition.
+Direct label-pointer truth retains the existing conservative escaped-taint
+policy for returned values, static storage, call arguments and later uses of
+local assignments. Discarded expressions, control positions and unused local
+assignments retain their existing acceptance; a complete equality remains a
+sink even around a conditional boolean. The GNU omitted true arm still
+transports the condition's value, checked once. The
 same guarded worklist uses the semantic conditional/delimiter index to route
 these ranges without recursion or an AST requirement; reference-token and
 retained-tree semantic diagnostics must agree. Pointer result arms,
@@ -697,7 +703,8 @@ Conditional result ranges also carry their owner's proven delimiter depth.
 At the same depth the owner's root proof excludes lower-precedence operators,
 so an indexed question inside the child proves a conditional root directly.
 Stripping a group changes depth and requires a fresh root proof. The registered
-128/256/512-term boolean, control-only label and mixed logical witnesses bound
+128/256/512-term comparison-boolean and mixed logical witnesses, together with
+bounded direct-truth refusal witnesses, bound
 actual label root/value/split/index work in both semantic paths; this prevents
 right-nested conditional suffixes from being rescanned at every result arm.
 Every provenance fact the walk records descends from such a
