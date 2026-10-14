@@ -2138,6 +2138,7 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisRes
     return difference;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 // AST provenance is absent from the token-reference model above. Every named
 // file-scope declaration nevertheless needs one independently checked owner
 // before lowering can consume these links without reconstructing source.
@@ -2166,6 +2167,8 @@ BUSTER_GLOBAL_LOCAL bool c_ast_test_declaration_owners_consistent(CAnalysisResul
     }
     return valid;
 }
+
+#endif
 
 // The matching-delimiter index c_ast_spans_build reads (closer + 1 at each
 // opener, 0 elsewhere), built with a stack as CPositionIndex builds it. A
@@ -9186,7 +9189,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_copy_capacity(UnitTestArg
             u64 position = temporary.arena->position;
             u64 bytes = c_test_ast_facts_retention_bytes(temporary.arena, &facts);
             BUSTER_TEST(arguments, bytes != 0 && bytes != C_AST_RETAIN_FAILED && facts.recipe_count && facts.constant_count &&
-                                   facts.bound_arena && facts.offsetof_plan_count && facts.ext80_initializer_count);
+                                   facts.bound_arena && facts.offsetof_plan_count &&
+                                   ((facts.ext80_initializer_count != 0) == (target_data_layout(target_native).long_double_type.bit_width == 80)));
             c_test_retained_publication_limit(bytes - 1);
             BUSTER_TEST(arguments, c_ast_facts_retain_in_arena(temporary.arena, &facts) == C_AST_RETAIN_FAILED);
             c_test_retained_publication_limit(UINT64_MAX);
@@ -9299,7 +9303,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_entrypoints(UnitTestArgum
         BUSTER_TEST(arguments, retained->constant_capacity == retained->constant_count);
         BUSTER_TEST(arguments, retained->offsetof_plan_count != 0 && retained->offsetof_plan_capacity == retained->offsetof_plan_count &&
                                retained->offsetof_step_count != 0 && retained->offsetof_step_capacity == retained->offsetof_step_count);
-        BUSTER_TEST(arguments, retained->ext80_initializer_count != 0 && retained->ext80_initializer_capacity == retained->ext80_initializer_count);
+        BUSTER_TEST(arguments, ((retained->ext80_initializer_count != 0) == (target_data_layout(target_native).long_double_type.bit_width == 80)) &&
+                               retained->ext80_initializer_capacity == retained->ext80_initializer_count);
+        u32 wide_width = target_data_layout(target_native).long_double_type.bit_width;
+        bool retained_wide = false;
+        for (u32 row = 0; row < retained->constant_count; row += 1)
+        {
+            CAstConstantFact const* value = retained->constants + row;
+            if (value->status == C_AST_CONSTANT_FLOAT && value->float_width == wide_width)
+            {
+                retained_wide |= wide_width == 64 ? value->floating == 1.25
+                    : wide_width == 80 ? value->low == UINT64_C(0xa000000000000000) && value->high == UINT64_C(0x3fff)
+                    : wide_width == 128 && !value->low && value->high == UINT64_C(0x3fff400000000000);
+            }
+        }
+        BUSTER_TEST(arguments, retained_wide);
         bool parameter = false;
         for (u32 row = 0; row < retained->recipe_count; row += 1)
         {

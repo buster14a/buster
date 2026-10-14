@@ -34258,7 +34258,7 @@ BUSTER_C_INTERNAL void c_ir_expression_projection_compare(CIntegerIrBuilder* bui
             test->success[view] = row != 0;
             for (u32 depth = 0; row && depth < C_TEST_EXPRESSION_TYPE_DEPTH; depth += 1)
             {
-                test->shapes[view][depth] = (CTestExpressionTypeShape){.kind = row->kind, .bit_width = row->bit_width,
+                test->shapes[view][depth] = (CTestExpressionTypeShape){.kind = (u32)row->kind, .bit_width = row->bit_width,
                     .size = row->layout.size, .alignment = row->layout.alignment, .element_count = row->element_count,
                     .parameter_count = row->parameter_count, .is_signed = row->is_signed,
                     .is_atomic = row->is_atomic, .is_volatile = row->is_volatile};

@@ -11070,8 +11070,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArgume
     parse.aggregate_lookup = 0;
     BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
 
-    // Lowering: 64 tags named by casts cost no search row; a shadowed tag
-    // still searches, and each search visits the whole table.
+    // Retained TYPE_NAME owners resolve both unique and shadowed tags without
+    // the retired lowering table scan. The shadowed char member must still
+    // produce a narrow load rather than the outer tag's int member.
     for (u32 shadow = 0; shadow < 2; shadow += 1)
     {
         String8 source = {0};
@@ -11096,11 +11097,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArgume
         CParseResult parsed = c_parse_for_lowering(temporary.arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("aggregate-unique.c"), tokens, parsed, target_native);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program != 0);
+        bool narrow_load = false;
+        if (lowered.program && lowered.program->module_count)
+        {
+            IrFunction* function = c_test_find_ir_function(lowered.program->modules, S8("use"));
+            if (function)
+            {
+                for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                {
+                    IrInstruction const* row = function->instructions + instruction;
+                    IrType const* type = ir_type_from_id(&lowered.program->types, row->canonical_type);
+                    narrow_load |= row->opcode == IR_OPCODE_LOAD && type && type->kind == IR_TYPE_INTEGER && type->bit_width == 8;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, narrow_load == (shadow != 0));
 #if BUSTER_BENCH_ALLOCATIONS
         if (BUSTER_REQUIRE(arguments, parsed.aggregate_lookup != 0))
         {
             u64 rows = parsed.aggregate_lookup->lowering_search_type_count;
-            BUSTER_TEST(arguments, shadow ? rows != 0 && rows % parsed.type_count == 0 : rows == 0);
+            BUSTER_TEST(arguments, rows == 0);
         }
 #endif
     }
