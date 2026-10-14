@@ -3107,18 +3107,28 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_fact_kind(u32 kind)
 
 // Unevaluated query operands also need F1 outside bodies and initializers.
 // Mark their complete expression subtrees before the final completion pass.
-BUSTER_C_SHARED void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u32 root, u8* required)
+BUSTER_C_SHARED void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u8* required)
 {
-    for (u32 node = c_ast_subtree_begin(ast, root); node <= root; node += 1)
+    u32 floor = C_AST_NODE_INVALID;
+    for (u32 position = ast->node_count; position; position -= 1)
     {
-        if (c_ast_types_fact_kind(ast->kinds[node]) && !(facts->flags[node] & C_AST_FACT_EXPRESSION))
+        u32 node = position - 1;
+        u8 bit = (u8)(1u << (node % 8));
+        if (required[node / 8] & bit)
+        {
+            u32 begin = c_ast_subtree_begin(ast, node);
+            floor = floor == C_AST_NODE_INVALID ? begin : BUSTER_MIN(floor, begin);
+        }
+        required[node / 8] &= (u8)~bit;
+        if (floor != C_AST_NODE_INVALID && c_ast_types_fact_kind(ast->kinds[node]) && !(facts->flags[node] & C_AST_FACT_EXPRESSION))
         {
             facts->flags[node] |= C_AST_FACT_EXPRESSION;
             facts->statistics.candidates += 1;
             facts->statistics.machine += (facts->flags[node] & C_AST_FACT_TYPED) != 0;
             facts->statistics.strings += (facts->flags[node] & C_AST_FACT_STRING) != 0;
-            required[node / 8] |= (u8)(1u << (node % 8));
+            required[node / 8] |= bit;
         }
+        if (node == floor) floor = C_AST_NODE_INVALID;
     }
 }
 
@@ -3640,6 +3650,11 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_enabled;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_facts_uncached_enabled;
+
+void c_test_ast_required_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required)
+{
+    c_ast_types_facts_require(facts, ast, required);
+}
 
 void c_test_ast_fact_uncached_set(bool enabled)
 {

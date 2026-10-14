@@ -8439,6 +8439,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unevaluated_operand_facts(UnitTest
     return result;
 }
 
+// Required roots form a union of postorder subtree intervals. Nested
+// unevaluated roots and disjoint operands are marked once; unrelated nodes
+// and candidates already owned by a typed region stay outside this pass.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_fact_intervals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u32 depth = 8192;
+    String8 head = S8("int f(void){return ");
+    String8 prefix = S8("sizeof ");
+    String8 tail = S8(",3;}");
+    u64 bytes = head.length + (u64)depth * prefix.length * 2 + 3 + tail.length;
+    char8* text = arena_allocate(temporary.arena, char8, bytes);
+    u64 cursor = 0;
+    memcpy(text + cursor, head.pointer, head.length);
+    cursor += head.length;
+    for (u32 group = 0; group < 2; group += 1)
+    {
+        for (u32 index = 0; index < depth; index += 1)
+        {
+            memcpy(text + cursor, prefix.pointer, prefix.length);
+            cursor += prefix.length;
+        }
+        text[cursor++] = (char8)('1' + group);
+        if (!group) text[cursor++] = ',';
+    }
+    memcpy(text + cursor, tail.pointer, tail.length);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){.pointer = text, .length = bytes}, C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    CAstFacts facts = {0};
+    if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+    {
+        u8* required = arena_allocate_zeroed(temporary.arena, u8, ((u64)built.ast.node_count + 7) / 8);
+        u32 excluded = C_AST_NODE_INVALID;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_SIZEOF_EXPRESSION)
+            {
+                u32 operand = c_ast_child_at(&built.ast, node, 0);
+                required[operand / 8] |= (u8)(1u << (operand % 8));
+                if (excluded == C_AST_NODE_INVALID && built.ast.kinds[operand] == C_AST_NUMBER)
+                {
+                    excluded = operand;
+                    facts.flags[node] = C_AST_FACT_EXPRESSION;
+                }
+            }
+        }
+        c_test_ast_required_fact_intervals(&facts, &built.ast, required);
+        u32 found = 0;
+        u32 numbers = 0;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+        {
+            bool marked = (required[node / 8] & (1u << (node % 8))) != 0;
+            found += marked;
+            numbers += marked && built.ast.kinds[node] == C_AST_NUMBER;
+            if (marked) BUSTER_TEST(arguments, (facts.flags[node] & C_AST_FACT_EXPRESSION) != 0);
+        }
+        BUSTER_TEST(arguments, found == depth * 2 - 1 && numbers == 2 && facts.statistics.candidates == found);
+        BUSTER_TEST(arguments, excluded != C_AST_NODE_INVALID && (required[excluded / 8] & (1u << (excluded % 8))));
+    }
+    c_ast_facts_release(&facts);
+    c_ast_release(&built.ast);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Completed indirection facts compose from their children. Query count is
 // bounded independently of the grouped function designator's input depth.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
@@ -8646,6 +8712,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_fact_intervals);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
