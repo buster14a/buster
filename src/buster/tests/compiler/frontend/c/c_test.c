@@ -32,10 +32,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
     parts[65] = S8("return id(x);}");
     String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
     CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-    // Analysis owns required facts, constants, machine buffer, phase arena
+    // Required syntax owns its builder, four columns and sparse delimiters;
+    // semantic analysis owns facts, constants, machine buffer, phase arena
     // and node index. Lowering borrows that index, so only its function arena and the
     // arena a 64 KiB first reservation grows into remain here.
-    u32 counts[] = {4, 5, 2};
+    u32 counts[] = {4, 11, 2};
     String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -64,7 +65,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
                 if (BUSTER_REQUIRE(arguments, lowered.diagnostics && lowered.diagnostic_count != 0))
                 {
                     BUSTER_TEST(arguments, lowered.diagnostics[0].message.length != 0);
-                    BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, names[phase]) != BUSTER_STRING_NO_MATCH);
+                    String8 owner = phase == 1 && ordinal <= 6 ? S8("syntax tree") : names[phase];
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(lowered.diagnostics[0].message, owner) != BUSTER_STRING_NO_MATCH,
+                                    lowered.diagnostics[0].message);
                     BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("reserve")) != BUSTER_STRING_NO_MATCH);
                 }
                 if (phase == 0)
@@ -6844,9 +6847,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
                 (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-            CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
+            CParseResult parse = c_parse(temporary.arena, tokens);
             BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
-            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vla-row-place.c"), tokens, parse, target_native,
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vla-row-place.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target_native,
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             if (index)
             {
@@ -18290,10 +18293,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
                                                                         .target = target_native,
                                                                         .data_layout = target_data_layout(target_native),
                                                                     });
-    CParseResult static_compound_literal_parse = c_parse_for_lowering(static_compound_literal_temporary.arena, static_compound_literal_tokens);
+    CParseResult static_compound_literal_parse = c_parse(static_compound_literal_temporary.arena, static_compound_literal_tokens);
     CIRLowerResult static_compound_literal_ir =
         c_lower_to_ir(static_compound_literal_temporary.arena, S8("static-compound-literal.c"), static_compound_literal_tokens,
-                      static_compound_literal_parse, target_native);
+                      c_parse_for_lowering(static_compound_literal_temporary.arena, static_compound_literal_tokens), target_native);
     BUSTER_TEST(arguments, static_compound_literal_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, static_compound_literal_parse.diagnostic_count == 0);
     // Lines 3 through 6 fold, so do the subscript forms on lines 19 and 20,
@@ -47720,7 +47723,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                 "_Static_assert(sizeof(struct State) == {u32}, \"record extent\");"),
                 source, sizes[target_index], 2 * sizes[target_index], sizes[target_index], sizes[target_index] + 8);
             CPreprocessResult tokens = c_preprocess(temporary.arena, checked_source, options);
-            CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
+            CParseResult parse = c_parse(temporary.arena, tokens);
             BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
             BUSTER_TEST(arguments, parse.declaration_count >= 3);
             if (parse.declaration_count >= 3)
@@ -47733,7 +47736,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                 BUSTER_TEST(arguments, list && list->kind == C_TYPE_VA_LIST);
                 BUSTER_TEST(arguments, pointer && pointer->kind == C_TYPE_POINTER);
             }
-            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("va-list-places.c"), tokens, parse, target.target,
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("va-list-places.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target.target,
                                                                  (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
             if (lowered.program && !lowered.diagnostic_count)
@@ -47777,8 +47780,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
             for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
             {
                 CPreprocessResult bad_tokens = c_preprocess(temporary.arena, invalid[case_index], options);
-                CParseResult bad_parse = c_parse_for_lowering(temporary.arena, bad_tokens);
-                CIRLowerResult bad = c_lower_to_ir_with_options(temporary.arena, S8("invalid-va-list.c"), bad_tokens, bad_parse, target.target,
+                CParseResult bad_parse = c_parse(temporary.arena, bad_tokens);
+                CIRLowerResult bad = c_lower_to_ir_with_options(temporary.arena, S8("invalid-va-list.c"), bad_tokens, c_parse_for_lowering(temporary.arena, bad_tokens), target.target,
                                                                  (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 BUSTER_TEST_RAW(arguments, !bad_tokens.diagnostic_count && !bad_parse.diagnostic_count, invalid[case_index]);
                 BUSTER_TEST_RAW(arguments, bad.diagnostic_count == 1, invalid[case_index]);
@@ -47810,9 +47813,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                         "#endif\n");
                     String8 header_source = string_format(temporary.arena, S8("{S8}{S8}"), prefixes[order], body);
                     CPreprocessResult header_tokens = c_preprocess(temporary.arena, header_source, options);
-                    CParseResult header_parse = c_parse_for_lowering(temporary.arena, header_tokens);
+                    CParseResult header_parse = c_parse(temporary.arena, header_tokens);
                     CIRLowerResult header = c_lower_to_ir_with_options(temporary.arena, S8("windows-stdarg-order.c"), header_tokens,
-                        header_parse, target.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        c_parse_for_lowering(temporary.arena, header_tokens), target.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     BUSTER_TEST(arguments, !header_tokens.diagnostic_count && !header_parse.diagnostic_count);
                     BUSTER_TEST(arguments, header.program && !header.diagnostic_count);
                     if (header.program && !header.diagnostic_count)
@@ -62177,8 +62180,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_abi(UnitTestArgument
                     .dialect = C_PREPROCESS_DIALECT_GNU23,
                 };
                 CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, options);
-                CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
-                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("transparent-union-internal.c"), tokens, parse,
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("transparent-union-internal.c"), tokens, c_parse_for_lowering(temporary.arena, tokens),
                                                                       targets[target_index], (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
                 bool accepted = tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.program && lowered.diagnostic_count == 0;
                 BUSTER_TEST_RAW(arguments, accepted == cases[case_index].accepted, cases[case_index].source);
@@ -67728,8 +67731,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             CPreprocessOptions options = {.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17};
             CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
-            CParseResult parsed = c_parse_for_lowering(temporary.arena, tokens);
-            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("switch-integer-controls.c"), tokens, parsed, target,
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("switch-integer-controls.c"), tokens, c_parse_for_lowering(temporary.arena, tokens), target,
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count &&
                                lowered.program && lowered.program->module_count == 1))
@@ -67766,8 +67769,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejections); index += 1)
             {
                 CPreprocessResult wide_tokens = c_preprocess(temporary.arena, rejections[index].source, options);
-                CParseResult wide_parse = c_parse_for_lowering(temporary.arena, wide_tokens);
-                CIRLowerResult wide = c_lower_to_ir_with_options(temporary.arena, S8("switch-wide-rejection.c"), wide_tokens, wide_parse, target,
+                CParseResult wide_parse = c_parse(temporary.arena, wide_tokens);
+                CIRLowerResult wide = c_lower_to_ir_with_options(temporary.arena, S8("switch-wide-rejection.c"), wide_tokens, c_parse_for_lowering(temporary.arena, wide_tokens), target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 BUSTER_TEST(arguments, !wide_tokens.diagnostic_count && !wide_parse.diagnostic_count);
                 BUSTER_TEST(arguments, !wide.canonical_ir_certified);
@@ -69379,9 +69382,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                " return apply(callback, matrix) == 11 && local_static_and_extern() == 4 &&"
                " statement_and_builtins(3, values) == 18 ? 0 : 1; }\n"),
             (CPreprocessOptions){0});
-        CParseResult artifact_parse = c_parse_for_lowering(artifact_temporary.arena, artifact_tokens);
+        CParseResult artifact_parse = c_parse(artifact_temporary.arena, artifact_tokens);
         CIRLowerResult artifact_ir =
-            c_lower_to_ir(artifact_temporary.arena, S8("c-frontend-artifacts.c"), artifact_tokens, artifact_parse, target_native);
+            c_lower_to_ir(artifact_temporary.arena, S8("c-frontend-artifacts.c"), artifact_tokens, c_parse_for_lowering(artifact_temporary.arena, artifact_tokens), target_native);
         BUSTER_TEST(arguments, artifact_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, artifact_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, artifact_ir.diagnostic_count == 0);
@@ -69713,9 +69716,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, declarator_at == declarator_source_length);
         CPreprocessResult declarator_tokens = c_preprocess(
             declarator_arena, (String8){.pointer = declarator_source_pointer, .length = declarator_source_length}, (CPreprocessOptions){0});
-        CParseResult declarator_parse = c_parse_for_lowering(declarator_arena, declarator_tokens);
+        CParseResult declarator_parse = c_parse(declarator_arena, declarator_tokens);
         CIRLowerResult declarator_ir =
-            c_lower_to_ir(declarator_arena, S8("function-pointer-stress.c"), declarator_tokens, declarator_parse, target_native);
+            c_lower_to_ir(declarator_arena, S8("function-pointer-stress.c"), declarator_tokens, c_parse_for_lowering(declarator_arena, declarator_tokens), target_native);
         BUSTER_TEST(arguments, declarator_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, declarator_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, declarator_ir.diagnostic_count == 0);
@@ -69750,8 +69753,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, typeof_at == typeof_source_length);
         CPreprocessResult typeof_tokens =
             c_preprocess(typeof_arena, (String8){.pointer = typeof_source_pointer, .length = typeof_source_length}, (CPreprocessOptions){0});
-        CParseResult typeof_parse = c_parse_for_lowering(typeof_arena, typeof_tokens);
-        CIRLowerResult typeof_ir = c_lower_to_ir(typeof_arena, S8("typeof-stress.c"), typeof_tokens, typeof_parse, target_native);
+        CParseResult typeof_parse = c_parse(typeof_arena, typeof_tokens);
+        CIRLowerResult typeof_ir = c_lower_to_ir(typeof_arena, S8("typeof-stress.c"), typeof_tokens, c_parse_for_lowering(typeof_arena, typeof_tokens), target_native);
         BUSTER_TEST(arguments, typeof_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, typeof_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, typeof_ir.diagnostic_count == 0);
@@ -69826,9 +69829,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, aggregate_at == aggregate_source_length);
         CPreprocessResult aggregate_stress_tokens = c_preprocess(
             aggregate_stress_arena, (String8){.pointer = aggregate_source_pointer, .length = aggregate_source_length}, (CPreprocessOptions){0});
-        CParseResult aggregate_stress_parse = c_parse_for_lowering(aggregate_stress_arena, aggregate_stress_tokens);
+        CParseResult aggregate_stress_parse = c_parse(aggregate_stress_arena, aggregate_stress_tokens);
         CIRLowerResult aggregate_stress_ir = c_lower_to_ir(aggregate_stress_arena, S8("aggregate-stress.c"), aggregate_stress_tokens,
-                                                           aggregate_stress_parse, target_native);
+                                                           c_parse_for_lowering(aggregate_stress_arena, aggregate_stress_tokens), target_native);
         BUSTER_TEST(arguments, aggregate_stress_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, aggregate_stress_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, aggregate_stress_ir.diagnostic_count == 0);
@@ -69869,9 +69872,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, array_bound_at == array_bound_source_length);
         CPreprocessResult array_bound_tokens = c_preprocess(
             array_bound_arena, (String8){.pointer = array_bound_source_pointer, .length = array_bound_source_length}, (CPreprocessOptions){0});
-        CParseResult array_bound_parse = c_parse_for_lowering(array_bound_arena, array_bound_tokens);
+        CParseResult array_bound_parse = c_parse(array_bound_arena, array_bound_tokens);
         CIRLowerResult array_bound_ir =
-            c_lower_to_ir(array_bound_arena, S8("array-bound-stress.c"), array_bound_tokens, array_bound_parse, target_native);
+            c_lower_to_ir(array_bound_arena, S8("array-bound-stress.c"), array_bound_tokens, c_parse_for_lowering(array_bound_arena, array_bound_tokens), target_native);
         BUSTER_TEST(arguments, array_bound_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, array_bound_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, array_bound_ir.diagnostic_count == 0);
@@ -69959,9 +69962,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, assignment_at == assignment_source_length);
         CPreprocessResult assignment_tokens = c_preprocess(
             assignment_temporary.arena, (String8){.pointer = assignment_source_pointer, .length = assignment_source_length}, (CPreprocessOptions){0});
-        CParseResult assignment_parse = c_parse_for_lowering(assignment_temporary.arena, assignment_tokens);
+        CParseResult assignment_parse = c_parse(assignment_temporary.arena, assignment_tokens);
         CIRLowerResult assignment_lowered =
-            c_lower_to_ir_with_options(assignment_temporary.arena, S8("assignment-stress.c"), assignment_tokens, assignment_parse, target_native,
+            c_lower_to_ir_with_options(assignment_temporary.arena, S8("assignment-stress.c"), assignment_tokens, c_parse_for_lowering(assignment_temporary.arena, assignment_tokens), target_native,
                                        (CIRLowerOptions){.disable_direct_ssa = true});
         BUSTER_TEST(arguments, assignment_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, assignment_parse.diagnostic_count == 0);
@@ -70009,9 +70012,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, statement_at == statement_source_length);
         CPreprocessResult statement_tokens = c_preprocess(
             statement_temporary.arena, (String8){.pointer = statement_source_pointer, .length = statement_source_length}, (CPreprocessOptions){0});
-        CParseResult statement_parse = c_parse_for_lowering(statement_temporary.arena, statement_tokens);
+        CParseResult statement_parse = c_parse(statement_temporary.arena, statement_tokens);
         CIRLowerResult statement_lowered =
-            c_lower_to_ir(statement_temporary.arena, S8("statement-expression-stress.c"), statement_tokens, statement_parse, target_native);
+            c_lower_to_ir(statement_temporary.arena, S8("statement-expression-stress.c"), statement_tokens, c_parse_for_lowering(statement_temporary.arena, statement_tokens), target_native);
         BUSTER_TEST(arguments, statement_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, statement_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, statement_lowered.diagnostic_count == 0);
@@ -70055,9 +70058,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             string_join_arena(statement_nontrivial_arena, (SliceString8){.pointer = statement_parts, .length = statement_part_count}, false);
         CPreprocessResult statement_tokens = c_preprocess(
             statement_nontrivial_arena, statement_source, (CPreprocessOptions){0});
-        CParseResult statement_parse = c_parse_for_lowering(statement_nontrivial_arena, statement_tokens);
+        CParseResult statement_parse = c_parse(statement_nontrivial_arena, statement_tokens);
         CIRLowerResult statement_lowered =
-            c_lower_to_ir(statement_nontrivial_arena, S8("statement-expression-nontrivial-stress.c"), statement_tokens, statement_parse, target_native);
+            c_lower_to_ir(statement_nontrivial_arena, S8("statement-expression-nontrivial-stress.c"), statement_tokens, c_parse_for_lowering(statement_nontrivial_arena, statement_tokens), target_native);
         BUSTER_TEST(arguments, statement_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, statement_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, statement_lowered.diagnostic_count == 0);
@@ -70096,9 +70099,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, compound_at == compound_source_length);
         CPreprocessResult compound_stress_tokens = c_preprocess(
             compound_arena, (String8){.pointer = compound_source_pointer, .length = compound_source_length}, (CPreprocessOptions){0});
-        CParseResult compound_stress_parse = c_parse_for_lowering(compound_arena, compound_stress_tokens);
+        CParseResult compound_stress_parse = c_parse(compound_arena, compound_stress_tokens);
         CIRLowerResult compound_stress_lowered =
-            c_lower_to_ir(compound_arena, S8("compound-literal-stress.c"), compound_stress_tokens, compound_stress_parse, target_native);
+            c_lower_to_ir(compound_arena, S8("compound-literal-stress.c"), compound_stress_tokens, c_parse_for_lowering(compound_arena, compound_stress_tokens), target_native);
         BUSTER_TEST(arguments, compound_stress_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, compound_stress_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, compound_stress_lowered.diagnostic_count == 0);
@@ -70152,9 +70155,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, conditional_at == conditional_source_length);
         CPreprocessResult conditional_tokens = c_preprocess(
             conditional_arena, (String8){.pointer = conditional_source_pointer, .length = conditional_source_length}, (CPreprocessOptions){0});
-        CParseResult conditional_parse = c_parse_for_lowering(conditional_arena, conditional_tokens);
+        CParseResult conditional_parse = c_parse(conditional_arena, conditional_tokens);
         CIRLowerResult conditional_lowered =
-            c_lower_to_ir(conditional_arena, S8("conditional-stress.c"), conditional_tokens, conditional_parse, target_native);
+            c_lower_to_ir(conditional_arena, S8("conditional-stress.c"), conditional_tokens, c_parse_for_lowering(conditional_arena, conditional_tokens), target_native);
         BUSTER_TEST(arguments, conditional_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, conditional_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, conditional_lowered.diagnostic_count == 0);
@@ -70217,9 +70220,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, vla_assembly_at == vla_assembly_source_length);
         CPreprocessResult vla_assembly_tokens = c_preprocess(
             vla_assembly_arena, (String8){.pointer = vla_assembly_source_pointer, .length = vla_assembly_source_length}, (CPreprocessOptions){0});
-        CParseResult vla_assembly_parse = c_parse_for_lowering(vla_assembly_arena, vla_assembly_tokens);
+        CParseResult vla_assembly_parse = c_parse(vla_assembly_arena, vla_assembly_tokens);
         CIRLowerResult vla_assembly_lowered =
-            c_lower_to_ir(vla_assembly_arena, S8("vla-assembly-stress.c"), vla_assembly_tokens, vla_assembly_parse, target_native);
+            c_lower_to_ir(vla_assembly_arena, S8("vla-assembly-stress.c"), vla_assembly_tokens, c_parse_for_lowering(vla_assembly_arena, vla_assembly_tokens), target_native);
         BUSTER_TEST(arguments, vla_assembly_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, vla_assembly_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, vla_assembly_lowered.diagnostic_count == 0);
@@ -70268,9 +70271,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, subscript_at == subscript_source_length);
         CPreprocessResult subscript_tokens = c_preprocess(
             subscript_temporary.arena, (String8){.pointer = subscript_source_pointer, .length = subscript_source_length}, (CPreprocessOptions){0});
-        CParseResult subscript_parse = c_parse_for_lowering(subscript_temporary.arena, subscript_tokens);
+        CParseResult subscript_parse = c_parse(subscript_temporary.arena, subscript_tokens);
         CIRLowerResult subscript_lowered =
-            c_lower_to_ir(subscript_temporary.arena, S8("subscript-stress.c"), subscript_tokens, subscript_parse, target_native);
+            c_lower_to_ir(subscript_temporary.arena, S8("subscript-stress.c"), subscript_tokens, c_parse_for_lowering(subscript_temporary.arena, subscript_tokens), target_native);
         BUSTER_TEST(arguments, subscript_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, subscript_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, subscript_lowered.diagnostic_count == 0);
@@ -70301,9 +70304,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         names_at += names_suffix.length;
         CPreprocessResult names_tokens =
             c_preprocess(names_temporary.arena, (String8){.pointer = names_source_pointer, .length = names_at}, (CPreprocessOptions){0});
-        CParseResult names_parse = c_parse_for_lowering(names_temporary.arena, names_tokens);
+        CParseResult names_parse = c_parse(names_temporary.arena, names_tokens);
         CIRLowerResult names_lowered =
-            c_lower_to_ir(names_temporary.arena, S8("function-name-stress.c"), names_tokens, names_parse, target_native);
+            c_lower_to_ir(names_temporary.arena, S8("function-name-stress.c"), names_tokens, c_parse_for_lowering(names_temporary.arena, names_tokens), target_native);
         BUSTER_TEST(arguments, names_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, names_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, names_lowered.diagnostic_count == 0);
@@ -70384,9 +70387,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         String8 mixed_type_source =
             string_join_arena(mixed_type_arena, (SliceString8){.pointer = mixed_type_parts, .length = mixed_type_part_count}, false);
         CPreprocessResult mixed_type_tokens = c_preprocess(mixed_type_arena, mixed_type_source, (CPreprocessOptions){0});
-        CParseResult mixed_type_parse = c_parse_for_lowering(mixed_type_arena, mixed_type_tokens);
+        CParseResult mixed_type_parse = c_parse(mixed_type_arena, mixed_type_tokens);
         CIRLowerResult mixed_type_lowered =
-            c_lower_to_ir(mixed_type_arena, S8("mixed-type-machine-stress.c"), mixed_type_tokens, mixed_type_parse, target_native);
+            c_lower_to_ir(mixed_type_arena, S8("mixed-type-machine-stress.c"), mixed_type_tokens, c_parse_for_lowering(mixed_type_arena, mixed_type_tokens), target_native);
         BUSTER_TEST(arguments, mixed_type_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, mixed_type_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, mixed_type_lowered.diagnostic_count == 0);
@@ -70434,9 +70437,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         String8 mixed_ir_source =
             string_join_arena(mixed_ir_arena, (SliceString8){.pointer = mixed_ir_parts, .length = mixed_ir_part_count}, false);
         CPreprocessResult mixed_ir_tokens = c_preprocess(mixed_ir_arena, mixed_ir_source, (CPreprocessOptions){0});
-        CParseResult mixed_ir_parse = c_parse_for_lowering(mixed_ir_arena, mixed_ir_tokens);
+        CParseResult mixed_ir_parse = c_parse(mixed_ir_arena, mixed_ir_tokens);
         CIRLowerResult mixed_ir_lowered =
-            c_lower_to_ir(mixed_ir_arena, S8("mixed-ir-machine-stress.c"), mixed_ir_tokens, mixed_ir_parse, target_native);
+            c_lower_to_ir(mixed_ir_arena, S8("mixed-ir-machine-stress.c"), mixed_ir_tokens, c_parse_for_lowering(mixed_ir_arena, mixed_ir_tokens), target_native);
         BUSTER_TEST(arguments, mixed_ir_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, mixed_ir_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, mixed_ir_lowered.diagnostic_count == 0);
@@ -70769,8 +70772,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                            .data_layout = target_data_layout(target_native),
                                                            .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                        });
-        CParseResult labels_parse = c_parse_for_lowering(labels_temporary.arena, labels_tokens);
-        CIRLowerResult labels_lowered = c_lower_to_ir(labels_temporary.arena, S8("labels-as-values.c"), labels_tokens, labels_parse, target_native);
+        CParseResult labels_parse = c_parse(labels_temporary.arena, labels_tokens);
+        CIRLowerResult labels_lowered = c_lower_to_ir(labels_temporary.arena, S8("labels-as-values.c"), labels_tokens, c_parse_for_lowering(labels_temporary.arena, labels_tokens), target_native);
         BUSTER_TEST(arguments, labels_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, labels_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, labels_lowered.diagnostic_count == 0);
@@ -71004,9 +71007,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                .data_layout = target_data_layout(label_flow_target),
                                                                .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                            });
-        CParseResult label_flow_parse = c_parse_for_lowering(label_flow_temporary.arena, label_flow_tokens);
+        CParseResult label_flow_parse = c_parse(label_flow_temporary.arena, label_flow_tokens);
         CIRLowerResult label_flow_lowered =
-            c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, label_flow_parse, label_flow_target);
+            c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, c_parse_for_lowering(label_flow_temporary.arena, label_flow_tokens), label_flow_target);
         BUSTER_TEST(arguments, label_flow_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_flow_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_flow_lowered.diagnostic_count == 0);
@@ -71231,9 +71234,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult dynamic_aggregate_parse = c_parse_for_lowering(dynamic_aggregate_temporary.arena, dynamic_aggregate_tokens);
+        CParseResult dynamic_aggregate_parse = c_parse(dynamic_aggregate_temporary.arena, dynamic_aggregate_tokens);
         CIRLowerResult dynamic_aggregate_lowered = c_lower_to_ir(dynamic_aggregate_temporary.arena, S8("dynamic-aggregate-label.c"),
-                                                                  dynamic_aggregate_tokens, dynamic_aggregate_parse, target_native);
+                                                                  dynamic_aggregate_tokens, c_parse_for_lowering(dynamic_aggregate_temporary.arena, dynamic_aggregate_tokens), target_native);
         BUSTER_TEST(arguments, dynamic_aggregate_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, dynamic_aggregate_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, dynamic_aggregate_lowered.diagnostic_count == 1);
@@ -71341,9 +71344,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult cleanup_label_parse = c_parse_for_lowering(cleanup_label_temporary.arena, cleanup_label_tokens);
+        CParseResult cleanup_label_parse = c_parse(cleanup_label_temporary.arena, cleanup_label_tokens);
         CIRLowerResult cleanup_label_lowered = c_lower_to_ir(cleanup_label_temporary.arena, S8("cleanup-labels.c"), cleanup_label_tokens,
-                                                             cleanup_label_parse, target_native);
+                                                             c_parse_for_lowering(cleanup_label_temporary.arena, cleanup_label_tokens), target_native);
         BUSTER_TEST(arguments, cleanup_label_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, cleanup_label_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, cleanup_label_lowered.diagnostic_count == 0);
@@ -71413,9 +71416,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                    .data_layout = target_data_layout(target_native),
                                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                });
-        CParseResult invalid_labels_parse = c_parse_for_lowering(invalid_labels_temporary.arena, invalid_labels_tokens);
+        CParseResult invalid_labels_parse = c_parse(invalid_labels_temporary.arena, invalid_labels_tokens);
         CIRLowerResult invalid_labels_lowered = c_lower_to_ir(invalid_labels_temporary.arena, S8("invalid-label-target.c"), invalid_labels_tokens,
-                                                              invalid_labels_parse, target_native);
+                                                              c_parse_for_lowering(invalid_labels_temporary.arena, invalid_labels_tokens), target_native);
         BUSTER_TEST(arguments, invalid_labels_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_labels_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_labels_lowered.diagnostic_count == 1);
@@ -71435,9 +71438,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                           .data_layout = target_data_layout(target_native),
                                                                           .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                       });
-        CParseResult invalid_static_label_parse = c_parse_for_lowering(invalid_static_label_temporary.arena, invalid_static_label_tokens);
+        CParseResult invalid_static_label_parse = c_parse(invalid_static_label_temporary.arena, invalid_static_label_tokens);
         CIRLowerResult invalid_static_label_lowered = c_lower_to_ir(invalid_static_label_temporary.arena, S8("invalid-static-label.c"),
-                                                                      invalid_static_label_tokens, invalid_static_label_parse, target_native);
+                                                                      invalid_static_label_tokens, c_parse_for_lowering(invalid_static_label_temporary.arena, invalid_static_label_tokens), target_native);
         BUSTER_TEST(arguments, invalid_static_label_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_static_label_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_static_label_lowered.diagnostic_count == 1);
@@ -71457,9 +71460,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                       .data_layout = target_data_layout(target_native),
                                                                       .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                   });
-        CParseResult duplicate_labels_parse = c_parse_for_lowering(duplicate_labels_temporary.arena, duplicate_labels_tokens);
+        CParseResult duplicate_labels_parse = c_parse(duplicate_labels_temporary.arena, duplicate_labels_tokens);
         CIRLowerResult duplicate_labels_lowered = c_lower_to_ir(duplicate_labels_temporary.arena, S8("duplicate-labels.c"), duplicate_labels_tokens,
-                                                                  duplicate_labels_parse, target_native);
+                                                                  c_parse_for_lowering(duplicate_labels_temporary.arena, duplicate_labels_tokens), target_native);
         BUSTER_TEST(arguments, duplicate_labels_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, duplicate_labels_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, duplicate_labels_lowered.diagnostic_count == 1);
@@ -71478,9 +71481,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                         .data_layout = target_data_layout(target_native),
                                                                         .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                     });
-        CParseResult invalid_label_cast_parse = c_parse_for_lowering(invalid_label_cast_temporary.arena, invalid_label_cast_tokens);
+        CParseResult invalid_label_cast_parse = c_parse(invalid_label_cast_temporary.arena, invalid_label_cast_tokens);
         CIRLowerResult invalid_label_cast_lowered = c_lower_to_ir(invalid_label_cast_temporary.arena, S8("invalid-label-cast.c"), invalid_label_cast_tokens,
-                                                                    invalid_label_cast_parse, target_native);
+                                                                    c_parse_for_lowering(invalid_label_cast_temporary.arena, invalid_label_cast_tokens), target_native);
         BUSTER_TEST(arguments, invalid_label_cast_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_label_cast_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_label_cast_lowered.diagnostic_count == 1);
@@ -71500,9 +71503,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                          .data_layout = target_data_layout(target_native),
                                                                          .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                      });
-        CParseResult invalid_label_deref_parse = c_parse_for_lowering(invalid_label_deref_temporary.arena, invalid_label_deref_tokens);
+        CParseResult invalid_label_deref_parse = c_parse(invalid_label_deref_temporary.arena, invalid_label_deref_tokens);
         CIRLowerResult invalid_label_deref_lowered = c_lower_to_ir(invalid_label_deref_temporary.arena, S8("invalid-label-deref.c"), invalid_label_deref_tokens,
-                                                                     invalid_label_deref_parse, target_native);
+                                                                     c_parse_for_lowering(invalid_label_deref_temporary.arena, invalid_label_deref_tokens), target_native);
         BUSTER_TEST(arguments, invalid_label_deref_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_label_deref_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_label_deref_lowered.diagnostic_count == 1);
@@ -71523,9 +71526,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult invalid_label_address_of_parse = c_parse_for_lowering(invalid_label_address_of_temporary.arena, invalid_label_address_of_tokens);
+        CParseResult invalid_label_address_of_parse = c_parse(invalid_label_address_of_temporary.arena, invalid_label_address_of_tokens);
         CIRLowerResult invalid_label_address_of_lowered = c_lower_to_ir(invalid_label_address_of_temporary.arena, S8("invalid-label-address-of.c"),
-                                                                         invalid_label_address_of_tokens, invalid_label_address_of_parse, target_native);
+                                                                         invalid_label_address_of_tokens, c_parse_for_lowering(invalid_label_address_of_temporary.arena, invalid_label_address_of_tokens), target_native);
         BUSTER_TEST(arguments, invalid_label_address_of_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_label_address_of_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_label_address_of_lowered.diagnostic_count == 1);
@@ -71547,9 +71550,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult invalid_union_overlay_parse = c_parse_for_lowering(invalid_union_overlay_temporary.arena, invalid_union_overlay_tokens);
+        CParseResult invalid_union_overlay_parse = c_parse(invalid_union_overlay_temporary.arena, invalid_union_overlay_tokens);
         CIRLowerResult invalid_union_overlay_lowered = c_lower_to_ir(invalid_union_overlay_temporary.arena, S8("invalid-union-overlay.c"),
-                                                                      invalid_union_overlay_tokens, invalid_union_overlay_parse, target_native);
+                                                                      invalid_union_overlay_tokens, c_parse_for_lowering(invalid_union_overlay_temporary.arena, invalid_union_overlay_tokens), target_native);
         BUSTER_TEST(arguments, invalid_union_overlay_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_union_overlay_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_union_overlay_lowered.diagnostic_count == 1);
@@ -71570,10 +71573,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult invalid_mixed_label_integer_cast_parse = c_parse_for_lowering(invalid_mixed_label_integer_cast_temporary.arena, invalid_mixed_label_integer_cast_tokens);
+        CParseResult invalid_mixed_label_integer_cast_parse = c_parse(invalid_mixed_label_integer_cast_temporary.arena, invalid_mixed_label_integer_cast_tokens);
         CIRLowerResult invalid_mixed_label_integer_cast_lowered = c_lower_to_ir(
             invalid_mixed_label_integer_cast_temporary.arena, S8("invalid-mixed-label-integer-cast.c"), invalid_mixed_label_integer_cast_tokens,
-            invalid_mixed_label_integer_cast_parse, target_native);
+            c_parse_for_lowering(invalid_mixed_label_integer_cast_temporary.arena, invalid_mixed_label_integer_cast_tokens), target_native);
         BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_lowered.diagnostic_count == 1);
@@ -71594,10 +71597,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult invalid_mixed_label_pointer_cast_parse = c_parse_for_lowering(invalid_mixed_label_pointer_cast_temporary.arena, invalid_mixed_label_pointer_cast_tokens);
+        CParseResult invalid_mixed_label_pointer_cast_parse = c_parse(invalid_mixed_label_pointer_cast_temporary.arena, invalid_mixed_label_pointer_cast_tokens);
         CIRLowerResult invalid_mixed_label_pointer_cast_lowered = c_lower_to_ir(
             invalid_mixed_label_pointer_cast_temporary.arena, S8("invalid-mixed-label-pointer-cast.c"), invalid_mixed_label_pointer_cast_tokens,
-            invalid_mixed_label_pointer_cast_parse, target_native);
+            c_parse_for_lowering(invalid_mixed_label_pointer_cast_temporary.arena, invalid_mixed_label_pointer_cast_tokens), target_native);
         BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_lowered.diagnostic_count == 1);
@@ -71619,9 +71622,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult valid_struct_label_sibling_parse = c_parse_for_lowering(valid_struct_label_sibling_temporary.arena, valid_struct_label_sibling_tokens);
+        CParseResult valid_struct_label_sibling_parse = c_parse(valid_struct_label_sibling_temporary.arena, valid_struct_label_sibling_tokens);
         CIRLowerResult valid_struct_label_sibling_lowered = c_lower_to_ir(valid_struct_label_sibling_temporary.arena, S8("valid-struct-label-sibling.c"),
-                                                                            valid_struct_label_sibling_tokens, valid_struct_label_sibling_parse, target_native);
+                                                                            valid_struct_label_sibling_tokens, c_parse_for_lowering(valid_struct_label_sibling_temporary.arena, valid_struct_label_sibling_tokens), target_native);
         BUSTER_TEST(arguments, valid_struct_label_sibling_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, valid_struct_label_sibling_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, valid_struct_label_sibling_lowered.diagnostic_count == 0);
@@ -71643,9 +71646,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult label_provenance_mutation_parse = c_parse_for_lowering(label_provenance_mutation_temporary.arena, label_provenance_mutation_tokens);
+        CParseResult label_provenance_mutation_parse = c_parse(label_provenance_mutation_temporary.arena, label_provenance_mutation_tokens);
         CIRLowerResult label_provenance_mutation_lowered = c_lower_to_ir(label_provenance_mutation_temporary.arena, S8("label-provenance-mutations.c"),
-                                                                          label_provenance_mutation_tokens, label_provenance_mutation_parse, target_native);
+                                                                          label_provenance_mutation_tokens, c_parse_for_lowering(label_provenance_mutation_temporary.arena, label_provenance_mutation_tokens), target_native);
         BUSTER_TEST(arguments, label_provenance_mutation_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_provenance_mutation_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_provenance_mutation_lowered.diagnostic_count == 0);
@@ -71708,9 +71711,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult legal_label_address_of_parse = c_parse_for_lowering(legal_label_address_of_temporary.arena, legal_label_address_of_tokens);
+        CParseResult legal_label_address_of_parse = c_parse(legal_label_address_of_temporary.arena, legal_label_address_of_tokens);
         CIRLowerResult legal_label_address_of_lowered = c_lower_to_ir(legal_label_address_of_temporary.arena, S8("legal-label-address-of.c"),
-                                                                       legal_label_address_of_tokens, legal_label_address_of_parse, target_native);
+                                                                       legal_label_address_of_tokens, c_parse_for_lowering(legal_label_address_of_temporary.arena, legal_label_address_of_tokens), target_native);
         BUSTER_TEST(arguments, legal_label_address_of_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, legal_label_address_of_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, legal_label_address_of_lowered.diagnostic_count == 0);
@@ -71730,9 +71733,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                      .data_layout = target_data_layout(target_native),
                                                                      .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                  });
-        CParseResult invalid_asm_goto_parse = c_parse_for_lowering(invalid_asm_goto_temporary.arena, invalid_asm_goto_tokens);
+        CParseResult invalid_asm_goto_parse = c_parse(invalid_asm_goto_temporary.arena, invalid_asm_goto_tokens);
         CIRLowerResult invalid_asm_goto_lowered = c_lower_to_ir(invalid_asm_goto_temporary.arena, S8("invalid-asm-goto.c"), invalid_asm_goto_tokens,
-                                                                  invalid_asm_goto_parse, target_native);
+                                                                  c_parse_for_lowering(invalid_asm_goto_temporary.arena, invalid_asm_goto_tokens), target_native);
         BUSTER_TEST(arguments, invalid_asm_goto_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_asm_goto_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, invalid_asm_goto_lowered.diagnostic_count == 1);
@@ -71752,9 +71755,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                         .data_layout = target_data_layout(target_native),
                                                                         .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                     });
-        CParseResult duplicate_asm_goto_parse = c_parse_for_lowering(duplicate_asm_goto_temporary.arena, duplicate_asm_goto_tokens);
+        CParseResult duplicate_asm_goto_parse = c_parse(duplicate_asm_goto_temporary.arena, duplicate_asm_goto_tokens);
         CIRLowerResult duplicate_asm_goto_lowered = c_lower_to_ir(duplicate_asm_goto_temporary.arena, S8("duplicate-asm-goto.c"), duplicate_asm_goto_tokens,
-                                                                    duplicate_asm_goto_parse, target_native);
+                                                                    c_parse_for_lowering(duplicate_asm_goto_temporary.arena, duplicate_asm_goto_tokens), target_native);
         BUSTER_TEST(arguments, duplicate_asm_goto_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, duplicate_asm_goto_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, duplicate_asm_goto_lowered.diagnostic_count == 1);
@@ -71774,9 +71777,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                         .data_layout = target_data_layout(target_native),
                                                                         .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                     });
-        CParseResult malformed_asm_goto_parse = c_parse_for_lowering(malformed_asm_goto_temporary.arena, malformed_asm_goto_tokens);
+        CParseResult malformed_asm_goto_parse = c_parse(malformed_asm_goto_temporary.arena, malformed_asm_goto_tokens);
         CIRLowerResult malformed_asm_goto_lowered = c_lower_to_ir(malformed_asm_goto_temporary.arena, S8("malformed-asm-goto.c"), malformed_asm_goto_tokens,
-                                                                    malformed_asm_goto_parse, target_native);
+                                                                    c_parse_for_lowering(malformed_asm_goto_temporary.arena, malformed_asm_goto_tokens), target_native);
         BUSTER_TEST(arguments, malformed_asm_goto_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, malformed_asm_goto_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, malformed_asm_goto_lowered.diagnostic_count == 1);
@@ -71796,9 +71799,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                                           .data_layout = target_data_layout(target_native),
                                                                           .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                                       });
-        CParseResult unqualified_asm_goto_parse = c_parse_for_lowering(unqualified_asm_goto_temporary.arena, unqualified_asm_goto_tokens);
+        CParseResult unqualified_asm_goto_parse = c_parse(unqualified_asm_goto_temporary.arena, unqualified_asm_goto_tokens);
         CIRLowerResult unqualified_asm_goto_lowered = c_lower_to_ir(unqualified_asm_goto_temporary.arena, S8("unqualified-asm-goto.c"),
-                                                                      unqualified_asm_goto_tokens, unqualified_asm_goto_parse, target_native);
+                                                                      unqualified_asm_goto_tokens, c_parse_for_lowering(unqualified_asm_goto_temporary.arena, unqualified_asm_goto_tokens), target_native);
         BUSTER_TEST(arguments, unqualified_asm_goto_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, unqualified_asm_goto_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, unqualified_asm_goto_lowered.diagnostic_count == 1);
@@ -71821,9 +71824,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(conflicting_fixed_asm_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult conflicting_fixed_asm_parse = c_parse_for_lowering(conflicting_fixed_asm_temporary.arena, conflicting_fixed_asm_tokens);
+        CParseResult conflicting_fixed_asm_parse = c_parse(conflicting_fixed_asm_temporary.arena, conflicting_fixed_asm_tokens);
         CIRLowerResult conflicting_fixed_asm_lowered = c_lower_to_ir(conflicting_fixed_asm_temporary.arena, S8("conflicting-fixed-asm.c"),
-                                                                       conflicting_fixed_asm_tokens, conflicting_fixed_asm_parse,
+                                                                       conflicting_fixed_asm_tokens, c_parse_for_lowering(conflicting_fixed_asm_temporary.arena, conflicting_fixed_asm_tokens),
                                                                        conflicting_fixed_asm_target);
         BUSTER_TEST(arguments, conflicting_fixed_asm_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, conflicting_fixed_asm_parse.diagnostic_count == 0);
@@ -71868,9 +71871,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(same_fixed_asm_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult same_fixed_asm_parse = c_parse_for_lowering(same_fixed_asm_temporary.arena, same_fixed_asm_tokens);
+        CParseResult same_fixed_asm_parse = c_parse(same_fixed_asm_temporary.arena, same_fixed_asm_tokens);
         CIRLowerResult same_fixed_asm_lowered = c_lower_to_ir(same_fixed_asm_temporary.arena, S8("same-fixed-asm.c"), same_fixed_asm_tokens,
-                                                               same_fixed_asm_parse, same_fixed_asm_target);
+                                                               c_parse_for_lowering(same_fixed_asm_temporary.arena, same_fixed_asm_tokens), same_fixed_asm_target);
         BUSTER_TEST(arguments, same_fixed_asm_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, same_fixed_asm_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, same_fixed_asm_lowered.diagnostic_count == 1);
@@ -71893,9 +71896,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(aarch64_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult aarch64_clobber_parse = c_parse_for_lowering(aarch64_clobber_temporary.arena, aarch64_clobber_tokens);
+        CParseResult aarch64_clobber_parse = c_parse(aarch64_clobber_temporary.arena, aarch64_clobber_tokens);
         CIRLowerResult aarch64_clobber_lowered = c_lower_to_ir(aarch64_clobber_temporary.arena, S8("aarch64-clobber.c"), aarch64_clobber_tokens,
-                                                               aarch64_clobber_parse, aarch64_target);
+                                                               c_parse_for_lowering(aarch64_clobber_temporary.arena, aarch64_clobber_tokens), aarch64_target);
         BUSTER_TEST(arguments, aarch64_clobber_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_clobber_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_clobber_lowered.diagnostic_count == 1);
@@ -71918,9 +71921,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(aarch64_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult aarch64_clobber_parse = c_parse_for_lowering(reserved_clobber_temporary.arena, aarch64_clobber_tokens);
+        CParseResult aarch64_clobber_parse = c_parse(reserved_clobber_temporary.arena, aarch64_clobber_tokens);
         CIRLowerResult aarch64_clobber_lowered = c_lower_to_ir(reserved_clobber_temporary.arena, S8("aarch64-stack-clobber.c"),
-                                                               aarch64_clobber_tokens, aarch64_clobber_parse, aarch64_target);
+                                                               aarch64_clobber_tokens, c_parse_for_lowering(reserved_clobber_temporary.arena, aarch64_clobber_tokens), aarch64_target);
         BUSTER_TEST(arguments, aarch64_clobber_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_clobber_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_clobber_lowered.diagnostic_count == 1);
@@ -71944,9 +71947,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(x86_64_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult x86_64_clobber_parse = c_parse_for_lowering(reserved_clobber_temporary.arena, x86_64_clobber_tokens);
+        CParseResult x86_64_clobber_parse = c_parse(reserved_clobber_temporary.arena, x86_64_clobber_tokens);
         CIRLowerResult x86_64_clobber_lowered = c_lower_to_ir(reserved_clobber_temporary.arena, S8("x86_64-reserved-clobber.c"),
-                                                              x86_64_clobber_tokens, x86_64_clobber_parse, x86_64_target);
+                                                              x86_64_clobber_tokens, c_parse_for_lowering(reserved_clobber_temporary.arena, x86_64_clobber_tokens), x86_64_target);
         BUSTER_TEST(arguments, x86_64_clobber_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, x86_64_clobber_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, x86_64_clobber_lowered.diagnostic_count == 2);
@@ -71978,9 +71981,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(x86_64_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult percent_parse = c_parse_for_lowering(percent_clobber_temporary.arena, percent_tokens);
+        CParseResult percent_parse = c_parse(percent_clobber_temporary.arena, percent_tokens);
         CIRLowerResult percent_lowered = c_lower_to_ir(percent_clobber_temporary.arena, S8("x86_64-percent-clobber.c"),
-                                                       percent_tokens, percent_parse, x86_64_target);
+                                                       percent_tokens, c_parse_for_lowering(percent_clobber_temporary.arena, percent_tokens), x86_64_target);
         BUSTER_TEST(arguments, percent_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, percent_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, percent_lowered.diagnostic_count == 6);
@@ -72012,9 +72015,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult malformed_recovery_parse = c_parse_for_lowering(malformed_recovery_temporary.arena, malformed_recovery_tokens);
+        CParseResult malformed_recovery_parse = c_parse(malformed_recovery_temporary.arena, malformed_recovery_tokens);
         CIRLowerResult malformed_recovery_lowered = c_lower_to_ir(malformed_recovery_temporary.arena, S8("malformed-recovery.c"), malformed_recovery_tokens,
-                                                                   malformed_recovery_parse, target_native);
+                                                                   c_parse_for_lowering(malformed_recovery_temporary.arena, malformed_recovery_tokens), target_native);
         BUSTER_TEST(arguments, malformed_recovery_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, malformed_recovery_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, malformed_recovery_lowered.diagnostic_count == 1);
@@ -72043,9 +72046,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
         });
-        CParseResult typedef_shadow_label_parse = c_parse_for_lowering(typedef_shadow_label_temporary.arena, typedef_shadow_label_tokens);
+        CParseResult typedef_shadow_label_parse = c_parse(typedef_shadow_label_temporary.arena, typedef_shadow_label_tokens);
         CIRLowerResult typedef_shadow_label_lowered = c_lower_to_ir(typedef_shadow_label_temporary.arena, S8("typedef-shadow-label.c"), typedef_shadow_label_tokens,
-                                                                     typedef_shadow_label_parse, target_native);
+                                                                     c_parse_for_lowering(typedef_shadow_label_temporary.arena, typedef_shadow_label_tokens), target_native);
         BUSTER_TEST(arguments, typedef_shadow_label_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, typedef_shadow_label_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, typedef_shadow_label_lowered.diagnostic_count == 0);
@@ -72067,9 +72070,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult symbolic_array_operand_parse = c_parse_for_lowering(symbolic_array_operand_temporary.arena, symbolic_array_operand_tokens);
+        CParseResult symbolic_array_operand_parse = c_parse(symbolic_array_operand_temporary.arena, symbolic_array_operand_tokens);
         CIRLowerResult symbolic_array_operand_lowered = c_lower_to_ir(symbolic_array_operand_temporary.arena, S8("symbolic-array-operand.c"),
-                                                                      symbolic_array_operand_tokens, symbolic_array_operand_parse, target_native);
+                                                                      symbolic_array_operand_tokens, c_parse_for_lowering(symbolic_array_operand_temporary.arena, symbolic_array_operand_tokens), target_native);
         BUSTER_TEST(arguments, symbolic_array_operand_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, symbolic_array_operand_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, symbolic_array_operand_lowered.diagnostic_count == 0);
@@ -73030,8 +73033,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult label_escape_parse = c_parse_for_lowering(label_escape_temporary.arena, label_escape_tokens);
-        CIRLowerResult label_escape_lowered = c_lower_to_ir(label_escape_temporary.arena, S8("label-escape.c"), label_escape_tokens, label_escape_parse, target_native);
+        CParseResult label_escape_parse = c_parse(label_escape_temporary.arena, label_escape_tokens);
+        CIRLowerResult label_escape_lowered = c_lower_to_ir(label_escape_temporary.arena, S8("label-escape.c"), label_escape_tokens, c_parse_for_lowering(label_escape_temporary.arena, label_escape_tokens), target_native);
         BUSTER_TEST(arguments, label_escape_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_escape_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_escape_lowered.diagnostic_count >= 4);
@@ -73048,9 +73051,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult legal_label_pointer_address_parse = c_parse_for_lowering(legal_label_pointer_address_temporary.arena, legal_label_pointer_address_tokens);
+        CParseResult legal_label_pointer_address_parse = c_parse(legal_label_pointer_address_temporary.arena, legal_label_pointer_address_tokens);
         CIRLowerResult legal_label_pointer_address_lowered = c_lower_to_ir(legal_label_pointer_address_temporary.arena, S8("legal-label-pointer-address.c"),
-                                                                            legal_label_pointer_address_tokens, legal_label_pointer_address_parse, target_native);
+                                                                            legal_label_pointer_address_tokens, c_parse_for_lowering(legal_label_pointer_address_temporary.arena, legal_label_pointer_address_tokens), target_native);
         BUSTER_TEST(arguments, legal_label_pointer_address_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, legal_label_pointer_address_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, legal_label_pointer_address_lowered.diagnostic_count == 0);
@@ -73072,10 +73075,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult label_metadata_growth_parse = c_parse_for_lowering(label_metadata_growth_temporary.arena, label_metadata_growth_tokens);
+        CParseResult label_metadata_growth_parse = c_parse(label_metadata_growth_temporary.arena, label_metadata_growth_tokens);
         // The value table must outgrow its initial capacity; repeated constants keep their own values.
         CIRLowerResult label_metadata_growth_lowered = c_lower_to_ir_with_options(label_metadata_growth_temporary.arena, S8("label-metadata-growth.c"),
-            label_metadata_growth_tokens, label_metadata_growth_parse, target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
+            label_metadata_growth_tokens, c_parse_for_lowering(label_metadata_growth_temporary.arena, label_metadata_growth_tokens), target_native, (CIRLowerOptions){.disable_block_constant_interning = true});
         BUSTER_TEST(arguments, label_metadata_growth_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_metadata_growth_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_metadata_growth_lowered.diagnostic_count == 0);
@@ -73143,9 +73146,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 .data_layout = target_data_layout(target_native),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
-        CParseResult cfg_label_storage_parse = c_parse_for_lowering(cfg_label_storage_temporary.arena, cfg_label_storage_tokens);
+        CParseResult cfg_label_storage_parse = c_parse(cfg_label_storage_temporary.arena, cfg_label_storage_tokens);
         CIRLowerResult cfg_label_storage_lowered = c_lower_to_ir(cfg_label_storage_temporary.arena, S8("cfg-label-storage.c"), cfg_label_storage_tokens,
-                                                                  cfg_label_storage_parse, target_native);
+                                                                  c_parse_for_lowering(cfg_label_storage_temporary.arena, cfg_label_storage_tokens), target_native);
         BUSTER_TEST(arguments, cfg_label_storage_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, cfg_label_storage_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, cfg_label_storage_lowered.diagnostic_count == 0);
