@@ -47266,6 +47266,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, C
     {
         CParserResult prepared = c_parse_ast(arena, preprocess);
         syntax.ast = prepared.ast;
+        syntax.number_facts = syntax.number_facts ? syntax.number_facts : prepared.number_facts;
         syntax.ast_diagnostics = prepared.ast_diagnostics;
         syntax.ast_diagnostic_count = prepared.ast_diagnostic_count;
         syntax.ast_retained_copy_bytes += prepared.ast_retained_copy_bytes;
@@ -47275,6 +47276,10 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics_retained(Arena* arena, C
             syntax.diagnostic_count = prepared.diagnostic_count;
             setup_failed = prepared.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
         }
+    }
+    if (arena && !syntax.diagnostic_count && !syntax.number_facts && !syntax.reference_tokens)
+    {
+        syntax.number_facts = c_number_facts_build(arena, &preprocess);
     }
     if (arena && !syntax.diagnostic_count && !syntax.reference_tokens && syntax.ast && !syntax.ast_facts && !syntax.string_literal_lengths_only)
     {

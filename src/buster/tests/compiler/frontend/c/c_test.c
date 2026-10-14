@@ -10283,6 +10283,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArgum
     };
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
     {
+        TemporalArena source_temporary = arena_begin_temporal(temporary.arena);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], S8("declarator-group-nesting.c"), target_native, &preprocess, &parse);
@@ -10294,6 +10295,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArgum
         {
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
         }
+        c_test_scratch_end(source_temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     // The same callee shape, executed: g returns 7 and main reports a mismatch.
@@ -16983,6 +16985,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_ir(UnitTestArgument
             .data_layout = target_data_layout(target_native),
         });
     CParseResult ambiguous_promoted_parse = c_parse(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens);
+    CAnalysisResult ambiguous_authority = c_analyze_semantics_only(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens,
+        c_parse_ast_reference(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens));
     CIRLowerResult ambiguous_promoted_ir = c_lower_to_ir(ambiguous_promoted_temporary.arena, S8("ambiguous-promoted.c"), ambiguous_promoted_tokens, c_parse_for_lowering(ambiguous_promoted_temporary.arena, ambiguous_promoted_tokens), target_native);
     bool found_ambiguity = false;
     for (u32 diagnostic_index = 0; diagnostic_index < ambiguous_promoted_ir.diagnostic_count; diagnostic_index += 1)
@@ -16992,7 +16996,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_ir(UnitTestArgument
     }
     BUSTER_TEST(arguments, ambiguous_promoted_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, ambiguous_promoted_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, ambiguous_promoted_ir.diagnostic_count == 1);
+    BUSTER_TEST(arguments, ambiguous_promoted_ir.diagnostic_count == ambiguous_authority.diagnostic_count && ambiguous_authority.diagnostic_count != 0);
+    for (u32 index = 0; index < ambiguous_promoted_ir.diagnostic_count && index < ambiguous_authority.diagnostic_count; index += 1)
+    {
+        BUSTER_TEST(arguments, ambiguous_promoted_ir.diagnostics[index].kind == ambiguous_authority.diagnostics[index].kind);
+        BUSTER_STRING_TEST(arguments, ambiguous_promoted_ir.diagnostics[index].message, ambiguous_authority.diagnostics[index].message);
+    }
     BUSTER_TEST(arguments, found_ambiguity);
     c_test_scratch_end(ambiguous_promoted_temporary);
     return result;
@@ -35097,13 +35106,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
         TemporalArena refused_temporary = scratch_begin(0, 0);
         CPreprocessResult refused_tokens = c_preprocess(refused_temporary.arena, refused[index].source, (CPreprocessOptions){0});
         CParseResult refused_parse = c_parse_for_lowering(refused_temporary.arena, refused_tokens);
+        CAnalysisResult refused_authority = c_analyze_semantics_only(refused_temporary.arena, refused_tokens,
+            c_parse_ast_reference(refused_temporary.arena, refused_tokens));
         CIRLowerResult refused_ir = c_lower_to_ir(refused_temporary.arena, S8("alignof-object-refused.c"), refused_tokens, refused_parse, target_native);
         u32 diagnostic_count = refused_ir.diagnostic_count;
         CDiagnosticKind kind = refused_parse.diagnostic_count ? refused_parse.diagnostics[0].kind
                                : refused_ir.diagnostic_count  ? refused_ir.diagnostics[0].kind
                                                               : C_DIAGNOSTIC_KIND_COUNT;
         BUSTER_TEST_RAW(arguments, refused_tokens.diagnostic_count == 0, refused[index].source);
-        BUSTER_TEST_RAW(arguments, diagnostic_count == 1, refused[index].source);
+        BUSTER_TEST_RAW(arguments, diagnostic_count == refused_authority.diagnostic_count && refused_authority.diagnostic_count != 0,
+            string_format(refused_temporary.arena, S8("alignof refusal: retained={u32} reference={u32}: {S8}"), diagnostic_count,
+                          refused_authority.diagnostic_count, refused[index].source));
         BUSTER_TEST_RAW(arguments, kind == refused[index].kind, refused[index].source);
         c_test_scratch_end(refused_temporary);
     }
