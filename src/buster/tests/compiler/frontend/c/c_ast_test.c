@@ -7232,6 +7232,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_entrypoints(UnitTestArgum
     }
     c_ast_facts_release(&facts);
     c_ast_release(&tree.ast);
+    CPreprocessResult sidecar_preprocess = c_ast_test_preprocess(temporary.arena,
+        S8("struct S { char c; int x; }; long double wide = 1.25L; "
+           "unsigned long offset = __builtin_offsetof(struct S, x); "
+           "int f(int n) { int values[2] = {n, n + 1}; "
+           "int z = _Generic(values[1], int: values[1], default: 0); "
+           "if (((z))) z += (int)sizeof(int (*)(int, double)); "
+           "return z + (int)offset + (int)wide; }"), C_PREPROCESS_DIALECT_GNU17);
+    CAnalysisResult compact = c_parse_for_lowering(temporary.arena, sidecar_preprocess);
+    if (BUSTER_REQUIRE(arguments, compact.analysis_complete && !compact.diagnostic_count && compact.ast && compact.ast_facts))
+    {
+        CAstFacts const* retained = compact.ast_facts;
+        BUSTER_TEST(arguments, compact.lowering_validated && compact.frontend_retained_copy_bytes != 0);
+        BUSTER_TEST(arguments, !retained->arena && !retained->index_arena && !retained->recipe_arena && !retained->constants_arena);
+        BUSTER_TEST(arguments, compact.ast->parenthesis_count != 0 && retained->recipe_count != 0 && retained->constant_count != 0);
+        BUSTER_TEST(arguments, retained->constant_capacity == retained->constant_count);
+        BUSTER_TEST(arguments, retained->offsetof_plan_count != 0 && retained->offsetof_plan_capacity == retained->offsetof_plan_count &&
+                               retained->offsetof_step_count != 0 && retained->offsetof_step_capacity == retained->offsetof_step_count);
+        BUSTER_TEST(arguments, retained->ext80_initializer_count != 0 && retained->ext80_initializer_capacity == retained->ext80_initializer_count);
+        bool parameter = false;
+        for (u32 row = 0; row < retained->recipe_count; row += 1)
+        {
+            parameter |= retained->recipes[row].form == C_AST_TYPE_RECIPE_PARAMETER;
+        }
+        BUSTER_TEST(arguments, parameter);
+        u32 type_count = compact.type_count;
+        CIRLowerResult first = c_lower_to_ir(temporary.arena, S8("retained sidecars first"), sidecar_preprocess, compact, target_native);
+        CIRLowerResult second = c_lower_to_ir(temporary.arena, S8("retained sidecars second"), sidecar_preprocess, compact, target_native);
+        BUSTER_TEST(arguments, first.program && second.program && !first.diagnostic_count && !second.diagnostic_count);
+        BUSTER_TEST(arguments, first.canonical_ir_certified && second.canonical_ir_certified && compact.type_count == type_count);
+        BUSTER_TEST(arguments, c_ast_test_instruction_total(&first) == c_ast_test_instruction_total(&second));
+    }
     c_test_scratch_end(temporary);
     return result;
 }
