@@ -6376,23 +6376,6 @@ BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u3
     return resolved;
 }
 
-BUSTER_C_INTERNAL CEntityId c_ir_local_entity_at(CIntegerIrBuilder* builder, u32 token_index)
-{
-    CEntityId bound = c_ir_identifier_entity(builder, token_index);
-    CEntityId result;
-    if (bound.value < builder->parse.entity_count && builder->parse.entities[bound.value].kind == C_ENTITY_LOCAL &&
-        builder->parse.entities[bound.value].declaration_token_plus_one == token_index + 1)
-    {
-        result = bound;
-    }
-    else
-    {
-        result = C_ENTITY_ID_INVALID;
-    }
-
-    return result;
-}
-
 BUSTER_C_INTERNAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)
 {
     while (type_id.value < builder->parse.type_count)
@@ -43974,7 +43957,6 @@ struct CIrSubstatementCase
 
 typedef struct CIrLabel CIrLabel;
 
-BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 index, u32 end, u32* after_out);
 
 // The rest of `task` after the statement just taken from it, as the task that
 // lowers it from `block`: it opens at `after` and keeps the task's end, its
@@ -44442,25 +44424,6 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
         }
     }
     return UINT32_MAX;
-}
-
-// One GNU `__attribute__((...))` (or `__attribute((...))`) list at `index`:
-// true with `after_out` one past its closing parenthesis. An unbalanced list
-// answers false and is left for the statement it begins to diagnose.
-BUSTER_C_INTERNAL bool c_ir_gnu_attribute_at(CIntegerIrBuilder* builder, u32 index, u32 end, u32* after_out)
-{
-    CPreprocessResult* preprocess = &builder->preprocess;
-    bool result = index + 1 < end && preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER &&
-                  c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
-                                            C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) &&
-                  c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-    u32 close = result ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) : end;
-    result = result && close < end;
-    if (result)
-    {
-        *after_out = close + 1;
-    }
-    return result;
 }
 
 // The unit's retained span facts (GitHub #3102 step 1), in a private arena:
