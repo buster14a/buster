@@ -693,6 +693,13 @@ reference-token/retained-tree semantic parity, debug/no-debug, SSA/memory and
 FAST/QUALITY controls. The computed-goto machine fixture additionally retains
 its original ten functions, including the comparison-conditioned ordinary
 integer return, through both native backend selectors and allocators.
+Conditional result ranges also carry their owner's proven delimiter depth.
+At the same depth the owner's root proof excludes lower-precedence operators,
+so an indexed question inside the child proves a conditional root directly.
+Stripping a group changes depth and requires a fresh root proof. The registered
+128/256/512-term boolean, control-only label and mixed logical witnesses bound
+actual label root/value/split/index work in both semantic paths; this prevents
+right-nested conditional suffixes from being rescanned at every result arm.
 Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and

@@ -48563,6 +48563,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_label_expression_has_value(CTypeParseMachine* m
     bool label = false;
     for (u32 index = start; !label && index < end; index += 1)
     {
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LABEL_VALUE_TOKENS, 1);
         CToken token = preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) && index + 1 < end)
         {
@@ -48612,19 +48613,35 @@ BUSTER_GLOBAL_LOCAL bool c_parse_label_expression_has_value(CTypeParseMachine* m
 
 // The existing lowest-precedence operator proof, with parentheses stripped once.
 BUSTER_GLOBAL_LOCAL u32 c_parse_label_expression_root(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                       u32* first_out, u32* limit_out)
+                                                       u32* first_out, u32* limit_out, CIrExt80ConditionalIndex const* conditional,
+                                                       u32 conditional_depth)
 {
     u32 first = *first_out;
     u32 limit = *limit_out;
     while (first < limit && c_token_is_punctuator(&preprocess.tokens[first], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_parse_matching_delimiter_indexed(result, preprocess, first) + 1 == limit)
     {
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LABEL_ROOT_TOKENS, 1);
         first += 1;
         limit -= 1;
     }
     u32 root_precedence = UINT32_MAX;
-    for (u32 cursor = first; cursor < limit; cursor += 1)
+    // A conditional owner's root proof excludes lower-precedence operators
+    // throughout each same-depth arm. Its indexed next question therefore
+    // proves an arm's conditional root without rescanning the suffix. A
+    // stripped group changes depth and needs its own ordinary root proof.
+    bool inherited = conditional && conditional_depth != UINT32_MAX && first < limit &&
+        conditional->depths[first - conditional->base] == conditional_depth;
+    u32 question = inherited ? conditional->next_questions_at_depth[first - conditional->base] : UINT32_MAX;
+    inherited = inherited && question < limit;
+    if (inherited)
     {
+        root_precedence = 3;
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LABEL_ROOT_REUSES, 1);
+    }
+    for (u32 cursor = first; !inherited && cursor < limit; cursor += 1)
+    {
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LABEL_ROOT_TOKENS, 1);
         CToken token = preprocess.tokens[cursor];
         if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
         {
@@ -48654,6 +48671,7 @@ typedef struct CParseLabelRange CParseLabelRange;
 struct CParseLabelRange
 {
     u32 first, limit;
+    u32 conditional_depth;
 };
 
 // Comparisons consume label values. Logical operators compose those booleans;
@@ -48666,7 +48684,7 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
     if (label)
     {
         u32 first = start, limit = end;
-        u32 root = c_parse_label_expression_root(result, preprocess, scope, &first, &limit);
+        u32 root = c_parse_label_expression_root(result, preprocess, scope, &first, &limit, 0, UINT32_MAX);
         u32 equality = c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_EQUAL});
         u32 conjunction = c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_AMPERSAND_AMPERSAND});
         u32 disjunction = c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_PIPE_PIPE});
@@ -48682,12 +48700,13 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
             CIrExt80ConditionalIndex conditional = {.base = start, .token_count = capacity};
             bool indexed = false;
             u32 count = work ? 1 : 0;
-            if (work) work[0] = (CParseLabelRange){.first = first, .limit = limit};
+            if (work) work[0] = (CParseLabelRange){.first = first, .limit = limit, .conditional_depth = UINT32_MAX};
             label = !work;
             while (count && !label)
             {
                 CParseLabelRange range = work[--count];
-                u32 precedence = c_parse_label_expression_root(result, preprocess, scope, &range.first, &range.limit);
+                u32 precedence = c_parse_label_expression_root(result, preprocess, scope, &range.first, &range.limit,
+                    indexed ? &conditional : 0, range.conditional_depth);
                 if (precedence == 3)
                 {
                     if (!indexed)
@@ -48702,6 +48721,7 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
                         indexed = conditional.delimiter_closes_plus_one && conditional.conditional_colons_plus_one && conditional.depths &&
                             conditional.next_questions_at_depth && conditional.delimiter_stack && conditional.question_heads &&
                             c_ir_ext80_conditional_index_build(&indexing, preprocess, start, end, &conditional);
+                        if (indexed) C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LABEL_INDEX_TOKENS, (u64)capacity * 2);
                     }
                     u32 question = 0;
                     u32 colon = 0;
@@ -48709,10 +48729,11 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
                         &range.first, &question, &colon, &range.limit);
                     if (split && count + 2 <= capacity)
                     {
-                        work[count++] = (CParseLabelRange){.first = colon + 1, .limit = range.limit};
+                        u32 owner_depth = conditional.depths[range.first - conditional.base];
+                        work[count++] = (CParseLabelRange){.first = colon + 1, .limit = range.limit, .conditional_depth = owner_depth};
                         work[count++] = question + 1 == colon
-                            ? (CParseLabelRange){.first = range.first, .limit = question}
-                            : (CParseLabelRange){.first = question + 1, .limit = colon};
+                            ? (CParseLabelRange){.first = range.first, .limit = question, .conditional_depth = owner_depth}
+                            : (CParseLabelRange){.first = question + 1, .limit = colon, .conditional_depth = owner_depth};
                     }
                     else
                     {
@@ -48727,6 +48748,7 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
                     // skip nested groups until their own work item is visited.
                     for (u32 cursor = operand; cursor < range.limit; cursor += 1)
                     {
+                        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LABEL_SPLIT_TOKENS, 1);
                         CToken token = preprocess.tokens[cursor];
                         if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
                         {
@@ -48743,12 +48765,12 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
                             {
                                 // Each pushed range owns at least one token,
                                 // so outstanding ranges cannot fill capacity.
-                                work[count++] = (CParseLabelRange){.first = operand, .limit = cursor};
+                                work[count++] = (CParseLabelRange){.first = operand, .limit = cursor, .conditional_depth = UINT32_MAX};
                                 operand = cursor + 1;
                             }
                         }
                     }
-                    work[count++] = (CParseLabelRange){.first = operand, .limit = range.limit};
+                    work[count++] = (CParseLabelRange){.first = operand, .limit = range.limit, .conditional_depth = UINT32_MAX};
                 }
                 else if (precedence != equality)
                 {

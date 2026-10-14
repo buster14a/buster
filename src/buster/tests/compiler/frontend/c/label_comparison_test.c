@@ -1,6 +1,48 @@
 // First-party #3670 witnesses. Equality consumes label provenance before logical composition.
 // The frozen typeof witness and plain reduction run against independent hosted GCC/Clang
 // before Buster's debug/no-debug and SSA/memory cells. Pointer transport remains refused.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_conditional_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 terms[] = {S8("p != &&done ? 1 : "), S8("&&done ? 0 : "), S8("p == &&done ? (p != &&done || 0) : ")};
+    u32 sizes[] = {128, 256, 512};
+    u32 slots[] = {C_TEST_PARSE_NESTING_LABEL_VALUE_TOKENS, C_TEST_PARSE_NESTING_LABEL_ROOT_TOKENS,
+        C_TEST_PARSE_NESTING_LABEL_SPLIT_TOKENS, C_TEST_PARSE_NESTING_LABEL_INDEX_TOKENS, C_TEST_PARSE_NESTING_LABEL_ROOT_REUSES};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(terms); shape += 1)
+    {
+        for (u32 reference = 0; reference < 2; reference += 1)
+        {
+            u64 shallow = 0;
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u64 capacity = terms[shape].length * sizes[size] + 128;
+                char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+                u64 length = 0;
+                c_test_append_source(bytes, capacity, &length, S8("int main(void) { void *p=&&done; done: return "));
+                for (u32 term = 0; term < sizes[size]; term += 1) c_test_append_source(bytes, capacity, &length, terms[shape]);
+                c_test_append_source(bytes, capacity, &length, S8("0; }\n"));
+                CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length},
+                    (CPreprocessOptions){.target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU23});
+                CParserResult syntax = reference ? c_parse_ast_reference(temporary.arena, tokens) : c_parse_ast(temporary.arena, tokens);
+                u64 before = 0;
+                for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(slots); slot += 1) before += c_test_parse_nesting_count(slots[slot]);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                u64 work = 0;
+                for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(slots); slot += 1) work += c_test_parse_nesting_count(slots[slot]);
+                work -= before;
+                if (!size) shallow = work;
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete);
+                BUSTER_TEST(arguments, work && work <= (u64)sizes[size] * 96 + 64 && work <= shallow * (size == 2 ? 5 : 3));
+                arguments->show(arguments, S8("LABEL_CONDITIONAL_WORK_V1 shape={u32} reference={u32} terms={u32} work={u64}\n"),
+                    shape, reference, sizes[size], work);
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -28,6 +70,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
         S8("int main(void) { void *p=&&done; done: return ((p==&&done ? 1 : 0) ? (p!=&&done ? 9 : 7) : 3)!=7; }"),
         S8("int main(void) { int n=0; void *p=&&done; done: int value=p==&&done ? ++n : ++n; return value!=1 || n!=1; }"),
         S8("int main(void) { void *p=&&done; done: return (p==&&done ?: 0)!=1; }"),
+        S8("int main(void) { void *p=&&done; done: return (p!=&&done ? 0 : ((p==&&done ? 7 : 9)))!=7; }"),
         S8("int saved; int take(int x) { saved=x; return x; } int main(void) { void *p=&&done; done: saved=p==&&done ? 7 : 9; return take(p==&&done ? 7 : 9)!=7 || saved!=7; }"),
     };
     String8 escapes[] = {
@@ -43,6 +86,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_comparison_logicals(UnitTestArgu
         S8("void *f(void) { void *p=&&done; done: return p ?: 0; }"),
         S8("void take(void*); void f(void) { void *p=&&done; done: take(p==&&done ? p : 0); }"),
         S8("void *saved; void f(void) { void *p=&&done; done: saved=p==&&done ? p : 0; }"),
+        S8("int f(void) { void *p=&&done; done: return p==&&done ? 0 : (p,p==&&done ? 0 : 1); }"),
+        S8("long f(void) { void *p=&&done; done: return (long)(p==&&done ? p : 0); }"),
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
     Target targets[] = {
