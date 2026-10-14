@@ -9622,7 +9622,11 @@ BUSTER_GLOBAL_LOCAL bool c_parse_region_facts_sound(CTypeParseMachine const* mac
 // (c_parse_region_facts_sound) and either the answer's row is older than the
 // run (the rows it appended were an operand's, such as a string literal's
 // under `[]`), or the node is a string literal, whose array row is kept in
-// structural form (c_ast_types_facts_string). Any other node is a gap.
+// structural form (c_ast_types_facts_string). An otherwise sound query whose
+// answer is itself temporary keeps its entire appended type graph in sparse
+// CAstTypeRecipe descriptions before rollback. Recognised builtin identifiers
+// and implicit function-name objects keep explicit semantic identity forms;
+// they mint no callable or array row. Other failures remain counted gaps.
 // `scope` is a body's declaration scope, which each node's scope descends
 // from, or an initializer's own scope.
 BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, bool body)
@@ -9633,6 +9637,10 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
         CAstFacts* facts = machine->ast_facts;
         bool checked = machine->validate_expression_constraints;
         bool runtime = machine->runtime_expression_constraints;
+#if BUSTER_INCLUDE_TESTS
+        CParseExpressionQuery* saved_queries = machine->expression_queries;
+        machine->expression_queries = c_ast_types_facts_uncached() ? 0 : machine->expression_queries;
+#endif
         machine->ast_types = 0;
         machine->validate_expression_constraints = false;
         machine->runtime_expression_constraints = body;
@@ -9662,6 +9670,15 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 machine->committed_mutation_count = mutation_mark;
                 CTypeId type = C_TYPE_ID_INVALID;
                 bool valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
+                u32 derived_recipe = C_AST_FACT_NONE;
+                if (!valid)
+                {
+                    valid = c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
+                    if (valid && derived_recipe == C_AST_FACT_NONE && slot != UINT32_MAX)
+                    {
+                        c_parse_expression_query_publish(machine, slot, end, node_scope, type, 0);
+                    }
+                }
                 facts->statistics.completion_queries += 1;
                 // A valid root drops the records of the rows it mutated; they
                 // are still in place, so the rollback below can undo them.
@@ -9675,7 +9692,14 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 bool kept = sound && valid && type.value < checkpoint.type_count;
                 bool string = sound && valid && !kept &&
                               c_ast_types_facts_string(facts, result, machine->syntax_tree, node, type, checkpoint.type_count);
-                if (kept)
+                if (sound && derived_recipe != C_AST_FACT_NONE)
+                {
+                    facts->types[node] = derived_recipe;
+                    facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_RECIPE;
+                    facts->statistics.completed += 1;
+                    facts->statistics.recipes += 1;
+                }
+                else if (kept)
                 {
                     c_ast_types_facts_record(facts, node, type, machine->result_nonplace_projection);
                 }
@@ -9683,6 +9707,15 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 {
                     facts->statistics.completed += 1;
                     facts->statistics.strings += 1;
+                }
+                else if (sound && valid && c_ast_types_facts_recipe(facts, result, &preprocess, node, type, checkpoint.type_count))
+                {
+                    facts->flags[node] |= machine->result_nonplace_projection ? C_AST_FACT_NONPLACE : 0;
+                }
+                else if (sound && !valid && c_ast_types_facts_identity(facts, result, machine->syntax_tree, &preprocess, node))
+                {
+                    // Its explicit semantic form is the fact: no callable C
+                    // row is invented for a builtin or implicit name object.
                 }
                 else
                 {
@@ -9701,10 +9734,19 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                     }
                 }
             }
+            if (facts->recipe_failed && !machine->failed)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[first]), C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                                   S8("could not reserve retained C type recipes"));
+                machine->failed = true;
+            }
             node += 1;
         }
         arena_set_position(machine->scratch_arena, scratch_mark);
         machine->ast_types = region;
+#if BUSTER_INCLUDE_TESTS
+        machine->expression_queries = saved_queries;
+#endif
         machine->validate_expression_constraints = checked;
         machine->runtime_expression_constraints = runtime;
     }

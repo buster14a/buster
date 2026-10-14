@@ -7581,6 +7581,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* tot
     total->bound += unit.bound;
     total->bit_fields += unit.bit_fields;
     total->strings += unit.strings;
+    total->recipes += unit.recipes;
+    total->builtin_identities += unit.builtin_identities;
+    total->function_names += unit.function_names;
     for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
     {
         total->gaps[gap] += unit.gaps[gap];

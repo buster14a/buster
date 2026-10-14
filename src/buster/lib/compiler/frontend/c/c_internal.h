@@ -1827,6 +1827,9 @@ BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
 // candidate whose span it is, a string literal's in structural form
 // (c_ast_types_facts_string). c_ast_types_facts_finish settles the unit's
 // counts once analysis is done.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_EXTERN bool c_ast_types_facts_uncached(void);
+#endif
 BUSTER_C_EXTERN CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess);
 BUSTER_C_EXTERN bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out);
 BUSTER_C_EXTERN void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeId type, bool nonplace);
@@ -1834,6 +1837,9 @@ BUSTER_C_EXTERN void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeI
 // answered for it (C_AST_FACT_STRING); false, and nothing kept, when the row
 // is not a string literal's or its element row is at or past `rows`.
 BUSTER_C_EXTERN bool c_ast_types_facts_string(CAstFacts* facts, CParseResult const* result, CAst const* ast, u32 node, CTypeId array, u32 rows);
+BUSTER_C_EXTERN bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess, u32 node, CTypeId type, u32 rows);
+BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult const* result, CAst const* ast, CPreprocessResult const* preprocess, u32 node);
+BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
 BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
 BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,

@@ -1724,19 +1724,52 @@ typedef enum CAstFactFlag
     // row is kept for it: unless a validator's query already minted one,
     // minting it would give lowering an IR type of its own and change -g.
     C_AST_FACT_STRING = 1u << 6,
+    // `types` names a sparse CAstTypeRecipe, including a derivation that a
+    // rolled-back completion query built, or an explicit builtin/name form.
+    C_AST_FACT_RECIPE = 1u << 7,
 } CAstFactFlag;
+
+typedef enum CAstTypeRecipeForm
+{
+    C_AST_TYPE_RECIPE_DERIVATION,
+    // No callable CType row exists: builtin records retain its semantic
+    // identity. A call's own result is a separate ordinary type fact.
+    C_AST_TYPE_RECIPE_BUILTIN,
+    // The implicit function-name object: const char[name length + 1].
+    C_AST_TYPE_RECIPE_FUNCTION_NAME,
+} CAstTypeRecipeForm;
+
+// A row-free semantic type. All rows appended by its query are copied into
+// one contiguous recipe run before rollback. A CType reference below
+// row_begin is an existing published row; a later one names
+// recipe_begin + reference - row_begin. Bounds and alignment inheritance
+// are copied too, so no recipe points into rolled-back rows or bound tables.
+typedef struct CAstTypeRecipe CAstTypeRecipe;
+struct CAstTypeRecipe
+{
+    CType type;
+    CArrayBound bound;
+    CTypeAlignment alignment;
+    u32 bound_node;
+    u32 row_begin;
+    u32 recipe_begin;
+    u32 declaration;
+    u32 builtin;
+    CAstTypeRecipeForm form;
+    bool has_alignment;
+};
 
 // Why a fact candidate has no type.
 typedef enum CAstFactGap
 {
     // The span rules give the node no token range.
     C_AST_FACT_GAP_UNSPANNED,
-    // The machine types its range to nothing (`__func__`, an unbound
-    // `__builtin_expect(...)`, a void-typed failure).
+    // The machine types its range to nothing, and no explicit semantic
+    // identity or implicit object form describes it.
     C_AST_FACT_GAP_INVALID,
-    // The machine's answer is a type row its own run appended (an appended
-    // row would get an IR type and change -g), or the run mutated a row or
-    // raised a diagnostic; the run is rolled back.
+    // The run changed semantic state outside a describable temporary type
+    // graph: a row mutation, member/parameter addition or diagnostic. The
+    // run is rolled back.
     C_AST_FACT_GAP_APPENDS,
     // The machine had failed or had no capacity left.
     C_AST_FACT_GAP_BUSY,
@@ -1765,6 +1798,9 @@ struct CAstFactStatistics
     u64 bound;
     u64 bit_fields;
     u64 strings;
+    u64 recipes;
+    u64 builtin_identities;
+    u64 function_names;
     u64 gaps[C_AST_FACT_GAP_COUNT];
     u64 uncovered;
     u64 outside;
@@ -1788,6 +1824,11 @@ struct CAstFacts
     Arena* index_arena;
     CAstSpans* spans;
     u32 const* matches;
+    // Sparse completion descriptions, appended in place in their own arena.
+    Arena* recipe_arena;
+    CAstTypeRecipe* recipes;
+    u32 recipe_count;
+    bool recipe_failed;
     u32* types;
     u32* payloads;
     u8* flags;

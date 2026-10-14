@@ -296,13 +296,29 @@ it publishes and does not parse differently.
      length with its terminator (`c_ast_types_facts_string`). A validator's
      query that answers a string literal is kept in the same form.
 
-   Any other node is a gap.
+   A sound answer whose own row is temporary keeps the entire appended row
+   run in sparse `CAstTypeRecipe` descriptions before rollback. Each describes
+   a CType, its copied array bound and bound-expression node, and inherited
+   type-alignment record. References into the temporary run become recipe
+   references; older references name existing published rows. The type table,
+   bound table and query memo still return to their checkpoints.
+
+   Two forms without ordinary C rows are explicit: a recognised builtin
+   identifier retains its semantic builtin identity (its call retains its own
+   result type separately), and a function-name identifier retains its
+   enclosing declaration and the implicit `const char[name length + 1]`
+   object. The counters report those forms separately from ordinary type
+   recipes. Every remaining failure is a counted gap.
 
 **Why a completion may not append.** Lowering maps every C type row to an IR
 type up front (`c_type_ir_map`), and `-g` describes every IR type. A row that
 only the completion run appended would therefore change the `-g` object.
-Such nodes are counted as `appends`; the [inventory](#facts-lowering-needs)
-has their numbers and the open decision.
+The sparse descriptions retain these answers without appending any row to
+that inventory. `C_AST_FACT_RECIPE` makes the distinction explicit; `types`
+is then a recipe index, and consumers must never interpret it as a CTypeId.
+The recipe arena follows the facts' lifetime, and its committed bytes are
+included in `retained_bytes`. Failed recipe reservations produce a structured
+source-size diagnostic.
 
 **Lifetime.**
 - The driver reserves the record (`c_ast_facts_create`) in a private arena
@@ -2600,7 +2616,12 @@ A throwaway census on the unity self-host attributes the missing nodes:
   string literals, and 16,925 `[]` over a string literal, mostly `S8()`'s
   `(("text"))[0]`.
 
-**The open decision.** Reaching 0 needs one of two things, and it is the owner's call:
+**Current row-free publication.** The type-query takeover keeps sparse
+structural recipes rather than accepting extra C rows. The historical census
+above predates that extension; it is retained as the baseline of the gap
+classes. The implementation resolves the appended-type class, recognised
+builtin identities and implicit function-name objects. Unsupported machine
+answers remain visible as gaps. The original alternatives were:
 - **New fact forms that name no new row.** These follow the string literal's
   form: `__func__` as an array of `const char` of its function name's length;
   a builtin callee as a builtin identity (its spelling, which provenance
@@ -2609,8 +2630,15 @@ A throwaway census on the unity self-host attributes the missing nodes:
 - **Accepting the rows.** Keep the rows the completion run appends, and
   accept, after review, the `-g` difference their extra IR types make.
 
-Step 1 keeps the objects byte-identical and leaves both open. Step 3
-(expression lowering) will show which of these nodes it actually reads.
+The row-free route is implemented for completion queries that append only
+type rows, bounds, alignment metadata and interning entries. It copies the
+complete temporary row run before rollback, while every reference into an
+older table remains a published row. Fresh-completion fixtures cover qualified
+array elements, decayed pointers, pointer conditionals and transitive string
+arrays, and compare the semantic model with publication disabled. Builtin
+callee identities and implicit function-name objects have explicit forms.
+Type-name publication and the lowering consumer migration remain open; this
+producer commit does not claim retirement of the query machine.
 
 ## Consumer and retirement map
 

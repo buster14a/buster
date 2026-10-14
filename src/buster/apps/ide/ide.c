@@ -2245,13 +2245,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             }
             string_print(S8("C_AST_FACTS nodes={u64} retained_bytes={u64} regions={u64} candidates={u64} tree={u64} machine={u64} completed={u64} "
                             "missing={u64} {S8}={u64} {S8}={u64} {S8}={u64} {S8}={u64} bound={u64} bit_fields={u64} strings={u64} uncovered={u64} outside={u64} "
-                            "stale={u64} completion_queries={u64}\n"),
+                            "stale={u64} completion_queries={u64} recipes={u64} builtin_identities={u64} function_names={u64}\n"),
                          facts.nodes, facts.retained_bytes, facts.regions, facts.candidates, facts.tree, facts.machine, facts.completed, missing,
                          c_ast_fact_gap_name(C_AST_FACT_GAP_UNSPANNED), facts.gaps[C_AST_FACT_GAP_UNSPANNED],
                          c_ast_fact_gap_name(C_AST_FACT_GAP_INVALID), facts.gaps[C_AST_FACT_GAP_INVALID],
                          c_ast_fact_gap_name(C_AST_FACT_GAP_APPENDS), facts.gaps[C_AST_FACT_GAP_APPENDS],
                          c_ast_fact_gap_name(C_AST_FACT_GAP_BUSY), facts.gaps[C_AST_FACT_GAP_BUSY], facts.bound, facts.bit_fields, facts.strings, facts.uncovered,
-                         facts.outside, facts.stale, facts.completion_queries);
+                         facts.outside, facts.stale, facts.completion_queries, facts.recipes, facts.builtin_identities, facts.function_names);
         }
         // Also report disabled passes: -O0 must expose its selected policy.
         {
