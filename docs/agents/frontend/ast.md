@@ -3017,7 +3017,9 @@ an exact retained TYPE_NAME boundary; their remaining expression/operand and
 VLA readers are still an explicit retirement task. TYPEOF and atomic-specifier operands now request their exact TYPE_NAME or
 STRICT EXPRESSION_TYPE child through the shared scheduler. Stable source
 TYPE_NAME constructor projections have one owner per function subtree, shared
-by constant and runtime readers; TYPEOF retains its local projection effects.
+by constant and runtime readers. The producer marks those body source owners
+with TYPE_NAME payload `C_AST_TYPE_NAME_BODY_SOURCE`; lowering does not derive
+ownership from a source token range. TYPEOF retains its local projection effects.
 The body token opener cache and its negative probe states are removed. VLA
 TYPEOF shells retain the operand node alongside diagnostic provenance. This
 checkpoint does not claim complete query-machine retirement or a green full
@@ -5956,3 +5958,12 @@ provenance, preserving evaluation order and memory-place recovery. Semantic
 analysis owns the token-based GNU dialect preflight; lowering no longer
 repeats it. The remaining local register-label adapter is retired with the
 published entity-to-`INIT_DECLARATOR` link in the global declaration migration.
+
+Runtime casts and compound literals now read their exact TYPE_NAME/list
+children. Runtime sizeof/_Alignof reads its operand node, uses saved VLA
+suffix dimensions by bound entity, and asks the shared constant task for fixed
+layouts. VLA operand evaluation hands the same node to call preparation and
+expression lowering. The previous prefix/subscript token walk, type-name probe,
+statement-tail scans and core fallback classifier are removed. Legacy whole
+SIZEOF callbacks referenced by remaining constant walkers await their owners'
+retirement; they are not a fallback for these migrated runtime consumers.

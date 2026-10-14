@@ -1802,6 +1802,9 @@ typedef enum CAstFactFlag
 typedef enum CAstTypeNameFlag
 {
     C_AST_TYPE_NAME_VARIABLY_MODIFIED = 1u << 0,
+    // A written type name in a function body owns its stable constructor
+    // projection there; parameter and unit-level type names have no owner.
+    C_AST_TYPE_NAME_BODY_SOURCE = 1u << 1,
 } CAstTypeNameFlag;
 
 typedef enum CAstTypeRecipeForm

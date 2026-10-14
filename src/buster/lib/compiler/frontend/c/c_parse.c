@@ -9919,6 +9919,12 @@ BUSTER_C_INTERNAL void c_parse_unevaluated_operand_facts(CTypeParseMachine* mach
                 if (first != C_AST_SPAN_NONE && first < end && end <= preprocess.token_count)
                     c_parse_retained_fact_complete(machine, preprocess, result, scope, node, first, end);
                 else facts->statistics.gaps[C_AST_FACT_GAP_UNSPANNED] += 1;
+                if (facts->recipe_failed && !machine->failed)
+                {
+                    c_parse_diagnostic(result, first < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[first]) : (CSourceLocation){0},
+                        C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve retained unevaluated operand type recipes"));
+                    machine->failed = true;
+                }
                 arena_set_position(machine->scratch_arena, completion_mark);
             }
         }

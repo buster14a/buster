@@ -3592,11 +3592,21 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
     {
         CAstFactStatistics* statistics = &facts->statistics;
         u32 floor = C_AST_TYPE_NONE;
+        u32 body_floor = C_AST_TYPE_NONE;
+        u32 body_last = C_AST_TYPE_NONE;
         for (u32 index = facts->node_count; index; index -= 1)
         {
             u32 node = index - 1;
             u32 flags = facts->flags[node];
             u32 kind = ast->kinds[node];
+            body_floor = body_floor != C_AST_TYPE_NONE && node < body_floor ? C_AST_TYPE_NONE : body_floor;
+            if (kind == C_AST_FUNCTION_DEFINITION && node && ast->kinds[node - 1] == C_AST_COMPOUND_STATEMENT)
+            {
+                body_last = node - 1;
+                body_floor = c_ast_subtree_begin(ast, body_last);
+            }
+            if (kind == C_AST_TYPE_NAME && body_floor != C_AST_TYPE_NONE && node <= body_last)
+                facts->payloads[node] |= C_AST_TYPE_NAME_BODY_SOURCE;
             if (kind == C_AST_CALL)
             {
                 facts->payloads[node] = (u32)c_ast_types_call_builtin(ast, preprocess, node);
