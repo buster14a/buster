@@ -135,6 +135,7 @@ jobs:
           grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
           grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
           grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-direct-vulkan1.2' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |
@@ -308,6 +309,7 @@ jobs:
           grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
           grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
           grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-direct-vulkan1.2' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |

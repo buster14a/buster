@@ -1509,6 +1509,8 @@ BUSTER_GLOBAL_LOCAL String8 test_process_spawn_failure_name(ProcessSpawnFailure 
         case PROCESS_SPAWN_FAILURE_UNSUPPORTED: name = S8("unsupported"); break;
         case PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY: name = S8("working-directory"); break;
         case PROCESS_SPAWN_FAILURE_CAPTURE_SINK: name = S8("capture-sink"); break;
+        case PROCESS_SPAWN_FAILURE_PENDING_CLEANUP: name = S8("pending-cleanup"); break;
+        case PROCESS_SPAWN_FAILURE_OWNER_ALLOCATION: name = S8("owner-allocation"); break;
         default: name = S8("out-of-range"); break;
     }
     return name;

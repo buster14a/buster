@@ -181,7 +181,13 @@
   CI attempt when other required metadata remains unresolved.
   GitHub can attach externally published admission and compiler-benchmark checks
   to this Actions inventory. `github_ci_time.py` separates their metadata only
-  after exact check ID/name/head/app/namespace proof. The compiler benchmark
+  after exact check ID/name/head/app/namespace proof. Compiler sampling research
+  uses its freeze/phase/packet/request/executor marker and first-attempt-only
+  trusted-main sampling queue or terminal publication writer (#4209). It requires
+  the authorized exact-head request, matching executor run title and actor,
+  frozen-implementation checkout and state-appropriate writer step. A default
+  check URL must have one matching current executor link in its report.
+  The compiler benchmark
   additionally binds request and measurement attempts, re-reads the matching
   same-repository request and trusted-main publisher, and requires the publisher's
   exact-attempt checkout and writer-step execution. Its queued/running/completed
