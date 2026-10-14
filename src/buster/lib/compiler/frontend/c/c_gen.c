@@ -4698,20 +4698,421 @@ BUSTER_C_INTERNAL bool c_ir_node_query_execute(CIntegerIrBuilder* builder, CIrNo
     return complete;
 }
 
-// F2's materializer replaces these explicit declined attempts in its next
-// checkpoint. The node tasks are not routed to a token query at this stage.
+// A retained semantic reference. Temporary query rows refer to their sparse
+// run; published rows still name the immutable C model. Lowering materializes
+// only the requested projection, without appending a C row or reading grammar.
+typedef struct CIrRetainedTypeReference CIrRetainedTypeReference;
+struct CIrRetainedTypeReference
+{
+    u32 index;
+    bool recipe;
+};
+
+typedef struct CIrRetainedTypeFrame CIrRetainedTypeFrame;
+struct CIrRetainedTypeFrame
+{
+    CIrRetainedTypeReference reference;
+    IrTypeId element;
+    IrTypeId* parameters;
+    u32 parameter;
+    u8 stage;
+    bool qualifier;
+    bool parameter_pending;
+    bool bound_seen;
+    bool allow_unknown;
+};
+
+typedef struct CIrRetainedTypeState CIrRetainedTypeState;
+struct CIrRetainedTypeState
+{
+    CIrRetainedTypeFrame* stack;
+    IrTypeId* memo;
+    IrTypeId last;
+    CIrRetainedTypeReference base;
+    u32 begin;
+    u32 end;
+    u32 count;
+    u32 capacity;
+    bool failed;
+    bool constructors;
+};
+
+BUSTER_C_INTERNAL CType const* c_ir_retained_type(CIntegerIrBuilder* builder, CIrRetainedTypeReference reference)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    return reference.recipe ? facts && reference.index < facts->recipe_count &&
+                                    facts->recipes[reference.index].form == C_AST_TYPE_RECIPE_DERIVATION
+                                  ? &facts->recipes[reference.index].type : 0
+                            : reference.index < builder->parse.type_count ? builder->parse.types + reference.index : 0;
+}
+
+BUSTER_C_INTERNAL CIrRetainedTypeReference c_ir_retained_nested(CIntegerIrBuilder* builder, CIrRetainedTypeReference parent, CTypeId child)
+{
+    CAstTypeRecipe const* recipe = parent.recipe ? builder->syntax_facts->recipes + parent.index : 0;
+    bool temporary = recipe && child.value != C_ID_UNDERLYING_INVALID && child.value >= recipe->row_begin;
+    u32 index = temporary ? recipe->recipe_begin + child.value - recipe->row_begin : child.value;
+    return (CIrRetainedTypeReference){.index = index, .recipe = temporary};
+}
+
+BUSTER_C_INTERNAL bool c_ir_retained_type_push(CIrRetainedTypeState* state, CIrRetainedTypeReference reference, bool allow_unknown)
+{
+    bool room = state->count < state->capacity;
+    if (room)
+    {
+        state->stack[state->count++] = (CIrRetainedTypeFrame){.reference = reference, .allow_unknown = allow_unknown};
+    }
+    state->failed = state->failed || !room;
+    return room;
+}
+
+BUSTER_C_INTERNAL void c_ir_retained_type_complete(CIrRetainedTypeState* state, IrTypeId type)
+{
+    CIrRetainedTypeReference reference = state->stack[state->count - 1].reference;
+    if (reference.recipe && reference.index >= state->begin && reference.index < state->end)
+    {
+        state->memo[reference.index - state->begin] = type;
+    }
+    state->last = type;
+    state->count -= 1;
+    state->failed = state->failed || type.value == IR_ID_UNDERLYING_INVALID;
+}
+
+BUSTER_C_INTERNAL CIrRetainedTypeState* c_ir_retained_type_begin(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame,
+                                                                 CIrRetainedTypeReference reference)
+{
+    CAstTypeRecipe const* recipe = reference.recipe ? builder->syntax_facts->recipes + reference.index : 0;
+    u32 begin = recipe ? recipe->recipe_begin : 0;
+    u32 end = recipe ? recipe->recipe_end : 0;
+    u64 capacity = (u64)builder->parse.type_count + end - begin + 64;
+    Arena* arena = builder->temporary_arena;
+    u64 bytes = sizeof(CIrRetainedTypeState) + capacity * sizeof(CIrRetainedTypeFrame) + (u64)(end - begin) * sizeof(IrTypeId) + 64;
+    bool room = arena && capacity <= UINT32_MAX && arena->position <= arena->reserved_size && bytes <= arena->reserved_size - arena->position;
+    CIrRetainedTypeState* state = room ? arena_allocate(arena, CIrRetainedTypeState, 1) : 0;
+    if (state)
+    {
+        *state = (CIrRetainedTypeState){.stack = arena_allocate(arena, CIrRetainedTypeFrame, capacity),
+                                      .memo = arena_allocate(arena, IrTypeId, end - begin),
+                                      .last = IR_TYPE_ID_INVALID, .begin = begin, .end = end, .capacity = (u32)capacity};
+        memset(state->memo, 0xff, sizeof(IrTypeId) * (end - begin));
+        c_ir_retained_type_push(state, reference, false);
+        frame->state = state;
+    }
+    else
+    {
+        builder->failure_message = S8("could not reserve retained C type materialization state");
+        builder->failure_token_index = builder->syntax_tree->tokens[frame->node];
+        builder->failure_kind_plus_one = C_DIAGNOSTIC_SOURCE_TOO_LARGE + 1;
+    }
+    return state;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_retained_qualify(CIntegerIrBuilder* builder, CType const* type, IrTypeId plain)
+{
+    return plain.value != IR_ID_UNDERLYING_INVALID && (type->is_atomic || type->is_volatile)
+               ? c_ir_add_qualified_type(builder->program, plain, type->is_atomic, type->is_volatile) : plain;
+}
+
+BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame, CIrRetainedTypeReference reference,
+                                                       CIrRetainedTypeReference base)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    bool admitted = facts != 0;
+    CIrRetainedTypeState* state = (CIrRetainedTypeState*)frame->state;
+    frame->result_type = IR_TYPE_ID_INVALID;
+    if (admitted && !state)
+    {
+        IrTypeId direct = reference.recipe == base.recipe && reference.index == base.index && !reference.recipe &&
+                                  reference.index < builder->parse.type_count ? builder->c_type_ir_map[reference.index] : IR_TYPE_ID_INVALID;
+        if (direct.value != IR_ID_UNDERLYING_INVALID)
+        {
+            frame->result_type = direct;
+        }
+        else
+        {
+            state = c_ir_retained_type_begin(builder, frame, reference);
+            admitted = state != 0;
+            if (state)
+            {
+                state->base = base;
+                state->constructors = base.index != C_AST_FACT_NONE;
+            }
+        }
+    }
+    while (admitted && state && state->count && !state->failed && !builder->queries->has_request)
+    {
+        CIrRetainedTypeFrame* current = state->stack + state->count - 1;
+        CType const* type = c_ir_retained_type(builder, current->reference);
+        CAstTypeRecipe const* recipe = current->reference.recipe ? facts->recipes + current->reference.index : 0;
+        if (!type)
+        {
+            state->failed = true;
+        }
+        else if (!current->stage)
+        {
+            IrTypeId cached = current->reference.recipe && current->reference.index >= state->begin && current->reference.index < state->end
+                                  ? state->memo[current->reference.index - state->begin]
+                                  : !current->reference.recipe &&
+                                            (!state->constructors || (current->reference.index == state->base.index && !state->base.recipe) ||
+                                             (type->kind != C_TYPE_POINTER && type->kind != C_TYPE_ARRAY && type->kind != C_TYPE_FUNCTION))
+                                        ? builder->c_type_ir_map[current->reference.index] : IR_TYPE_ID_INVALID;
+            if (cached.value != IR_ID_UNDERLYING_INVALID)
+            {
+                c_ir_retained_type_complete(state, cached);
+            }
+            else if (type->has_unqualified_type && (type->is_atomic || type->is_volatile))
+            {
+                current->qualifier = true;
+                current->stage = 1;
+                CTypeId plain = type->unqualified_type;
+                plain.value = recipe && recipe->has_alignment && !type->is_atomic ? recipe->alignment.source_type_index : plain.value;
+                c_ir_retained_type_push(state, c_ir_retained_nested(builder, current->reference, plain), current->allow_unknown);
+            }
+            else if (type->kind == C_TYPE_POINTER || type->kind == C_TYPE_ARRAY || type->kind == C_TYPE_VECTOR || type->kind == C_TYPE_FUNCTION)
+            {
+                current->stage = 1;
+                CTypeId child = type->kind == C_TYPE_FUNCTION ? type->return_type : type->element_type;
+                c_ir_retained_type_push(state, c_ir_retained_nested(builder, current->reference, child), type->kind == C_TYPE_POINTER);
+            }
+            else
+            {
+                IrTypeId scalar = type->kind == C_TYPE_VOID ? builder->void_type : c_ir_builder_scalar_type(builder, type->kind);
+                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, scalar));
+            }
+        }
+        else if (current->stage == 1)
+        {
+            current->element = state->last;
+            if (current->qualifier)
+            {
+                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, current->element));
+            }
+            else if (type->kind == C_TYPE_POINTER)
+            {
+                IrTypeId pointer = c_ir_add_pointer_type(builder->program, builder->pointer_types, current->element);
+                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, pointer));
+            }
+            else if (type->kind == C_TYPE_VECTOR)
+            {
+                IrType const* element = ir_type_from_id(&builder->program->types, current->element);
+                u64 lanes = 0;
+                u64 storage = 0;
+                u32 alignment = 0;
+                bool valid = element && element->layout.resolved &&
+                             c_vector_type_layout(builder->target, element->layout.size, type->vector_byte_size, &lanes, &storage, &alignment);
+                IrTypeId vector = IR_TYPE_ID_INVALID;
+                for (u32 index = 0; valid && vector.value == IR_ID_UNDERLYING_INVALID && index < builder->program->types.count; index += 1)
+                {
+                    IrType const* candidate = builder->program->types.types + index;
+                    if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == current->element.value && candidate->element_count == lanes &&
+                        candidate->layout.size == storage && candidate->layout.alignment == alignment)
+                    {
+                        vector = candidate->id;
+                    }
+                }
+                vector = valid && vector.value == IR_ID_UNDERLYING_INVALID ? ir_program_add_type(builder->program, (IrType){.name = S8("GNU vector"), .element_type = current->element,
+                                                           .return_type = IR_TYPE_ID_INVALID, .layout = {.size = storage, .alignment = alignment, .resolved = true},
+                                                           .kind = IR_TYPE_VECTOR, .element_count = lanes, .bit_width = (u32)storage * 8}) : vector;
+                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, vector));
+            }
+            else
+            {
+                current->stage = 2;
+                if (type->kind == C_TYPE_FUNCTION)
+                {
+                    current->parameters = arena_allocate(builder->arena, IrTypeId, type->parameter_count);
+                }
+            }
+        }
+        else if (type->kind == C_TYPE_FUNCTION)
+        {
+            if (current->parameter < type->parameter_count)
+            {
+                if (!current->parameter_pending)
+                {
+                    u32 row = type->parameter_start + current->parameter;
+                    bool temporary = recipe && row >= recipe->parameter_row_begin;
+                    u32 index = temporary ? recipe->parameter_recipe_begin + row - recipe->parameter_row_begin : row;
+                    CTypeId source = temporary && index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_PARAMETER
+                                         ? facts->recipes[index].parameter_source_type
+                                         : !temporary && index < builder->parse.parameter_count ? builder->parse.parameters[index].type : C_TYPE_ID_INVALID;
+                    current->parameter_pending = true;
+                    c_ir_retained_type_push(state, c_ir_retained_nested(builder, current->reference, source), false);
+                }
+                else
+                {
+                    IrTypeId parameter = state->last;
+                    IrType const* value = ir_type_from_id(&builder->program->types, parameter);
+                    parameter = value && value->kind == IR_TYPE_FUNCTION ? c_ir_add_pointer_type(builder->program, builder->pointer_types, parameter) : parameter;
+                    current->parameters[current->parameter++] = c_ir_parameter_value_type(builder->program, parameter);
+                    current->parameter_pending = false;
+                }
+            }
+            else
+            {
+                IrTypeId function = ir_program_add_type(builder->program, (IrType){.name = S8("C function"), .element_type = IR_TYPE_ID_INVALID,
+                    .return_type = current->element, .layout = {.size = builder->program->data_layout.pointer.size,
+                                                              .alignment = builder->program->data_layout.pointer.alignment, .resolved = true},
+                    .kind = IR_TYPE_FUNCTION, .parameter_types = current->parameters, .parameter_count = type->parameter_count,
+                    .calling_convention = IR_CALLING_CONVENTION_C, .is_variadic = type->is_variadic, .is_unprototyped = type->is_unprototyped});
+                c_ir_retained_type_complete(state, function);
+            }
+        }
+        else if (type->kind == C_TYPE_ARRAY)
+        {
+            CArrayBound bound = recipe ? recipe->bound : type->array_bound < builder->parse.array_bound_count
+                                                              ? builder->parse.array_bounds[type->array_bound] : (CArrayBound){0};
+            u32 node = recipe ? recipe->bound_node : bound.token_count
+                           ? c_ast_facts_locate(facts, &builder->preprocess, bound.token_start, bound.token_start + bound.token_count) : C_AST_NODE_INVALID;
+            bool constant = recipe ? recipe->count_is_constant : bound.has_inferred_count;
+            u64 count = recipe ? recipe->resolved_count : bound.inferred_count;
+            if (node != C_AST_NODE_INVALID && !current->bound_seen)
+            {
+                CIrNodeQueryFrame answer = {0};
+                bool settled = c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = node, .kind = C_IR_NODE_QUERY_CONSTANT}, &answer);
+                if (settled)
+                {
+                    current->bound_seen = true;
+                    if (!recipe && answer.success && !answer.constant.is_complex && answer.constant.real.kind == C_IR_CONSTANT_INTEGER &&
+                        !answer.constant.real.integer_high)
+                    {
+                        count = answer.constant.real.integer;
+                        constant = true;
+                    }
+                }
+            }
+            if (!builder->queries->has_request)
+            {
+                IrType const* element = ir_type_from_id(&builder->program->types, current->element);
+                bool unknown = !bound.token_count && !bound.has_inferred_count && !bound.is_star;
+                IrTypeId array = constant || (unknown && current->allow_unknown)
+                                     ? c_ir_add_array_type(builder->program, builder->pointer_types, current->element, count) : IR_TYPE_ID_INVALID;
+                if (constant && element && element->layout.resolved && array.value == IR_ID_UNDERLYING_INVALID &&
+                    builder->oversized_array_bound_token_plus_one && bound.token_count &&
+                    !c_array_object_size_valid(builder->program->data_layout.pointer.bit_width, element->layout.size, count) &&
+                    (!*builder->oversized_array_bound_token_plus_one || bound.token_start + 1 < *builder->oversized_array_bound_token_plus_one))
+                {
+                    *builder->oversized_array_bound_token_plus_one = bound.token_start + 1;
+                }
+                if (element && element->layout.resolved && element->layout.alignment && element->layout.size % element->layout.alignment &&
+                    builder->over_aligned_array_name && bound.token_start &&
+                    (!builder->over_aligned_array_name->bracket_token_plus_one || bound.token_start < builder->over_aligned_array_name->bracket_token_plus_one))
+                {
+                    *builder->over_aligned_array_name = (CIrOverAlignedArrayName){.element_size = element->layout.size,
+                        .element_alignment = element->layout.alignment, .bracket_token_plus_one = bound.token_start};
+                }
+                if (array.value == IR_ID_UNDERLYING_INVALID && !unknown && element && (!constant || !element->layout.resolved))
+                {
+                    array = ir_program_add_type(builder->program, (IrType){.kind = IR_TYPE_ARRAY, .element_type = current->element,
+                        .return_type = IR_TYPE_ID_INVALID, .element_count = constant ? count : 0, .layout = {.alignment = element->layout.alignment}});
+                    CIrVlaArrayType* entry = arena_allocate(builder->arena, CIrVlaArrayType, 1);
+                    *entry = (CIrVlaArrayType){.next = builder->vla_array_types, .type = array, .bound = bound};
+                    builder->vla_array_types = entry;
+                }
+                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, array));
+            }
+        }
+    }
+    if (state)
+    {
+        admitted = admitted && !state->failed && !state->count;
+        frame->result_type = admitted ? state->last : IR_TYPE_ID_INVALID;
+    }
+    return admitted;
+}
+
+// The expression projection owns its temporary frame and may request bound
+// children through the same scheduler. Keep this descriptor across yields.
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL bool c_ir_retained_type_fact_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame, u32 node)
+{
+    CAstFacts const* facts = builder->syntax_facts;
+    bool admitted = facts && node < facts->node_count && (facts->flags[node] & C_AST_FACT_TYPED) && !(facts->flags[node] & C_AST_FACT_STRING);
+    frame->node = node;
+    frame->result_type = IR_TYPE_ID_INVALID;
+    if (admitted)
+    {
+        CIrRetainedTypeReference reference = {.index = facts->types[node], .recipe = (facts->flags[node] & C_AST_FACT_RECIPE) != 0};
+        admitted = c_ir_retained_type_materialize(builder, frame, reference, (CIrRetainedTypeReference){.index = C_AST_FACT_NONE});
+    }
+    return admitted;
+}
+
 BUSTER_C_INTERNAL bool c_ir_type_name_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
 {
-    BUSTER_UNUSED(builder);
+    CAstFacts const* facts = builder->syntax_facts;
+    CAst const* ast = builder->syntax_tree;
+    bool admitted = facts && ast && frame->node < facts->node_count && ast->kinds[frame->node] == C_AST_TYPE_NAME &&
+                    (facts->flags[frame->node] & C_AST_FACT_TYPED);
     frame->result_type = IR_TYPE_ID_INVALID;
-    return false;
+    if (admitted)
+    {
+        CIrRetainedTypeReference reference = {.index = facts->types[frame->node],
+                                              .recipe = (facts->flags[frame->node] & C_AST_FACT_RECIPE) != 0};
+        u32 specifiers = c_ast_child_at(ast, frame->node, 0);
+        CIrRetainedTypeReference base = {.index = facts->types[specifiers], .recipe = (facts->flags[specifiers] & C_AST_FACT_RECIPE) != 0};
+        admitted = c_ir_retained_type_materialize(builder, frame, reference, base);
+    }
+    return admitted;
 }
 
 BUSTER_C_INTERNAL bool c_ir_compound_literal_type_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
 {
-    BUSTER_UNUSED(builder);
+    CAst const* ast = builder->syntax_tree;
+    CAstFacts const* facts = builder->syntax_facts;
     frame->result_type = IR_TYPE_ID_INVALID;
-    return false;
+    bool admitted = ast && facts && frame->node < ast->node_count && ast->kinds[frame->node] == C_AST_COMPOUND_LITERAL;
+    CIrNodeQueryFrame type = {0};
+    u32 name = admitted ? c_ast_child_at(ast, frame->node, 0) : C_AST_NODE_INVALID;
+    bool settled = admitted && c_ir_node_query_request(builder, (CIrNodeQueryFrame){.node = name, .kind = C_IR_NODE_QUERY_TYPE_NAME}, &type);
+    if (settled && type.success)
+    {
+        frame->result_type = type.result_type;
+    }
+    else if (settled && name < facts->node_count && (facts->flags[name] & C_AST_FACT_TYPED))
+    {
+        CIrRetainedTypeReference reference = {.index = facts->types[name], .recipe = (facts->flags[name] & C_AST_FACT_RECIPE) != 0};
+        CType const* row = c_ir_retained_type(builder, reference);
+        CInitializerPlan const* plan = c_initializer_plan_find(&builder->parse, c_ast_child_at(ast, frame->node, 1));
+        u64 count = plan && plan->complete && !plan->failed ? plan->inferred_count : 0;
+        bool counted = plan && plan->complete && !plan->failed;
+        if (!counted && frame->node < facts->node_count && (facts->flags[frame->node] & C_AST_FACT_TYPED))
+        {
+            CIrRetainedTypeReference complete = {.index = facts->types[frame->node], .recipe = (facts->flags[frame->node] & C_AST_FACT_RECIPE) != 0};
+            CType const* literal = c_ir_retained_type(builder, complete);
+            CAstTypeRecipe const* recipe = complete.recipe && complete.index < facts->recipe_count ? facts->recipes + complete.index : 0;
+            CArrayBound bound = literal && literal->kind == C_TYPE_ARRAY ? recipe ? recipe->bound
+                                   : literal->array_bound < builder->parse.array_bound_count ? builder->parse.array_bounds[literal->array_bound]
+                                                                                             : (CArrayBound){0} : (CArrayBound){0};
+            counted = bound.has_inferred_count;
+            count = bound.inferred_count;
+        }
+        if (row && row->kind == C_TYPE_ARRAY && counted)
+        {
+            u32 specifiers = c_ast_child_at(ast, name, 0);
+            CIrRetainedTypeReference base = {.index = facts->types[specifiers], .recipe = (facts->flags[specifiers] & C_AST_FACT_RECIPE) != 0};
+            bool built = c_ir_retained_type_materialize(builder, frame, c_ir_retained_nested(builder, reference, row->element_type), base);
+            frame->result_type = built ? c_ir_add_array_type(builder->program, builder->pointer_types, frame->result_type, count) : IR_TYPE_ID_INVALID;
+        }
+    }
+    admitted = settled && frame->result_type.value != IR_ID_UNDERLYING_INVALID;
+    return admitted;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CIrNodeQueryFrame answer = {0};
+    CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_TYPE_NAME};
+    bool settled = builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+                                                 : c_ir_node_query_execute(builder, key, &answer);
+    return settled && answer.success ? answer.result_type : IR_TYPE_ID_INVALID;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type_node(CIntegerIrBuilder* builder, u32 node)
+{
+    CIrNodeQueryFrame answer = {0};
+    CIrNodeQueryFrame key = {.node = node, .kind = C_IR_NODE_QUERY_COMPOUND_TYPE};
+    bool settled = builder->queries->frame_count ? c_ir_node_query_request(builder, key, &answer)
+                                                 : c_ir_node_query_execute(builder, key, &answer);
+    return settled && answer.success ? answer.result_type : IR_TYPE_ID_INVALID;
 }
 
 BUSTER_C_INTERNAL bool c_ir_expression_type_node_attempt(CIntegerIrBuilder* builder, CIrNodeQueryFrame* frame)
@@ -4736,13 +5137,10 @@ BUSTER_C_INTERNAL bool c_ir_node_query_attempt(CIntegerIrBuilder* builder, CIrNo
 
 BUSTER_C_INTERNAL bool c_ir_query_type_name(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer, IrTypeId* type_out)
 {
-    CIrQueryFrame result = {0};
-    if (!c_ir_query_request(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_NAME, .flag = allow_function_pointer}, &result))
-    {
-        return false;
-    }
-    *type_out = result.result_type;
-    return result.success;
+    BUSTER_UNUSED(allow_function_pointer);
+    u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
+    *type_out = c_ir_type_name_node(builder, node);
+    return type_out->value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_array_bound(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
@@ -4794,22 +5192,13 @@ BUSTER_C_INTERNAL bool c_ir_query_compound_element_count(CIntegerIrBuilder* buil
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_compound_type(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open, u32 initializer_close,
-                                                   IrTypeId* type_out)
+                                                 IrTypeId* type_out)
 {
-    CIrQueryFrame result = {0};
-    CIrQueryFrame key = {
-        .start = type_start,
-        .end = type_end,
-        .third = initializer_open,
-        .fourth = initializer_close,
-        .kind = C_IR_QUERY_FRAME_COMPOUND_TYPE,
-    };
-    if (!c_ir_query_request(builder, key, &result))
-    {
-        return false;
-    }
-    *type_out = result.result_type;
-    return result.success;
+    BUSTER_UNUSED(type_end);
+    BUSTER_UNUSED(initializer_open);
+    u32 node = type_start ? c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, type_start - 1, initializer_close + 1) : C_AST_NODE_INVALID;
+    *type_out = c_ir_compound_literal_type_node(builder, node);
+    return type_out->value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_prediction(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
@@ -32486,62 +32875,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, 
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
-    {
-        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
-        if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
-        {
-            CTypeId c_type = builder->parse.entities[entity.value].type;
-            if (c_type.value < builder->parse.type_count)
-            {
-                IrTypeId direct = builder->c_type_ir_map[c_type.value];
-                if (direct.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    CType* c_type_value = builder->parse.types + c_type.value;
-                    if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
-                        builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
-                    {
-                        direct = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
-                    }
-                }
-                if (direct.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    return direct;
-                }
-            }
-        }
-    }
-    CIrQueryFrame result = {0};
-    if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_NAME, .flag = true}, &result) || !result.success)
-    {
-        if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
-        {
-            CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
-            if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
-            {
-                CTypeId c_type = builder->parse.entities[entity.value].type;
-                if (c_type.value < builder->parse.type_count)
-                {
-                    IrTypeId fallback = builder->c_type_ir_map[c_type.value];
-                    if (fallback.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        CType* c_type_value = builder->parse.types + c_type.value;
-                        if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
-                            builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
-                        {
-                            fallback = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
-                        }
-                    }
-                    if (fallback.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return fallback;
-                    }
-                }
-            }
-        }
-        return IR_TYPE_ID_INVALID;
-    }
-    return result.result_type;
+    u32 node = c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, start, end);
+    return c_ir_type_name_node(builder, node);
 }
 
 BUSTER_C_INTERNAL bool c_ir_compound_literal_element_count_attempt(CIntegerIrBuilder* builder, u32 open, u32 close, u64* count_out)
@@ -32686,19 +33021,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type_attempt(CIntegerIrBuilder*
 
 BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open, u32 initializer_close)
 {
-    CIrQueryFrame result = {0};
-    CIrQueryFrame root = {
-        .start = type_start,
-        .end = type_end,
-        .third = initializer_open,
-        .fourth = initializer_close,
-        .kind = C_IR_QUERY_FRAME_COMPOUND_TYPE,
-    };
-    if (!c_ir_query_execute(builder, root, &result) || !result.success)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    return result.result_type;
+    BUSTER_UNUSED(type_end);
+    BUSTER_UNUSED(initializer_open);
+    u32 node = type_start ? c_ast_facts_locate(builder->syntax_facts, &builder->preprocess, type_start - 1, initializer_close + 1) : C_AST_NODE_INVALID;
+    return c_ir_compound_literal_type_node(builder, node);
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrValueId previous, CToken token, bool prefix)
