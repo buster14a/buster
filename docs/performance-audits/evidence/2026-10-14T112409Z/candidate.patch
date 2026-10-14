@@ -1,0 +1,395 @@
+diff --git a/docs/compiler-lifetime.md b/docs/compiler-lifetime.md
+index 779975c7a..bc10079b2 100644
+--- a/docs/compiler-lifetime.md
++++ b/docs/compiler-lifetime.md
+@@ -57,6 +57,20 @@ together for the same reason.
+ 
+ The registered Linux x86-64 regression also runs the ordinary `-E -o` path in a fresh process. After prewarming and parsing, the child measures its virtual size and applies a checked `RLIMIT_AS` allowance for the 31 GiB preprocessing phase arena, three 1 GiB preprocessing base arenas, an 8 GiB macro arena, and 2 GiB of setup headroom. Its one in-memory input uses the driver's single-input fast path, which executes in the already measured caller/test arena; it does not reserve a new 32 GiB compiler unit arena. The bound must leave the phase and preprocessing base reservations available while a macro arena reservation fails; the diagnostic identifies whether the failed request was the 8 GiB argument arena or the 8 GiB expansion arena. The child records the measured baseline, each reservation allowance, the planned limit, and the applied `RLIMIT_AS` in the captured diagnostic stream. The parent requires that exact macro-reservation diagnostic and exit status 1 without a signal, and verifies that preprocessing published no output file; an unlimited child control must publish exactly the token sequence `int value = (7+1);` (whitespace ignored), so the original `F(7)` invocation cannot satisfy the control.
+ 
++**Macro text-line output.** Root rescan nodes are allocated in stable batches.
++Ordinary text-line wrapping and those nodes use an available thread scratch
++arena until `c_preprocess_process_expanded_line` has written final tokens and
++shapes, copied foreign spellings, recorded source-map origins and applied
++pragma markers. Only then is that line's storage rewound, on success or failure.
++Macro definitions, stamps, diagnostic messages and spellings keep their existing
++owners. If the caller occupies both scratch arenas with the result and phase,
++the line uses phase storage without rewinding it. Directive expansion keeps
++phase ownership. Neither choice changes the sealed result's lifetime.
++
++The registered `c_macro_line_output_tests` checks allocation batching, equal
++per-line scratch size across increasing line counts, exact tokens and macro
++locations after scratch overwrite, and a separate caller-owned phase arena.
++
+ **Semantic layout queries.** `c_parse_type_layout_core` allocates its
+ query-local state (the arrays sized to the whole type table, bound token copies,
+ local spelling spaces, evaluation buffers) in the machine's phase arena above a
+diff --git a/src/buster/lib/compiler/frontend/c/c.h b/src/buster/lib/compiler/frontend/c/c.h
+index 921b3ae3d..897ff09ae 100644
+--- a/src/buster/lib/compiler/frontend/c/c.h
++++ b/src/buster/lib/compiler/frontend/c/c.h
+@@ -495,6 +495,11 @@ struct CPreprocessDetail
+     // for the scaling fixtures. Tests-disabled builds neither store nor
+     // maintain it.
+     u64 macro_expansion_peak_bytes;
++    // Root output allocation batches versus the token nodes they contain.
++    u64 macro_output_batch_count;
++    u64 macro_output_node_count;
++    // Largest ordinary text-line wrapping/output run before its rewind.
++    u64 macro_line_peak_bytes;
+ #endif
+     u32 lexed_file_count;
+     // Caller-arena-owned copy that survives option-array expiry through
+diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
+index f5d7c32c7..2746a3434 100644
+--- a/src/buster/lib/compiler/frontend/c/c_source.c
++++ b/src/buster/lib/compiler/frontend/c/c_source.c
+@@ -5722,6 +5722,28 @@ struct CPreprocessTokenNode
+     CPpToken token;
+ };
+ 
++// Root rescan output is consumed as one list. Allocate its nodes in batches;
++// no pointer into a batch moves when the next batch is appended.
++enum
++{
++    C_PREPROCESS_OUTPUT_INITIAL_CAPACITY = 128,
++    C_PREPROCESS_OUTPUT_MAXIMUM_CAPACITY = 1024,
++};
++
++typedef struct CPreprocessOutput CPreprocessOutput;
++struct CPreprocessOutput
++{
++    Arena* arena;
++    CPreprocessTokenNode* first;
++    CPreprocessTokenNode* last;
++    CPreprocessTokenNode* available;
++    u32 remaining;
++    u32 batch_capacity;
++#if BUSTER_INCLUDE_TESTS
++    u64 batch_count;
++#endif
++};
++
+ // The preprocessed output stream. Tokens land in their final slots as lines
+ // resolve: the stream is the tail of a dedicated commit-on-demand arena
+ // (created beside the spelling arena in c_preprocess) that nothing else
+@@ -5810,8 +5832,8 @@ typedef struct CMacroExpansionContinuation CMacroExpansionContinuation;
+ // (they are copied by value), so c_macro_expansion_release rewinds both arenas
+ // to the positions taken before the invocation began. Nothing that outlives
+ // the invocation may live here: diagnostics, formatted messages, interned
+-// symbols, stamps and the root context's output nodes stay in the phase arena,
+-// and spellings in the spelling space. `argument_arena` holds only the raw
++// symbols and stamps stay in the phase arena, root output in the caller's
++// output arena, and spellings in the spelling space. `argument_arena` holds only the raw
+ // argument token run of the innermost live invocations, so that it can give
+ // consumed arguments back from its top; `expansion_arena` holds the argument
+ // records, continuations, argument contexts and their output runs.
+@@ -5852,8 +5874,7 @@ struct CMacroExpansionContext
+     // `output_tokens` instead: one contiguous run in the expansion arena that
+     // becomes the argument's expanded tokens in place, so no node and no copy
+     // is made per token. `output_count` counts either form.
+-    CPreprocessTokenNode* first_output;
+-    CPreprocessTokenNode* last_output;
++    CPreprocessOutput* output;
+     CPpToken* output_tokens;
+     u64 output_count;
+ };
+@@ -6546,21 +6567,30 @@ BUSTER_C_INTERNAL void c_preprocess_diagnostic_copy(Arena* arena, CPreprocessRes
+     }
+ }
+ 
+-BUSTER_C_INTERNAL void c_preprocess_output_push(Arena* arena, CPreprocessTokenNode** first, CPreprocessTokenNode** last, CPpToken token, u64* count)
++BUSTER_C_INTERNAL void c_preprocess_output_push(CPreprocessOutput* output, CPpToken token)
+ {
+-    CPreprocessTokenNode* node = arena_allocate(arena, CPreprocessTokenNode, 1);
++    if (!output->remaining)
++    {
++        output->available = arena_allocate(output->arena, CPreprocessTokenNode, output->batch_capacity);
++        output->remaining = output->batch_capacity;
++        output->batch_capacity = BUSTER_MIN(output->batch_capacity * 2, C_PREPROCESS_OUTPUT_MAXIMUM_CAPACITY);
++#if BUSTER_INCLUDE_TESTS
++        output->batch_count += 1;
++#endif
++    }
++    CPreprocessTokenNode* node = output->available++;
++    output->remaining -= 1;
+     node->next = 0;
+     node->token = token;
+-    if (*last)
++    if (output->last)
+     {
+-        (*last)->next = node;
++        output->last->next = node;
+     }
+     else
+     {
+-        *first = node;
++        output->first = node;
+     }
+-    *last = node;
+-    *count += 1;
++    output->last = node;
+ }
+ 
+ #define C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE BUSTER_GB(8)
+@@ -6647,7 +6677,7 @@ BUSTER_C_INTERNAL void c_macro_expansion_release(CMacroExpansionStorage const* s
+ // One token onto an argument context's output run. Nothing else allocates from
+ // the expansion arena between two pushes to the same context: an invocation
+ // found in between is released before the context runs again.
+-BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* arena, Arena* expansion_arena, CMacroExpansionContext* context, CPpToken token)
++BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* expansion_arena, CMacroExpansionContext* context, CPpToken token)
+ {
+     if (context->continuation)
+     {
+@@ -6662,7 +6692,8 @@ BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* arena, Arena* expansio
+     }
+     else
+     {
+-        c_preprocess_output_push(arena, &context->first_output, &context->last_output, token, &context->output_count);
++        c_preprocess_output_push(context->output, token);
++        context->output_count += 1;
+     }
+ }
+ 
+@@ -7823,17 +7854,25 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, Arena* scratch, CSpelli
+ // `frame` and `file` locate the input's unstamped tokens on demand into
+ // `stamps` (see CPpToken.stamp); null when every input token is stamped
+ // already.
+-BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage* storage, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
++BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, Arena* output_arena, CMacroExpansionStorage* storage, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
+                                              struct CPreprocessSourceFrame* frame, u32 file, CPpStampTable* stamps, CPpToken* input, u32 input_count,
+                                              CPreprocessTokenNode** first_output, CPreprocessTokenNode** last_output, u64* output_count, u32 expansion_limit,
+                                              CPreprocessResult* result, CPreprocessPragmaContext* pragma_context)
+ {
+-    CMacroExpansionContext* context = arena_allocate(arena, CMacroExpansionContext, 1);
+-    *context = (CMacroExpansionContext){
+-        .first_output = *first_output,
+-        .last_output = *last_output,
++#if BUSTER_INCLUDE_TESTS
++    u64 initial_output_count = *output_count;
++#endif
++    CPreprocessOutput output = {
++        .arena = output_arena,
++        .first = *first_output,
++        .last = *last_output,
++        .batch_capacity = BUSTER_MIN(BUSTER_MAX(input_count, 1u), C_PREPROCESS_OUTPUT_INITIAL_CAPACITY),
++    };
++    CMacroExpansionContext root_context = {
++        .output = &output,
+         .output_count = *output_count,
+     };
++    CMacroExpansionContext* context = &root_context;
+     CMacroExpansionTask local_tasks[C_MACRO_EXPANSION_LOCAL_TASK_CAPACITY];
+     CMacroExpansionTaskStack tasks = {.data = local_tasks, .capacity = BUSTER_ARRAY_LENGTH(local_tasks)};
+     c_macro_expansion_tasks_push(arena, &tasks, input, input_count, 0, 0);
+@@ -7847,8 +7886,8 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
+             CMacroExpansionContinuation* continuation = context->continuation;
+             if (!continuation)
+             {
+-                *first_output = context->first_output;
+-                *last_output = context->last_output;
++                *first_output = output.first;
++                *last_output = output.last;
+                 *output_count = context->output_count;
+                 done = true;
+             }
+@@ -7954,7 +7993,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
+                         c_preprocess_diagnostic_push(arena, result, c_pp_stamp_location(stamps, token.stamp), C_DIAGNOSTIC_INVALID_MACRO_INVOCATION,
+                                                      S8("'__VA_OPT__' can only appear in the replacement list of a variadic macro"));
+                     }
+-                    c_macro_context_output_push(arena, storage->expansion_arena, context, token);
++                    c_macro_context_output_push(storage->expansion_arena, context, token);
+                 }
+                 else
+                 {
+@@ -7995,7 +8034,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
+                             // Nothing was collected. The mark is dropped before
+                             // the push so the token's slot is not rewound with it.
+                             scoped = false;
+-                            c_macro_context_output_push(arena, storage->expansion_arena, context, token);
++                            c_macro_context_output_push(storage->expansion_arena, context, token);
+                         }
+                         else if (argument_count != macro->definition.parameter_count)
+                         {
+@@ -8055,6 +8094,10 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
+             }
+         }
+     }
++#if BUSTER_INCLUDE_TESTS
++    result->detail->macro_output_batch_count += output.batch_count;
++    result->detail->macro_output_node_count += root_context.output_count - initial_output_count;
++#endif
+     return ok;
+ }
+ 
+@@ -9044,7 +9087,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
+     if (valid && preprocessor_arithmetic)
+     {
+         CMacroExpansionStorage expansion_storage = {.conditional_expression = true};
+-        valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
++        valid = c_preprocess_expand(arena, arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
+                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
+         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
+     }
+@@ -12700,7 +12743,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
+ // fields still follow the explicit rehoming rules below.
+ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
+ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
+-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 664 + 32 * BUSTER_INCLUDE_TESTS);
++BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 664 + 56 * BUSTER_INCLUDE_TESTS);
+ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
+ BUSTER_CT_CHECK(sizeof(CPragmaState) == 8);
+ 
+@@ -14079,6 +14122,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+         .base = (CToken*)((char8*)token_arena + arena_minimum_position),
+         .shape_base = (CTokenShape*)((char8*)token_shape_arena + arena_minimum_position),
+     };
++    Arena* line_conflicts[] = {arena, result_arena};
++    Arena* line_arena = thread_context_get_scratch(line_conflicts, BUSTER_ARRAY_LENGTH(line_conflicts));
+     u64 output_count = 0;
+     COutputSpacingBlock* first_spacing = 0;
+     COutputSpacingBlock* last_spacing = 0;
+@@ -14372,7 +14417,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+                         CPreprocessTokenNode* first_line = 0;
+                         CPreprocessTokenNode* last_line = 0;
+                         line_token_count = 0;
+-                        line_expanded = c_preprocess_expand(arena, &expansion_storage, space, symbol_table, first_macro, 0, 0, &stamps,
++                        line_expanded = c_preprocess_expand(arena, arena, &expansion_storage, space, symbol_table, first_macro, 0, 0, &stamps,
+                                                             c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end),
+                                                             (u32)(line_end - token_index), &first_line, &last_line, &line_token_count,
+                                                             expansion_limit, &result, 0);
+@@ -14469,7 +14514,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+                     bool extra_include_tokens = include_expanded && include_name_count < raw_include_count;
+                     if (!include_expanded)
+                     {
+-                        include_expanded = c_preprocess_expand(arena, &expansion_storage, space, symbol_table, first_macro, 0, 0, &stamps,
++                        include_expanded = c_preprocess_expand(arena, arena, &expansion_storage, space, symbol_table, first_macro, 0, 0, &stamps,
+                                                                c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end), raw_include_count,
+                                                                &first_include, &last_include, &include_token_count, expansion_limit, &result, 0);
+                         CToken* include_tokens = arena_allocate(arena, CToken, include_token_count);
+@@ -14644,7 +14689,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+                         CPreprocessTokenNode* first_pragma = 0;
+                         CPreprocessTokenNode* last_pragma = 0;
+                         u64 pragma_token_count = 0;
+-                        pragma_expanded = c_preprocess_expand(arena, &expansion_storage, space, symbol_table, first_macro, 0, 0, &stamps,
++                        pragma_expanded = c_preprocess_expand(arena, arena, &expansion_storage, space, symbol_table, first_macro, 0, 0, &stamps,
+                                                               c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end),
+                                                               (u32)(line_end - token_index), &first_pragma, &last_pragma, &pragma_token_count,
+                                                               expansion_limit, &result, 0);
+@@ -14930,8 +14975,13 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+         else
+         {
+             u32 token_file = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
++            // Wrapping and root output live only through this materialization.
++            // Persistent macro state, stamps, messages and spellings keep their
++            // existing owners. A caller using both scratch arenas falls back
++            // to phase storage, where a rewind would also discard live state.
++            TemporalArena line_storage = arena_begin_temporal(line_arena ? line_arena : arena);
+             u64 wrapped_capacity = logical_end - token_index;
+-            CPpToken* wrapped_tokens = arena_allocate(arena, CPpToken, wrapped_capacity);
++            CPpToken* wrapped_tokens = arena_allocate(line_storage.arena, CPpToken, wrapped_capacity);
+             u32 wrapped_count = 0;
+             stamps.count = 0;
+             if (source_conditionals)
+@@ -14992,7 +15042,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+             CPreprocessTokenNode* first_line = 0;
+             CPreprocessTokenNode* last_line = 0;
+             u64 line_output_count = 0;
+-            expansion_ok = c_preprocess_expand(arena, &expansion_storage, space, symbol_table, first_macro, source_frame, token_file, &stamps, wrapped_tokens, wrapped_count, &first_line, &last_line,
++            expansion_ok = c_preprocess_expand(arena, line_storage.arena, &expansion_storage, space, symbol_table, first_macro, source_frame, token_file, &stamps, wrapped_tokens, wrapped_count, &first_line, &last_line,
+                                                &line_output_count, expansion_limit, &result, &pragma_context);
+             if (expansion_ok)
+             {
+@@ -15016,6 +15066,14 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
+                 }
+                 c_preprocess_process_expanded_line(pragma_context, space, &map, &stamps, first_line, line_output_count, &token_stream, &output_count, spacing);
+             }
++#if BUSTER_INCLUDE_TESTS
++            result.detail->macro_line_peak_bytes = BUSTER_MAX(result.detail->macro_line_peak_bytes,
++                                                              line_storage.arena->position - line_storage.position);
++#endif
++            if (line_arena)
++            {
++                scratch_end(line_storage);
++            }
+         }
+         source_frame->token_index = logical_end;
+         if (!expansion_ok)
+diff --git a/src/buster/tests/compiler/frontend/c/macro_conditional_test.c b/src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+index a7a75c6e2..650b1ba70 100644
+--- a/src/buster/tests/compiler/frontend/c/macro_conditional_test.c
++++ b/src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+@@ -210,6 +210,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_storage_scaling_tests(UnitTe
+     return result;
+ }
+ 
++// Root output crosses several allocation batches, then its storage is reused
++// by the next line. Final tokens and their invocation locations must survive.
++// A caller-owned phase arena must remain excluded from that reuse too.
++BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_line_output_tests(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    u64 line_counts[] = {16, 128};
++    for (u32 supplied_phase = 0; supplied_phase < 2; supplied_phase += 1)
++    {
++        u64 peaks[BUSTER_ARRAY_LENGTH(line_counts)] = {0};
++        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(line_counts); size_index += 1)
++        {
++            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
++            String8 replacement = c_macro_storage_nest(temporary.arena, S8("x+"), S8("x"), S8(""), 64);
++            String8 lines = c_macro_storage_nest(temporary.arena, S8("R(7);\n"), S8(""), S8(""), line_counts[size_index]);
++            String8 source = string_format(temporary.arena, S8("#define R(x) {S8}\n{S8}"), replacement, lines);
++            String8 expression = c_macro_storage_nest(temporary.arena, S8("7+"), S8("7;"), S8(""), 64);
++            String8 expected = c_macro_storage_nest(temporary.arena, expression, S8(""), S8(""), line_counts[size_index]);
++            Arena* phase = supplied_phase ? arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)}) : 0;
++            CPreprocessResult actual = c_preprocess(temporary.arena, source, (CPreprocessOptions){
++                .source_path = S8("line-output.c"),
++                .phase_arena = phase,
++                .retain_output_spacing = true,
++            });
++            BUSTER_TEST(arguments, actual.diagnostic_count == 0);
++            BUSTER_TEST(arguments, actual.detail->preprocessed.expansions == line_counts[size_index]);
++            BUSTER_TEST(arguments, actual.detail->macro_output_node_count == line_counts[size_index] * 130);
++            BUSTER_TEST(arguments, actual.detail->macro_output_batch_count * 8 < actual.detail->macro_output_node_count);
++            peaks[size_index] = actual.detail->macro_line_peak_bytes;
++            BUSTER_TEST(arguments, peaks[size_index] != 0);
++            // Overwrite the reusable output scratch after preprocessing as
++            // well as between its lines; only the sealed result is inspected.
++            Arena* conflicts[] = {temporary.arena, phase};
++            Arena* line_arena = thread_context_get_scratch(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
++            if (line_arena)
++            {
++                TemporalArena overwrite = arena_begin_temporal(line_arena);
++                memset(arena_allocate(line_arena, u8, peaks[size_index]), 0xa5, peaks[size_index]);
++                scratch_end(overwrite);
++            }
++            UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual, expected);
++            result.test_count += compared.test_count;
++            result.succeeded_test_count += compared.succeeded_test_count;
++            for (u32 line = 0; line < line_counts[size_index]; line += 1)
++            {
++                CSourceLocation location = c_preprocess_token_location(&actual, actual.tokens[line * 130]);
++                BUSTER_TEST(arguments, location.line == line + 2);
++                BUSTER_STRING_TEST(arguments, actual.files[location.file], S8("line-output.c"));
++            }
++            if (phase)
++            {
++                arena_destroy(phase, 1);
++            }
++            c_test_scratch_end(temporary);
++        }
++        BUSTER_TEST(arguments, peaks[0] == peaks[1]);
++    }
++    return result;
++}
++
+ // Definition-owned argument demand is reused, never a previous expansion's
+ // tokens or stamps. Count checks pin both omitted work and once-only prescan.
+ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArguments* arguments)
+@@ -2139,6 +2199,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
+     C_TEST_BOUNDED_FIXTURE(arguments, c_trigraph_preprocess_tests);
+     C_TEST_BOUNDED_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
+     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
++    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_line_output_tests);
+     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_reservation_tests);
+     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_rlimit_tests);
+     C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_demand_tests);
