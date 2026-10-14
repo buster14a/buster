@@ -13590,6 +13590,56 @@ BUSTER_C_SHARED bool c_initializer_has_top_level_comma(CToken* tokens, u32 start
     return false;
 }
 
+// Type-taking builtins already name their result type. Publication can read
+// an existing TYPE_NAME fact or a bound typedef directly; it must not invent
+// an integer lane selection merely because the generic call query declines.
+BUSTER_C_INTERNAL CTypeId c_parse_initializer_builtin_result_type(CTypeParseMachine* machine, CParseResult* result,
+                                                                    CPreprocessResult const* preprocess, CScopeId scope, u32 start, u32 end)
+{
+    CTypeId type = C_TYPE_ID_INVALID;
+    if (machine->ast_facts && machine->syntax_tree)
+    {
+        CAst const* ast = machine->syntax_tree;
+        u32 node = c_ast_facts_locate(machine->ast_facts, preprocess, start, end);
+        if (node < ast->node_count && ast->kinds[node] == C_AST_CALL && c_ast_child_count(ast, node) == 3)
+        {
+            u32 callee = c_ast_child_at(ast, node, 0);
+            if (ast->kinds[callee] == C_AST_IDENTIFIER)
+            {
+                CToken token = preprocess->tokens[ast->tokens[callee]];
+                String8 name = c_token_spelling(preprocess->spelling_base, token);
+                CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
+                bool first_type = generic.operation != C_VENDOR_GENERIC_NONE && generic.result == C_VENDOR_GENERIC_RESULT_FIRST_TYPE;
+                bool second_type = c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_VA_ARG ||
+                    (generic.operation != C_VENDOR_GENERIC_NONE && generic.result == C_VENDOR_GENERIC_RESULT_SECOND_TYPE);
+                u32 type_node = first_type || second_type ? c_ast_child_at(ast, node, first_type ? 1 : 2) : C_AST_NODE_INVALID;
+                if (type_node < ast->node_count && ast->kinds[type_node] == C_AST_TYPE_NAME)
+                {
+                    u32 row = machine->ast_facts->types[type_node];
+                    if ((machine->ast_facts->flags[type_node] & C_AST_FACT_TYPED) && !(machine->ast_facts->flags[type_node] & 0x80u) && row < result->type_count)
+                        type = (CTypeId){row};
+                    else if (c_ast_child_count(ast, type_node) == 1)
+                    {
+                        u32 specifiers = c_ast_child_at(ast, type_node, 0);
+                        if (ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && c_ast_child_count(ast, specifiers) == 1)
+                        {
+                            u32 specifier = c_ast_child_at(ast, specifiers, 0);
+                            if (ast->kinds[specifier] == C_AST_TYPEDEF_NAME)
+                            {
+                                CEntityId entity = c_parse_lookup_entity_token(result, preprocess->spelling_base, scope,
+                                    &preprocess->tokens[ast->tokens[specifier]]);
+                                if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
+                                    type = result->entities[entity.value].type;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return type;
+}
+
 // An aggregate expression initializes the current subobject whole only when
 // its type is compatible. Otherwise brace elision must descend through the
 // enclosing record or array. Whole-array admission requires an array expression.
@@ -13599,8 +13649,14 @@ BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypePa
 {
     CTypeId expression_type = C_TYPE_ID_INVALID;
     bool consumes_whole = false;
-    if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &expression_type) &&
-        expression_type.value < result->type_count && object_type.value < result->type_count)
+    bool typed = c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &expression_type);
+    CTypeId builtin_type = c_parse_initializer_builtin_result_type(machine, result, &preprocess, scope, start, end);
+    if (builtin_type.value < result->type_count)
+    {
+        expression_type = builtin_type;
+        typed = true;
+    }
+    if (typed && expression_type.value < result->type_count && object_type.value < result->type_count)
     {
         // The query can grow the type table; fetch both kinds afterward.
         CTypeKind expression_kind = result->types[expression_type.value].kind;

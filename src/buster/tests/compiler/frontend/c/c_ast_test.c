@@ -6463,6 +6463,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                         "int matrix[2][2] = { 1, 2, 3, 4 };\n"
                         "char* names[] = { \"argument\" }; char letters[] = { \"abc\" };\n"
                         "double _Complex complex_value = { 1.0, 2.0 };\n"
+                        "typedef unsigned int V __attribute__((vector_size(32))); union U { V v; unsigned int lanes[8]; };\n"
+                        "unsigned int g(unsigned int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
+                        "union U u = { .v = __builtin_va_arg(ap, V) }; __builtin_va_end(ap); return u.lanes[0]; }\n"
                         "int f(void) { struct S local = { .y = 1, 2 }; int conditional[] = { 1 ? 2, 3 : 4, 5 };\n"
                         "return ((int[]){ 3, 4 })[0] + local.z + conditional[1]; }\n");
     CPreprocessResult preprocess = c_ast_test_preprocess(arena, source, C_PREPROCESS_DIALECT_GNU17);
@@ -6512,6 +6515,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_initializer_plans(UnitTestArgument
                 BUSTER_TEST(arguments, value.node < built.ast.node_count && value.type.value < analysis.type_count &&
                                        value.path_plus_one <= plan->path_count);
                 values += (value.flags & C_INITIALIZER_ITEM_VALUE) != 0;
+                if ((value.flags & C_INITIALIZER_ITEM_VALUE) && value.type.value < analysis.type_count && analysis.types[value.type.value].kind == C_TYPE_VECTOR)
+                    BUSTER_TEST(arguments, value.path_plus_one && plan->paths[value.path_plus_one - 1].member != UINT32_MAX);
                 if (value.flags & (C_INITIALIZER_ITEM_LIST_BEGIN | C_INITIALIZER_ITEM_LIST_END))
                     BUSTER_TEST(arguments, value.paired_item_plus_one != 0 && value.paired_item_plus_one <= plan->item_count &&
                         plan->items[value.paired_item_plus_one - 1].node == value.node);
