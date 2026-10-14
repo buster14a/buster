@@ -184,3 +184,4 @@ request: issue #1125 owner-requested 9700X measurement of the x86-64 per-process
 profile: process-floor-v1
 request: issue #1295 owner-requested exact-head comparison (acceptance: matched 9700X time-to-artifact for the per-invocation x86 prewarm floor); lazy opcode rows and direct partition-walk decode on top of merged #3435/#3542
 request: issue #1295 owner-requested exact-head comparison, renewed for the docs-only head after review 5484128221 (code identical to 929393b1); matched 9700X time-to-artifact for the x86 prewarm floor
+request: issue #1295 owner-requested exact-head comparison for the lazy opcode rows prepared under machine_x64_exact_entry_claim (lane-safe after #53), merged with main f640ce24; matched 9700X time-to-artifact for the x86 prewarm floor
