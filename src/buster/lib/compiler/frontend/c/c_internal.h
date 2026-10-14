@@ -270,9 +270,6 @@ struct CParsePrimitiveSpelling
 BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
-// A deferred _Static_assert row's semantic verdict, for lowering when
-// validation left the row unchecked; see CStaticAssertVerdict.
-BUSTER_C_EXTERN CStaticAssertVerdict c_semantic_static_assert_verdict(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 row);
 // Size and alignment of an unevaluated sizeof/_Alignof operand whose type is
 // storage-only __fp16 or built from it, which has no canonical IR type.
 BUSTER_C_EXTERN bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
@@ -309,8 +306,6 @@ BUSTER_C_EXTERN bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delim
 BUSTER_C_EXTERN void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena,
                                                   CPreprocessResult preprocess, CParseResult* result,
                                                   CDeclaration declaration, CScopeId scope);
-BUSTER_C_EXTERN String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
-                                                                 CDeclaration declaration, CDiagnosticKind kind);
 BUSTER_C_EXTERN void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena,
                                                  CParseResult* result, CPreprocessResult preprocess,
                                                  u32 declaration_index);

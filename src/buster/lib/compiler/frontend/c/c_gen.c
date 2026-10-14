@@ -60300,7 +60300,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     queries.chain_bucket = arena_allocate(temporary_arena, u32, query_frame_capacity);
     queries.chain_mask = (u32)(chain_bucket_count - 1);
     // One per declaration for the lowering failures, one per entity for the
-    // definition failures, one per deferred static assertion, a second per
+    // definition failures, a second per
     // declaration for an __attribute__((alias)) naming a target this unit
     // never declares -- which is diagnosed before the entity's own pass runs
     // and so cannot share that budget -- one per type for the type table
@@ -61495,42 +61495,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                      : (CSourceLocation){0},
             .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
         };
-    }
-    // Deferred assertions are the semantic typer's to decide (#2531). Through
-    // c_analyze_with_options validation has already stored every verdict and
-    // lowering runs only when each one held; the model-building entry points
-    // leave the rows unchecked and the same semantic evaluator answers them
-    // here. Lowering never evaluates an assertion with its own typer, so
-    // -fsyntax-only and -c cannot disagree on one.
-    for (u32 deferred_index = 0; deferred_index < parse.deferred_static_assert_count; deferred_index += 1)
-    {
-        CDeferredStaticAssert deferred = parse.deferred_static_asserts[deferred_index];
-        CStaticAssertVerdict verdict = parse.deferred_static_assert_verdicts ? (CStaticAssertVerdict)parse.deferred_static_assert_verdicts[deferred_index]
-                                                                             : C_STATIC_ASSERT_UNCHECKED;
-        if (verdict == C_STATIC_ASSERT_UNCHECKED)
-        {
-            // The constant builder's copy is the newest: its own identity
-            // queries may have appended rows past parse's counts.
-            CParseResult query = constant_builder.parse;
-            verdict = c_semantic_static_assert_verdict(temporary_arena, preprocess, &query, deferred_index);
-        }
-        if (verdict != C_STATIC_ASSERT_HOLDS && result.diagnostic_count < parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
-        {
-            // An oversized measured type has no size diagnostic of its own on
-            // this path, so it is reported as a non-constant assertion.
-            CDiagnosticKind kind = verdict == C_STATIC_ASSERT_FAILED ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
-            CDeclaration declaration = {
-                .token_start = deferred.token_start,
-                .token_count = deferred.token_count,
-                .scope = deferred.scope,
-                .location = deferred.location,
-            };
-            *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, kind),
-                .location = c_preprocess_site_location(&preprocess, declaration.location),
-                .kind = kind,
-            };
-        }
     }
     // __attribute__((weak)) and __attribute__((alias("target"))) per entity,
     // collected before any symbol is created because both change what the
@@ -63576,16 +63540,29 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_tree_run(Arena* arena, String8 so
     options.syntax_tree = options.syntax_tree ? options.syntax_tree : parse.ast;
     options.syntax_facts = options.syntax_facts ? options.syntax_facts : parse.ast_facts;
     bool lower = true;
-    if (arena && !parse.diagnostic_count && parse.analysis_complete &&
-        (!parse.lowering_validated || !options.syntax_tree || !options.syntax_facts || !parse.declaration_bindings_complete))
+    if (arena && !parse.diagnostic_count && parse.analysis_complete)
     {
-        *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
-            .message = !parse.lowering_validated ? S8("C IR lowering requires completed source constraints; use c_parse_for_lowering") :
-                                                 S8("C IR lowering requires retained syntax and semantic outputs"),
-            .location = {.line = 1, .column = 1},
-            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-        };
-        lower = false;
+        bool assertions_complete = !parse.deferred_static_assert_count || parse.deferred_static_assert_verdicts;
+        u32 incomplete_assertion = 0;
+        for (u32 row = 0; assertions_complete && row < parse.deferred_static_assert_count; row += 1)
+        {
+            assertions_complete = parse.deferred_static_assert_verdicts[row] == C_STATIC_ASSERT_HOLDS;
+            incomplete_assertion = row;
+        }
+        if (!parse.lowering_validated || !options.syntax_tree || !options.syntax_facts ||
+            !parse.declaration_bindings_complete || !assertions_complete)
+        {
+            *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
+                .message = !parse.lowering_validated ? S8("C IR lowering requires completed source constraints; use c_parse_for_lowering") :
+                           !assertions_complete ? S8("C IR lowering requires finished passing static assertion verdicts") :
+                                                  S8("C IR lowering requires retained syntax and semantic outputs"),
+                .location = !assertions_complete && parse.deferred_static_asserts
+                    ? c_preprocess_site_location(&preprocess, parse.deferred_static_asserts[incomplete_assertion].location)
+                    : (CSourceLocation){.line = 1, .column = 1},
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+            lower = false;
+        }
     }
     if (lower)
     {

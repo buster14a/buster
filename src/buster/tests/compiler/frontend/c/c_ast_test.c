@@ -6937,6 +6937,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_constant_facts(UnitTestArguments* 
     return result;
 }
 
+// Lowering consumes declaration-point assertion verdicts. It accepts the
+// validated source, preserves semantic failure diagnostics, and refuses a
+// missing or altered verdict before creating any canonical IR.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_static_assert_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    CPreprocessResult preprocess = c_ast_test_preprocess(arena,
+        S8("enum { E = 3 };\n_Static_assert(E == 3, \"enum\");\nint f(void) { return E; }\n"), C_PREPROCESS_DIALECT_GNU17);
+    CParseResult analysis = c_parse_for_lowering(arena, preprocess);
+    bool complete = analysis.analysis_complete && analysis.lowering_validated && !analysis.diagnostic_count &&
+                    analysis.deferred_static_assert_count == 1 && analysis.deferred_static_assert_verdicts &&
+                    analysis.deferred_static_assert_verdicts[0] == C_STATIC_ASSERT_HOLDS;
+    BUSTER_TEST_RAW(arguments, complete, analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("unfinished passing assertion"));
+    if (complete)
+    {
+        CIRLowerResult lowered = c_lower_to_ir(arena, S8("passing-assertion.c"), preprocess, analysis, target_native);
+        BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+        u8 const unfinished[] = {C_STATIC_ASSERT_UNCHECKED, C_STATIC_ASSERT_FAILED, C_STATIC_ASSERT_NOT_CONSTANT};
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(unfinished) + 1; form += 1)
+        {
+            CParseResult missing = analysis;
+            u8 verdict = form ? unfinished[form - 1] : C_STATIC_ASSERT_HOLDS;
+            missing.deferred_static_assert_verdicts = form ? &verdict : 0;
+            CIRLowerResult refused = c_lower_to_ir(arena, S8("unfinished-assertion.c"), preprocess, missing, target_native);
+            BUSTER_TEST(arguments, refused.program == 0 && refused.diagnostic_count == 1 &&
+                                  refused.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                                  refused.diagnostics[0].location.line == 2);
+            BUSTER_TEST(arguments, analysis.deferred_static_assert_verdicts[0] == C_STATIC_ASSERT_HOLDS);
+        }
+    }
+    CPreprocessResult failed_preprocess = c_ast_test_preprocess(arena,
+        S8("enum { E = 3 };\n_Static_assert(E == 4, \"false enum\");\nint f(void) { return E; }\n"), C_PREPROCESS_DIALECT_GNU17);
+    CParseResult failed = c_parse_for_lowering(arena, failed_preprocess);
+    BUSTER_TEST(arguments, failed.diagnostic_count == 1 && failed.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+    CIRLowerResult refused = c_lower_to_ir(arena, S8("false-assertion.c"), failed_preprocess, failed, target_native);
+    BUSTER_TEST(arguments, refused.program == 0 && refused.diagnostic_count == failed.diagnostic_count &&
+                          refused.diagnostics == failed.diagnostics);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_symbol_bindings(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7969,6 +8012,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_members);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_plans);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_lower_reuse);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_symbol_bindings);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declaration_owners);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_facts);

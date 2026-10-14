@@ -1487,9 +1487,9 @@ struct CDeferredStaticAssert
 
 // The semantic answer for one deferred _Static_assert. Validation stores one
 // per row in CParseResult.deferred_static_assert_verdicts and lowering
-// consumes it instead of evaluating the assertion again (#2531). Unchecked
-// means validation did not run (the model-building entry points); lowering
-// then asks the same semantic evaluator (c_semantic_static_assert_verdict).
+// requires a passing verdict instead of evaluating the assertion again
+// (#2531). Unchecked means validation did not run (the model-building entry
+// points); such a result must pass c_parse_for_lowering before lowering.
 typedef enum CStaticAssertVerdict
 {
     C_STATIC_ASSERT_UNCHECKED,

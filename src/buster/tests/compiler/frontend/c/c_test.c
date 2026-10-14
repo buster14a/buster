@@ -46786,10 +46786,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
 // Lowering takes a deferred _Static_assert's verdict from the semantic typer
 // instead of evaluating it again with its own (GitHub #2531). Every source
 // here is deferred (an enumerator, _Generic, offsetof, a compatibility
-// builtin or an initializer-inferred array). Routes: 0 lowers c_parse's
-// model, which validation never checked, so lowering asks
-// c_semantic_static_assert_verdict; 1 is c_analyze_with_options (-c), whose
-// validation stored every verdict; 2 is semantic-only analysis
+// builtin or an initializer-inferred array). Routes: 0 independently checks
+// c_parse's model and lowers a completed c_parse_for_lowering result; 1 is
+// c_analyze_with_options (-c), whose validation stored every verdict; 2 is
+// semantic-only analysis
 // (-fsyntax-only). All three must agree on each case, on three data layouts
 // and both frontend forms. Before this, route 1 rejected the first case,
 // which route 2 accepted.

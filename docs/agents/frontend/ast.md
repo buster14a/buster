@@ -272,6 +272,11 @@ so function parameter names cannot substitute for a declaration's owner.
 The token-reference semantic model has no node provenance; independent owner
 fixtures check these links while model comparisons check the existing fields.
 
+Deferred static assertions are finished semantic verdicts. Canonical lowering
+accepts only retained `C_STATIC_ASSERT_HOLDS` rows and rejects missing or
+non-passing rows at their recorded declaration location before allocating IR.
+It has no unchecked assertion evaluator or late source-message parser.
+
 Finished symbol properties are sparse `CDeclarationBinding` rows in the
 result's arena. `CDeclaration.binding_plus_one` and a static or extern local's
 `CEntity.binding_plus_one` select them; zero means the empty property set.

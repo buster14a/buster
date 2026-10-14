@@ -104,9 +104,9 @@
 //                                                 and deferred past unresolved
 //                                                 bounds
 //   c_parse_static_assert_diagnostic_message      immediate/deferred messages;
-//   c_parse_deferred_assertion_verdict,           one verdict per deferred
-//   c_semantic_static_assert_verdict              assertion, which lowering
-//                                                 consumes (CStaticAssertVerdict)
+//   c_parse_deferred_assertion_verdict            one finished verdict per
+//                                                 deferred assertion; lowering
+//                                                 requires C_STATIC_ASSERT_HOLDS
 //   c_parse_token_range_text                      one-line expression quotes
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
@@ -11887,7 +11887,7 @@ BUSTER_C_INTERNAL String8 c_parse_token_range_text(Arena* arena, CPreprocessResu
 // which evaluator decides it. Allocate diagnostic text in the result arena,
 // after semantic evaluation has rewound its scratch space. Literal spelling
 // retains its quotes and escapes; the C23 one-argument form has no message.
-BUSTER_C_SHARED String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
+BUSTER_C_INTERNAL String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
                                                                    CDeclaration declaration, CDiagnosticKind kind)
 {
     String8 message = kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT
@@ -43506,10 +43506,9 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
     scratch_end(temporary);
 }
 
-// One deferred assertion's semantic verdict. Validation and lowering's
-// unchecked-row query both come here, so they resolve names in the same scope
-// and evaluate in the same context: C17 6.6 integer-constant truth through the
-// typed evaluator. It reports nothing itself.
+// One deferred assertion's semantic verdict, resolved during validation in
+// its declaration scope: C17 6.6 integer-constant truth through the typed
+// evaluator. It reports nothing itself.
 BUSTER_C_INTERNAL CStaticAssertVerdict c_parse_deferred_assertion_verdict(CTypeParseMachine* machine, CParseResult* result,
                                                                          CPreprocessResult preprocess, u32 row)
 {
@@ -43567,37 +43566,6 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
         }
     }
     result->deferred_static_assert_verdicts = verdicts;
-}
-
-// The verdict for a deferred row that validation did not check: lowering
-// reached through c_parse / c_analyze_semantics, which skip it. The same
-// semantic evaluator answers on private scratch machine storage, as in
-// c_semantic_type_identity_query, and the result is restored afterwards, as
-// a speculative checkpoint is, so the query leaves lowering's model no type
-// rows (lowering indexes its type map by type_count), interning entries or
-// diagnostics. A row it cannot evaluate is NOT_CONSTANT, never a guess.
-BUSTER_C_SHARED CStaticAssertVerdict c_semantic_static_assert_verdict(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 row)
-{
-    CStaticAssertVerdict verdict = C_STATIC_ASSERT_NOT_CONSTANT;
-    if (row < result->deferred_static_assert_count)
-    {
-        CDeferredStaticAssert assertion = result->deferred_static_asserts[row];
-        u64 mark = scratch->position;
-        CParseResult checkpoint = *result;
-        u32 capacity = assertion.token_count + 64;
-        CTypeParseMachine machine = {
-            .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
-            .frame_checkpoints = arena_allocate(scratch, CParseResult, capacity),
-            .mutations = arena_allocate(scratch, CTypeMutation, capacity),
-            .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
-            .scratch_arena = scratch,
-            .frame_capacity = capacity, .mutation_capacity = capacity, .expression_task_capacity = capacity,
-        };
-        verdict = c_parse_deferred_assertion_verdict(&machine, result, preprocess, row);
-        *result = checkpoint;
-        arena_set_position(scratch, mark);
-    }
-    return verdict;
 }
 
 // The diagnostic text for one evaluated bit-field width, empty when the width
