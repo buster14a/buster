@@ -1291,7 +1291,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_mixed_dbghelp_lookup(UnitTestArgumen
                             {
                                 String16 query = string16_from_string8(arguments->arena, names.pointer[index], true);
                                 u64 symbol_bytes = sizeof(SYMBOL_INFOW) + 64 * sizeof(WCHAR);
-                                PSYMBOL_INFOW symbol = (PSYMBOL_INFOW)arena_allocate_zeroed(arguments->arena, u8, symbol_bytes);
+                                PSYMBOL_INFOW symbol = (PSYMBOL_INFOW)arena_allocate_zeroed_bytes(arguments->arena, symbol_bytes, BUSTER_ALIGN_OF(SYMBOL_INFOW));
                                 symbol->SizeOfStruct = (ULONG)sizeof(SYMBOL_INFOW);
                                 symbol->MaxNameLen = 64;
                                 BOOL found = from_name.from_name(session, query.pointer, symbol);
