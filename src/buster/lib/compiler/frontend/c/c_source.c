@@ -1932,7 +1932,12 @@ CSourceAnchor c_source_anchor_at(CPreprocessResult const* preprocess, u32 index)
     if (preprocess && index < preprocess->token_count)
     {
         CToken token = preprocess->tokens[index];
-        result = (CSourceAnchor){.offset = token.offset, .length = (u32)c_token_length(preprocess->spelling_base, token)};
+        // The sentinel records a terminated literal spelling. Resolve its
+        // byte extent without inspecting the source token's grammar fields.
+        u64 length = token.length == C_TOKEN_LENGTH_OVERSIZED
+                         ? c_token_literal_scan_length(preprocess->spelling_base + token.offset, UINT64_MAX) : token.length;
+        BUSTER_CHECK(length <= UINT32_MAX - token.offset);
+        result = (CSourceAnchor){.offset = token.offset, .length = (u32)length};
     }
     return result;
 }

@@ -109,6 +109,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_source_anchors(UnitTestArguments* 
                 CSourceAnchor named = c_source_anchor_from_name(&preprocess, spelling);
                 BUSTER_TEST(arguments, named.offset == anchor.offset && named.length == anchor.length);
             }
+            // Retained provenance remains usable after token grammar has
+            // become unavailable, including sentinel-sized spellings.
+            preprocess.tokens[index].kind = C_TOKEN_INVALID;
+            preprocess.tokens[index].symbol = UINT32_MAX;
+            preprocess.tokens[index].punctuator = C_PUNCTUATOR_ELLIPSIS;
+            CSourceAnchor poisoned = c_source_anchor_at(&preprocess, index);
+            BUSTER_TEST(arguments, poisoned.offset == anchor.offset && poisoned.length == anchor.length &&
+                                   string_equal(c_source_anchor_spelling(&preprocess, poisoned), spelling));
+            CSourceLocation poisoned_location = c_source_anchor_location_cursor(&preprocess, poisoned, &cursor);
+            BUSTER_TEST(arguments, !memcmp(&old_location, &poisoned_location, sizeof(poisoned_location)));
             large |= anchor.length == 70002;
         }
         BUSTER_TEST(arguments, form < BUSTER_ARRAY_LENGTH(sources) || large);
