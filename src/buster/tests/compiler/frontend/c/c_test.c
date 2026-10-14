@@ -38392,39 +38392,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_parameter_expression_type(UnitTe
         c_test_scratch_end(temporary);
 #endif
     }
-    // Volatile element qualification must survive nested-array canonical mapping,
-    // while mutation of the adjusted parameter pointer remains nonvolatile.
-    for (u32 form = 0; form < 2; form += 1)
+    // Declared aliases and explicit type-name casts both retain volatile
+    // accesses, even when their canonical array qualification is represented
+    // at different levels. The adjusted parameter pointer stays nonvolatile.
+    for (u32 tree_route = 0; tree_route < 2; tree_route += 1)
     {
-        TemporalArena temporary = scratch_begin(0, 0);
-        String8 source = S8("typedef int Row[2]; typedef Row Matrix[2];"
-                           " int probe(volatile Matrix a) { a++; a[0][0] += 1; return a[0][0]; }");
-        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("volatile-array-alias.c"), tokens,
-            c_parse_ast(temporary.arena, tokens), target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
-        BUSTER_TEST(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified);
-        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+        for (u32 form = 0; form < 2; form += 1)
         {
-            IrFunction* function = c_test_find_ir_function(lowered.program->modules, S8("probe"));
-            if (BUSTER_REQUIRE(arguments, function != 0))
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = S8("typedef int Row[2]; typedef Row Matrix[2];"
+                               " int probe(volatile Matrix a) { a++; a[0][0] += 1; return a[0][0]; }"
+                               " int declared(int *p) { volatile Row *q = (volatile Row *)p; (*q)[0] += 1; return (*q)[0]; }"
+                               " int explicit_cast(int *p) { ((volatile Row *)p)[0][0] += 1; return ((volatile Row *)p)[0][0]; }");
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CAst tree = {0};
+            CAstFacts facts = {0};
+            bool syntax_ready = tree_route == 0;
+            CParserResult syntax = {0};
+            if (!tree_route)
             {
-                u32 loads = 0;
-                u32 stores = 0;
-                for (u32 index = 0; index < function->instruction_count; index += 1)
-                {
-                    IrInstruction const* instruction = function->instructions + index;
-                    if (instruction->volatile_access)
-                    {
-                        loads += instruction->opcode == IR_OPCODE_LOAD;
-                        stores += instruction->opcode == IR_OPCODE_STORE;
-                    }
-                }
-                BUSTER_TEST(arguments, loads == 2 && stores == 1);
-                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                syntax = c_parse_ast(temporary.arena, tokens);
             }
+            else
+            {
+                CAstResult built = c_ast_build(temporary.arena, tokens, (CAstOptions){0});
+                tree = built.ast;
+                BUSTER_TEST(arguments, built.complete);
+                syntax_ready = built.complete && c_ast_facts_create(&facts, &tree);
+                BUSTER_TEST(arguments, syntax_ready);
+                if (syntax_ready)
+                {
+                    syntax = c_parse_ast_from_tree(temporary.arena, tokens, &tree, 0);
+                    syntax.ast_facts = &facts;
+                }
+            }
+            if (syntax_ready)
+            {
+                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("volatile-array-alias.c"), tokens,
+                    analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0,
+                        .syntax_tree = tree_route ? &tree : 0, .syntax_facts = tree_route ? &facts : 0});
+                BUSTER_TEST(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified);
+                if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                {
+                    String8 names[] = {S8("probe"), S8("declared"), S8("explicit_cast")};
+                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(lowered.program->modules, names[name]);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 loads = 0;
+                            u32 stores = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction const* instruction = function->instructions + index;
+                                if (instruction->volatile_access)
+                                {
+                                    loads += instruction->opcode == IR_OPCODE_LOAD;
+                                    stores += instruction->opcode == IR_OPCODE_STORE;
+                                }
+                            }
+                            BUSTER_TEST_RAW(arguments, loads == 2 && stores == 1, names[name]);
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            c_ast_facts_release(&facts);
+            c_ast_release(&tree);
+            c_test_scratch_end(temporary);
         }
-        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -38448,6 +38486,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_parameter_address_runtime(UnitTe
         "static int qualified_rows(const Matrix a) { next_const(&a); return a[0][0] != 7 || a[0][1] != 9; }\n"
         "static int pointer_elements(const Pointers a) { a++; return *a[0] != 9; }\n"
         "static int volatile_elements(volatile Matrix a) { a++; a[0][0] += 1; return a[0][0] != 8; }\n"
+        "static int explicit_volatile(int *p) { ((volatile A *)p)[0][0] += 1; return ((volatile A *)p)[0][0]; }\n"
+        "static int declared_volatile(int *p) { volatile A *q = (volatile A *)p; (*q)[0] += 1; return (*q)[0]; }\n"
         "static int bound_effects; static int bound(void) { bound_effects += 1; return 2; }\n"
         "static int vla_alias(int *a) { typedef int Row[bound()]; const Row *p = (const Row *)a;\n"
         " return sizeof *p != 2 * sizeof(int) || (*p)[1] != 9 || bound_effects != 1; }\n"
@@ -38455,8 +38495,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_parameter_address_runtime(UnitTe
         " int *pointers[2] = {&matrix[0][0], &matrix[1][1]}; const A literal = {7, 9};\n"
         " int generic = _Generic(literal, const int *: 1, default: 0);\n"
         " int failure = probe(a, b) || rows(matrix) || qualified(matrix[0], matrix[1]) || qualified_rows(matrix)\n"
-        " || pointer_elements(pointers) || vla_alias(matrix[1]) || volatile_elements(matrix);\n"
-        " return failure || a[0] != 0 || a[1] != 0 || matrix[1][0] != 8 || bound_effects != 1 || generic != 1; }\n");
+        " || pointer_elements(pointers) || vla_alias(matrix[1]) || volatile_elements(matrix)\n"
+        " || explicit_volatile(matrix[1]) != 9 || declared_volatile(matrix[1]) != 10;\n"
+        " return failure || a[0] != 0 || a[1] != 0 || matrix[1][0] != 10 || bound_effects != 1 || generic != 1; }\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("array-parameter-address"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))

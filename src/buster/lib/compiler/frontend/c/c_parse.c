@@ -6384,10 +6384,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, 
     return type;
 }
 
-// Keep the declared array for parameter-bound/VLA ownership; an unqualified
-// outer array's identifier denotes the adjusted pointer (C17 6.7.6.3p7), even
-// under &. Qualified array aliases keep their existing path pending #4183:
-// their outer qualifiers belong to elements, not to this pointer.
+// Keep the declared array for parameter-bound/VLA ownership; its identifier
+// denotes the adjusted pointer (C17 6.7.6.3p7), even under &. Array-alias
+// qualifiers belong to the element graph, not to this pointer (#4183).
 // Ordinary arrays retain their type, so &local still points at the whole array.
 // The read-only tree typer declines if the query has not interned this row.
 BUSTER_C_SHARED CTypeId c_parse_expression_entity_type(CParseResult* result, CEntity const* entity, bool existing_only)
