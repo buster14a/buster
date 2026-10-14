@@ -164,7 +164,7 @@
     X(PARAMETER_LIST_VARIADIC, LIST, 0, 0) /* PARAMETER* followed by `...`; token: `(` */                                                   \
     X(IDENTIFIER_LIST, LIST, 0, 0)         /* K&R DECLARATOR_NAME*; token: `(` */                                                           \
     X(PARAMETER, PRESENCE, 1, 0)           /* DECL_SPECIFIERS, bits 0 declarator, 1 trailing ATTRIBUTE_LIST; token: first token */          \
-    X(TYPE_NAME, PRESENCE, 1, 0)           /* DECL_SPECIFIERS, bit 0 abstract declarator; token: first token */                             \
+    X(TYPE_NAME, RANGE, 1, 2)              /* DECL_SPECIFIERS, [abstract declarator]; token: first token; data: end token */                             \
     /* ---- attributes ---- */                                                                                                              \
     X(ATTRIBUTE_LIST, LIST, 0, 0)          /* consecutive ATTRIBUTE_GNU/_STANDARD/_DECLSPEC groups; token: first group's first token */  \
     X(ATTRIBUTE_GNU, LIST, 0, 0)           /* `__attribute__ (( ... ))`: ATTRIBUTE*; token: keyword */                                      \

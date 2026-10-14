@@ -6244,6 +6244,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_spans(UnitTestArguments* arguments
             BUSTER_TEST(arguments, spans.first[ast->root] == C_AST_SPAN_NONE);
         }
     }
+    // Type names keep the producer's complete boundary; optional, nested and
+    // variably modified declarators are checked against literal spellings.
+    String8 type_source = S8("int f(int n) { return sizeof(int) + sizeof(int (*)[n]) + sizeof(__typeof__(__typeof__(int)) *) + sizeof(int (*)(void)); }");
+    String8 const type_names[] = {S8("int"), S8("int ( * ) [ n ]"), S8("int"), S8("__typeof__ ( int )"),
+                                 S8("__typeof__ ( __typeof__ ( int ) ) *"), S8("int ( * ) ( void )")};
+    CPreprocessResult type_preprocess = c_ast_test_preprocess(temporary.arena, type_source, C_PREPROCESS_DIALECT_GNU17);
+    for (u32 batch = 0; batch < 8; batch += 1)
+    {
+        CAstResult type_tree = c_ast_build(temporary.arena, type_preprocess, (CAstOptions){.refill_batch = batch});
+        u32* type_matches = c_ast_test_matches(temporary.arena, type_preprocess);
+        CAstSpans type_spans = {0};
+        bool ready = BUSTER_REQUIRE(arguments, type_tree.complete && c_ast_validate(&type_tree.ast) == C_AST_NODE_INVALID) &&
+                     BUSTER_REQUIRE(arguments, c_ast_spans_build(temporary.arena, &type_tree.ast, type_preprocess.tokens,
+                                                                    (u32)type_preprocess.token_count, type_matches, &type_spans));
+        if (ready)
+        {
+            u32 seen = 0;
+            for (u32 node = 0; node < type_tree.ast.node_count; node += 1)
+            {
+                if (type_tree.ast.kinds[node] == C_AST_TYPE_NAME)
+                {
+                    BUSTER_TEST(arguments, c_ast_child_count(&type_tree.ast, node) >= 1 && c_ast_child_count(&type_tree.ast, node) <= 2);
+                    BUSTER_TEST(arguments, type_spans.first[node] == type_tree.ast.tokens[node] && type_spans.end[node] == type_tree.ast.data[node]);
+                    if (BUSTER_REQUIRE(arguments, seen < BUSTER_ARRAY_LENGTH(type_names)))
+                    {
+                        BUSTER_STRING_TEST(arguments, c_ast_test_span_text(temporary.arena, type_preprocess, type_spans.first[node], type_spans.end[node]),
+                                           type_names[seen]);
+                    }
+                    seen += 1;
+                }
+            }
+            BUSTER_TEST(arguments, seen == BUSTER_ARRAY_LENGTH(type_names));
+        }
+        c_ast_release(&type_tree.ast);
+    }
     // Without a delimiter index there are no spans.
     CAstSpans none = {.spanned = 1};
     BUSTER_TEST(arguments, !c_ast_spans_build(temporary.arena, &built.ast, preprocess.tokens, (u32)preprocess.token_count, 0, &none) &&

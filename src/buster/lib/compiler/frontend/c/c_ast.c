@@ -2833,7 +2833,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_type_name(CAstBuilder* builder, CAstFrame* f
         }
         case C_AST_TYPE_NAME_END:
         {
-            c_ast_append(builder, C_AST_TYPE_NAME, frame->begin, frame->a, frame->b);
+            c_ast_append(builder, C_AST_TYPE_NAME, frame->begin, frame->a, builder->position);
             c_ast_pop(builder);
             running = false;
             break;
@@ -6585,6 +6585,12 @@ bool c_ast_span_rule(CAstSpanInput const* input, u32 node, u32* first_out, u32* 
     u32 end = C_AST_SPAN_NONE;
     switch (kind)
     {
+    case C_AST_TYPE_NAME:
+    {
+        first = token;
+        end = ast->data[node];
+    }
+    break;
     case C_AST_DECLARATOR_NAME:
     case C_AST_IDENTIFIER:
     case C_AST_NUMBER:

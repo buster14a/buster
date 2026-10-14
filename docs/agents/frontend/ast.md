@@ -76,7 +76,11 @@ Facts are produced once and stored with the node:
 - Pointer and array qualifiers are flags.
 
 Parentheses, commas and other punctuation get no nodes. A cast and a
-compound literal differ by kind, so neither needs a separate marker.
+compound literal differ by kind, so neither needs a separate marker. A
+`TYPE_NAME` has one specifier child and an optional abstract declarator
+(`RANGE`, one or two children); its `data` retains the builder's cursor at
+its end. The shared span index reads that producer boundary directly,
+including nested `typeof`, function pointers and VLA bounds.
 
 ## Construction
 
