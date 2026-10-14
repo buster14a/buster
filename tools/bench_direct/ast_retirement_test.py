@@ -15,11 +15,14 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import subprocess
+import tempfile
 import unittest
 import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ast_retirement_acceptance as retirement
+import compiler_compare as compare
 import compiler_publish as publisher
 import compiler_receipt as receipt
 import compiler_test as ordinary
@@ -386,6 +389,47 @@ class RetirementPublicationPolicyTest(unittest.TestCase):
         current.pop("ast_retirement_acceptance")
         self.assertIn("has no ast-retirement acceptance record", publisher.verify_analyzer_request_freshness(
             Api((0, 0)), expected, current, throughput))
+
+
+class RetirementProducerRoutingTest(unittest.TestCase):
+    def test_real_git_merge_parents_cannot_replay_or_duplicate_a_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            subprocess.run(["git", "config", "user.name", "retirement fixture"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=root, check=True)
+            request = root / receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+
+            def tree(count: int) -> str:
+                request.write_text(receipt.AST_RETIREMENT_REQUEST_LINE + "\n" if count == 1 else
+                                   (receipt.AST_RETIREMENT_REQUEST_LINE + "\n") * count)
+                subprocess.run(["git", "add", receipt.ANALYZER_REQUEST_PATH], cwd=root, check=True)
+                return subprocess.check_output(["git", "write-tree"], cwd=root, text=True).strip()
+
+            def commit(tree_id: str, parents: tuple[str, ...], message: str) -> str:
+                command = ["git", "commit-tree", tree_id, *[value for parent in parents for value in ("-p", parent)]]
+                return subprocess.check_output(command, input=message + "\n", cwd=root, text=True).strip()
+
+            empty = tree(0)
+            first = commit(empty, (), "first parent")
+            other = commit(empty, (), "second parent")
+            fresh = commit(tree(1), (first, other), "fresh merge request")
+            self.assertEqual(compare.ast_retirement_request_selection(root, fresh), (True, ""))
+            inherited = commit(tree(1), (fresh,), "unrelated head")
+            self.assertEqual(compare.ast_retirement_request_selection(root, inherited), (False, ""))
+            mixed = commit(tree(1), (fresh, other), "merge inherited marker")
+            self.assertIn("every head parent", compare.ast_retirement_request_selection(root, mixed)[1])
+            duplicate = commit(tree(2), (first, other), "duplicate merge marker")
+            self.assertIn("every head parent", compare.ast_retirement_request_selection(root, duplicate)[1])
+
+    def test_native_and_receipt_command_populations_agree_without_legacy_flag_pair(self) -> None:
+        self.assertEqual(set(_lab.AST_RETIREMENT_CELLS), set(receipt.AST_RETIREMENT_CELLS))
+        self.assertEqual(len(receipt.AST_RETIREMENT_CELLS), 20)
+        for cell in receipt.AST_RETIREMENT_CELLS:
+            with self.subTest(cell=cell):
+                self.assertEqual(_lab.ast_retirement_command(cell), receipt.ast_retirement_cell_command(cell))
+                self.assertFalse(any("ast-pilot" in flag for flag in _lab.ast_retirement_command(cell)))
 
 
 if __name__ == "__main__":

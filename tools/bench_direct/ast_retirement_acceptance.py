@@ -78,10 +78,14 @@ def validate_documents(cell: str, summary: dict, meta: dict, labs: dict, binarie
         binary = binaries.get(role) or {}
         info, lab = summary.get(role) or {}, labs.get(key) or {}
         lab_config = lab.get("config") or {}
+        variant = (meta.get("variants") or {}).get(key) or {}
         if info.get("sha256") != binary.get("sha256") or info.get("size_bytes") != binary.get("size_bytes") or \
                 info.get("runs") != PAIRS or info.get("failed") or info.get("deterministic") is not True or info.get("metrics_out_enabled") is not False:
             raise RuntimeError(f"retirement {role} binary/observations differ from the prepared compiler")
         ide = lab_config.get("ide")
+        if variant.get("role") != role or variant.get("ide") != ide or variant.get("sha256") != binary.get("sha256") or \
+                variant.get("size_bytes") != binary.get("size_bytes") or info.get("path") != ide:
+            raise RuntimeError(f"retirement {role} compare identity differs from the raw lab/prepared compiler")
         if not isinstance(ide, str) or lab_config.get("command") != shell_join([ide, *cell_command(cell)]) or \
                 lab_config.get("ast_retirement_cell") != cell or lab_config.get("extra") != [] or lab_config.get("cpu") != CPU or \
                 lab_config.get("fresh_copy") is not True or lab.get("collection", {}).get("metrics_out") is not False or \
@@ -93,7 +97,7 @@ def validate_documents(cell: str, summary: dict, meta: dict, labs: dict, binarie
     for name, fields in (("wall", ("a_median", "b_median", "ratio", "ci_low", "ci_high")),
                          ("instructions", ("a_median", "b_median", "ratio")), ("peak_rss", ("a_median", "b_median"))):
         if not isinstance(values.get(name), dict) or any(not _finite_positive(values[name].get(field)) for field in fields):
-            reason = summary.get("counters", {}).get("reason", "missing native metric")
+            reason = summary.get("counters", {}).get("reason") or "required native metric was not counted"
             raise RuntimeError(f"retirement {name} is incomplete: {reason}")
     return summary
 
@@ -112,7 +116,7 @@ def retained_field(lines: list, name: str, positive: bool = False) -> int:
     if len(lines) != 1 or not isinstance(lines[0], str):
         raise RuntimeError(f"retirement probe did not report exactly one {name} line")
     found = re.findall(r"(?:^| )retained_bytes=([0-9]+)(?: |$)", lines[0])
-    if len(found) != 1 or (positive and int(found[0]) == 0):
+    if len(found) != 1 or int(found[0]) > (1 << 64) - 1 or (positive and int(found[0]) == 0):
         raise RuntimeError(f"retirement probe has missing/invalid {name} retained bytes")
     return int(found[0])
 
@@ -210,6 +214,7 @@ def execute(args: argparse.Namespace) -> dict:
         corpus[name] = {"path": path.relative_to(root).as_posix(), "sha256": sha256(path), "size_bytes": path.stat().st_size}
         shutil.copyfile(path, output / "inputs" / path.name)
     unity = root / "src/buster/apps/ide/ide.c"
+    shutil.copyfile(unity, output / "inputs" / "unity.c")
     source = {"revision": args.base_revision, "frozen_input_tree": before,
               "unity": {"path": unity.relative_to(root).as_posix(), "sha256": sha256(unity), "size_bytes": unity.stat().st_size},
               "corpus": corpus, "generator": {"sha256": sha256(harness), "size_bytes": harness.stat().st_size, "revision": args.base_revision}}

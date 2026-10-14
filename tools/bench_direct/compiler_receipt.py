@@ -2314,6 +2314,9 @@ def validate_ast_retirement_acceptance(summary: object, base: str, head: str, bi
         problems.append(f"{label} profile or source revisions differ from the authorized comparison")
     expected = {role: {key: binaries.get(role, {}).get(key) for key in ("sha256", "size_bytes", "revision")}
                 for role in ("baseline", "candidate")}
+    if any(not SHA256.fullmatch(str(row["sha256"])) or type(row["size_bytes"]) is not int or row["size_bytes"] <= 0 or
+           not isinstance(row["revision"], str) or not SHA.fullmatch(row["revision"]) for row in expected.values()):
+        problems.append(f"{label} prepared binary hash/size/revision is malformed")
     if summary.get("binaries") != expected or expected["baseline"]["revision"] != base or expected["candidate"]["revision"] != head:
         problems.append(f"{label} compiler identities differ from the prepared binaries")
     if not isinstance(summary.get("cpu_model"), str) or not APPROVED_HOST.search(summary["cpu_model"]):
@@ -5019,6 +5022,7 @@ INVENTORY_LEGS = {
         "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
         "inline": ("uarch_lab:compare@canonical-inline-self-host",),
         "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "ast-retirement": ("uarch_lab:compare@ast-retirement-acceptance",),
         "constant-reuse": ("uarch_lab:compare@constant-reuse-acceptance",),
         "process-floor": ("uarch_lab:compare@process-floor",),
         "real-source": ("build:bench_throughput@throughput-real-source",),
@@ -5033,7 +5037,7 @@ INVENTORY_LEGS = {
     },
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
-INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
+INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance", "ast-retirement": "ast_retirement_acceptance",
                             "constant-reuse": "constant_reuse_acceptance", "process-floor": "process_floor",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
@@ -5301,6 +5305,32 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   for name, check in checks.items()]
         if ast.get("exit") not in (None, 0):
             lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
+    retirement = receipt.get("ast_retirement_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(retirement, dict) and retirement.get("requested"):
+        shown = retirement.get("summary") if isinstance(retirement.get("summary"), dict) else {}
+        cells = shown.get("cells") if isinstance(shown.get("cells"), dict) else {}
+        probes = shown.get("probes") if isinstance(shown.get("probes"), dict) else {}
+        lines += ["", f"Issue #4058 AST retirement: {retirement.get('status', 'NA')} "
+                  "(20 fixed default/default cells, 20 ABBA pairs each; report-only).",
+                  "Retained bytes below are the published AST tree and semantic node-fact components, "
+                  "measured in separate untimed probes. They are not peak RSS or a whole-frontend arena total. "
+                  "Separate symbol-binding bytes are retained in the raw report when the compiler exposes that counter. "
+                  "Missing instruction measurements leave acceptance incomplete.", "",
+                  "| Cell | Wall B/A [95% CI] | Instructions B/A | Peak RSS A / B | Tree bytes A / B | Fact bytes A / B |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for cell in AST_RETIREMENT_CELLS:
+            row = cells.get(cell) or {}
+            values = row.get("metrics") or {}
+            wall, instructions, rss = (values.get(name) or {} for name in ("wall", "instructions", "peak_rss"))
+            retained = probes.get(cell) or {}
+            a, b = retained.get("baseline") or {}, retained.get("candidate") or {}
+            lines.append("| %s | %s [%s, %s] | %s | %s / %s | %s / %s | %s / %s |" % (
+                cell, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"), number(wall.get("ci_high"), "%.4f"),
+                number(instructions.get("ratio"), "%.4f"), number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                number(a.get("tree_retained_bytes"), "%.0f"), number(b.get("tree_retained_bytes"), "%.0f"),
+                number(a.get("fact_retained_bytes"), "%.0f"), number(b.get("fact_retained_bytes"), "%.0f")))
+        if retirement.get("exit") not in (None, 0):
+            lines.append(f"Issue #4058 profile exit: {retirement.get('exit')}; required measurement remains incomplete.")
     reuse = receipt.get("constant_reuse_acceptance") if isinstance(receipt, dict) else None
     if isinstance(reuse, dict) and reuse.get("requested"):
         reuse_summary = reuse.get("summary") if isinstance(reuse.get("summary"), dict) else {}

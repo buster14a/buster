@@ -204,6 +204,19 @@
       }
     },
     {
+      "id": "uarch_lab:compare@ast-retirement-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "#4058 fixed ast-retirement-acceptance-v1 on an owner request line: two prepared tests-off Clang Release compilers, default/default, on one frozen baseline/current-main tree and its six unchanged throughput CI sources; two unity syntax/object, six corpus syntax and twelve FAST/QUALITY corpus object cells, each with 20 ABBA pairs after one warmup on CPU 2 with fresh copies and disabled timed phase metrics; wall time with 95% CI, positive retired instructions:u and wait4 peak RSS, untimed AST tree/node-fact retained bytes and separately reported symbol-binding bytes, byte-identical reference objects and diagnostics; independently replayed sealed raw evidence, report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "ast-retirement-acceptance-v1",
+        "request": "one exact fresh line, profile: ast-retirement-acceptance-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
       "id": "uarch_lab:compare@constant-reuse-acceptance",
       "kind": "lab-mode",
       "validation": "performance",
