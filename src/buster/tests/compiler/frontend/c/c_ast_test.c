@@ -8109,7 +8109,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_projection(UnitTestA
                 void_bases += type && type->kind == C_TYPE_VOID;
             }
         }
-        BUSTER_TEST(arguments, aliases == 1 && arrays == BUSTER_ARRAY_LENGTH(expected) && void_bases == 1);
+        BUSTER_TEST(arguments, aliases == 1 && arrays == BUSTER_ARRAY_LENGTH(expected) && void_bases == 2);
         u32 type_count = analysis.type_count;
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("retained-type-projection.c"), preprocess, analysis, target_native);
         BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified && analysis.type_count == type_count);

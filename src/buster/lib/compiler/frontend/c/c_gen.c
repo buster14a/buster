@@ -4038,12 +4038,23 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_push(CIrRetainedTypeState* state, CIrR
     return room;
 }
 
-BUSTER_C_INTERNAL void c_ir_retained_type_complete(CIrRetainedTypeState* state, IrTypeId type)
+BUSTER_C_INTERNAL void c_ir_retained_type_complete(CIntegerIrBuilder* builder, CIrRetainedTypeState* state, IrTypeId type)
 {
     CIrRetainedTypeReference reference = state->stack[state->count - 1].reference;
     if (reference.recipe && reference.index >= state->begin && reference.index < state->end)
     {
         state->memo[reference.index - state->begin] = type;
+    }
+    bool base = reference.index == state->base.index && reference.recipe == state->base.recipe;
+    if (!reference.recipe && reference.index < builder->parse.type_count && (!state->constructors || base) &&
+        builder->c_type_ir_map[reference.index].value == IR_ID_UNDERLYING_INVALID && type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        if (!builder->vla_c_types)
+        {
+            builder->vla_c_types = arena_allocate(builder->arena, IrTypeId, builder->parse.type_count);
+            memset(builder->vla_c_types, 0xff, sizeof(IrTypeId) * builder->parse.type_count);
+        }
+        builder->vla_c_types[reference.index] = type;
     }
     state->last = type;
     state->count -= 1;
@@ -4167,9 +4178,12 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
                                             (!state->constructors || (current->reference.index == state->base.index && !state->base.recipe) ||
                                              (type->kind != C_TYPE_POINTER && type->kind != C_TYPE_ARRAY && type->kind != C_TYPE_FUNCTION))
                                         ? builder->c_type_ir_map[current->reference.index] : IR_TYPE_ID_INVALID;
+            if (cached.value == IR_ID_UNDERLYING_INVALID && !current->reference.recipe &&
+                (!state->constructors || is_base) && builder->vla_c_types)
+                cached = builder->vla_c_types[current->reference.index];
             if (cached.value != IR_ID_UNDERLYING_INVALID)
             {
-                c_ir_retained_type_complete(state, cached);
+                c_ir_retained_type_complete(builder, state, cached);
             }
             else if (type->has_unqualified_type)
             {
@@ -4188,7 +4202,7 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
             else
             {
                 IrTypeId scalar = type->kind == C_TYPE_VOID ? builder->void_type : c_ir_builder_scalar_type(builder, type->kind);
-                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, scalar));
+                c_ir_retained_type_complete(builder, state, c_ir_retained_qualify(builder, type, scalar));
             }
         }
         else if (current->stage == 1)
@@ -4196,12 +4210,12 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
             current->element = state->last;
             if (current->qualifier)
             {
-                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, current->element));
+                c_ir_retained_type_complete(builder, state, c_ir_retained_qualify(builder, type, current->element));
             }
             else if (type->kind == C_TYPE_POINTER)
             {
                 IrTypeId pointer = c_ir_add_pointer_type(builder->program, builder->pointer_types, current->element);
-                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, pointer));
+                c_ir_retained_type_complete(builder, state, c_ir_retained_qualify(builder, type, pointer));
             }
             else if (type->kind == C_TYPE_VECTOR)
             {
@@ -4224,7 +4238,7 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
                 vector = valid && vector.value == IR_ID_UNDERLYING_INVALID ? ir_program_add_type(builder->program, (IrType){.name = S8("GNU vector"), .element_type = current->element,
                                                            .return_type = IR_TYPE_ID_INVALID, .layout = {.size = storage, .alignment = alignment, .resolved = true},
                                                            .kind = IR_TYPE_VECTOR, .element_count = lanes, .bit_width = (u32)storage * 8}) : vector;
-                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, vector));
+                c_ir_retained_type_complete(builder, state, c_ir_retained_qualify(builder, type, vector));
             }
             else
             {
@@ -4286,7 +4300,7 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
                                                               .alignment = builder->program->data_layout.pointer.alignment, .resolved = true},
                     .kind = IR_TYPE_FUNCTION, .parameter_types = current->parameters, .parameter_count = type->parameter_count,
                     .calling_convention = IR_CALLING_CONVENTION_C, .is_variadic = type->is_variadic, .is_unprototyped = type->is_unprototyped});
-                c_ir_retained_type_complete(state, function);
+                c_ir_retained_type_complete(builder, state, function);
             }
         }
         else if (type->kind == C_TYPE_ARRAY)
@@ -4340,7 +4354,7 @@ BUSTER_C_INTERNAL bool c_ir_retained_type_materialize(CIntegerIrBuilder* builder
                     *entry = (CIrVlaArrayType){.next = builder->vla_array_types, .type = array, .bound = bound};
                     builder->vla_array_types = entry;
                 }
-                c_ir_retained_type_complete(state, c_ir_retained_qualify(builder, type, array));
+                c_ir_retained_type_complete(builder, state, c_ir_retained_qualify(builder, type, array));
             }
         }
     }
@@ -35902,35 +35916,10 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_cast(CIntegerIrBuilder* builder, CIrLo
     CAstSpans const* spans = builder->syntax_spans;
     u32 index = spans->first[node];
     u32 operand = c_ir_core_last_child(node);
-    // A type name has no span of its own; the cast's parentheses bound it.
-    u32 close = builder->syntax_matches[index] - 1;
     CToken token = builder->preprocess.tokens[index];
     IrSourceRange source = c_ir_token_source_range(builder, token);
     CIrCoreStatus status = C_IR_CORE_NEXT;
-    IrTypeId cast_type = c_ir_group_type_name(builder, index, close);
-    if (cast_type.value == IR_ID_UNDERLYING_INVALID && ast->kinds[operand] == C_AST_LABEL_ADDRESS && !c_ir_core_wrapped(builder, operand) &&
-        builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
-    {
-        // `(T)&&label` with T a typedef the type-name reader does not map.
-        CEntityId type_entity = c_ir_identifier_entity(builder, index + 1);
-        if (type_entity.value < builder->parse.entity_count && builder->parse.entities[type_entity.value].kind == C_ENTITY_TYPEDEF)
-        {
-            CTypeId c_type = builder->parse.entities[type_entity.value].type;
-            if (c_type.value < builder->parse.type_count)
-            {
-                cast_type = builder->c_type_ir_map[c_type.value];
-                if (cast_type.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    CType* c_type_value = builder->parse.types + c_type.value;
-                    if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
-                        builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
-                    {
-                        cast_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
-                    }
-                }
-            }
-        }
-    }
+    IrTypeId cast_type = c_ir_type_name_node(builder, c_ast_child_at(ast, node, 0));
     IrType* cast = ir_type_from_id(&builder->program->types, cast_type);
     CIrVlaArrayType* array = cast && cast->kind == IR_TYPE_POINTER ? c_ir_vla_array_type(builder, cast->element_type) : 0;
     IrTypeId nested_type = cast_type;
@@ -36064,17 +36053,15 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
     case C_AST_COMPOUND_LITERAL:
     {
         state->walk_count -= 1;
-        u32 close = builder->syntax_matches[first] - 1;
-        IrTypeId literal_type = c_ir_group_may_be_type_name(builder, first)
-                                    ? c_ir_compound_literal_type(builder, first + 1, close, close + 1, end - 1)
-                                    : IR_TYPE_ID_INVALID;
+        u32 list = c_ast_child_at(ast, node, 1);
+        IrTypeId literal_type = c_ir_compound_literal_type_node(builder, node);
         status = C_IR_CORE_FAILED;
         if (literal_type.value != IR_ID_UNDERLYING_INVALID)
         {
             state->pending_type = literal_type;
             state->pending_source = c_ir_token_source_range(builder, builder->preprocess.tokens[first]);
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL;
-            status = c_ir_lower_compound_literal_frame_push(builder, literal_type, node - 1, close + 1, end - 1) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
+            status = c_ir_lower_compound_literal_frame_push(builder, literal_type, list, spans->first[list], spans->end[list] - 1) ? C_IR_CORE_SUSPENDED : C_IR_CORE_FAILED;
         }
     }
     break;
