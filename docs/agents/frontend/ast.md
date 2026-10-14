@@ -1688,7 +1688,7 @@ verdict), the token scan it fell back to (`c_ir_root_conditional_scan`) and the
 
 ## Expression lowering from the tree
 
-**Status: (a) to (c) are implemented; the owner frames still take their
+**Status: (a) to (c) and CALL record identity are implemented; the owner frames still take their
 subtree's token range, and the step-4 callers read operand extents through
 marked temporary adapters.** This is
 step 3 of the [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
@@ -1705,6 +1705,22 @@ short stack, each part byte-identical on its own:
   their node's root operator, calls split their arguments from the `CALL`
   node, and the root-split, group-fact and operand-end token walkers are
   deleted.
+
+Prepared calls now use their `CALL` or `GENERIC_SELECTION` node as their
+identity. `c_ir_prepared_call_find` reads one zero-initialized row slot per
+node of the function-definition subtree, including parameter VLA bounds
+before the body. Discovery rejects an already prepared node, the evaluator
+consumes that exact node's result, and a `typeof` replay releases its slots
+with its preparation rows. Source tokens still supply names, source ranges
+and the unchanged call emission order. Returned-call chains no longer need
+callee-token chains or a reference scan: their inner and outer calls have
+distinct nodes even when their source starts coincide.
+
+The place and type-query owners that still accept token ranges resolve the
+range's postfix base through retained nodes before asking for a prepared
+CALL. These boundaries remain temporary until the owner frames take nodes;
+there is no token-index or prepared-record scan fallback. The standalone
+argument-separator query adapter is still part of step 4.
 
 The rest of this section is the design that (a) to (c) follow. It describes
 the token path as it was before (a).
@@ -1837,7 +1853,8 @@ frame, or the postorder phase. The walk marks the nodes it hoisted in a bit
 array, private to lowering and offset from the core's first node. A nested
 core consumes a node hoisted by an enclosing core, and does not lower it
 again. Today `c_ir_prepared_control_expression_find` and
-`c_ir_prepared_call_find` record the same fact, keyed by token.
+`c_ir_prepared_call_find` record the same fact; calls now key it by their
+exact node, while the control-record migration owns its grouping identity.
 
 **No recursion and no callbacks.** A nested core, a call argument or a lazy
 operand becomes a frame on the existing `CIrLowerMachine` with today's frame
@@ -2030,7 +2047,13 @@ byte.
 - **Calls.** A prepared call keeps its `CALL` node
   (`CIrPreparedCall.node`), and `c_ir_call_arguments_counted` splits the
   arguments from the node's children. A sole argument does not widen over
-  the call's own parentheses. `c_ir_call_argument_separator` is deleted.
+  the call's own parentheses. The preparation table and evaluator consume
+  that same node, with one dense per-function node index; the callee-token
+  lookup, chained-call table and Debug reference scan are deleted.
+  `c_ir_call_argument_separator` is deleted. `c_test_call_result_callees`
+  checks call-result member/index callbacks, grouped designators, sequencing,
+  lazy branches, unevaluated chains, `typeof` and parameter VLA bounds with
+  exact call counts and native effects.
 - **The `EXPRESSION` frame** splits at the node's root comma, assignment,
   conditional or logical operator. `c_ir_root_first_token` walks the root
   region in order over an explicit stack for the first root `+`, assignment

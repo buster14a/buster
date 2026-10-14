@@ -45,10 +45,11 @@
 // conditional-value frames split a range at its node's root operator
 // (c_ir_root_first_token, c_ir_range_has_root_assignment, c_ir_root_conditional,
 // from the node and its CIrHoistFact byte), and prepared calls split their
-// arguments from their CALL node (c_ir_call_arguments_counted). What the
-// control prepass records are keyed by structural group identity (node and
-// wrapping level); call records and owner frames (places, sizeof, compound
-// literals) still take their subtree's token range. The step-4
+// arguments from their CALL node (c_ir_call_arguments_counted). Prepared
+// calls are indexed by that node (c_ir_prepared_call_find); distinct calls
+// sharing a callee's first token keep distinct rows. Prepared control groups
+// use their node and wrapping level. The owner frames (places,
+// sizeof, compound literals) still take their subtree's token range. The step-4
 // callers that take token ranges (the query machine, the constant evaluator,
 // static initializers, array bounds) read operand extents from the spans
 // through the marked temporary adapters c_ir_tree_unevaluated_operand_end,
@@ -196,7 +197,7 @@
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_root_conditional                         root `?:` splits from the
 //                                                 range's node
-//   c_ir_call_arguments_counted, c_ir_call_node   call arguments from the
+//   c_ir_call_arguments_counted,                  call arguments from the
 //                                                 CALL node
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
@@ -2765,10 +2766,8 @@ struct CIrPreparedCall
     // An index into c_ir_overflow_builtins, or C_IR_OVERFLOW_BUILTIN_NONE.
     u32 builtin_overflow;
     bool emitted;
-    // Set while this call's own callee expression is being lowered. The
-    // callee chain can begin at this call's first token, and a token walk
-    // that reaches it then is walking inside the call rather than arriving at
-    // one to consume.
+    // Set while this call's own callee expression is being lowered; that
+    // context cannot consume its unfinished prepared value.
     bool emitting;
     // Set when c_ir_tree_calls_discover left a call inside this one's
     // parentheses unprepared because it sits in a lazily evaluated operand.
@@ -2819,7 +2818,7 @@ struct CIrPreparedCall
     bool indirect;
     bool parenthesized_callee;
     bool argument_ends_built;
-    // The call's CALL or GENERIC_SELECTION node (c_ir_call_node), lowering's
+    // The call's CALL or GENERIC_SELECTION node, lowering's
     // private reference; and its arguments' ends once split
     // (c_ir_call_argument_end).
     u32 node;
@@ -3826,24 +3825,15 @@ struct CIntegerIrBuilder
     CIrFieldSymbolCache* field_symbols;
     CIrOverAlignedArrayName* over_aligned_array_name;
     u32* oversized_array_bound_token_plus_one;
-    u32* prepared_call_indices;
-    // The prepared calls whose `token_index` is a given body token, as an
-    // index-linked list: `prepared_call_token_heads` is indexed by body token
-    // offset and `prepared_call_token_next` by prepared-call index, both
-    // UINT32_MAX terminated, and a new call is pushed onto its token's head.
-    // c_ir_prepared_call_chained asks exactly that question and used to answer
-    // it by scanning every prepared call of the function: 33.006 calls over
-    // 3,84 M rows of a 128-byte record on a self-compile, one cache line per
-    // row, for a chain that was never once non-empty.
-    u32* prepared_call_token_heads;
-    u32* prepared_call_token_next;
-#if BUSTER_REFERENCE_CHECKS
-    // Monotone across typeof replay: a removed parenthesized callee may
-    // leave this true, which only retains the full reference scan.
-    bool prepared_call_has_parenthesized_callee;
-#endif
+    // One row index plus one per node of the FUNCTION_DEFINITION subtree,
+    // including parameter VLA bounds before the body. Zero means unprepared.
+    // Source token spans remain provenance; only a CALL or GENERIC_SELECTION
+    // node identifies a prepared value, including in a returned-call chain.
+    u32* prepared_call_node_slots;
+    u32 prepared_call_node_start;
+    u32 prepared_call_node_count;
     // Type-name probe answers per body token, indexed like
-    // prepared_call_indices by the `(` that opens the probed group: 0 is
+    // body token offset by the `(` that opens the probed group: 0 is
     // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
     // c_ir_group_type_name owns it and says which groups are never stored.
     u32* group_type_names;
@@ -6262,7 +6252,7 @@ BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u
 }
 
 // The memo slot for the group opening at `open`, in the body-token array
-// prepared_call_indices also spans: a `(` outside the body -- a parameter
+// body-local type-name cache spans: a `(` outside the body -- a parameter
 // bound's declarator, a global initializer -- has none and is probed each
 // time.
 BUSTER_C_INTERNAL u32* c_ir_group_type_name_slot(CIntegerIrBuilder* builder, u32 open)
@@ -19191,8 +19181,8 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index);
-BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 node);
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_base(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
 // Whether [start, end) is a bare member chain: an identifier followed only by
@@ -19554,11 +19544,11 @@ c_ir_place_base_resolved:
         // arrow/subscript chain (`*getlock(l)->plock`), even though it is not
         // itself a local/global place.  Keep the call value as the suffix
         // operand and defer a leading dereference until that chain is walked.
-        CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, base_index);
+        CIrPreparedCall* prepared_call = c_ir_prepared_call_base(builder, base_index, end);
         if (prepared_call && prepared_call->close_index < end)
         {
             IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[base_index]);
-            IrValueId place = c_ir_emit_call(builder, base_index);
+            IrValueId place = prepared_call->emitted ? prepared_call->result : IR_VALUE_ID_INVALID;
             if (place.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -24263,30 +24253,22 @@ BUSTER_C_INTERNAL bool c_ir_apply_complex_operation(CIntegerIrBuilder* builder, 
     return true;
 }
 
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index)
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 node)
 {
-    if (token_index >= builder->body_token_start)
+    CIrPreparedCall* found = 0;
+    if (node >= builder->prepared_call_node_start && node - builder->prepared_call_node_start < builder->prepared_call_node_count)
     {
-        u32 offset = token_index - builder->body_token_start;
-        if (offset < builder->body_token_count)
+        u32 stored = builder->prepared_call_node_slots[node - builder->prepared_call_node_start];
+        if (stored && stored - 1 < builder->prepared_call_count)
         {
-            u32 index = builder->prepared_call_indices[offset];
-            if (index < builder->prepared_call_count && builder->prepared_calls[index].token_index == token_index &&
-                !builder->prepared_calls[index].emitting)
+            CIrPreparedCall* candidate = builder->prepared_calls + stored - 1;
+            if (candidate->node == node && !candidate->emitting)
             {
-                return builder->prepared_calls + index;
+                found = candidate;
             }
-            return 0;
         }
     }
-    for (u32 index = 0; index < builder->prepared_call_count; index += 1)
-    {
-        if (builder->prepared_calls[index].token_index == token_index && !builder->prepared_calls[index].emitting)
-        {
-            return builder->prepared_calls + index;
-        }
-    }
-    return 0;
+    return found;
 }
 
 // The record with this structural group identity. A node can own both
@@ -24870,12 +24852,8 @@ BUSTER_C_INTERNAL bool c_ir_tree_control_groups(CIntegerIrBuilder* builder, u32 
                     // arguments, recording every group in them: a nested
                     // argument of `f(g(h(...)))` does not walk the nesting
                     // again.
-                    u32 callee_start = 0;
-                    bool indexed = false;
-                    bool parenthesized = false;
-                    c_ir_tree_callee_shape(builder, node, start, 0, 0, &callee_start, &indexed, &parenthesized);
-                    CIrPreparedCall* prepared = c_ir_prepared_call_find(builder, callee_start);
-                    if (prepared && prepared->emitted && prepared->open_index == ast->tokens[node])
+                    CIrPreparedCall* prepared = c_ir_prepared_call_find(builder, node);
+                    if (prepared && prepared->emitted)
                     {
                         visible = 0;
                     }
@@ -25155,144 +25133,68 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     }
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index)
+// The token-range place and type-query owners still hand off a source span
+// until #3102 step 4. Resolve its postfix base through the retained tree;
+// prepared values are looked up only by the resulting CALL node. No token
+// index or prepared-row scan can substitute for a missing structural node.
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_base(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    CIrPreparedCall* call = c_ir_prepared_call_find(builder, token_index);
-    return call && call->emitted ? call->result : IR_VALUE_ID_INVALID;
+    u32 node = c_ir_tree_range_node(builder, start, end);
+    CIrPreparedCall* found = 0;
+    bool descending = node != C_AST_NODE_INVALID;
+    while (descending)
+    {
+        u32 kind = builder->syntax_tree->kinds[node];
+        switch (kind)
+        {
+        case C_AST_CALL:
+        case C_AST_GENERIC_SELECTION:
+        {
+            found = c_ir_prepared_call_find(builder, node);
+            descending = false;
+        }
+        break;
+        case C_AST_MEMBER:
+        case C_AST_MEMBER_ARROW:
+        case C_AST_INDEX:
+        case C_AST_EXTENSION:
+        case C_AST_DEREFERENCE:
+        case C_AST_ADDRESS:
+        {
+            node = c_ir_tree_first_child(builder->syntax_tree, node);
+        }
+        break;
+        case C_AST_CAST:
+        {
+            node -= 1;
+        }
+        break;
+        default:
+        {
+            descending = false;
+        }
+        break;
+        }
+    }
+    return found;
 }
 
-// The outermost chained call rooted at `call` that still closes inside
-// `end`.  A chain call keys on its base call's argument list -- two calls
-// cannot share one first token in the token->call index -- so
-// `Py_TYPE(self)->tp_free(self)` and `pick(0)(5)` record their outer call
-// with token_index == the inner call's open_index, and a walk that found the
-// inner call by its first token follows that link outward before consuming.
-// A call still being emitted is its own callee's context and stays excluded,
-// which is what keeps the callee lowering consuming the inner value.
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_call_reference_work;
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_call_reference_rows;
+// Retained test hooks: direct CALL-node consumption needs no chained-call
+// reference scan, in Debug or Release.
 u64 c_test_logical_call_reference_work(void)
 {
-    return c_logical_call_reference_work;
+    return 0;
 }
 u64 c_test_logical_call_reference_rows(void)
 {
-    return c_logical_call_reference_rows;
+    return 0;
 }
 #endif
-
-#if BUSTER_REFERENCE_CHECKS
-// The scan the chain replaces, kept as the reference: a Debug or sanitized
-// build checks every step of every walk. An independent publication fact
-// proves negative lookups without a scan when no callee starts at '('.
-// The scan is not compiled into Release, even though that tree carries
-// tests (BUSTER_INCLUDE_TESTS=1), because it would restore the removed cost.
-BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
-{
-    BUSTER_CHECK(call->open_index < builder->preprocess.token_count &&
-                 c_token_is_punctuator(&builder->preprocess.tokens[call->open_index], C_PUNCTUATOR_LEFT_PARENTHESIS));
-    u32 reference = UINT32_MAX;
-#if BUSTER_INCLUDE_TESTS
-    c_logical_call_reference_work += 1;
-#endif
-    // Every chain candidate keys on the source call's '(' token. If no
-    // published call ever started at '(', there can be no such candidate.
-    // This fact is recorded from publication, independently of the chain.
-    // Check every lookup; retain the full scan whenever the fact permits it.
-    for (u32 index = 0; builder->prepared_call_has_parenthesized_callee && index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
-    {
-#if BUSTER_INCLUDE_TESTS
-        c_logical_call_reference_work += 1;
-        c_logical_call_reference_rows += 1;
-#endif
-        CIrPreparedCall* candidate = builder->prepared_calls + index;
-        if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
-        {
-            reference = index;
-        }
-    }
-    if (reference != answer)
-    {
-        os_fail_message(S8("prepared call chain disagrees with the prepared call scan"));
-    }
-}
-#endif
-
-BUSTER_C_INTERNAL u32 c_ir_prepared_call_chained_index(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
-{
-    u32 chained = UINT32_MAX;
-    u32 open = call->open_index;
-    u32 offset = open - builder->body_token_start;
-    if (open >= builder->body_token_start && offset < builder->body_token_count)
-    {
-        // The chain holds every prepared call whose token index is `open`, so
-        // the lowest of its members that passes is the row the scan over the
-        // whole table answered with.  A call is pushed onto its token's head,
-        // so the chain runs newest first and the minimum is taken rather than
-        // the first match.
-        u32 call_index = (u32)(call - builder->prepared_calls);
-        for (u32 index = builder->prepared_call_token_heads[offset]; index != UINT32_MAX; index = builder->prepared_call_token_next[index])
-        {
-            CIrPreparedCall* candidate = builder->prepared_calls + index;
-            if (index != call_index && index < chained && candidate->close_index < end && !candidate->emitting)
-            {
-                chained = index;
-            }
-        }
-    }
-    else
-    {
-        // A call discovered outside the body -- a variable-length array
-        // parameter's bound -- never entered the token-keyed chain, the same
-        // exception c_ir_prepared_call_find carries.
-        for (u32 index = 0; index < builder->prepared_call_count && chained == UINT32_MAX; index += 1)
-        {
-            CIrPreparedCall* candidate = builder->prepared_calls + index;
-            if (candidate != call && candidate->token_index == open && candidate->close_index < end && !candidate->emitting)
-            {
-                chained = index;
-            }
-        }
-    }
-    return chained;
-}
-
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
-{
-    u32 chained = c_ir_prepared_call_chained_index(builder, call, end);
-    while (chained != UINT32_MAX)
-    {
-#if BUSTER_REFERENCE_CHECKS
-        c_ir_prepared_call_chained_check(builder, call, end, chained);
-#endif
-        call = builder->prepared_calls + chained;
-        chained = c_ir_prepared_call_chained_index(builder, call, end);
-    }
-#if BUSTER_REFERENCE_CHECKS
-    c_ir_prepared_call_chained_check(builder, call, end, UINT32_MAX);
-#endif
-    return call;
-}
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
 BUSTER_C_INTERNAL u32 c_ir_core_wraps(CIntegerIrBuilder* builder, u32 node, u32 limit);
-
-// The CALL (or GENERIC_SELECTION) node of a prepared call, which
-// c_ir_tree_calls_discover records with it; a call another reader builds
-// from its parentheses alone finds its node through the retained spans once.
-// C_AST_NODE_INVALID when no such node spans the call.
-BUSTER_C_INTERNAL u32 c_ir_call_node(CIntegerIrBuilder* builder, CIrPreparedCall* call)
-{
-    if (call->node == C_AST_NODE_INVALID && builder->syntax_tree)
-    {
-        u32 node = c_ir_tree_range_node(builder, call->token_index, call->close_index + 1);
-        u32 kind = node != C_AST_NODE_INVALID ? builder->syntax_tree->kinds[node] : C_AST_KIND_COUNT;
-        call->node = kind == C_AST_CALL || kind == C_AST_GENERIC_SELECTION ? node : C_AST_NODE_INVALID;
-    }
-    return call->node;
-}
 
 // Splits the call's arguments from its node's children (GitHub #3102 step
 // 3c): argument k runs from its first token to the token before the next
@@ -25305,8 +25207,9 @@ BUSTER_C_INTERNAL u32 c_ir_call_node(CIntegerIrBuilder* builder, CIrPreparedCall
 BUSTER_C_INTERNAL bool c_ir_call_arguments_counted(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32* starts, u32* ends, u32 capacity,
                                                    u32* count_out, bool count_extra)
 {
-    u32 node = c_ir_call_node(builder, call);
-    bool valid = node != C_AST_NODE_INVALID;
+    u32 node = call->node;
+    bool valid = builder->syntax_tree && node < builder->syntax_tree->node_count &&
+                 (builder->syntax_tree->kinds[node] == C_AST_CALL || builder->syntax_tree->kinds[node] == C_AST_GENERIC_SELECTION);
     u32 count = 0;
     if (valid)
     {
@@ -25372,14 +25275,15 @@ BUSTER_C_INTERNAL u32 c_ir_call_argument_end(CIntegerIrBuilder* builder, CIrPrep
 
 #define C_IR_CALL_SEPARATORS_CAPACITY 4u
 
-// The query machine's adapter until step 4 moves it to nodes: the ends of
+// TEMPORARY ADAPTER: the query machine until step 4 moves it to nodes. The ends of
 // the first `capacity` arguments of the call whose callee is the token at
 // `callee` and whose `)` is `close`. An argument past the last one ends at
 // `close` too.
 BUSTER_C_INTERNAL void c_ir_call_separators(CIntegerIrBuilder* builder, u32 callee, u32 close, u32* ends, u32 capacity)
 {
     BUSTER_CHECK(capacity <= C_IR_CALL_SEPARATORS_CAPACITY);
-    CIrPreparedCall call = {.token_index = callee, .open_index = callee + 1, .close_index = close, .node = C_AST_NODE_INVALID};
+    CIrPreparedCall call = {.token_index = callee, .open_index = callee + 1, .close_index = close,
+                            .node = c_ir_tree_range_node(builder, callee, close + 1)};
     u32 starts[C_IR_CALL_SEPARATORS_CAPACITY] = {0};
     u32 count = 0;
     for (u32 index = 0; index < capacity; index += 1)
@@ -26008,12 +25912,12 @@ BUSTER_C_INTERNAL bool c_ir_call_rejected(CIntegerIrBuilder* builder, CIrPrepare
                    call->builtin_sse2_immediate_shift != C_IR_SSE2_IMMEDIATE_SHIFT_NONE;
     return (!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
            (!builtin && !indirect && !c_ir_function_name_resolution_token(builder, token)) ||
-           (!indirect && c_ir_prepared_control_expression_contains(builder, call->node)) || c_ir_prepared_call_find(builder, callee_start);
+           (!indirect && c_ir_prepared_control_expression_contains(builder, call->node)) || c_ir_prepared_call_find(builder, call->node);
 }
 
 // Records a classified call whose `(` follows `index` and whose `)` is
 // `close`: its parent is the innermost active call that closes after it, and
-// it joins the active stack and the token->call index. Returns its row, or
+// it joins the active stack and the CALL-node index. Returns its row, or
 // UINT32_MAX when the table is full.
 BUSTER_C_INTERNAL u32 c_ir_call_record(CIntegerIrBuilder* builder, CIrPreparedCall call, u32 index, u32 callee_start, u32 close, bool indexed_callee,
                                        bool parenthesized_callee, u32 last_deferred_index, u32* active_calls, u32* active_call_count,
@@ -26047,10 +25951,6 @@ BUSTER_C_INTERNAL u32 c_ir_call_record(CIntegerIrBuilder* builder, CIrPreparedCa
         call.indirect = indirect;
         call.parenthesized_callee = parenthesized_callee;
         builder->prepared_calls[prepared_call_index] = call;
-#if BUSTER_REFERENCE_CHECKS
-        builder->prepared_call_has_parenthesized_callee |=
-            c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
-#endif
         if (parent_index != UINT32_MAX)
         {
             builder->prepared_calls[parent_index].last_child_index = prepared_call_index;
@@ -26062,18 +25962,9 @@ BUSTER_C_INTERNAL u32 c_ir_call_record(CIntegerIrBuilder* builder, CIrPreparedCa
         BUSTER_CHECK(*active_call_count < active_capacity);
         active_calls[*active_call_count] = prepared_call_index;
         *active_call_count += 1;
-        // The token->call index spans the body alone.  A variable-length array
-        // parameter's bound is lowered from the declarator, whose tokens sit
-        // below body_token_start, so a call discovered there simply does not
-        // get a fast slot: c_ir_prepared_call_find already answers an
-        // out-of-body token with a linear scan over the prepared calls.
-        if (callee_start >= builder->body_token_start && callee_start - builder->body_token_start < builder->body_token_count)
-        {
-            u32 callee_offset = callee_start - builder->body_token_start;
-            builder->prepared_call_indices[callee_offset] = prepared_call_index;
-            builder->prepared_call_token_next[prepared_call_index] = builder->prepared_call_token_heads[callee_offset];
-            builder->prepared_call_token_heads[callee_offset] = prepared_call_index;
-        }
+        BUSTER_CHECK(call.node >= builder->prepared_call_node_start &&
+                     call.node - builder->prepared_call_node_start < builder->prepared_call_node_count);
+        builder->prepared_call_node_slots[call.node - builder->prepared_call_node_start] = prepared_call_index + 1;
     }
     return prepared_call_index;
 }
@@ -26179,10 +26070,8 @@ BUSTER_C_INTERNAL u32 c_ir_tree_subscript_base(CIntegerIrBuilder* builder, u32 n
     return named ? base : C_AST_NODE_INVALID;
 }
 
-// The callee shape of a CALL, in the terms the expression evaluator keys its
-// prepared calls by (CIrPreparedCall.token_index, a temporary adapter until
-// the evaluator reads nodes, GitHub #3102 step 3): `callee_start` is the
-// first token of the place the
+// The source callee shape of a CALL: `callee_start` preserves the first
+// token of the place the
 // callee is read from, and the call is indexed (`a[i](...)`) or
 // parenthesized (`(*f)(...)`, and a call's result, `get()(...)`). A name
 // walks back over the member chain that leads to it. False for a callee
@@ -35474,7 +35363,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         // A direct call through a function name resolves to the declared return type.
-        CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, start);
+        CIrPreparedCall* prepared_call = c_ir_prepared_call_base(builder, start, end);
         u32 close = UINT32_MAX;
         if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
         {
@@ -38096,14 +37985,9 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_identifier(CIntegerIrBuilder* builder,
     }
     else if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        // A call no prepass recorded: only a chained call can still supply
-        // its value.
-        CIrPreparedCall* chained_call = c_ir_prepared_call_find(builder, index);
-        if (chained_call && chained_call->close_index < end)
-        {
-            chained_call = c_ir_prepared_call_chained(builder, chained_call, end);
-        }
-        value = chained_call && chained_call->emitted ? chained_call->result : IR_VALUE_ID_INVALID;
+        u32 call_node = c_ir_tree_range_node(builder, index, end);
+        CIrPreparedCall* prepared = c_ir_prepared_call_find(builder, call_node);
+        value = prepared && prepared->emitted ? prepared->result : IR_VALUE_ID_INVALID;
     }
     else
     {
@@ -38353,7 +38237,6 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
     u32 kind = ast->kinds[node];
     u32 first = spans->first[node];
     u32 end = spans->end[node];
-    u32 core_end = frame->as.expression_core.end;
     CIrCoreStatus status = C_IR_CORE_NEXT;
     switch (kind)
     {
@@ -38464,23 +38347,11 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_own(CIntegerIrBuilder* builder, CIrLow
         }
         if (!done)
         {
-            // A call keys on the first token of its callee, so a call that
-            // this range is the callee of is found here as well -- its
-            // argument list closes past the end of the range. Consuming only
-            // the inner call of a chain would strand the walk at the outer
-            // argument list, so hop to the outermost chained call the range
-            // still contains. The call is this node's when it ends where the
-            // node does.
-            CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, first);
-            if (prepared_call && prepared_call->close_index >= core_end)
-            {
-                prepared_call = 0;
-            }
+            // This node alone owns its prepared value. In a returned-call
+            // chain the callee and the outer CALL are distinct nodes, even
+            // when their source spans begin at the same token.
+            CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, node);
             if (prepared_call)
-            {
-                prepared_call = c_ir_prepared_call_chained(builder, prepared_call, core_end);
-            }
-            if (prepared_call && prepared_call->close_index + 1 == end)
             {
                 state->walk_count -= 1;
                 done = true;
@@ -40290,14 +40161,9 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         for (u32 index = builder->prepared_call_count; index > state->typeof_previous_call_count; index -= 1)
         {
             CIrPreparedCall* call = builder->prepared_calls + index - 1;
-            if (call->token_index >= builder->body_token_start &&
-                call->token_index - builder->body_token_start < builder->body_token_count)
-            {
-                u32 offset = call->token_index - builder->body_token_start;
-                u32 previous = builder->prepared_call_token_next[index - 1];
-                builder->prepared_call_token_heads[offset] = previous;
-                builder->prepared_call_indices[offset] = previous;
-            }
+            BUSTER_CHECK(call->node >= builder->prepared_call_node_start &&
+                         call->node - builder->prepared_call_node_start < builder->prepared_call_node_count);
+            builder->prepared_call_node_slots[call->node - builder->prepared_call_node_start] = 0;
         }
         builder->prepared_call_count = state->typeof_previous_call_count;
         c_ir_prepared_control_expression_rollback(builder, state->typeof_previous_control_count);
@@ -59554,7 +59420,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(builder->target,
                     c_token_spelling(builder->preprocess.spelling_base, token));
                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                CIrPreparedCall call = {.token_index = index, .open_index = index + 1, .close_index = close, .node = C_AST_NODE_INVALID};
+                // TEMPORARY ADAPTER: the constant owner still takes ranges;
+                // its argument view carries the resolved CALL node explicitly.
+                CIrPreparedCall call = {.token_index = index, .open_index = index + 1, .close_index = close,
+                                       .node = close < end ? c_ir_tree_range_node(builder, index, close + 1) : C_AST_NODE_INVALID};
                 u32 starts[2] = {0};
                 u32 ends[2] = {0};
                 u32 argument_count = 0;
@@ -64682,9 +64551,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), lowering_capacity, BUSTER_ALIGN_OF(u32)) &&
             (!cleanup_capacity || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrValueId), cleanup_capacity, BUSTER_ALIGN_OF(IrValueId))) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedCall), call_array_capacity, BUSTER_ALIGN_OF(CIrPreparedCall)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), call_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_node_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             (stream_matching_delimiters_plus_one || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32))) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
@@ -64840,6 +64707,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .label_candidate_count = label_candidate_count,
             .label_candidates_valid = label_candidates_valid,
             .prepared_call_capacity = prepared_call_capacity ? (u32)prepared_call_capacity : 1,
+            .prepared_call_node_start = prepared_node_start,
+            .prepared_call_node_count = prepared_node_count,
             .body_token_start = declaration.body_start,
             .body_token_count = declaration.body_token_count,
             .prepared_control_expression_capacity = prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1,
@@ -64863,9 +64732,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.label_place_next = arena_allocate(lowering_temporary.arena, u32, lowering_capacity);
         builder.cleanup_flags = cleanup_capacity ? arena_allocate(lowering_temporary.arena, IrValueId, cleanup_capacity) : 0;
         builder.prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, call_array_capacity);
-        builder.prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
-        builder.prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
-        builder.prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, call_array_capacity);
+        builder.prepared_call_node_slots = arena_allocate(lowering_temporary.arena, u32, prepared_node_array_capacity);
         builder.group_type_names = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         builder.matching_delimiters_plus_one = stream_matching_delimiters_plus_one ? 0 : arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         builder.prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
@@ -64883,10 +64750,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         memset(builder.prepared_control_node_heads, 0, sizeof(u32) * prepared_node_array_capacity);
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * prepared_node_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
+        memset(builder.prepared_call_node_slots, 0, sizeof(u32) * prepared_node_array_capacity);
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
-            builder.prepared_call_indices[token_offset] = UINT32_MAX;
-            builder.prepared_call_token_heads[token_offset] = UINT32_MAX;
             builder.group_type_names[token_offset] = 0;
         }
         if (!builder.stream_matching_delimiters_plus_one)
