@@ -1889,8 +1889,12 @@ parenthesis. These groups add no nodes and preserve implicit, hybrid and
 explicit topology. Records are append-built in node order, then innermost to
 outermost for a shared root. `c_ast_parentheses` finds a node's sparse slice;
 `c_ast_parenthesis_at` reads a wrapping level, with level 1 innermost.
-Call argument and statement condition delimiters belong to their owning
-syntax nodes and are not redundant expression groups.
+Owned conditions, `for` headers and compound blocks also retain their exact
+opening and closing tokens in flagged rows. Conditions commit at their closer;
+blocks and `for` headers publish their saved closer when the owner node is
+appended. `c_ast_owned_delimiter` reads these roles separately;
+`c_ast_parentheses` and `c_ast_parenthesis_at` exclude them from true wrapping
+levels. Call argument delimiters remain owned by their `CALL` node.
 
 The rows live in a private retained arena owned by `CAstStorage`, with checked
 reservation growth and independent step commits. A failed build retires it;
@@ -1907,6 +1911,10 @@ normal visited-node role before the table is published.
 `c_ast_test_parentheses` specifies exact roots and delimiters independently,
 checks every layout and refill batch, forces both column and group moves,
 and covers deep nesting, release through copies and failed-build rollback.
+`c_ast_test_owned_delimiters` specifies exact condition, header and block
+boundaries through every layout, refill and column-growth mode, and verifies
+that owned delimiters contribute no true wrapping level. The token-free
+lowering probe reads both roles with no token stream or matching index.
 
 ### Delimiters (map row 8)
 
@@ -1934,11 +1942,12 @@ and the initializer walkers. There the end comes from nodes, as in the
 - a node's last token is the greatest anchor on its rightmost chain;
 - a `CALL` or `INDEX` adds its closer;
 - expression groups read their parser-committed sparse records;
-- the statement range adapter still widens syntax-owned delimiters pending
-  its owner metadata migration.
+- statement headers and block closers read owned delimiter provenance.
 
-Expression wrapper navigation has no token fallback. Syntax-owned delimiter
-ranges in the statement adapter remain a separate step-5 boundary.
+`c_ir_node_expression_range`, its explicit edge stack and `c_ir_node_close`
+are deleted. `c_ir_node_expression_provenance` reads a known root's retained
+semantic span and true groups. `DO_WHILE` reads its separate owned condition;
+no token scan, delimiter matching or token fallback remains in these reads.
 
 Row 8 retires from lowering only when none of the four classes asks a
 delimiter question. That happens after slices 1–5, so it is the last step.

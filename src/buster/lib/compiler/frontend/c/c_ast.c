@@ -5379,6 +5379,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_block(CAstBuilder* builder, CAstFrame* frame
                     c_ast_scope_pop(builder, frame->c);
                 }
                 c_ast_append(builder, C_AST_COMPOUND_STATEMENT, frame->begin, frame->a, frame->b);
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a, builder->position - 1, C_AST_DELIMITER_BLOCK);
                 c_ast_pop(builder);
                 running = false;
             }
@@ -5433,6 +5434,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_if(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a + 1, builder->position, C_AST_DELIMITER_CONDITION);
                 c_ast_advance(builder);
                 frame->state = C_AST_IF_AFTER_THEN;
                 if (c_ast_start_child_statement(builder, false))
@@ -5509,6 +5511,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_while(CAstBuilder* builder, CAstFrame* frame
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a + 1, builder->position, C_AST_DELIMITER_CONDITION);
                 c_ast_advance(builder);
                 frame->state = C_AST_WHILE_AFTER_BODY;
                 if (c_ast_start_child_statement(builder, false))
@@ -5561,6 +5564,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_do(CAstBuilder* builder, CAstFrame* frame)
             if (c_ast_is_word(builder, c_ast_peek(builder, 0), C_AST_WORD_WHILE) &&
                 c_ast_is_punctuator(c_ast_peek(builder, 1), C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
+                frame->b = builder->position + 1;
                 c_ast_advance(builder);
                 c_ast_advance(builder);
                 frame->state = C_AST_DO_AFTER_CONDITION;
@@ -5577,6 +5581,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_do(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->b, builder->position, C_AST_DELIMITER_CONDITION);
                 c_ast_advance(builder);
                 if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_SEMICOLON))
                 {
@@ -5707,6 +5712,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_for(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                frame->d = builder->position;
                 c_ast_advance(builder);
                 frame->state = C_AST_FOR_END;
                 if (c_ast_start_child_statement(builder, false))
@@ -5727,6 +5733,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_for(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                frame->d = builder->position;
                 c_ast_advance(builder);
                 frame->state = C_AST_FOR_END;
                 if (c_ast_start_child_statement(builder, false))
@@ -5744,6 +5751,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_for(CAstBuilder* builder, CAstFrame* frame)
         {
             c_ast_scope_pop(builder, frame->c);
             c_ast_append(builder, C_AST_FOR, frame->begin, frame->a, frame->b);
+            c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a + 1, frame->d, C_AST_DELIMITER_FOR_HEADER);
             c_ast_pop(builder);
             running = false;
             break;
@@ -6461,7 +6469,7 @@ void c_ast_release(CAst* ast)
     *ast = (CAst){.root = C_AST_NODE_INVALID};
 }
 
-CAstParentheses c_ast_parentheses(CAst const* ast, u32 node)
+BUSTER_GLOBAL_LOCAL CAstParentheses c_ast_delimiter_slice(CAst const* ast, u32 node)
 {
     u32 low = 0;
     u32 high = ast->parenthesis_count;
@@ -6492,6 +6500,23 @@ CAstParentheses c_ast_parentheses(CAst const* ast, u32 node)
         }
     }
     return (CAstParentheses){.first = first, .count = low - first};
+}
+
+CAstParentheses c_ast_parentheses(CAst const* ast, u32 node)
+{
+    CAstParentheses slice = c_ast_delimiter_slice(ast, node);
+    if (slice.count && (ast->parentheses[slice.first + slice.count - 1].flags & C_AST_DELIMITER_OWNED_MASK))
+    {
+        slice.count -= 1;
+    }
+    return slice;
+}
+
+CAstParenthesis const* c_ast_owned_delimiter(CAst const* ast, u32 node, u32 role)
+{
+    CAstParentheses slice = c_ast_delimiter_slice(ast, node);
+    CAstParenthesis const* owned = slice.count ? ast->parentheses + slice.first + slice.count - 1 : 0;
+    return owned && (owned->flags & role & C_AST_DELIMITER_OWNED_MASK) ? owned : 0;
 }
 
 CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level)
@@ -6898,8 +6923,14 @@ u32 c_ast_validate(CAst const* ast)
     for (u32 index = 0; index < ast->parenthesis_count && result == C_AST_NODE_INVALID; index += 1)
     {
         CAstParenthesis group = ast->parentheses[index];
-        bool valid = group.node < count && group.open < group.close && group.open < ast->tokens[group.node] &&
-                     ast->tokens[group.node] < group.close;
+        bool valid = group.node < count && group.open < group.close;
+        if (valid)
+        {
+            u32 token = ast->tokens[group.node];
+            valid = group.flags & C_AST_DELIMITER_FOR_HEADER ? ast->kinds[group.node] == C_AST_FOR && token + 1 == group.open
+                  : group.flags & C_AST_DELIMITER_BLOCK ? ast->kinds[group.node] == C_AST_COMPOUND_STATEMENT && token == group.open
+                  : group.open < token && token < group.close;
+        }
         if (index)
         {
             CAstParenthesis previous = ast->parentheses[index - 1];

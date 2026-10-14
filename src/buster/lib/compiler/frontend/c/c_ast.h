@@ -419,17 +419,23 @@ struct CAstStatistics
 // points at it, so c_ast_release through any copy retires them once.
 typedef struct CAstStorage CAstStorage;
 
-// A redundant expression group, committed when its closing `)` is read.
-// These rows are ordered by node, then innermost to outermost. They are
-// structural metadata, not punctuation nodes or a second syntax tree.
+// A redundant expression group, or syntax-owned delimiter provenance.
+// Groups commit at their closing `)`; condition roles commit at their
+// closer, and blocks/for headers publish their saved closer with the owner.
+// Rows are ordered by node, true groups inner to outer followed by an owned
+// role when present. They add no punctuation nodes or second syntax tree.
 typedef struct CAstParenthesis CAstParenthesis;
 #define C_AST_PARENTHESIS_AFTER_IDENTIFIER 1u
+#define C_AST_DELIMITER_CONDITION (1u << 1)
+#define C_AST_DELIMITER_FOR_HEADER (1u << 2)
+#define C_AST_DELIMITER_BLOCK (1u << 3)
+#define C_AST_DELIMITER_OWNED_MASK (C_AST_DELIMITER_CONDITION | C_AST_DELIMITER_FOR_HEADER | C_AST_DELIMITER_BLOCK)
 struct CAstParenthesis
 {
     u32 node;
     u32 open;
     u32 close;
-    u32 flags; // parser-known opening context; C_AST_PARENTHESIS_*
+    u32 flags; // parser-known opening context or C_AST_DELIMITER_* role
 };
 
 typedef struct CAstParentheses CAstParentheses;
@@ -486,6 +492,8 @@ BUSTER_F_DECL void c_ast_release(CAst* ast);
 // innermost group). An absent level returns null. No tokens are inspected.
 BUSTER_F_DECL CAstParentheses c_ast_parentheses(CAst const* ast, u32 node);
 BUSTER_F_DECL CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level);
+// Syntax-owned delimiter provenance is separate from true wrapping levels.
+BUSTER_F_DECL CAstParenthesis const* c_ast_owned_delimiter(CAst const* ast, u32 node, u32 role);
 
 // Checks every node's contract, extent tiling and containment, layout slices
 // against the implicit topology, and that the root spans the tree. Returns
