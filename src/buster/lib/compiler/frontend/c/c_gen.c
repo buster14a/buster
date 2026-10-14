@@ -25962,10 +25962,10 @@ BUSTER_C_INTERNAL bool c_ir_tree_callee_shape(CIntegerIrBuilder* builder, u32 ca
         if (base != C_AST_NODE_INVALID)
         {
             callee_start = ast->tokens[base];
-            if (ast->kinds[base] == C_AST_CALL && c_ir_span_wrapped(builder->syntax_spans, tokens, builder->syntax_matches, base))
+            if (ast->kinds[base] == C_AST_CALL && c_ir_span_wrapped(ast, base))
             {
                 u32 base_end = 0;
-                c_ir_span_expanded(builder->syntax_spans, tokens, builder->syntax_matches, base, &callee_start, &base_end);
+                c_ir_span_expanded(ast, builder->syntax_spans, base, &callee_start, &base_end);
             }
             indexed = true;
             current = base;
