@@ -10859,6 +10859,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_consumer_register_hint(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_register_compaction(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        u32 count = shape ? 6u : 4u;
+        u32 ids[4] = {0, shape ? 2u : 1u, shape ? 3u : 2u, shape ? 5u : 3u};
+        MachineVirtualRegister registers[6] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            registers[index] = (MachineVirtualRegister){.definition_point = machine_point_make(index, MACHINE_POINT_AFTER),
+                                                        .typed_origin = index + 100u,
+                                                        .register_class = MACHINE_REGISTER_CLASS_GENERAL};
+        }
+        registers[ids[2]].flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE;
+        MachineVirtualRegister expected[4];
+        for (u32 index = 0; index < 4; index += 1) memcpy(expected + index, registers + ids[index], sizeof(*expected));
+        MachineInstruction instructions[2] = {
+            {.opcode = MACHINE_X64_MOV_RR,
+             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[0]),
+                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[1])}},
+            {.opcode = MACHINE_X64_RET},
+        };
+        MachineBlockParameter parameter = {.virtual_register = ids[2]};
+        MachineRef sources[2] = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[3]),
+                                machine_ref_make(MACHINE_REF_IMMEDIATE, 7)};
+        MachineFunction function = {.virtual_registers = registers, .virtual_register_count = count,
+                                    .instructions = instructions, .instruction_count = 2,
+                                    .block_parameters = &parameter, .block_parameter_count = 1,
+                                    .edge_copy_sources = sources, .edge_copy_source_count = 2};
+        u32 mutable_count = machine_test_compact_virtual_registers(arguments->arena, &function);
+        BUSTER_TEST(arguments, mutable_count == 1 && function.virtual_register_count == 4);
+        BUSTER_TEST(arguments, !memcmp(registers, expected, sizeof(expected)));
+        BUSTER_TEST(arguments, instructions[0].operands[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) &&
+                               instructions[0].operands[1] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1));
+        BUSTER_TEST(arguments, parameter.virtual_register == 2 && sources[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 3) &&
+                               sources[1] == machine_ref_make(MACHINE_REF_IMMEDIATE, 7));
+        BUSTER_TEST(arguments, machine_test_compact_virtual_registers(arguments->arena, &function) == 1 &&
+                               function.virtual_register_count == 4 && !memcmp(registers, expected, sizeof(expected)));
+        // Each reference family still rejects out-of-range IDs before any
+        // identity shortcut can succeed or mutate the machine function.
+        for (u32 invalid = 0; invalid < 4; invalid += 1)
+        {
+            MachineInstruction bad_row = {.opcode = invalid ? MACHINE_X64_MOV_RR : MACHINE_OPCODE_COUNT,
+                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, invalid == 1 ? 4u : 0u),
+                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1)}};
+            MachineBlockParameter bad_parameter = {.virtual_register = invalid == 2 ? 4u : 2u};
+            MachineRef bad_source = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, invalid == 3 ? 4u : 3u);
+            MachineFunction bad_function = {.virtual_registers = registers, .virtual_register_count = 4,
+                                            .instructions = &bad_row, .instruction_count = 1,
+                                            .block_parameters = &bad_parameter, .block_parameter_count = 1,
+                                            .edge_copy_sources = &bad_source, .edge_copy_source_count = 1};
+            BUSTER_TEST(arguments, machine_test_compact_virtual_registers(arguments->arena, &bad_function) == UINT32_MAX);
+            BUSTER_TEST(arguments, bad_function.virtual_register_count == 4 && !memcmp(registers, expected, sizeof(expected)));
+        }
+    }
+    MachineFunction empty = {0};
+    BUSTER_TEST(arguments, machine_test_compact_virtual_registers(arguments->arena, &empty) == 0);
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -10868,6 +10929,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_register_compaction);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_test_fast_consumer_register_hint);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_test_source_writer_guards);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_test_sparse_local_state);
