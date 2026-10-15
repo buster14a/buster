@@ -9827,6 +9827,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTe
         // The historical unchecked TYPEOF query admits this; publication
         // must preserve that answer until its separate constraint fix.
         S8("int f(double x){__typeof__(x%2) a;return 0;}"),
+        S8("typedef int V __attribute__((vector_size(16)));int f(V x,V z){__typeof__(sizeof(x&z)) a=0;return (int)a;}"),
     };
     String8 const rejected[] = {
         S8("typedef int V __attribute__((vector_size(16)));int f(V x,V z){__typeof__(x&z) a=x;return a[0];}"),
