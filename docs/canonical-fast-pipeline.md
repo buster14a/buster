@@ -726,7 +726,13 @@ Zero row/site limits remain zero in embedding options across modules;
 other zero numeric fields normalize to their named defaults.
 Mandatory calls are processed before optional tiny candidates across the module.
 Their growth and sites count against any subsequent optional allowance.
-Mandatory graph planning retains its module-wide work and scratch bounds.
+Mandatory graph planning retains its module-wide 4 Mi work-unit allowance for
+function/symbol metadata and retained dependency edges, and its 16 MiB scratch
+bound. Discovering those edges reads existing input at most once densely and
+once through block instruction lists per function; this input-proportional
+work is counted in `IR_INLINE visits` separately from the fixed graph allowance.
+Known call-free functions need neither scan. Large unrelated bodies therefore
+cannot exhaust required graph planning before a call is considered (#4289).
 Required splicing keeps the fixed 4 Mi work-unit and 16 MiB retained-storage
 limits per caller, plus one input-proportional relocation of the caller's
 existing tables and local/debug snapshots. The required work charge follows
