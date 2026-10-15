@@ -644,6 +644,13 @@ printf '%s\n' "$checked"
             self.assertEqual(result.stdout.strip(), "146")
 
 
+class CurrentEvidencePackTests(_frozen_ci.EvidencePackTests):
+    def native_steps(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        native = text.split("\n  native:", 1)[1].split("\n  uefi:", 1)[0]
+        return dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", native))
+
+
 class CurrentActionPinsTests(_frozen_actions.ActionPinsTest):
     def test_github_lint_checks_policy(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -664,7 +671,7 @@ class CurrentActionPinsTests(_frozen_actions.ActionPinsTest):
     def test_buster_ci_uses_native_node24_artifact_action(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn(_frozen_actions.UPLOAD_ARTIFACT_V4_PIN, github)
-        self.assertEqual(github.count(_frozen_actions.UPLOAD_ARTIFACT_V7_PIN), 9)
+        self.assertEqual(github.count(_frozen_actions.UPLOAD_ARTIFACT_V7_PIN), 8)
         self.assertEqual(_frozen_actions.PINS.APPROVED["actions/upload-artifact"],
                          {_frozen_actions.UPLOAD_ARTIFACT_V4_SHA,
                           _frozen_actions.UPLOAD_ARTIFACT_V7_SHA})
@@ -676,7 +683,7 @@ def load_tests(loader, tests, pattern):
     for value in vars(_frozen_ci).values():
         if (isinstance(value, type) and issubclass(value, unittest.TestCase) and
                 value.__module__ == _frozen_ci.__name__ and
-                value is not _frozen_ci.WorkflowPolicyTests):
+                value not in (_frozen_ci.WorkflowPolicyTests, _frozen_ci.EvidencePackTests)):
             tests.addTests(loader.loadTestsFromTestCase(value))
     return tests
 
