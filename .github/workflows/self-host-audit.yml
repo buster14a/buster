@@ -77,8 +77,7 @@ jobs:
           mkdir -p build/self-host-audit
           {
             "$RUNNER_TEMP/buster-build" build --config Release -t test_all
-          } 2>&1 | tee build/self-host-audit/truetype-tests.log
-          grep -F 'module=truetype_tests ' build/self-host-audit/truetype-tests.log
+          } 2>&1 | tee build/self-host-audit/compiler-regressions.log
       - name: Check the bootstrap probe against independent compiler oracles
         # A failed audit must not suppress its independent semantic evidence.
         # These steps remain required failures; no continue-on-error is used.
