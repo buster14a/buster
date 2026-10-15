@@ -28791,6 +28791,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
                 result->entities[file_scope.value].kind == C_ENTITY_FUNCTION)
             {
                 CEntity* file_entity = &result->entities[file_scope.value];
+                if (!c_parse_types_compatible(arena, result, preprocess, file_entity->type, type))
+                {
+                    CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                    c_parse_diagnostic(result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       c_parse_message(arena, S8("conflicting declaration of '{S8}' (previous declaration at {S8})"), function_name,
+                                                       c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, file_entity->location))));
+                }
                 u32 conflicting_hint_token = UINT32_MAX;
                 if (local_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE))
                 {

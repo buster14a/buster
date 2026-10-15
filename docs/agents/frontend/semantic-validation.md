@@ -1002,3 +1002,15 @@ with independent Linux GCC/Clang rejection controls. Workspace ownership has its
 own registered fault/recovery control: a failed replacement preserves the old
 reservation and generation, a later search recovers, and production teardown
 returns the private reservation count to its starting value.
+
+## Block-scope function prototypes
+
+When registering a local function declaration against an existing file-scope
+function, check its type with `c_parse_types_compatible` before merging inline
+attributes. The first local declaration needs this check even when no name
+has yet been declared in that block. A conflict produces
+`C_DIAGNOSTIC_CONFLICTING_DECLARATION` with both declaration sites; compatible
+repeats and inherited internal linkage retain their existing behavior.
+The registered local-linkage controls include FFmpeg's variadic ioctl-probe
+shape without platform headers, return/arity/variadic conflicts, a nested
+extern declaration, typedef prototypes and compatible static declarations.
