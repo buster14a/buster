@@ -292,6 +292,7 @@ struct MachineX64Selector
     u32 current_block;
     // Allocated only when wide division splits canonical blocks. Branches
     // enter the original entry; canonical outgoing edges leave the last split.
+    MachineParameterEdgeLayout parameter_edges;
     u32* block_entries;
     u32* block_exits;
     // Per canonical block, the first of target_count asm-goto continuations,
@@ -1224,7 +1225,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_define(MachineX64Selector* selector, u32 vi
         MachineVirtualRegister* row = machine_builder_virtual_register_at(&selector->builder, virtual_register);
         if (row->definition_point == MACHINE_POINT_INVALID)
         {
-            row->definition_point = machine_point_make(machine_index, MACHINE_POINT_AFTER);
+            row->definition_point = machine_builder_definition_point(&selector->builder, machine_index);
         }
     }
 }
@@ -1588,7 +1589,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_synthesize_register(MachineX64Selector* sele
 {
     return machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
                                                                     .definition_point =
-                                                                        machine_point_make(selector->builder.instructions.total_count, MACHINE_POINT_AFTER),
+                                                                        machine_builder_definition_point(&selector->builder, selector->builder.instructions.total_count),
                                                                     .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                     .typed_origin = IR_ID_UNDERLYING_INVALID,
                                                                 });
@@ -4296,7 +4297,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_vector_lanes(MachineX64Selector* sel
             {
                 // Integer comparisons emit CMP before their defining SETCC.
                 // Constrained shifts/divides define at their initial MOV.
-                result_record->definition_point = machine_point_make(definition_row + (integer_comparison ? 1u : 0u), MACHINE_POINT_AFTER);
+                result_record->definition_point = machine_builder_definition_point(&selector->builder, definition_row + (integer_comparison ? 1u : 0u));
             }
         }
         if (selected && !unary && instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL)
@@ -5842,6 +5843,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
 BUSTER_GLOBAL_LOCAL u32 machine_x64_select_block_entry(MachineX64Selector* selector, u32 canonical_block)
 {
     return selector->block_entries ? selector->block_entries[canonical_block] : canonical_block;
+}
+
+BUSTER_GLOBAL_LOCAL u32 machine_x64_block_target(MachineX64Selector* selector, u32 canonical_block)
+{
+    u32 split = selector->parameter_edges.targets ? selector->parameter_edges.targets[canonical_block] : UINT32_MAX;
+    u32 result = split != UINT32_MAX ? split : machine_x64_select_block_entry(selector, canonical_block);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_assembly_identity(MachineX64Selector* selector, IrInstruction* instruction)
@@ -7509,7 +7517,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_call(MachineX64Selector* selector, I
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_branch(MachineX64Selector* selector, IrInstruction* instruction)
 {
     machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[0].value))},
+                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_block_target(selector, instruction->targets[0].value))},
                                          .opcode = MACHINE_X64_JMP,
                                      });
     return true;
@@ -7549,7 +7557,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_indirect_branch(MachineX64Selector* 
                 selected = false;
                 break;
             }
-            machine_x64_append_switch_case(selector, (MachineSwitchCase){.target_block = machine_x64_select_block_entry(selector, instruction->targets[target_index].value)});
+            machine_x64_append_switch_case(selector, (MachineSwitchCase){.target_block = machine_x64_block_target(selector, instruction->targets[target_index].value)});
         }
         if (selected)
         {
@@ -7751,13 +7759,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_switch(MachineX64Selector* selector,
         {
             machine_x64_append_switch_case(selector, (MachineSwitchCase){
                                                          .value = instruction->immediates[case_index] & value_mask,
-                                                         .target_block = machine_x64_select_block_entry(selector, instruction->targets[case_index].value),
+                                                         .target_block = machine_x64_block_target(selector, instruction->targets[case_index].value),
                                                          .compare_width = compare_width,
                                                      });
         }
         machine_x64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register),
-                                                          machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[instruction->target_count - 1].value))},
+                                                          machine_ref_make(MACHINE_REF_BLOCK, machine_x64_block_target(selector, instruction->targets[instruction->target_count - 1].value))},
                                              .payload = first_case,
                                              .opcode = MACHINE_X64_SWITCH,
                                              .flags = (u16)instruction->immediate_count,
@@ -7802,8 +7810,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_fused_branch(MachineX64Selector* sel
         if (selected)
         {
             machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[0].value)),
-                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[1].value))},
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_block_target(selector, instruction->targets[0].value)),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_x64_block_target(selector, instruction->targets[1].value))},
                                                  .payload = fusion->condition,
                                                  .opcode = MACHINE_X64_JCC,
                                              });
@@ -7831,8 +7839,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_branch_if(MachineX64Selector* select
                                                  .opcode = MACHINE_X64_TEST_RR,
                                              });
             machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[0].value)),
-                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[1].value))},
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_block_target(selector, instruction->targets[0].value)),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_x64_block_target(selector, instruction->targets[1].value))},
                                                  .payload = MACHINE_X64_CONDITION_NOT_EQUAL,
                                                  .opcode = MACHINE_X64_JCC,
                                              });
@@ -8549,6 +8557,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         BUSTER_CHECK(next_block == expanded_blocks);
     }
+    selector.parameter_edges = machine_parameter_edge_layout_plan(arena, function, canonical_layout, expanded_blocks,
+                                                                   &selector.block_entries, &selector.block_exits);
     // Block-parameter incoming values are uses on CFG edges rather than row
     // operands. Keep them visible to aliasing and branch fusion: in
     // particular, a comparison that also supplies a promoted local is not a
@@ -9130,6 +9140,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
         IrBlock* block = function->blocks + block_index;
         selector.current_block = block_index;
+        machine_parameter_edge_layout_begin(&selector.parameter_edges, function, block_index);
         machine_builder_block_begin(&selector.builder);
         selector.open_block = (MachineBlock){.parameter_offset = selector.builder.block_parameters.total_count};
         IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
@@ -9839,15 +9850,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         machine_builder_block_end(&selector.builder, selector.open_block);
+        machine_parameter_edge_layout_end(&selector.builder, &selector.parameter_edges, function, block_index,
+                                          selector.block_entries, &machine_x86_64_description);
     }
-    if (!selector.supported)
+    if (!selector.supported || selector.builder.point_capacity_exceeded ||
+        (selector.parameter_edges.split_count && selector.builder.instructions.total_count >= MACHINE_POINT_INSTRUCTION_LIMIT))
     {
         result.failed_opcode = selector.failed_opcode;
         result.failure_detail = selector.failure_detail;
         return result;
     }
     u32 canonical_edge_offset = selector.builder.edges.total_count;
-    if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts))
+    if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts,
+                                         &selector.parameter_edges, selector.block_entries))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
@@ -9923,13 +9938,13 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         arena_allocate(arena, MachineInlineAssemblyRelocation, selector.inline_assembly_relocations.total_count);
     result.function.inline_assembly_relocation_count = selector.inline_assembly_relocations.total_count;
     machine_stream_flatten(&selector.inline_assembly_relocations, result.function.inline_assembly_relocations);
-    if (!machine_selection_finish_canonical_edges(arena, &result.function, function, canonical_edge_offset,
+    if (!selector.parameter_edges.planned && !machine_selection_finish_canonical_edges(arena, &result.function, function, canonical_edge_offset,
                                                    selector.block_entries, selector.block_exits,
                                                    selector.asm_goto_continuations))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
-    if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+    if (!selector.parameter_edges.planned && !machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
                                                                   &selector.block_entries, function->block_count))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};

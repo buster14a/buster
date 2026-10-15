@@ -7,6 +7,7 @@
 // remain fail-closed without building unused selection facts.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/machine_parameter_edges_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/string.h>
@@ -1281,12 +1282,173 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
     return result;
 }
 
+
+// Compare the complete publication, not allocated addresses or only branch
+// opcodes. The legacy route is scoped to this thread and restored by the seam.
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_layout_bytes(void const* a, void const* b, u64 bytes)
+{
+    bool result = !bytes || (a && b && memcmp(a, b, bytes) == 0);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_layout_equal(Arena* arena, MachineSelectResult* a, MachineSelectResult* b, u32 canonical_blocks)
+{
+    MachineFunction* x = &a->function;
+    MachineFunction* y = &b->function;
+    ByteSlice first = machine_replay_serialize(arena, x);
+    ByteSlice second = machine_replay_serialize(arena, y);
+    bool result = a->supported && b->supported && a->returns_value == b->returns_value &&
+                  a->selector_certified == b->selector_certified && a->failed_opcode == b->failed_opcode &&
+                  a->selected_typed_instructions == b->selected_typed_instructions &&
+                  a->machine_instructions == b->machine_instructions && a->simd_operation_count == b->simd_operation_count &&
+                  a->mutable_virtual_register_count == b->mutable_virtual_register_count &&
+                  first.length == second.length && machine_selection_test_layout_bytes(first.pointer, second.pointer, first.length);
+#define MACHINE_LAYOUT_TABLE(table, count) \
+    result = result && x->count == y->count && machine_selection_test_layout_bytes(x->table, y->table, (u64)x->count * sizeof(*x->table))
+    MACHINE_LAYOUT_TABLE(immediates, immediate_count);
+    MACHINE_LAYOUT_TABLE(stack_slot_sizes, stack_slot_count);
+    MACHINE_LAYOUT_TABLE(stack_slot_alignments, stack_slot_count);
+    MACHINE_LAYOUT_TABLE(call_targets, call_target_count);
+    MACHINE_LAYOUT_TABLE(call_target_references, call_target_count);
+    MACHINE_LAYOUT_TABLE(switch_cases, switch_case_count);
+    MACHINE_LAYOUT_TABLE(line_marks, line_mark_count);
+    MACHINE_LAYOUT_TABLE(debug_values, debug_value_count);
+    MACHINE_LAYOUT_TABLE(va_args, va_arg_count);
+    MACHINE_LAYOUT_TABLE(inline_assembly_operands, inline_assembly_operand_count);
+    MACHINE_LAYOUT_TABLE(inline_assembly_relocations, inline_assembly_relocation_count);
+#undef MACHINE_LAYOUT_TABLE
+    result = result && x->inline_assembly_count == y->inline_assembly_count && x->target == y->target &&
+             x->outgoing_bytes == y->outgoing_bytes && x->outgoing_slot == y->outgoing_slot &&
+             x->nonvolatile_memory_certified == y->nonvolatile_memory_certified &&
+             x->windows_aarch64_frame == y->windows_aarch64_frame && x->windows_aarch64_variadic == y->windows_aarch64_variadic &&
+             x->predicate_absence_certified == y->predicate_absence_certified &&
+             x->returns_twice_absence_certified == y->returns_twice_absence_certified && x->distinct_frame_objects == y->distinct_frame_objects;
+    for (u32 i = 0; result && i < x->inline_assembly_count; i += 1)
+    {
+        MachineInlineAssembly left = x->inline_assemblies[i];
+        MachineInlineAssembly right = y->inline_assemblies[i];
+        result = string_equal(left.source, right.source) && left.bytes.length == right.bytes.length &&
+                 machine_selection_test_layout_bytes(left.bytes.pointer, right.bytes.pointer, left.bytes.length);
+        left.source = right.source = (String8){0};
+        left.bytes = right.bytes = (ByteSlice){0};
+        result = result && memcmp(&left, &right, sizeof(left)) == 0;
+    }
+    for (u32 i = 0; result && i < x->stack_slot_count; i += 1)
+    {
+        result = (x->stack_slot_memory_flags ? x->stack_slot_memory_flags[i] : 0) ==
+                 (y->stack_slot_memory_flags ? y->stack_slot_memory_flags[i] : 0);
+    }
+    for (u32 i = 0; result && i < canonical_blocks; i += 1)
+    {
+        result = (a->canonical_block_entries ? a->canonical_block_entries[i] : i) ==
+                 (b->canonical_block_entries ? b->canonical_block_entries[i] : i);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_parameter_edge_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "extern int callee(int);\n"
+        "int simple(int x) { return x + 3; }\n"
+        "int joins(int x, int y) { int r = y; if (x) r += x; return r; }\n"
+        "int calling(int x) { return callee(x) + 1; }\n"
+        "int loop(int x) { int y = 0; while (x--) { y += x ? x : y; if (y > 40) break; } return y; }\n"
+        "int switches(int x) { switch(x) { case 0: case 2: return x ? 7 : 8; case 3: return 9; default: return 10; } }\n"
+        "int labels(int x) { void *p = x ? &&a : &&b; goto *p; a: return 1; b: return 2; }\n"
+        "__int128 wide(__int128 x, __int128 y) { return (x / y) + (x ? y : 3); }\n"
+        "int assembly(int x) { asm volatile(\"\" ::: \"memory\"); return x ? 4 : 3; }\n"
+        "int debugged(volatile int *p, int x) { int y = *p; return x && (y ? x + y : y); }\n");
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 mark = c_test_preprocess_unit_mark();
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(arches); arch += 1)
+    {
+        c_test_release_preprocess_arenas_since(mark);
+        Target target = {.cpu_arch = arches[arch], .os = OPERATING_SYSTEM_LINUX};
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        BUSTER_TEST(arguments, program != 0);
+        u32 splitting_functions = 0;
+        for (u32 module = 0; program && module < program->module_count; module += 1)
+        {
+            IrModule* unit = program->modules + module;
+            BUSTER_TEST(arguments, ir_prepare_canonical_module(program, unit, false).error == IR_VALIDATION_NONE);
+            for (u32 i = 0; i < unit->function_count; i += 1)
+            {
+                IrFunction* function = unit->functions + i;
+                if (!function->block_count)
+                {
+                    continue;
+                }
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult legacy = machine_test_select_parameter_edge_layout(arguments->arena, program, function, target, false, debug != 0);
+                    MachineSelectResult direct = machine_test_select_parameter_edge_layout(arguments->arena, program, function, target, true, debug != 0);
+                    BUSTER_TEST_RAW(arguments, machine_selection_test_layout_equal(arguments->arena, &legacy, &direct, function->block_count), function->name);
+                    splitting_functions += direct.function.block_count > function->block_count && string_equal(function->name, S8("joins"));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, splitting_functions != 0);
+    }
+    // Geometric publication sizes cross both one- and multiple-chunk builders.
+    // Fill one flat source buffer; neither construction nor the oracle scans
+    // an accumulated prefix or searches for matching instructions.
+    String8 prefix = S8("int growing(int x) { int r = 0;\n");
+    String8 statement = S8("if (x & 1) r += x;\n");
+    String8 suffix = S8("return r; }\n");
+    for (u32 count = 8; count <= 512; count *= 8)
+    {
+        u64 size = prefix.length + count * statement.length + suffix.length;
+        char8* bytes = arena_allocate(arguments->arena, char8, size);
+        memcpy(bytes, prefix.pointer, prefix.length);
+        for (u32 i = 0; i < count; i += 1)
+        {
+            memcpy(bytes + prefix.length + i * statement.length, statement.pointer, statement.length);
+        }
+        memcpy(bytes + size - suffix.length, suffix.pointer, suffix.length);
+        for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(arches); arch += 1)
+        {
+            c_test_release_preprocess_arenas_since(mark);
+            Target target = {.cpu_arch = arches[arch], .os = OPERATING_SYSTEM_LINUX};
+            IrProgram* program = machine_selection_test_compile(arguments->arena, (String8){.pointer = bytes, .length = size}, target);
+            if (program)
+            {
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, program->modules, false).error == IR_VALIDATION_NONE);
+            }
+            IrFunction* function = machine_selection_test_find(program, S8("growing"));
+            BUSTER_TEST(arguments, function != 0);
+            if (function)
+            {
+                u64 start = arguments->arena->position;
+                MachineSelectResult legacy = machine_test_select_parameter_edge_layout(arguments->arena, program, function, target, false, true);
+                u64 legacy_bytes = arguments->arena->position - start;
+                start = arguments->arena->position;
+                MachineSelectResult direct = machine_test_select_parameter_edge_layout(arguments->arena, program, function, target, true, true);
+                u64 direct_bytes = arguments->arena->position - start;
+                BUSTER_TEST(arguments, machine_selection_test_layout_equal(arguments->arena, &legacy, &direct, function->block_count));
+                BUSTER_TEST(arguments, direct.function.block_count > function->block_count);
+                BUSTER_TEST(arguments, direct_bytes < legacy_bytes);
+            }
+        }
+    }
+    c_test_release_preprocess_arenas_since(mark);
+    MachineFunctionBuilder builder = {0};
+    MachinePoint last = machine_test_builder_definition_point(&builder, MACHINE_POINT_INSTRUCTION_LIMIT - 1);
+    BUSTER_TEST(arguments, machine_point_instruction(last) == MACHINE_POINT_INSTRUCTION_LIMIT - 1 && !builder.point_capacity_exceeded);
+    BUSTER_TEST(arguments, machine_test_builder_definition_point(&builder, MACHINE_POINT_INSTRUCTION_LIMIT) == MACHINE_POINT_INVALID && builder.point_capacity_exceeded);
+    builder.point_capacity_exceeded = false;
+    BUSTER_TEST(arguments, machine_test_builder_definition_point(&builder, UINT32_MAX) == MACHINE_POINT_INVALID && builder.point_capacity_exceeded);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_parameter_edge_layout);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_index_fold);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_copy_casts);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_folded_read_lifetimes);
