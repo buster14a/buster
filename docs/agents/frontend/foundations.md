@@ -2215,3 +2215,8 @@ This rule does not depend on optional FAST passes or the native allocator.
 The registered compiler-driver object-path regression links deliberately
 undefined externs only from dead arms and executes short-circuit, comma-effect,
 then/else, goto-entry and case-entry controls in both frontend SSA forms.
+
+A resumed condition leaf also branches directly when its already-emitted value
+is one integer-constant row. This bounded check retains preceding comma effects
+and supports both limbs of wide integers; it performs no whole-function value
+query and does not require construction folding.

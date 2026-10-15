@@ -6630,14 +6630,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
                         {.name = S8("main"), .size = text_length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
                         {.name = S8("padding_import"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
                     };
-                    ObjectRelocation marker = {.section = OBJECT_SECTION_DATA, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+                    // The stub boundary requires a real import reference:
+                    // a declaration alone must not request an eager dyld bind.
+                    u8 imported_pointer[8] = {0};
+                    ObjectRelocation relocations[] = {
+                        {.section = OBJECT_SECTION_DATA, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                        {.section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    };
                     Target target = {
                         .cpu_arch = aarch64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64,
                         .cpu_model = CPU_MODEL_BASELINE,
                         .os = pe ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS,
                     };
                     ObjectFile object = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text, .length = text_length},
-                                                              symbols, 1 + imports, &marker, 1);
+                                                              symbols, 1 + imports, relocations, 1 + imports);
+                    object.sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(imported_pointer);
+                    object.sections[OBJECT_SECTION_READ_ONLY_DATA].alignment = 8;
                     object.sections[OBJECT_SECTION_TEXT].alignment = 16;
                     object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
                     String8 exports[] = {S8("padding_import")};
