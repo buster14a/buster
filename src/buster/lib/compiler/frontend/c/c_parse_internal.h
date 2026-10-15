@@ -20,8 +20,38 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
-// Type-task steps, operator-token visits, and expression-end table/walk rows.
+// The real array-suffix word classifier: producer token visits, sparse-index
+// comparisons/hits and original scalar token visits. The bypass keeps every
+// other semantic/query path unchanged and forces the original classification.
+typedef struct CTestArrayBoundWordWork CTestArrayBoundWordWork;
+struct CTestArrayBoundWordWork
+{
+    u64 producer_tokens;
+    u64 comparisons;
+    u64 hits;
+    u64 scalar_tokens;
+    // Row payload only: excludes index header, arena alignment and scratch.
+    u64 summary_row_bytes;
+};
+BUSTER_F_DECL CTestArrayBoundWordWork c_test_array_bound_word_work_take(void);
+BUSTER_F_DECL void c_test_array_bound_word_rescan_set(bool rescan);
+BUSTER_F_DECL bool c_test_array_bound_words_agree(Arena* arena, CPreprocessResult preprocess);
+
+// Type-task steps, operator-token visits, expression-end table/walk rows,
+// and TYPEOF completion membership-node visits.
 BUSTER_F_DECL u64 c_test_assignment_chain_work(void);
+
+// One numeric storage-half publication under the actual body scratch guard.
+// Existing scratch-limit/trace seams control the guard. Report its terminal
+// exhaustion and machine failure separately before restoring the outer guard.
+typedef struct CTestAstStorageHalfPublication CTestAstStorageHalfPublication;
+struct CTestAstStorageHalfPublication
+{
+    bool exhausted;
+    bool failed;
+};
+BUSTER_F_DECL CTestAstStorageHalfPublication c_test_ast_storage_half_publication(Arena* scratch, CParseResult* result, CAst const* ast,
+                                                                                 CAstFacts* facts, Target target, u32 parent, bool failed_before, bool exhausted_before);
 
 // Caps, on the calling thread, the scratch bytes each function body's guarded
 // validation allocations (c_parse_body_scratch_allocate) may claim past the
@@ -48,6 +78,33 @@ struct CTestBodyScratchRequest
 };
 BUSTER_F_DECL void c_test_body_validation_scratch_trace(CTestBodyScratchRequest* entries, u32 capacity);
 BUSTER_F_DECL u32 c_test_body_validation_scratch_trace_count(void);
+
+typedef struct CTestConditionalFactsWork CTestConditionalFactsWork;
+struct CTestConditionalFactsWork
+{
+    u64 visits;
+    u64 words;
+    u64 attempts;
+    u64 published;
+};
+BUSTER_F_DECL CTestConditionalFactsWork c_test_conditional_facts_work_take(void);
+// Retain the original completion query as an independent publication control.
+BUSTER_F_DECL void c_test_conditional_facts_query_set(bool original);
+
+// Actual typed-constant precedence token visits and type-name probes. Reuse
+// counts suffix tasks whose parent already proved no top-level operator;
+// refused counts nonplain type-name probes or probes whose semantic writes
+// prevented that reuse.
+typedef struct CTestConstantPrefixWork CTestConstantPrefixWork;
+struct CTestConstantPrefixWork
+{
+    u64 tokens;
+    u64 probes;
+    u64 reused;
+    u64 refused;
+};
+BUSTER_F_DECL CTestConstantPrefixWork c_test_constant_prefix_work_take(void);
+BUSTER_F_DECL void c_test_constant_prefix_rescan_set(bool rescan);
 
 // The tree expression typer (c_ast_types.c). c_test_ast_type_probe answers one
 // range of an analyzed function body on a private machine. `status` is a
@@ -143,6 +200,32 @@ BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 // Turns the declaration specifier read from the tree (c_parse.c) off and back
 // on, per thread, so a test can analyse the same unit with and without it.
 BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+
+// Private controls for existing-row TYPE_NAME publication. Recorded original
+// mode executes the unchanged semantic producer and compares both type IDs.
+typedef struct CTestAstTypeNamePublication CTestAstTypeNamePublication;
+struct CTestAstTypeNamePublication
+{
+    u64 attempted;
+    u64 eligible;
+    u64 reused;
+    u64 qualified_primitive;
+    u64 multiple_pointers;
+    u64 state_checked;
+    u64 state_mismatches;
+    u64 queries;
+    u64 closed;
+    u64 suspended;
+    u64 uncached;
+    u64 readonly_checked;
+    u64 readonly_failed;
+    u64 authority_compared;
+    u64 authority_mismatches;
+    u64 authority_appended;
+};
+BUSTER_F_DECL void c_test_ast_type_name_publication_set(bool record, bool original);
+BUSTER_F_DECL CTestAstTypeNamePublication c_test_ast_type_name_publication_take(void);
+
 // Verify mode for the type-name runs skipped as no type name
 // (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
 // also runs on every skipped run, and the counts record the runs it checked
@@ -182,6 +265,9 @@ BUSTER_F_DECL bool c_test_constraint_expression_ends_agree(Arena* arena, CPrepro
 BUSTER_F_DECL void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type);
 BUSTER_F_DECL u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start);
 
+// Existing binding probes must not intern absent names or mutate model rows.
+BUSTER_F_DECL bool c_test_existing_entity_lookup_read_only(CParseResult const* result, String8 name, CEntityKind kind);
+
 // A single file-scope expression-type query, reported field by field; see
 // c_test_expression_type_query in c_parse.c. `machine_only` forces the type
 // machine even for a lone literal token, as the differential oracle.
@@ -212,6 +298,10 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Force fresh completion queries to exercise row-free capture and rollback.
 BUSTER_F_DECL void c_test_ast_fact_uncached_set(bool enabled);
+BUSTER_F_DECL void c_test_ast_required_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required);
+BUSTER_F_DECL void c_test_ast_unevaluated_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required);
+BUSTER_F_DECL u32 c_test_ast_call_builtin_fact(CAst const* ast, CPreprocessResult const* preprocess, u32 node);
+BUSTER_F_DECL void c_test_enum_scope_dirty_set(bool enabled);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
@@ -232,6 +322,11 @@ BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, C
 
 // Cast-proof token visits and logical-position probes on the calling thread.
 BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
+
+// Poison classification fields only after completed analysis, preserving
+// source bytes and the original stream identity. Disarming returns how many
+// source records were poisoned, so object controls prove the seam ran.
+BUSTER_F_DECL u64 c_test_lowering_token_poison(bool armed);
 
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
@@ -301,6 +396,11 @@ enum
     C_TEST_PARSE_NESTING_SCOPE_LEVELS,
     C_TEST_PARSE_NESTING_STATEMENT_END_STEPS,
     C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS,
+    C_TEST_PARSE_NESTING_LABEL_VALUE_TOKENS,
+    C_TEST_PARSE_NESTING_LABEL_ROOT_TOKENS,
+    C_TEST_PARSE_NESTING_LABEL_SPLIT_TOKENS,
+    C_TEST_PARSE_NESTING_LABEL_INDEX_TOKENS,
+    C_TEST_PARSE_NESTING_LABEL_ROOT_REUSES,
     C_TEST_PARSE_NESTING_STATEMENT_EXPRESSION_TAILS,
     C_TEST_PARSE_NESTING_SLOTS,
 };
@@ -364,8 +464,8 @@ BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CPar
 // keyword: its size always, and its signedness where lowering's answer
 // carries an integer type. Rows of different producers for one keyword are
 // compared with each other too. Output is unchanged: nothing reads the rows
-// but the comparison. Paths: the C_IR_QUERY_FRAME_SIZEOF resolver and the
-// body's prediction fallback after it.
+// but the comparison. The checked constant-node resolver records its settled
+// sizeof answer; the historical prediction-path row is retained and stays zero.
 enum
 {
     C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER,
@@ -375,8 +475,7 @@ enum
     C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH,
     // The sizes agree but lowering's integer type has the other signedness.
     C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH,
-    // The resolver gave no answer for an operand with a row; the body may
-    // still settle it through the prediction path.
+    // The node resolver gave no answer for an operand with a row.
     C_TEST_SIZEOF_HANDOFF_DECLINED,
     // A lowering answer for a `sizeof` keyword with no row in its scope.
     C_TEST_SIZEOF_HANDOFF_UNMATCHED,
@@ -437,10 +536,30 @@ struct CTestTypeConstantQuery
     CIntegerConstant constant;
     bool model_unchanged;
 };
+typedef struct CTestTypeConstantCursorQuery CTestTypeConstantCursorQuery;
+struct CTestTypeConstantCursorQuery
+{
+    CTestTypeConstantQuery query;
+    bool prepared;
+};
+BUSTER_F_DECL void c_test_offsetof_completion_only_set(bool enabled);
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
+BUSTER_F_DECL CTestTypeConstantCursorQuery c_test_type_integer_constant_cursor(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                                             CScopeId prepared_scope, CScopeId scope, u32 start, u32 end);
 // Runs the same protected reader without full-capacity snapshots. The caller
 // can supply large legitimate buffers and check its published rows/sentinels.
+typedef struct CTestSizeofArrayWork CTestSizeofArrayWork;
+struct CTestSizeofArrayWork
+{
+    u64 dependency_tasks;
+    u64 bound_requests;
+    u64 numeric_receipts;
+    u64 certified_reads;
+    u64 cycle_refusals;
+};
+BUSTER_F_DECL CTestSizeofArrayWork c_test_sizeof_array_work_take(void);
+
 BUSTER_F_DECL CIntegerConstant c_test_type_integer_constant_read(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
@@ -463,6 +582,10 @@ BUSTER_F_DECL bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessRe
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
 // Override production's derived frame limit for a structured refusal/recovery test.
 BUSTER_F_DECL void c_test_type_parse_frame_capacity_limit_set(u32 limit);
+
+// Rollback restores a speculative tag even after geometric type-row growth.
+BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
+                                                           bool* old_tag_restored_out, bool* grown_tag_preserved_out);
 
 // Whether nested frames' rollback snapshots stay independent; see c_parse.c.
 BUSTER_F_DECL bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth);

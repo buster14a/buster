@@ -2121,9 +2121,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
-        // The syntax tree is built ahead of analysis on every compile
-        // (GitHub #3102); -fno-c-ast-pilot is the tree-free reference path
-        // until #4058 deletes it.
+        // Every C unit prepares the retained syntax before analysis (#3102).
         .c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
         // Source debug information is opt-in; ordinary artifact generation
         // should not construct debug models or pay their output cost.
@@ -2963,9 +2961,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
             continue;
         }
-        if (string_equal(argument, S8("-fc-ast-pilot")) || string_equal(argument, S8("-fno-c-ast-pilot")))
+        if (string_equal(argument, S8("-fc-ast-pilot")))
         {
-            invocation.c_ast_pilot = string_equal(argument, S8("-fc-ast-pilot")) ? COMPILER_DRIVER_C_AST_PILOT_IMPLICIT : COMPILER_DRIVER_C_AST_PILOT_OFF;
+            invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fc-ast-pilot="));
@@ -7540,10 +7538,9 @@ String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot)
     case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
         name = S8("explicit");
         break;
-    case COMPILER_DRIVER_C_AST_PILOT_OFF:
     case COMPILER_DRIVER_C_AST_PILOT_COUNT:
     default:
-        name = S8("off");
+        name = S8("unknown");
         break;
     }
     return name;
@@ -7560,7 +7557,6 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
     case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
         layout = C_AST_LAYOUT_EXPLICIT;
         break;
-    case COMPILER_DRIVER_C_AST_PILOT_OFF:
     case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
     case COMPILER_DRIVER_C_AST_PILOT_COUNT:
     default:
@@ -7586,6 +7582,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* tot
     total->recipes += unit.recipes;
     total->builtin_identities += unit.builtin_identities;
     total->function_names += unit.function_names;
+    total->type_names += unit.type_names;
+    total->typed_type_names += unit.typed_type_names;
+    total->missing_type_names += unit.missing_type_names;
     for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
     {
         total->gaps[gap] += unit.gaps[gap];
@@ -7602,9 +7601,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_c_ast_facts_add(CAstFactStatistics* tot
 // label releases (c_ast_release); its storage record lives in the unit's
 // arena. Nothing reads it after the unit. The driver has no phase
 // arena to lend (c_preprocess is not given one either), so the builder makes
-// and retires a private one. The caller fails the unit when the builder could
-// not reserve its storage, and otherwise compiles an incomplete tree's unit
-// without one, counting it in `rejections`.
+// and retires a private one. Reservation failure immediately fails the unit.
+// Syntax rejection counts in `rejections` and retains its diagnostics while
+// semantic checking preserves diagnostic precedence; incomplete syntax never lowers.
 // Under -v three diagnostic passes over a finished tree are timed with the
 // same clock as the build: one c_ast_walk over the root, one linear pass over
 // the kinds column counting CALL nodes, and c_ast_children over every node
@@ -9053,7 +9052,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // Filled once the source is preprocessed; the end label releases its
     // private arenas, which nothing the result holds points into.
     CPreprocessResult preprocess = {0};
-    // The -fc-ast-pilot tree, empty without the hook. It reads the
+    // The mandatory retained tree. It reads the
     // preprocessing result by index, so the end label releases its column
     // arenas first.
     CAst pilot_tree = {0};
@@ -9254,13 +9253,13 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // function-body expression types from it where it can (c_ast_types.c) and
     // runs the type machine for the rest, and adds its counts to result.c_ast.
     bool pilot_tree_built = false;
-    if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
+    CDiagnostic* pilot_tree_diagnostics = 0;
+    u32 pilot_tree_diagnostic_count = 0;
     {
-        // A unit the builder rejects on syntax passes no tree, so lowering
-        // builds its own and reports the same rejection as under
-        // -fno-c-ast-pilot (#3102 step 3: the tree is mandatory); analysis
-        // diagnoses what it can first.
-        // A builder that could not reserve its storage still fails the unit.
+        // Syntax failures retain their diagnostics while the independent
+        // semantic parser preserves its established diagnostic precedence.
+        // A missing completed tree never reaches lowering. Reservation
+        // failures fail immediately with the parse error class.
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
         bool exhausted = !tree.complete && tree.diagnostic_count && tree.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE;
         if (exhausted)
@@ -9272,6 +9271,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
         result.c_ast.rejections += !tree.complete;
+        pilot_tree_diagnostics = tree.complete ? 0 : tree.diagnostics;
+        pilot_tree_diagnostic_count = tree.complete ? 0 : tree.diagnostic_count;
         if (tree.complete)
         {
             pilot_tree = tree.ast;
@@ -9281,7 +9282,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // Under the pilot the declaration split is read from the tree; it falls
     // back to c_parse_ast's token walker for any unit the walker would read
     // differently or diagnose, so the records are the walker's either way.
-    CParserResult syntax = pilot_tree_built ? c_parse_ast_from_tree(arena, preprocess, &pilot_tree, &result.c_ast.split) : c_parse_ast(arena, preprocess);
+    CParserResult syntax = pilot_tree_built ? c_parse_ast_from_tree(arena, preprocess, &pilot_tree, &result.c_ast.split) : c_parse_ast_reference(arena, preprocess);
+    syntax.ast_diagnostics = pilot_tree_diagnostics;
+    syntax.ast_diagnostic_count = pilot_tree_diagnostic_count;
     if (pilot_tree_built)
     {
         syntax.ast = &pilot_tree;
@@ -9290,9 +9293,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
         // Nothing lowers a -fsyntax-only unit, so it retains no facts.
-        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY && c_ast_facts_create(&pilot_facts, &pilot_tree))
+        if (invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
         {
-            syntax.ast_facts = &pilot_facts;
+            if (c_ast_facts_create(&pilot_facts, &pilot_tree))
+            {
+                syntax.ast_facts = &pilot_facts;
+            }
+            else
+            {
+                syntax.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+                *syntax.diagnostics = (CDiagnostic){
+                    .message = S8("could not reserve the retained C semantic analysis node facts"),
+                    .location = {.line = 1, .column = 1},
+                    .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                };
+                syntax.diagnostic_count = 1;
+            }
         }
     }
     // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
@@ -9311,6 +9327,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
+        result.declaration_bindings = (CDeclarationBindingStatistics){
+            .rows = semantic.declaration_binding_count,
+            .retained_bytes = semantic.declaration_binding_retained_bytes,
+            .copy_bytes = semantic.declaration_binding_copy_bytes,
+        };
         result.analysis_diagnostic_count = semantic.diagnostic_count;
         u64 promoted_analysis_warnings = 0;
         String8 promoted_analysis_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.warnings,
@@ -9347,9 +9368,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
                                                                                          invocation.enable_pinned_debug_locals),
-                                                                    // Lowering reads the pilot's tree, which is released at
-                                                                    // `end:`, after lowering; without the pilot it builds and
-                                                                    // releases the unit's tree itself.
+                                                                    // Lowering borrows the completed retained tree, which
+                                                                    // `end:` releases after its last consumer. Missing syntax
+                                                                    // is a refusal; lowering never rebuilds it.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
                                                                     .ast_lower_statistics = &result.c_ast.lower,
                                                                     .syntax_facts = syntax.ast_facts});
@@ -9371,6 +9392,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.constant_interning = lowered.constant_interning;
     result.construction_folds = lowered.construction_folds;
     result.type_layout = lowered.type_layout;
+    result.declaration_bindings = lowered.declaration_bindings;
     if (!lowered.program || lowered.diagnostic_count || !lowered.program->modules || lowered.program->module_count != 1)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
@@ -11773,6 +11795,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
         result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
+        result.declaration_bindings.rows += unit.declaration_bindings.rows;
+        result.declaration_bindings.retained_bytes += unit.declaration_bindings.retained_bytes;
+        result.declaration_bindings.copy_bytes += unit.declaration_bindings.copy_bytes;
         compiler_driver_c_ast_facts_add(&result.c_ast.facts, unit.c_ast.facts);
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;
@@ -11827,11 +11852,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
         result.c_ast.lower.statement_bodies += unit.c_ast.lower.statement_bodies;
         result.c_ast.lower.statements += unit.c_ast.lower.statements;
-        result.c_ast.lower.range_adapters += unit.c_ast.lower.range_adapters;
-        result.c_ast.lower.trees_built += unit.c_ast.lower.trees_built;
-        result.c_ast.lower.tree_rejections += unit.c_ast.lower.tree_rejections;
-        result.c_ast.lower.tree_nodes += unit.c_ast.lower.tree_nodes;
-        result.c_ast.lower.tree_bytes += unit.c_ast.lower.tree_bytes;
         result.c_ast.lower.span_nodes += unit.c_ast.lower.span_nodes;
         result.c_ast.lower.span_bytes += unit.c_ast.lower.span_bytes;
         result.c_ast.lower.hoist_steps += unit.c_ast.lower.hoist_steps;

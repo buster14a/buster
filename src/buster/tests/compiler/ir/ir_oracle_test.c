@@ -75,7 +75,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_oracle_fixture(Arena* arena, u32 fixture, u32 
             S8("static unsigned long long sink; unsigned long long probe(unsigned long long a,unsigned long long b){"
                "(void)a;(void)b;for(;;){}return 0;}unsigned long long observe(void){return sink;}");
         CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-        CParseResult parse = c_parse(arena, tokens);
+        CParseResult parse = c_parse_for_lowering(arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arena, S8("ir-oracle.c"), tokens, parse, target);
         if (!tokens.error_count && !parse.diagnostic_count && !lowered.diagnostic_count) program = lowered.program;
     }

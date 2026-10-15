@@ -227,7 +227,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_calls(UnitTestArgumen
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
             CPreprocessResult tokens = c_preprocess(arena, sources[sample], (CPreprocessOptions){0});
-            CParseResult parse = c_parse(arena, tokens);
+            CParseResult parse = c_parse_for_lowering(arena, tokens);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-local-calls.c"), tokens, parse, target,
                                                                 (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
             BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);

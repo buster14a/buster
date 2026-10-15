@@ -8,7 +8,19 @@ that previously depended on lowering. The driver uses its diagnostics and
 `c_analyze_with_options` runs the same validation before canonical lowering, so
 syntax-only and ordinary compilation share diagnostic ownership. The older
 `c_parse` / `c_analyze_semantics` entry points retain their model-building contract
-for callers that explicitly pair them with `c_lower_to_ir`.
+for callers that inspect the semantic model.
+The model-only `c_parse` result cannot now be lowered directly: callers that
+construct canonical IR use `c_parse_for_lowering`, which completes the same
+source constraints once and retains the required syntax and semantic outputs.
+`c_lower_to_ir` inherits these outputs from the analyzed model and never
+constructs a tree or runs another semantic pass. Explicit historical parser
+controls use `c_parse_ast_reference`; ordinary `c_parse_ast` builds the tree
+once and reads its declaration split. The caller's type-interning policy is
+unchanged.
+The model-only `c_parse` endpoint uses its original token declaration split and
+tree-free semantic query method and type inventory. Independent model
+tests keep that output for inspection and prepare a separate full-authority
+result when they also exercise canonical lowering.
 
 At the end of lowering-constraint validation, file-scope tentative object
 definitions are checked against their final translation-unit types. An object
@@ -110,6 +122,12 @@ call functions retain the statement-expression refusal. The parser and folder
 use the same bounded tail range. Bodies with declarations, multiple statements
 or an evaluated nested statement expression remain nonconstant. File-scope
 statement expressions remain rejected by the separate file-scope constraint.
+That constraint excludes opaque unknown-namespace attribute argument clauses:
+`[[vendor::tag({gnu::error("m")})]]` is a balanced token sequence, with no
+expression or GNU error binding inside it. The retained ATTRIBUTE_SCOPED
+namespace/name nodes and the semantic candidate index bound that context;
+the existing token proof still checks real GNU expression operands, including
+known attribute arguments and definition parameters outside the body.
 The registered driver regression checks the constant-only runtime result
 alongside aggregate and nonconstant-tail refusals.
 
@@ -283,6 +301,19 @@ rejected file/block/type-name/nested/typedef forms, exact member locations and
 valid neighbors through semantic-only analysis and both canonical frontend
 forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
 [WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
+The typed-constant precedence scan reuses a completed no-operator verdict
+only for unchanged cast and unary suffixes. Each type-name probe must preserve
+semantic inventories and mutation records; only identifier-only primitive
+scalar type-name runs can certify reuse. Constructor, `typeof`, attribute,
+array and function forms retain their existing scan order. Exposing a
+parenthesized group or a selected generic/choose arm starts a fresh scan;
+binary, builtin and array-dependency children also begin independently.
+`c_test_constant_prefix_scan_work` counts actual visits at geometric sizes and
+retains the original scan as a quadratic negative control.
+`c_test_constant_prefix_scan_boundaries` compares model inventories, protected
+query rollback, structured diagnostics and global images against that control.
+The original deep wide-float initializer population is unchanged.
 
 The typed-constant precedence scan keeps `sizeof` and the alignment operators
 as unary prefixes while it finds binary splits. A parenthesized type operand
@@ -606,6 +637,12 @@ assertion operand that both producers keep. The fixture also runs the
 `c_test_tall_expression_types` heights (1, 2, 63, 64, 65, 4096 and 10000) with
 the comparison on. That is the sampled sweep the regression already uses; a
 dense 1 to 10,000 sweep would lower about 50 million operands.
+`c_ast_test_conditional_publication_work` separately counts ordinary semantic
+work and the guarded publication summary at geometric sizes for both the
+`sizeof` conditional and `_Generic` controller. Its forced-original completion
+control retains the repeated suffix work. The paired authority fixture checks
+complete model inventories, diagnostics and exact conditional facts, including
+constructor, member-width, loose-operator, projection and refusal neighbors.
 `c_ast_test_sizeof_handoff` runs the comparison over the `c_ast` corpus and
 the hosted frontend sources and enforces floors on both. At `4ed35b59` on
 Linux x86-64 it keeps about 7,230 rows (17 from constant contexts). Of those
@@ -719,9 +756,39 @@ still an operand, and ordinary conjunctions still bind ordinary identifiers.
 layouts, both canonical forms, and default/pilot verified execution under
 FAST/QUALITY, with undeclared conjunction/sizeof/alignof/typeof neighbors.
 A complete root equality/inequality is a provenance sink: its result is the
-ordinary integer produced by canonical pointer equality. Conditional, comma,
-logical and cast results retain the conservative policy; decorated pointer
-return/call/static-storage and conditional/comma controls remain rejected.
+ordinary integer produced by canonical pointer equality. Logical `&&` and
+`||` compositions preserve that ordinary boolean result only when every
+operand's label provenance is consumed by a comparison. An explicit guarded
+worklist splits top-level logical operands once and uses indexed delimiter
+jumps for nested groups; it never recurses. Direct label-pointer truth
+conversion and comma and cast transports retain the conservative policy.
+A conditional transports its result arms after the condition's provenance
+has been consumed by a comparison or valid logical boolean composition.
+Direct label-pointer truth retains the existing conservative escaped-taint
+policy for returned values, static storage, call arguments and later uses of
+local assignments. Discarded expressions, control positions and unused local
+assignments retain their existing acceptance; a complete equality remains a
+sink even around a conditional boolean. The GNU omitted true arm still
+transports the condition's value, checked once. The
+same guarded worklist uses the semantic conditional/delimiter index to route
+these ranges without recursion or an AST requirement; reference-token and
+retained-tree semantic diagnostics must agree. Pointer result arms,
+return/call/static-storage and invalid computed targets remain rejected.
+`c_test_label_comparison_logicals` covers the frozen typeof witness,
+a plain reduction, nesting, both logical operators, short circuits and
+exactly-once effects, with independent hosted GCC/Clang expected-value runs and
+reference-token/retained-tree semantic parity, debug/no-debug, SSA/memory and
+FAST/QUALITY controls. The computed-goto machine fixture additionally retains
+its original ten functions, including the comparison-conditioned ordinary
+integer return, through both native backend selectors and allocators.
+Conditional result ranges also carry their owner's proven delimiter depth.
+At the same depth the owner's root proof excludes lower-precedence operators,
+so an indexed question inside the child proves a conditional root directly.
+Stripping a group changes depth and requires a fresh root proof. The registered
+128/256/512-term comparison-boolean and mixed logical witnesses, together with
+bounded direct-truth refusal witnesses, bound
+actual label root/value/split/index work in both semantic paths; this prevents
+right-nested conditional suffixes from being rescanned at every result arm.
 Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and

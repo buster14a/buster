@@ -1809,7 +1809,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_test_inline_lower(Arena* arena, String8 source
 {
     IrProgram* result = 0;
     CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult analysis = c_parse(arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arena, preprocess);
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("canonical-inline-splice.c"), preprocess, analysis, target_native,
@@ -1875,7 +1875,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         "}\n");
     CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
     CIRLowerResult lowered = {0};
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
@@ -1964,7 +1964,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int small_caller(int value) { return small_leaf(value); }\n");
         CPreprocessResult defaults_preprocess = c_preprocess(defaults_temporary.arena, defaults_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult defaults_analysis = c_parse(defaults_temporary.arena, defaults_preprocess);
+        CAnalysisResult defaults_analysis = c_parse_for_lowering(defaults_temporary.arena, defaults_preprocess);
         CIRLowerResult defaults_lowered = {0};
         if (!defaults_preprocess.error_count && !defaults_analysis.diagnostic_count)
         {
@@ -2024,7 +2024,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int band_caller(int v) { return leaf_14(v) + leaf_16(v) + leaf_17(v); }\n");
         CPreprocessResult band_preprocess = c_preprocess(band_temporary.arena, band_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult band_analysis = c_parse(band_temporary.arena, band_preprocess);
+        CAnalysisResult band_analysis = c_parse_for_lowering(band_temporary.arena, band_preprocess);
         CIRLowerResult band_lowered = {0};
         if (!band_preprocess.error_count && !band_analysis.diagnostic_count)
         {
@@ -2073,7 +2073,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int use(int v) { return get()(v); }\n");
         CPreprocessResult pointer_preprocess = c_preprocess(pointer_temporary.arena, pointer_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult pointer_analysis = c_parse(pointer_temporary.arena, pointer_preprocess);
+        CAnalysisResult pointer_analysis = c_parse_for_lowering(pointer_temporary.arena, pointer_preprocess);
         CIRLowerResult pointer_lowered = {0};
         if (!pointer_preprocess.error_count && !pointer_analysis.diagnostic_count)
         {
@@ -2273,7 +2273,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "}\n");
         CPreprocessResult bound_preprocess = c_preprocess(bound_temporary.arena, bound_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult bound_analysis = c_parse(bound_temporary.arena, bound_preprocess);
+        CAnalysisResult bound_analysis = c_parse_for_lowering(bound_temporary.arena, bound_preprocess);
         CIRLowerResult bound_lowered = {0};
         if (!bound_preprocess.error_count && !bound_analysis.diagnostic_count)
         {
@@ -2325,7 +2325,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int required_caller(int value) { return required_leaf(value); }\n");
         CPreprocessResult required_preprocess = c_preprocess(required_temporary.arena, required_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult required_analysis = c_parse(required_temporary.arena, required_preprocess);
+        CAnalysisResult required_analysis = c_parse_for_lowering(required_temporary.arena, required_preprocess);
         CIRLowerResult required_lowered = {0};
         if (!required_preprocess.error_count && !required_analysis.diagnostic_count)
         {
@@ -2366,7 +2366,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int required_caller(int value) { return required_leaf(value); }\n");
         CPreprocessResult priority_preprocess = c_preprocess(priority_temporary.arena, priority_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult priority_analysis = c_parse(priority_temporary.arena, priority_preprocess);
+        CAnalysisResult priority_analysis = c_parse_for_lowering(priority_temporary.arena, priority_preprocess);
         CIRLowerResult priority_lowered = {0};
         if (!priority_preprocess.error_count && !priority_analysis.diagnostic_count)
         {
@@ -2417,7 +2417,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int main(void) { return feeder(1); }\n");
         CPreprocessResult cycle_preprocess = c_preprocess(cycle_temporary.arena, cycle_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult cycle_analysis = c_parse(cycle_temporary.arena, cycle_preprocess);
+        CAnalysisResult cycle_analysis = c_parse_for_lowering(cycle_temporary.arena, cycle_preprocess);
         CIRLowerResult cycle_lowered = {0};
         if (!cycle_preprocess.error_count && !cycle_analysis.diagnostic_count)
         {
@@ -2571,7 +2571,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 "first: value += label_leaf(4); goto done; second: value += label_leaf(5); done: return value; }\n");
             CPreprocessResult label_tokens = c_preprocess(label_arena, label_source,
                 (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-            CAnalysisResult label_analysis = c_parse(label_arena, label_tokens);
+            CAnalysisResult label_analysis = c_parse_for_lowering(label_arena, label_tokens);
             CIRLowerResult label_lowered = c_lower_to_ir_with_options(label_arena, S8("inline-caller-labels.c"),
                 label_tokens, label_analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = label_form != 0});
             BUSTER_TEST(arguments, !label_tokens.error_count && !label_analysis.diagnostic_count && !label_lowered.diagnostic_count);
@@ -2665,7 +2665,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         }
         CPreprocessResult large_preprocessed = c_preprocess(large_arena, large_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult large_analysis = c_parse(large_arena, large_preprocessed);
+        CAnalysisResult large_analysis = c_parse_for_lowering(large_arena, large_preprocessed);
         CIRLowerResult large_lowered = {0};
         if (!large_preprocessed.error_count && !large_analysis.diagnostic_count)
         {
@@ -2732,7 +2732,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         String8 sites_source = {.pointer = sites_bytes, .length = sites_size};
         CPreprocessResult sites_preprocess = c_preprocess(sites_arena, sites_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult sites_analysis = c_parse(sites_arena, sites_preprocess);
+        CAnalysisResult sites_analysis = c_parse_for_lowering(sites_arena, sites_preprocess);
         CIRLowerResult sites_lowered = c_lower_to_ir(sites_arena, S8("canonical-inline-required-sites.c"),
             sites_preprocess, sites_analysis, target_native);
         BUSTER_TEST(arguments, !sites_preprocess.error_count && !sites_analysis.diagnostic_count && !sites_lowered.diagnostic_count);
@@ -2769,7 +2769,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int required_caller(int value) { return required_leaf(value); }\n");
         CPreprocessResult refusal_preprocess = c_preprocess(refusal_temporary.arena, refusal_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult refusal_analysis = c_parse(refusal_temporary.arena, refusal_preprocess);
+        CAnalysisResult refusal_analysis = c_parse_for_lowering(refusal_temporary.arena, refusal_preprocess);
         CIRLowerResult refusal_lowered = {0};
         if (!refusal_preprocess.error_count && !refusal_analysis.diagnostic_count)
         {
@@ -2857,7 +2857,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int required_caller(int value) { return required_leaf(value); }\n");
         CPreprocessResult capacity_preprocess = c_preprocess(capacity_temporary.arena, capacity_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult capacity_analysis = c_parse(capacity_temporary.arena, capacity_preprocess);
+        CAnalysisResult capacity_analysis = c_parse_for_lowering(capacity_temporary.arena, capacity_preprocess);
         CIRLowerResult capacity_lowered = {0};
         if (!capacity_preprocess.error_count && !capacity_analysis.diagnostic_count)
         {
@@ -3031,7 +3031,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         String8 spread_source = {.pointer = (char8*)source_bytes, .length = cursor};
         CPreprocessResult spread_preprocess = c_preprocess(spread_arena, spread_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult spread_analysis = c_parse(spread_arena, spread_preprocess);
+        CAnalysisResult spread_analysis = c_parse_for_lowering(spread_arena, spread_preprocess);
         CIRLowerResult spread_lowered = {0};
         if (!spread_preprocess.error_count && !spread_analysis.diagnostic_count)
         {
@@ -3134,7 +3134,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
     String8 source = ir_test_inline_required_work_source(arena, required_call_sites, required_statements);
     CPreprocessResult tokens = c_preprocess(arena, source,
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult analysis = c_parse(arena, tokens);
+    CAnalysisResult analysis = c_parse_for_lowering(arena, tokens);
     CIRLowerResult lowered = {0};
     if (!tokens.error_count && !analysis.diagnostic_count)
     {
@@ -3224,7 +3224,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_work_budget(UnitTestA
     String8 excessive_source = ir_test_inline_required_work_source(arena, excessive_call_sites, 0);
     CPreprocessResult excessive_tokens = c_preprocess(arena, excessive_source,
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult excessive_analysis = c_parse(arena, excessive_tokens);
+    CAnalysisResult excessive_analysis = c_parse_for_lowering(arena, excessive_tokens);
     CIRLowerResult excessive_lowered = {0};
     if (!excessive_tokens.error_count && !excessive_analysis.diagnostic_count)
     {
@@ -4780,7 +4780,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                                                     .target = target_native,
                                                     .data_layout = target_data_layout(target_native),
                                                 });
-    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
     CIRLowerResult lowered = {0};
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
