@@ -41,6 +41,18 @@ BUSTER_F_DECL bool c_test_array_bound_words_agree(Arena* arena, CPreprocessResul
 // and TYPEOF completion membership-node visits.
 BUSTER_F_DECL u64 c_test_assignment_chain_work(void);
 
+// One numeric storage-half publication under the actual body scratch guard.
+// Existing scratch-limit/trace seams control the guard. Report its terminal
+// exhaustion and machine failure separately before restoring the outer guard.
+typedef struct CTestAstStorageHalfPublication CTestAstStorageHalfPublication;
+struct CTestAstStorageHalfPublication
+{
+    bool exhausted;
+    bool failed;
+};
+BUSTER_F_DECL CTestAstStorageHalfPublication c_test_ast_storage_half_publication(Arena* scratch, CParseResult* result, CAst const* ast,
+                                                                                 CAstFacts* facts, Target target, u32 parent, bool failed_before, bool exhausted_before);
+
 // Caps, on the calling thread, the scratch bytes each function body's guarded
 // validation allocations (c_parse_body_scratch_allocate) may claim past the
 // body's starting position, so a small fixture exhausts the same allocation

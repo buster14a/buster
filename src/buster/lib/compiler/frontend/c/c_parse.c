@@ -12083,7 +12083,10 @@ BUSTER_C_INTERNAL void c_parse_ast_storage_half_layout_publish(CTypeParseMachine
     u32 flags = valid ? facts->flags[operand] : 0;
     bool recipe = (flags & C_AST_FACT_RECIPE) != 0;
     u32 index = valid ? facts->types[operand] : C_AST_FACT_NONE;
-    valid = valid && (flags & C_AST_FACT_TYPED) && c_ast_facts_constant(facts, parent).status != C_AST_CONSTANT_INVALID;
+    CAstConstantStatus status = valid && (flags & C_AST_FACT_TYPED) ? c_ast_facts_constant(facts, parent).status : C_AST_CONSTANT_INVALID;
+    // A finished integer already owns this answer; a descriptor walk cannot
+    // replace it and must not grow scratch for a value that will be discarded.
+    valid = valid && status != C_AST_CONSTANT_INVALID && status != C_AST_CONSTANT_INTEGER;
     bool alignment = valid && (ast->kinds[parent] == C_AST_ALIGNOF_EXPRESSION || ast->kinds[parent] == C_AST_ALIGNOF_TYPE);
     u64 size = 0;
     u32 natural = 0;
@@ -12104,6 +12107,23 @@ BUSTER_C_INTERNAL void c_parse_ast_storage_half_layout_publish(CTypeParseMachine
         }
     }
 }
+
+#if BUSTER_INCLUDE_TESTS
+CTestAstStorageHalfPublication c_test_ast_storage_half_publication(Arena* scratch, CParseResult* result, CAst const* ast,
+                                                                    CAstFacts* facts, Target target, u32 parent, bool failed_before, bool exhausted_before)
+{
+    CParseBodyScratchGuard previous = c_parse_body_scratch_guard;
+    u64 previous_base = c_parse_body_scratch_test_base;
+    CTypeParseMachine machine = {.scratch_arena = scratch, .syntax_tree = ast, .ast_facts = facts, .failed = failed_before};
+    c_parse_body_scratch_guard_begin(scratch);
+    if (exhausted_before) c_parse_body_scratch_refuse();
+    c_parse_ast_storage_half_layout_publish(&machine, result, target, parent);
+    CTestAstStorageHalfPublication report = {.exhausted = c_parse_body_scratch_guard_end(), .failed = machine.failed};
+    c_parse_body_scratch_guard = previous;
+    c_parse_body_scratch_test_base = previous_base;
+    return report;
+}
+#endif
 
 // One retained expression completion, shared by typed regions and the
 // required unevaluated operands outside them. All transient model changes

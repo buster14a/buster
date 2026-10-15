@@ -8230,6 +8230,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments
     return result;
 }
 
+// Completed numeric facts skip the discarded descriptor walk. An unanswered
+// 33-row pointer/half descriptor still crosses the same 32-row local buffer,
+// using the real body guard and its existing trace/limit controls.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_storage_half_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        CAstConstantStatus status;
+        u64 cap;
+        bool failed_before;
+        bool exhausted_before;
+    } const cases[] = {
+        {C_AST_CONSTANT_INTEGER, 1, false, false},
+        {C_AST_CONSTANT_UNQUERIED, 1, false, false},
+        {C_AST_CONSTANT_FLOAT, 1, false, false},
+        {C_AST_CONSTANT_NONCONSTANT, 1, false, false},
+        {C_AST_CONSTANT_UNSUPPORTED, 1, false, false},
+        {C_AST_CONSTANT_INVALID, 1, false, false},
+        {C_AST_CONSTANT_INTEGER, 1, true, false},
+        {C_AST_CONSTANT_INTEGER, 1, false, true},
+        {C_AST_CONSTANT_INTEGER, 1, true, true},
+        {C_AST_CONSTANT_UNQUERIED, 0, false, false},
+    };
+    String8 stars = S8("********************************");
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("int f(void){{return sizeof(__fp16{S8});}"), stars);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+        u32 parent = C_AST_NODE_INVALID;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+            if (built.ast.kinds[node] == C_AST_SIZEOF_TYPE) parent = node;
+        if (BUSTER_REQUIRE(arguments, built.complete && parent != C_AST_NODE_INVALID))
+        {
+            u32 rows = (u32)stars.length + 1;
+            CType* types = arena_allocate_zeroed(temporary.arena, CType, rows);
+            types[0].kind = C_TYPE_FP16_STORAGE;
+            for (u32 row = 1; row < rows; row += 1)
+                types[row] = (CType){.kind = C_TYPE_POINTER, .element_type = {.value = row - 1}};
+            CType* saved = arena_allocate(temporary.arena, CType, rows);
+            memcpy(saved, types, sizeof(*types) * rows);
+            u32 operand = c_ast_child_at(&built.ast, parent, 0);
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                CAstFacts facts = {0};
+                if (BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast)))
+                {
+                    facts.flags[operand] = C_AST_FACT_TYPED;
+                    facts.types[operand] = rows - 1;
+                    CAstConstantFact initial = {.low = target_data_layout(target_native).pointer.size, .type = C_TYPE_ID_INVALID,
+                                               .primitive_kind = C_TYPE_UNSIGNED_LONG_LONG, .status = cases[index].status};
+                    bool prepared = initial.status == C_AST_CONSTANT_UNQUERIED || c_ast_facts_store_constant(&facts, parent, initial);
+                    if (BUSTER_REQUIRE(arguments, prepared))
+                    {
+                        CAstConstantFact before = c_ast_facts_constant(&facts, parent);
+                        u32 constants = facts.constant_count;
+                        CParseResult analysis = {.arena = temporary.arena, .types = types, .type_count = rows};
+                        CTestBodyScratchRequest trace[4] = {0};
+                        c_test_body_validation_scratch_limit(cases[index].cap);
+                        c_test_body_validation_scratch_trace(trace, BUSTER_ARRAY_LENGTH(trace));
+                        u64 mark = temporary.arena->position;
+                        CTestAstStorageHalfPublication report = c_test_ast_storage_half_publication(temporary.arena, &analysis,
+                            &built.ast, &facts, target_native, parent, cases[index].failed_before, cases[index].exhausted_before);
+                        u32 traced = c_test_body_validation_scratch_trace_count();
+                        c_test_body_validation_scratch_trace(0, 0);
+                        c_test_body_validation_scratch_limit(0);
+                        bool walked = initial.status != C_AST_CONSTANT_INTEGER && initial.status != C_AST_CONSTANT_INVALID;
+                        bool refused = cases[index].exhausted_before || (walked && cases[index].cap != 0);
+                        BUSTER_TEST(arguments, report.exhausted == refused && report.failed == cases[index].failed_before);
+                        BUSTER_TEST(arguments, traced == (walked ? 2u : 1u) && trace[0].element_size == 0);
+                        if (walked)
+                        {
+                            BUSTER_TEST(arguments, trace[1].count == 64 && (trace[1].end == UINT64_MAX) == refused);
+                        }
+                        BUSTER_TEST(arguments, temporary.arena->position == mark && !facts.recipe_failed);
+                        BUSTER_TEST(arguments, analysis.type_count == rows && !analysis.diagnostic_count &&
+                                               memcmp(saved, types, sizeof(*types) * rows) == 0);
+                        CAstConstantFact answer = c_ast_facts_constant(&facts, parent);
+                        bool published = walked && !cases[index].cap;
+                        if (published)
+                        {
+                            BUSTER_TEST(arguments, answer.status == C_AST_CONSTANT_INTEGER && !answer.high &&
+                                answer.low == target_data_layout(target_native).pointer.size && facts.constant_count == constants + 1);
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, answer.status == before.status && answer.low == before.low && answer.high == before.high &&
+                                answer.floating == before.floating && answer.type.value == before.type.value && answer.primitive_kind == before.primitive_kind &&
+                                answer.float_width == before.float_width && answer.offsetof_plus_one == before.offsetof_plus_one &&
+                                answer.ext80_initializer_plus_one == before.ext80_initializer_plus_one && answer.selected_node_plus_one == before.selected_node_plus_one &&
+                                facts.constant_count == constants);
+                        }
+                        BUSTER_TEST(arguments, facts.flags[operand] == C_AST_FACT_TYPED && facts.types[operand] == rows - 1 && !facts.recipe_count);
+                    }
+                }
+                c_ast_facts_release(&facts);
+            }
+        }
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Intrinsic reservation walks evaluated nodes: storage-half values are
 // rejected only when used, and vector expansions keep sufficient capacity.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_budget_nodes(UnitTestArguments* arguments)
@@ -10417,6 +10523,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_refusal_cause);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_storage_half_publication);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_operand_admission);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vla_alignment);
