@@ -3,9 +3,11 @@
 **Buster** is a personal monorepo of applications, shared C components, tools
 and experiments. The compiler and toolchain is one project; find the others
 in [PROJECTS.md](PROJECTS.md). The compiler and its foundation/runtime dependencies are the maintained product.
-Application, GUI/media/font and mobile-hosting source is preserved without
-normal build, test, fuzz, analyzer or automatic CI maintenance. Do not reconnect
-those consumers without an explicit owner request.
+Shared GUI/media/font libraries and mobile-hosting source remain unmaintained.
+The image browser, disk builder, ancillary component tests and their CMake
+helpers are removed; retained components have no normal build, test, fuzz,
+analyzer or automatic CI maintenance. Do not reconnect those consumers without
+an explicit owner request.
 Its `ide` target is the headless compiler, test
 runner, benchmark driver and metadata tool; the name is retained for build
 compatibility. C is the compiler's sole active source frontend.
@@ -72,7 +74,7 @@ disagree, inspect the code and update the affected guide in the same change.
   before changing kernels and the [parallelism guide](docs/agents/parallelism.md)
   before changing concurrency or shared initialization.
 - Modules consumed by `ide` must be registered in CMake, added to its module
-  list, and included in its unity block. Preserved applications and component tests stay outside the maintained graph;
+  list, and included in its unity block. Unmaintained components stay outside the maintained graph;
   do not pull unused modules into the compiler. Wire shared tests
   into the CMake test source/header lists and `src/buster/tests/test.c`; keep test
   declarations behind `BUSTER_INCLUDE_TESTS` and private seams in `*_internal.h`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused build cwd, Android SDK and Apple target-architecture regressions."""
+"""Focused build cwd and Apple target-architecture regressions."""
 
 import json
 import os
@@ -24,73 +24,6 @@ def cmake_script(directory, module, body):
     script = directory / "selection.cmake"
     script.write_text(f'cmake_minimum_required(VERSION 3.17)\ninclude("{ROOT.as_posix()}/cmake/{module}")\n' + body)
     return subprocess.run([CMAKE, "-P", str(script)], capture_output=True, text=True, timeout=30)
-
-
-@unittest.skipUnless(CMAKE, "cmake is required")
-class AndroidSdkSelectionTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="buster sdk selection ")
-        self.addCleanup(temporary.cleanup)
-        self.work = Path(temporary.name)
-        self.sdk = self.work / "sdk"
-
-    def build_tools(self, versions, override=""):
-        for version in versions:
-            (self.sdk / "build-tools" / version).mkdir(parents=True)
-        return cmake_script(self.work, "AndroidSdkSelection.cmake", f'''
-buster_android_build_tools(selected "{self.sdk.as_posix()}" "{override}")
-message("selected=${{selected}}")
-''')
-
-    def jars(self, platforms, requested="android-31", override=""):
-        for name in platforms:
-            directory = self.sdk / "platforms" / name
-            directory.mkdir(parents=True)
-            (directory / "android.jar").touch()
-        return cmake_script(self.work, "AndroidSdkSelection.cmake", f'''
-buster_android_platform_jar(selected "{self.sdk.as_posix()}" "{requested}" "{override}")
-message("selected=${{selected}}")
-''')
-
-    def test_numeric_api_order_and_requested_platform(self):
-        result = self.jars(["android-9", "android-34", "android-35", "android-bad"])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("platforms/android-35/android.jar", result.stderr)
-        result = self.jars([], requested="android-9")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("platforms/android-9/android.jar", result.stderr)
-        explicit = self.work / "explicit.jar"
-        explicit.touch()
-        result = self.jars([], override=explicit.as_posix())
-        self.assertIn(f"selected={explicit.as_posix()}", result.stderr)
-
-    def test_numeric_build_tools_and_stable_preference(self):
-        result = self.build_tools(["9.0.0", "35.0.9", "35.0.10", "99.0.0-rc1", "bad"])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("build-tools/35.0.10", result.stderr)
-        explicit = self.work / "explicit tools"
-        explicit.mkdir()
-        result = self.build_tools([], override=explicit.as_posix())
-        self.assertIn(f"selected={explicit.as_posix()}", result.stderr)
-
-    def test_preview_version_stage_and_number(self):
-        result = self.build_tools(["9.0.0-rc99", "35.0.0-alpha99", "35.0.0-beta99", "35.0.0-rc9", "35.0.0-rc10"])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("build-tools/35.0.0-rc10", result.stderr)
-
-    def test_missing_malformed_and_invalid_overrides(self):
-        result = self.build_tools(["bad", "35", "35.0.0-dev1"])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No valid Android build-tools version directory", result.stderr)
-        result = self.jars(["android-bad", "android-35-preview"])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No valid android.jar", result.stderr)
-        result = self.build_tools([], override=(self.work / "missing").as_posix())
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("BUSTER_ANDROID_BUILD_TOOLS_DIR", result.stderr)
-        result = self.jars([], override=(self.work / "missing.jar").as_posix())
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("BUSTER_ANDROID_JAR", result.stderr)
 
 
 @unittest.skipUnless(CMAKE, "cmake is required")

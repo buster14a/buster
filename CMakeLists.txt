@@ -10,7 +10,6 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
-include(cmake/IOSBundleAssets.cmake)
 include(cmake/NativeTargetCompatibility.cmake)
 
 set(BUSTER_CONFIG_TYPES Debug Release)
@@ -1150,14 +1149,6 @@ buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
 buster_register_module(x86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
 buster_register_module(aarch64 "${BUSTER_SOURCE_DIR}/aarch64${COMMON_EXTENSION}")
 buster_register_module(time "${BUSTER_SOURCE_DIR}/time${COMMON_EXTENSION}")
-buster_register_module(ui_core "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}")
-buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}")
-buster_register_module(window "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
-buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
-buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
-buster_register_module(image
-    "${BUSTER_SOURCE_DIR}/image${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/png${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/jpeg${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/gif${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/bmp${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/tga${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/qoi${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/pnm${COMMON_EXTENSION}")
-buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 
 # Test sources follow the selected build mode: test.c includes them in unity

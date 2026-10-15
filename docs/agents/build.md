@@ -138,13 +138,14 @@ recorded stage-1 counts fail on both counters.
 ## Build
 
 The maintained build and automatic CI cover the headless compiler on Linux,
-Windows and macOS. Application, GUI, image/font and mobile-hosting source is
-preserved without a maintenance or CI-support promise. It is excluded from
+Windows and macOS. Shared GUI, image/font and mobile-hosting source is
+retained without a maintenance or CI-support promise. Ancillary applications,
+tests and CMake helpers have been removed. Retained components are excluded from
 the default build, compiler tests/fuzzing and analyzer database.
 
-The default graph registers one product executable, `ide`. Application/GUI
-CMake fragments remain in source but are not included; the optional SDK and
-example workflows are also outside automatic maintenance.
+The default graph registers one product executable, `ide`. Ancillary
+application/GUI and compiler-SDK CMake fragments are removed; retained example
+and mobile-hosting sources remain outside automatic maintenance.
 
 Three layers: `./build.sh` / `./build.ps1` bootstrap `build.c` using **tcc**,
 then the native driver runs CMake + ninja (multi-config, outputs in
@@ -669,76 +670,29 @@ Maintained Ninja targets: `ide`, `test_all`, `bench_all` (runs `ide bench`),
 `test_self_host` (Linux and Windows x86-64, and macOS), `test_mode_matrix`
 (same platforms), `run_ide`,
 `test_ide`, `debug_ide`,
-`clang_analyze`. Preserved renderer/shader and mobile packaging code has no
-automatic build or test support. Its earlier procedures below are reference
-material; they do not promise current buildability.
+`clang_analyze`. Retained renderer/shader and mobile-hosting code has no
+automatic build or test support; see the removed integration details below.
 
-## Preserved reference: Android SDK packaging inputs
+## Removed ancillary build integration
 
-This unmaintained path is not exercised by automatic CI.
+The image-browser and disk-builder applications, ancillary GUI/media/font tests,
+and CMake fragments for those consumers, hot reload, raster/texture tests,
+compiler SDK packaging and mobile asset packaging have been removed. They have
+no current Ninja targets. Shared GUI/media/font libraries, shaders and mobile
+hosting sources remain unmaintained outside the compiler graph.
 
-The explicit `BUSTER_ANDROID_BUILD_TOOLS_DIR` and `BUSTER_ANDROID_JAR` overrides
-win. Otherwise packaging selects build-tools by numeric `major.minor.patch`,
-preferring the newest stable version even when a newer preview is installed.
-Without a stable version it uses the newest preview version, then `rc` over
-`beta` over `alpha`, then the largest numeric preview suffix. Unrecognized
-names are ignored. Platform selection first uses the requested `ANDROID_PLATFORM`
-jar when installed, then the largest numeric `android-<API>` jar. Missing valid
-candidates and nonexistent explicit overrides fail configure with an actionable
-SDK diagnostic. The selection requires only CMake 3.17. Controlled mixed-digit,
-preview, override and missing-candidate fixtures run in the same compatibility
-suite as the cwd and Apple architecture regressions.
+`cmake/AndroidSdkSelection.cmake`, `cmake/AndroidApk.cmake` and
+`cmake/IOSBundleAssets.cmake` are absent. The compatibility suite therefore no
+longer runs Android SDK-selection fixtures; it retains build-working-directory,
+Apple target-architecture, Linux ASan and Clang native-target checks. Remaining
+mobile/shader CMake branches and helper scripts are historical source: references
+to removed packaging/embedding helpers must be restored or replaced before an
+owner can reconnect those paths. Automatic desktop compiler CI does not use them.
 
-## Preserved reference: Incremental Android test assets
-
-This unmaintained path is not exercised by automatic CI.
-
-The Android `apk` graph in `cmake/AndroidApk.cmake` treats the active files under
-`tests/` and the SPIR-V, codegen and driver fixture directories under
-`src/buster/tests/compiler/` as package inputs, not compiler sources. After
-configuring the normal Android tree, `cmake --build build/android-ci-x86_64
---config Debug --target apk` repackages fixture edits, additions, renames and
-deletions without requiring a C source rebuild or another destructive
-`generate`. Release uses the same contract. An unchanged build does not
-repackage. A content-stable inventory handles removals and newly added files
-whose timestamps predate the APK; `CONFIGURE_DEPENDS` refreshes that inventory
-with the supported Ninja generators. The preserved `.bbb` corpus is excluded
-before Android asset packaging.
-
-`python3 tests/android_apk_assets_test.py` exercises that same production graph
-through real CMake and Ninja Multi-Config, in Debug and Release, with isolated
-fixtures and controlled packaging-tool stand-ins. It checks package contents,
-fixture-only invalidation, stale-file removal, no-op behavior, and the retained
-native-library/manifest/sign-script dependencies. It requires the existing
-CMake, Ninja, Python and Bash prerequisites, not an Android SDK or a compiler.
-`python3 tools/mobile_driver_fixture_assets_test.py` covers staging of the
-source-tree driver fixtures.
-The existing `tests/mobile_ci_scripts_test.sh` suite and mobile lifecycle CI run
-it on Linux and macOS. This is build-graph evidence, not Android compilation,
-signing or device execution; those remain the regular Android mobile CI gates.
-Do not run two configurations' packaging concurrently in one build directory:
-the existing APK and staging paths are shared.
-
-## Preserved reference: Incremental iOS test assets
-
-This unmaintained path is not exercised by automatic CI.
-
-The iOS `ide` target stages active files under `tests/` and the SPIR-V, codegen
-and driver fixture directories under `src/buster/tests/compiler/` through
-`cmake/IOSBundleAssets.cmake`. Its filtered, content-stable inventory makes
-fixture edits, additions, renames and removals update the configuration's app
-bundle without relinking the native executable. The owned fixture subtrees are
-rebuilt on a real input change, so deleted files cannot survive; preserved
-`.bbb` inputs are excluded and do not invalidate the graph. Debug and Release
-use separate stamps and bundles, and an unchanged build does not rewrite either.
-
-`python3 tests/ios_bundle_assets_test.py` exercises the production CMake graph
-with Ninja Multi-Config in paths containing spaces. It covers both configurations,
-stale-file removal, old-timestamp additions, dormant/empty inventories, native
-target stability, no-op builds and command failure propagation without requiring
-an Apple SDK. `python3 tools/mobile_driver_fixture_assets_test.py` covers staging
-of the source-tree driver fixtures. Actual iOS compilation, bundle validation
-and simulator execution remain in `ios/test_ci.sh` and the mobile CI lanes.
+The [pre-removal build guide](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/docs/agents/build.md)
+retains the SDK-selection rules and Android/iOS incremental-asset procedures.
+Those commands and their asset-test scripts require that historical checkout;
+they do not establish current mobile packaging, signing or device coverage.
 
 The Clang/GCC build-driver binary now leaves the existing lane implementation
 available for opt-in `test_differential --jobs N`. The default remains one case
