@@ -2023,7 +2023,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "int band_caller(int v) { return leaf_14(v) + leaf_16(v) + leaf_17(v); }\n");
         CPreprocessResult band_preprocess = c_preprocess(band_temporary.arena, band_source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult band_analysis = c_parse(band_temporary.arena, band_preprocess);
+        CAnalysisResult band_analysis = c_parse_for_lowering(band_temporary.arena, band_preprocess);
         CIRLowerResult band_lowered = {0};
         if (!band_preprocess.error_count && !band_analysis.diagnostic_count)
         {
