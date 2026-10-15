@@ -119,8 +119,9 @@ BUSTER_CT_CHECK(MACHINE_FAST_EDGE_SOURCE_TILED >= MACHINE_TARGET_REGISTER_LIMIT)
 // Small planes keep the dense solver; larger ones share immutable set
 // subtrees instead of allocating four block-by-value rectangles.
 #define MACHINE_FAST_LIVENESS_DENSE_WORD_LIMIT (1ull << 18)
-// If sharing exhausts its node budget, preserve the former dense envelope.
-#define MACHINE_FAST_LIVENESS_FALLBACK_WORD_LIMIT (1ull << 22)
+// Preserve the established analysis-work envelope: expanding it spent
+// 18-29% more compile time on large nested functions (#4009).
+#define MACHINE_FAST_LIVENESS_WORK_WORD_LIMIT (1ull << 22)
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
 {
@@ -2460,9 +2461,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_value_liveness(Arena* arena, MachineFuncti
 {
     u32 register_count = function->virtual_register_count;
     u32 block_count = function->block_count;
-    if (block_count > 1 && prepass->live_value_count)
+    u64 plane_words = (u64)block_count * (((u64)prepass->live_value_count + 63u) / 64u);
+    if (block_count > 1 && prepass->live_value_count && plane_words <= MACHINE_FAST_LIVENESS_WORK_WORD_LIMIT)
     {
-        u64 initial_position = arena->position;
         u32* live_index = arena_allocate(arena, u32, register_count);
         u32 tracked = 0;
         for (u32 register_index = 0; register_index < register_count; register_index += 1)
@@ -2476,7 +2477,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_value_liveness(Arena* arena, MachineFuncti
         prepass->live_index = live_index;
         bool shared = plane > MACHINE_FAST_LIVENESS_DENSE_WORD_LIMIT &&
                       machine_fast_value_live_sets(arena, function, prepass, words, MACHINE_FAST_LIVE_NODE_LIMIT);
-        if (!shared && plane <= MACHINE_FAST_LIVENESS_FALLBACK_WORD_LIMIT)
+        if (!shared)
         {
             // Live-out and live-in outlive the solve; reads and writes are one
             // scratch allocation and one clear. The solve writes every block's
@@ -2556,12 +2557,6 @@ BUSTER_GLOBAL_LOCAL void machine_fast_value_liveness(Arena* arena, MachineFuncti
             prepass->live_out = live_out;
             prepass->live_in = live_in;
             prepass->live_words = words;
-        }
-        else if (!shared)
-        {
-            // The conservative fallback publishes no partial set or index.
-            arena_set_position(arena, initial_position);
-            prepass->live_index = 0;
         }
     }
 }
@@ -2725,8 +2720,9 @@ bool machine_fast_prepass_summary_test(Arena* arena)
         }
     }
     arena_set_position(arena, initial_position);
-    // Both sides of the former 2^22-word cap keep exact facts. The chain's
-    // common live set must be shared, not copied once per block.
+    // Preserve the established work budget on both sides of its boundary.
+    // Within it, the chain's common live set is shared; outside it, even
+    // the unused value index must not be allocated or published.
     for (u32 values = 16384; values <= 16385; values += 1)
     {
         MachineFunction chain = {.target = machine_target_x86_64(), .block_count = values,
@@ -2762,8 +2758,13 @@ bool machine_fast_prepass_summary_test(Arena* arena)
         }
         u64 before = arena->position;
         MachineFastPrepass facts = machine_fast_prepass_build(arena, &chain, false);
-        result &= facts.valid && facts.live_sets && facts.live_value_count == values && !facts.next_call;
+        result &= facts.valid && facts.live_value_count == values && !facts.next_call;
         result &= arena->position - before <= (u64)values * 384u;
+        result &= (facts.live_sets != 0) == (values == 16384);
+        if (values == 16385)
+        {
+            result &= !facts.live_index && !facts.live_in && !facts.live_out && !facts.live_words;
+        }
         if (facts.live_sets)
         {
             MachineFastLiveSets const* sets = facts.live_sets;

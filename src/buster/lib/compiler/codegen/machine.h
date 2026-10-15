@@ -2113,9 +2113,9 @@ struct MachineFastPrepass
     // its dense bit, or UINT32_MAX. Small populations use `live_out` and
     // `live_in` with `live_words` words per block; large ones use shared
     // immutable `live_sets` roots. No facts are built for one block or zero
-    // tracked values. If the shared-node budget and former dense envelope
-    // both fail, all liveness pointers stay null; no partial facts escape.
-    // Untracked values conservatively count as live.
+    // tracked values, or outside the established analysis-work envelope.
+    // Shared-node exhaustion rewinds unpublished nodes and uses the dense
+    // solve within that envelope. Untracked values count as live.
     u32* live_index;
     u64* live_out;
     u64* live_in;

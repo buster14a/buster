@@ -518,8 +518,12 @@ hosts execute its independent expected-value fixture.
   Zero/full subtrees use sentinel IDs, unchanged children keep their old IDs,
   and a reverse-CFG-ordered iterative solve propagates only changed roots.
   The node pool is bounded at 64 MiB. Exhaustion rewinds all unpublished
-  nodes and retains the old dense solve through 2^22 words per plane;
-  beyond both budgets the conservative textual fallback remains. The
+  nodes and uses the dense solve within the established analysis envelope.
+  The 2^22-word block-by-value work budget remains a deliberate throughput
+  boundary: outside it, the prepass publishes no liveness index or sets and
+  keeps the textual rules. Expanding that population was measured to slow
+  large nested-function compilation by 18-29%, so memory sharing does not
+  authorize extra analysis for smaller generated frames. The
   classification pass also counts tracked values and detects vectors during
   its completed escape reduction. The backward gen/kill row walk remains:
   escape identities are not final until every defining block is known. An
@@ -529,8 +533,9 @@ hosts execute its independent expected-value fixture.
   is per block, not per edge: one store at a conditional's terminator serves
   both successors. Contract construction still carries a dirty value that is
   dead in the join, because dropping it would force the store onto the
-  predecessor's other path. The representation switch preserves exact facts;
-  it does not discard liveness at the former block-by-value size cliff.
+  predecessor's other path. The representation switch preserves exact facts
+  and the existing conservative fallback population. The size discontinuity
+  is an intended analysis-work limit, not a reason to allocate dense planes.
 - The prepass keeps block live-in from the same solve. An edge conform
   leaves a value its destination does not read (`machine_fast_dead_in`)
   dirty instead of storing it, unless it sits in a register the contract
