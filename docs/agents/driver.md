@@ -915,11 +915,18 @@ Mach-O writer adds the C-level one, and marks a name without one
 `ObjectSymbol.final_name` so it is written unchanged. `-S` prints the real
 `_`-prefixed names (`compiler_driver_test_macho_assembly_symbol_names`). The vocabulary is `.text`,
 `.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
-`.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
-`.hidden`, `.type` and `.size`; on Mach-O targets `.weak_definition` (N_WEAK_DEF on
-a defined global in either order relative to `.globl`; on a defined local it is dropped, as
-llvm-mc does; on an undefined name it is refused, since the object model has no weak
-undefined Mach-O symbol, and `.weak_reference` is refused for the same reason); `.align`, `.balign` and `.p2align`; `.byte`,
+`.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`
+(except on Mach-O), `.hidden`, `.type` and
+`.size`; on Mach-O targets `.weak_definition` accepts a comma-separated symbol list and
+sets N_WEAK_DEF on a defined global in either order relative to `.globl`; it is ignored on
+a defined local. A pure `.set` alias (a bare symbol reference or `.`) inherits the
+aliasee's N_WEAK_DEF flag: aliases of strong targets stay strong, while aliases of weak
+targets stay weak, including chains. An expression with an addend retains its own flag.
+Same-section differences are permitted as llvm-mc does. An undefined `.weak_definition`
+name is refused because the object model represents weak definitions but not the
+N_WEAK_REF weak reference that llvm-mc emits;
+`.weak_reference` is refused for the same reason, with a diagnostic naming the
+directive. `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
 `.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and
@@ -983,8 +990,10 @@ are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
 out-of-range values are diagnosed. Numeric Mach-O `@PAGEOFF` remains
-refused. Mach-O unit symbols currently receive the
-object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
+refused. Standalone Mach-O assembly preserves the spellings written in assembly in
+the serialized symbol table. C-generated names use the platform's C-level
+underscore convention; the canonical Mach-O reader strips a leading platform
+underscore when exposing `ObjectSymbol` names.
 
 A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an

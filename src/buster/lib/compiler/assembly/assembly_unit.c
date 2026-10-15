@@ -142,6 +142,10 @@ struct AssemblyUnitBuilder
     AssemblyUnitAlias* aliases;
     // `.local` marks, indexed by symbol, consumed by `.comm`.
     bool* symbol_local;
+    // Direct-reference `.set` aliases and their target index plus one; zero
+    // means the target is the local location symbol for a bare `.`.
+    bool* symbol_alias;
+    u32* symbol_alias_target_plus_one;
     // Symbols that were never defined and name an opened section: they stand
     // for that section's start, as in GNU as and llvm-mc. Indexed by symbol.
     bool* symbol_section_start;
@@ -561,6 +565,23 @@ bool assembly_unit_test_parse_number(String8 text, u64* value)
 // including its position in a comma-separated list. Names may be quoted, as
 // in the -S printer. At most one positive and one negative symbolic term fit
 // the relocation model; unsupported expressions are diagnosed by the caller.
+// A direct-reference alias inherits its terminal aliasee's weak-definition origin.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_symbol_has_weak_definition_origin(const AssemblyUnitBuilder* builder, u32 symbol)
+{
+    bool marked = false;
+    if (symbol < builder->result.symbol_count)
+    {
+        marked = builder->symbol_weak_definition_line[symbol] != 0;
+        u32 target_plus_one = builder->symbol_alias_target_plus_one[symbol];
+        if (!marked && builder->symbol_alias[symbol] && target_plus_one &&
+            target_plus_one <= builder->result.symbol_count)
+        {
+            marked = builder->symbol_weak_definition_line[target_plus_one - 1] != 0;
+        }
+    }
+    return marked;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, String8 text, u64 location, AssemblyUnitValue* value)
 {
     AssemblyUnitValue result = {.symbol = UINT32_MAX, .subtract_symbol = UINT32_MAX};
@@ -658,7 +679,17 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, St
                                                      : builder->result.symbols[result.symbol];
         AssemblyUnitSymbol negative = result.subtract_location ? (AssemblyUnitSymbol){.defined = true, .section = builder->current_section}
                                                               : builder->result.symbols[result.subtract_symbol];
-        if (positive.defined && negative.defined && positive.section == negative.section && !positive.weak && !negative.weak)
+        bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+        bool positive_weak_definition =
+            !result.location && assembly_unit_symbol_has_weak_definition_origin(builder, result.symbol);
+        bool negative_weak_definition =
+            !result.subtract_location && assembly_unit_symbol_has_weak_definition_origin(builder, result.subtract_symbol);
+        bool weak_difference = macho && (!positive.weak || positive_weak_definition) &&
+                               (!negative.weak || negative_weak_definition);
+        // llvm-mc folds same-section differences when an operand is a Mach-O
+        // weak definition, including a pure alias inheriting that definition.
+        if (positive.defined && negative.defined && positive.section == negative.section &&
+            ((!positive.weak && !negative.weak) || weak_difference))
         {
             result.constant += (s64)positive.value - (s64)negative.value;
             result.has_symbol = false;
@@ -1009,11 +1040,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* bui
     {
         record->global = true;
         record->weak = true;
-        return part_count == 1;
-    }
-    if (string_equal(directive, S8(".weak_definition")))
-    {
-        builder->symbol_weak_definition_line[symbol] = builder->line;
         return part_count == 1;
     }
     if (string_equal(directive, S8(".hidden")))
@@ -1444,6 +1470,31 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_common(AssemblyUnitBuilder* bui
     return valid;
 }
 
+// Only a bare symbol ref or bare `.` remains a direct MC symbol-ref expression.
+// The evaluator represents bare `.` as a location with a sentinel symbol index.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_set_expression_is_pure_alias(String8 expression)
+{
+    String8 text = assembly_unit_trim(expression);
+    bool pure = string_equal(text, S8("."));
+    if (!pure && text.length && text.pointer[0] == '"')
+    {
+        pure = text.length > 2 && text.pointer[text.length - 1] == '"';
+        for (u64 index = 1; index + 1 < text.length && pure; index += 1)
+        {
+            pure = text.pointer[index] != '"';
+        }
+    }
+    else if (!pure && text.length && assembly_unit_name_start(text.pointer[0]))
+    {
+        pure = true;
+        for (u64 index = 1; index < text.length && pure; index += 1)
+        {
+            pure = assembly_unit_name_character(text.pointer[index]);
+        }
+    }
+    return pure;
+}
+
 // `.set`/`.equ name, expression`. A `.`-relative value is fixed here; one
 // naming a symbol is resolved once parsing has defined every label. A value
 // with no symbol would be an absolute symbol, which is refused by name.
@@ -1457,6 +1508,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
     valid = symbol != UINT32_MAX && !builder->result.symbols[symbol].defined &&
             assembly_unit_evaluate(builder, parts[1], builder->section_offsets[builder->current_section], &value) &&
             !value.has_subtract_symbol;
+    bool pure_alias = valid && assembly_unit_set_expression_is_pure_alias(parts[1]) &&
+                      (value.location || !value.has_symbol || value.symbol < builder->result.symbol_count);
     if (valid && !value.has_symbol)
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
@@ -1469,12 +1522,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
         defined->defined = true;
         defined->section = builder->current_section;
         defined->value = (u64)value.constant;
+        builder->symbol_alias[symbol] = pure_alias;
     }
     else if (valid)
     {
         valid = builder->alias_count < builder->alias_capacity;
         if (valid)
         {
+            builder->symbol_alias[symbol] = pure_alias;
+            if (pure_alias && value.has_symbol)
+            {
+                builder->symbol_alias_target_plus_one[symbol] = value.symbol + 1;
+            }
             builder->aliases[builder->alias_count++] = (AssemblyUnitAlias){
                 .expression = parts[1], .symbol = symbol, .line = builder->line, .column = builder->column,
                 .section = builder->current_section,
@@ -1484,15 +1543,33 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_weak_definition(AssemblyUnitBuilder* builder, String8 operands)
+{
+    String8 parts[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
+    u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+    bool valid = part_count != UINT32_MAX && part_count > 0 && operands.length;
+    for (u32 index = 0; index < part_count && valid; index += 1)
+    {
+        String8 trailing = {0};
+        String8 word = assembly_unit_word(parts[index], &trailing);
+        String8 name = assembly_unit_unquote(word);
+        u32 symbol = word.length && !trailing.length ? assembly_unit_symbol_intern(builder, name) : UINT32_MAX;
+        valid = symbol != UINT32_MAX;
+        if (valid) builder->symbol_weak_definition_line[symbol] = builder->line;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_unit_target_is_macho(const AssemblyUnitBuilder* builder)
 {
     return builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
 }
 
-// `.weak_definition` marks N_WEAK_DEF on a defined global, in either order
-// relative to `.globl`. llvm-mc ignores it on a defined local symbol, as is
-// done here, and makes an undefined one a weak reference, which the object
-// model cannot write; that is refused rather than emitted as a strong one.
+// MachObjectWriter follows a `.set` variable only when its expression is a
+// symbol reference, then takes N_DESC flags from the terminal aliasee. Addend
+// expressions keep their own flags; a bare `.` aliases a local location symbol.
+// `.weak_definition` marks defined globals in either order relative to `.globl`.
+// Undefined names would be N_WEAK_REF, which the object model cannot represent.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_weak_definitions(AssemblyUnitBuilder* builder)
 {
     bool valid = true;
@@ -1504,7 +1581,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_weak_definitions(AssemblyUnitBuil
             AssemblyUnitSymbol* symbol = builder->result.symbols + index;
             if (symbol->defined)
             {
-                symbol->weak = symbol->weak || symbol->global;
+                if (!builder->symbol_alias[index])
+                {
+                    symbol->weak = symbol->weak || symbol->global;
+                }
             }
             else
             {
@@ -1514,6 +1594,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_weak_definitions(AssemblyUnitBuil
                                                 S8("'.weak_definition' names undefined symbol '{S8}'; a weak reference cannot be written"),
                                                 symbol->name);
                 valid = false;
+            }
+        }
+    }
+    if (assembly_unit_target_is_macho(builder))
+    {
+        for (u32 index = 0; index < builder->result.symbol_count; index += 1)
+        {
+            if (builder->symbol_alias[index])
+            {
+                u32 target_plus_one = builder->symbol_alias_target_plus_one[index];
+                builder->result.symbols[index].weak =
+                    target_plus_one && target_plus_one <= builder->result.symbol_count
+                        ? builder->result.symbols[target_plus_one - 1].weak
+                        : false;
             }
         }
     }
@@ -1576,6 +1670,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_aliases(AssemblyUnitBuilder* buil
                 defined->section = target.section;
                 defined->value = target.value + (u64)value.constant;
                 defined->function = defined->function || target.function;
+                if (builder->symbol_alias[alias.symbol] && builder->symbol_alias_target_plus_one[alias.symbol])
+                {
+                    u32 target_index = builder->symbol_alias_target_plus_one[alias.symbol] - 1;
+                    if (target_index < builder->result.symbol_count && builder->symbol_alias[target_index])
+                    {
+                        builder->symbol_alias_target_plus_one[alias.symbol] =
+                            builder->symbol_alias_target_plus_one[target_index];
+                    }
+                }
                 resolved += 1;
                 progress = true;
             }
@@ -1670,15 +1773,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     {
         return !operands.length && assembly_unit_directive_section_return(builder, string_equal(directive, S8(".popsection")));
     }
-    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
-        string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
-    {
-        return assembly_unit_directive_symbol(builder, directive, operands);
-    }
-    // Only Mach-O has `.weak_definition`; ELF and COFF refuse it by name below.
-    // `.weak_reference` (N_WEAK_REF on an undefined symbol) is refused on every
-    // target: the object model has no weak undefined Mach-O symbol to write.
     if (string_equal(directive, S8(".weak_definition")) && assembly_unit_target_is_macho(builder))
+    {
+        return assembly_unit_directive_weak_definition(builder, operands);
+    }
+    // Mach-O's plain `.weak` is unknown; let it reach the terminal refusal.
+    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
+        (string_equal(directive, S8(".weak")) && !assembly_unit_target_is_macho(builder)) ||
+        string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
     {
         return assembly_unit_directive_symbol(builder, directive, operands);
     }
@@ -2425,6 +2527,9 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_reset_layout(AssemblyUnitBuilder* builder
     memset(builder->symbol_slots, 0, (builder->symbol_slot_mask + 1) * sizeof(*builder->symbol_slots));
     memset(builder->section_slots, 0, (builder->section_slot_mask + 1) * sizeof(*builder->section_slots));
     memset(builder->symbol_local, 0, builder->symbol_capacity * sizeof(*builder->symbol_local));
+    memset(builder->symbol_alias, 0, builder->symbol_capacity * sizeof(*builder->symbol_alias));
+    memset(builder->symbol_alias_target_plus_one, 0,
+           builder->symbol_capacity * sizeof(*builder->symbol_alias_target_plus_one));
     memset(builder->symbol_section_start, 0, builder->symbol_capacity * sizeof(*builder->symbol_section_start));
     memset(builder->symbol_weak_definition_line, 0, builder->symbol_capacity * sizeof(*builder->symbol_weak_definition_line));
 }
@@ -2781,6 +2886,8 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.alias_capacity = statement_count;
     builder.aliases = arena_allocate(arena, AssemblyUnitAlias, builder.alias_capacity);
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
+    builder.symbol_alias = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
+    builder.symbol_alias_target_plus_one = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
     builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_weak_definition_line = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
     u64 symbol_slot_capacity = assembly_unit_slot_capacity(builder.symbol_capacity);

@@ -10259,10 +10259,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
         os_file_delete(listing);
         os_file_delete(direct_object);
     }
-    // `.weak_definition` marks N_WEAK_DEF on a defined global in either order
-    // relative to `.globl`, as llvm-mc does; a defined local stays local. The
-    // object model's weak symbols are all definitions, so `.weak_definition`
-    // on a name nothing defines and `.weak_reference` are refused by name.
+    // Pure .set symbol-reference aliases inherit the terminal aliasee's weak
+    // flag; additive expressions retain their own .weak_definition flag.
+    // .weak_definition accepts symbol lists and same-section differences.
+    // Undefined weak references remain named refusals because the object model
+    // carries only weak definitions, not Mach-O N_WEAK_REF.
     typedef struct WeakCase
     {
         String8 name;
@@ -10288,16 +10289,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
          {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    ret\n.globl _c\n_c:\n    bl _w\n    ret\n"),
           S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    ret\n.globl _c\n_c:\n    call _w\n    ret\n")},
          true, true, true},
-        {S8("undefined name"),
-         {S8(".globl _w\n.weak_definition _w\n.text\n_f:\n    ret\n"), S8(".globl _w\n.weak_definition _w\n.text\n_f:\n    ret\n")},
+        {S8("comma-separated names"),
+         {S8(".globl _w\n.globl _x\n.weak_definition _w, _x\n.text\n_w:\n    ret\n_x:\n    ret\n"),
+          S8(".globl _w\n.globl _x\n.weak_definition _w, _x\n.text\n_w:\n    ret\n_x:\n    ret\n")},
+         true, true, true},
+        {S8("set alias stays strong"),
+         {S8(".text\n_a:\n    ret\n.globl _s\n.set _s, _a\n.weak_definition _s\n"),
+          S8(".text\n_a:\n    ret\n.globl _s\n.set _s, _a\n.weak_definition _s\n")},
+         true, true, false},
+        {S8("set location alias stays strong"),
+         {S8(".text\n.globl _s\n.set _s, .\n.weak_definition _s\n"),
+          S8(".text\n.globl _s\n.set _s, .\n.weak_definition _s\n")},
+         true, true, false},
+        {S8("set alias inherits weak target"),
+         {S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    ret\n.globl _s\n.set _s, _a\n"),
+          S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    ret\n.globl _s\n.set _s, _a\n")},
+         true, true, true},
+        {S8("set chain inherits weak target"),
+         {S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    ret\n.set _s, _a\n.globl _t\n.set _t, _s\n"),
+          S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    ret\n.set _s, _a\n.globl _t\n.set _t, _s\n")},
+         true, true, true},
+        {S8("set addend keeps weak_definition"),
+         {S8(".text\n_a:\n    .byte 0\n.globl _s\n.weak_definition _s\n.set _s, _a+1\n"),
+          S8(".text\n_a:\n    .byte 0\n.globl _s\n.weak_definition _s\n.set _s, _a+1\n")},
+         true, true, true},
+        {S8("set dot addend keeps weak_definition"),
+         {S8(".text\n.globl _s\n.set _s, .+1\n.weak_definition _s\n.byte 0\n"),
+          S8(".text\n.globl _s\n.set _s, .+1\n.weak_definition _s\n.byte 0\n")},
+         true, true, true},
+        {S8("same-section weak difference"),
+         {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n"),
+          S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    .byte 1\n_x:\n    .long _x-_w\n")},
+         true, true, true},
+        {S8("inherited weak same-section difference"),
+         {S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    .byte 1\n.globl _s\n.set _s, _a\n_x:\n    .long _x-_s\n"),
+          S8(".globl _a\n.weak_definition _a\n.text\n_a:\n    .byte 1\n.globl _s\n.set _s, _a\n_x:\n    .long _x-_s\n")},
+         true, true, true},
+        {S8("undefined weak reference"),
+         {S8(".globl _w\n.globl _u\n.weak_definition _w, _u\n.text\n_w:\n    ret\n_f:\n    bl _u\n    ret\n"),
+          S8(".globl _w\n.globl _u\n.weak_definition _w, _u\n.text\n_w:\n    ret\n_f:\n    call _u\n    ret\n")},
          false, false, false},
         {S8("no operand"), {S8(".weak_definition\n.text\n_w:\n    ret\n"), S8(".weak_definition\n.text\n_w:\n    ret\n")},
          false, false, false},
-        {S8("two operands"),
-         {S8(".globl _w\n.weak_definition _w, _x\n.text\n_w:\n    ret\n"), S8(".globl _w\n.weak_definition _w, _x\n.text\n_w:\n    ret\n")},
+        {S8("trailing token"),
+         {S8(".globl _w\n.weak_definition _w trailing\n.text\n_w:\n    ret\n"),
+          S8(".globl _w\n.weak_definition _w trailing\n.text\n_w:\n    ret\n")},
          false, false, false},
         {S8("weak_reference"),
          {S8(".weak_reference _u\n.text\n_f:\n    ret\n"), S8(".weak_reference _u\n.text\n_f:\n    ret\n")},
+         false, false, false},
+        {S8("plain weak is unsupported on Mach-O"),
+         {S8(".weak _w\n.text\n_w:\n    ret\n"), S8(".weak _w\n.text\n_w:\n    ret\n")},
          false, false, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
@@ -10319,11 +10361,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
                 {
                     ObjectFile reread = object_read(arena, file_read(arena, object, (FileReadOptions){0}), assembled.object.target);
                     // The reader drops the Mach-O C-level underscore.
-                    ObjectSymbol const* symbol = reread.error == OBJECT_ERROR_NONE ? compiler_driver_test_object_symbol(&reread, S8("w")) : 0;
+                    bool set_t_alias = string_first_sequence(weak_case->text[index], S8(".set _t,")) != BUSTER_STRING_NO_MATCH;
+                    bool set_s_alias = string_first_sequence(weak_case->text[index], S8(".set _s,")) != BUSTER_STRING_NO_MATCH;
+                    String8 symbol_name = set_t_alias ? S8("t") : set_s_alias ? S8("s") : S8("w");
+                    ObjectSymbol const* symbol = reread.error == OBJECT_ERROR_NONE ? compiler_driver_test_object_symbol(&reread, symbol_name) : 0;
                     if (BUSTER_REQUIRE(arguments, symbol != 0))
                     {
                         BUSTER_TEST_RAW(arguments, symbol->section != OBJECT_SECTION_UNDEFINED && symbol->global == weak_case->global &&
                             symbol->weak == weak_case->weak, weak_case->name);
+                    }
+                    if (string_equal(weak_case->name, S8("set alias stays strong")))
+                    {
+                        ObjectSymbol const* target_symbol = compiler_driver_test_object_symbol(&reread, S8("a"));
+                        if (BUSTER_REQUIRE(arguments, symbol != 0 && target_symbol != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, symbol->section == target_symbol->section && symbol->value == target_symbol->value,
+                                weak_case->name);
+                        }
+                    }
+                    else if (string_equal(weak_case->name, S8("set location alias stays strong")))
+                    {
+                        if (BUSTER_REQUIRE(arguments, symbol != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, symbol->section == OBJECT_SECTION_TEXT && symbol->value == 0, weak_case->name);
+                        }
+                    }
+                    else if (string_equal(weak_case->name, S8("set dot addend keeps weak_definition")))
+                    {
+                        if (BUSTER_REQUIRE(arguments, symbol != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, symbol->section == OBJECT_SECTION_TEXT && symbol->value == 1, weak_case->name);
+                        }
+                    }
+                    if (string_first_sequence(weak_case->text[index], S8(".weak_definition _w, _x")) != BUSTER_STRING_NO_MATCH)
+                    {
+                        ObjectSymbol const* second = compiler_driver_test_object_symbol(&reread, S8("x"));
+                        if (BUSTER_REQUIRE(arguments, second != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, second->section != OBJECT_SECTION_UNDEFINED && second->global && second->weak,
+                                weak_case->name);
+                        }
+                    }
+                    if (string_first_sequence(weak_case->text[index], S8(".long _x-_w")) != BUSTER_STRING_NO_MATCH ||
+                        string_first_sequence(weak_case->text[index], S8(".long _x-_s")) != BUSTER_STRING_NO_MATCH)
+                    {
+                        ByteSlice section_text = {0};
+                        if (reread.error == OBJECT_ERROR_NONE && reread.sections && reread.section_count > OBJECT_SECTION_TEXT)
+                        {
+                            section_text = reread.sections[OBJECT_SECTION_TEXT].data;
+                        }
+                        if (BUSTER_REQUIRE(arguments, section_text.length >= 5))
+                        {
+                            u32 difference = 0;
+                            for (u32 byte = 0; byte < sizeof(difference); byte += 1)
+                            {
+                                difference |= (u32)section_text.pointer[1 + byte] << (byte * 8);
+                            }
+                            BUSTER_TEST_RAW(arguments, reread.relocation_count == 0 && difference == 1, weak_case->name);
+                        }
                     }
                     if (weak_case->weak && string_first_sequence(weak_case->text[index], S8("_c:")) != BUSTER_STRING_NO_MATCH)
                     {
@@ -10336,7 +10431,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
             else
             {
                 BUSTER_TEST_RAW(arguments, assembled.error != COMPILER_DRIVER_ERROR_NONE, weak_case->name);
-                BUSTER_TEST_RAW(arguments, string_first_sequence(assembled.diagnostic, S8(".weak_")) != BUSTER_STRING_NO_MATCH, assembled.diagnostic);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(assembled.diagnostic, S8(".weak")) != BUSTER_STRING_NO_MATCH,
+                    assembled.diagnostic);
+                if (string_equal(weak_case->name, S8("undefined weak reference")))
+                {
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(assembled.diagnostic, S8("_u")) != BUSTER_STRING_NO_MATCH,
+                        assembled.diagnostic);
+                }
             }
         }
         os_file_delete(assembly);
