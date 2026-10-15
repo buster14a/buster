@@ -21,9 +21,14 @@ building one instruction permutation, then publishes these immutable slices:
   `i` of its destination.
 - No two rows' operand, target or immediate slices alias. Slices that ascend
   without overlap in row order stay where construction put them, gaps
-  included. Only a kind whose ascent fails, such as one overlapping or
-  descending slice, is copied into fresh dense storage. No consumer reads the
-  slices as one pool, so publication publishes no pool pointer.
+  included. A failed ascent gets a bounded local proof: split the address
+  space at the first descent, require each partition's slices to be monotone
+  without overlap, and reject any slice crossing the split. Descending slices
+  and interleaved ordered allocation groups can therefore stay in place.
+  Overlapping or more fragmented layouts keep the conservative fresh-copy
+  fallback. Every publication proves the current slices again; no certificate
+  survives direct edits after reopening. No consumer reads the slices as one
+  pool, so publication publishes no pool pointer.
 
 Repeated conditional/switch/computed-goto destinations collapse to one edge.
 Parameter-free destinations are included even if their builder omitted its
@@ -33,10 +38,13 @@ Construction transposes ordered builder incoming columns once, with linear
 work in blocks, terminator targets, parameters and incoming values.
 
 When instruction order changes, publication builds one scratch map from
-prepublication IDs to published IDs. The row permutation is in place;
-canonical source rows move with it, value definitions are remapped, and sparse
-instruction extras are remapped and sorted again. The map is not retained: no
-consumer reads prepublication IDs afterwards. Block, value, local, symbol
+prepublication IDs to published IDs. Value definitions and sparse extras
+consume that map before the in-place row permutation. Extras whose mapped keys
+remain ordered need no payload sort or sorting scratch; disordered keys keep
+the existing merge sort and binary-lookup contract. Each permutation cycle
+carries its row and canonical source forward, then marks the consumed map
+entry as identity. There is no inverse-map allocation, even when rows move.
+The map is not retained: no consumer reads prepublication IDs afterwards. Block, value, local, symbol
 and label IDs remain stable. Computed-goto address identity and relocation
 ownership therefore do not change. The declared entry remains independent of
 numeric block order, and backend layout still emits it first where required.
@@ -91,7 +99,12 @@ These counts are not compiler throughput results.
 duplicate destinations, optional predecessor lists, invalid IDs,
 truncated/overlong/cyclic lists and wrong tails. Instruction-span tests cover
 interleaving, explicit remaps, source/extras/value-definition preservation,
-nonzero entry identity, link discard and reconstruction. Existing native/mode,
+nonzero entry identity, link discard and reconstruction. An independent oracle
+checks all 120 five-row permutations against all 32 sparse-extra subsets,
+including republishing after reopening. The slice-range matrix checks all
+three slice kinds against independent pairwise interval overlap, pointer
+reuse, payloads and aliases introduced by direct edits after reopening.
+Existing native/mode,
 Wasm, eBPF and bitcode tests cover downstream behavior. Performance acceptance
 requires paired measurements and must account for finalization cost and peak
 arena memory as well as saved backend traversal.

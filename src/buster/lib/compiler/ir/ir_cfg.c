@@ -107,39 +107,50 @@ struct IrCfgExtraOrder
     IrInstructionId instruction;
 };
 
-BUSTER_GLOBAL_LOCAL void ir_cfg_remap_extras(Arena* scratch, IrFunction* function, IrInstructionId const* remap)
+BUSTER_GLOBAL_LOCAL void ir_cfg_remap_extras(Arena* scratch, IrFunction* function, IrInstructionId const* remap, bool ordered)
 {
     u32 count = function->extra_count;
-    IrCfgExtraOrder* rows = arena_allocate(scratch, IrCfgExtraOrder, count);
-    IrCfgExtraOrder* temporary = arena_allocate(scratch, IrCfgExtraOrder, count);
-    for (u32 index = 0; index < count; index += 1)
+    if (ordered)
     {
-        rows[index] = (IrCfgExtraOrder){.extra = function->extras[index], .instruction = remap[function->extra_instructions[index].value]};
-    }
-    // Sparse extras must remain sorted for binary lookup after row permutation.
-    // Bottom-up merging preserves linear auxiliary storage and bounded stack.
-    for (u64 width = 1; width < count; width *= 2)
-    {
-        for (u64 begin = 0; begin < count; begin += 2 * width)
+        for (u32 index = 0; index < count; index += 1)
         {
-            u64 middle = BUSTER_MIN(begin + width, count);
-            u64 end = BUSTER_MIN(begin + 2 * width, count);
-            u64 left = begin;
-            u64 right = middle;
-            for (u64 out = begin; out < end; out += 1)
-            {
-                bool take_left = left < middle && (right == end || rows[left].instruction.value < rows[right].instruction.value);
-                temporary[out] = rows[take_left ? left++ : right++];
-            }
+            IrInstructionId* instruction = function->extra_instructions + index;
+            *instruction = remap[instruction->value];
         }
-        IrCfgExtraOrder* swap = rows;
-        rows = temporary;
-        temporary = swap;
     }
-    for (u32 index = 0; index < count; index += 1)
+    else
     {
-        function->extras[index] = rows[index].extra;
-        function->extra_instructions[index] = rows[index].instruction;
+        IrCfgExtraOrder* rows = arena_allocate(scratch, IrCfgExtraOrder, count);
+        IrCfgExtraOrder* temporary = arena_allocate(scratch, IrCfgExtraOrder, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            rows[index] = (IrCfgExtraOrder){.extra = function->extras[index], .instruction = remap[function->extra_instructions[index].value]};
+        }
+        // Sparse extras must remain sorted for binary lookup after row permutation.
+        // Bottom-up merging preserves linear auxiliary storage and bounded stack.
+        for (u64 width = 1; width < count; width *= 2)
+        {
+            for (u64 begin = 0; begin < count; begin += 2 * width)
+            {
+                u64 middle = BUSTER_MIN(begin + width, count);
+                u64 end = BUSTER_MIN(begin + 2 * width, count);
+                u64 left = begin;
+                u64 right = middle;
+                for (u64 out = begin; out < end; out += 1)
+                {
+                    bool take_left = left < middle && (right == end || rows[left].instruction.value < rows[right].instruction.value);
+                    temporary[out] = rows[take_left ? left++ : right++];
+                }
+            }
+            IrCfgExtraOrder* swap = rows;
+            rows = temporary;
+            temporary = swap;
+        }
+        for (u32 index = 0; index < count; index += 1)
+        {
+            function->extras[index] = rows[index].extra;
+            function->extra_instructions[index] = rows[index].instruction;
+        }
     }
 }
 
@@ -151,12 +162,87 @@ BUSTER_CT_CHECK(sizeof(((IrInstruction*)0)->immediate_count) == sizeof(u16));
 BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND <= UINT64_MAX / sizeof(IrBlockId));
 BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND <= UINT64_MAX / sizeof(u64));
 
-// Rows may share or overlap construction slices. A slice that starts at or
-// after the previous row's slice end, in row order, cannot alias an earlier
-// one, so ascending slices stay in place even with gaps between them. Only a
-// kind whose ascent fails is copied into fresh disjoint storage, so an in-place
-// edit after ir_function_invalidate_cfg cannot reach another row. No consumer
-// reads the slices as one pool.
+typedef enum IrCfgSliceKind
+{
+    IR_CFG_SLICE_OPERAND,
+    IR_CFG_SLICE_TARGET,
+    IR_CFG_SLICE_IMMEDIATE,
+} IrCfgSliceKind;
+
+typedef struct IrCfgSliceRange IrCfgSliceRange;
+struct IrCfgSliceRange
+{
+    u64 begin;
+    u64 end;
+};
+
+BUSTER_GLOBAL_LOCAL IrCfgSliceRange ir_cfg_slice_range(IrInstruction const* row, IrCfgSliceKind kind)
+{
+    u32 count = kind == IR_CFG_SLICE_OPERAND ? row->operand_count : kind == IR_CFG_SLICE_TARGET ? row->target_count : row->immediate_count;
+    u64 begin = kind == IR_CFG_SLICE_OPERAND ? (u64)(uintptr_t)row->operands : kind == IR_CFG_SLICE_TARGET ? (u64)(uintptr_t)row->targets : (u64)(uintptr_t)row->immediates;
+    return (IrCfgSliceRange){.begin = count ? begin : 0, .end = count ? begin + (u64)count * (kind == IR_CFG_SLICE_IMMEDIATE ? sizeof(u64) : sizeof(IrValueId)) : 0};
+}
+
+// A failed ascent may interleave construction allocations with later fold
+// allocations. Split at the first descent and prove each address partition
+// monotone without overlap. No interval may cross the split. More fragmented
+// layouts conservatively keep the copy; no proof survives direct row edits.
+BUSTER_GLOBAL_LOCAL bool ir_cfg_slices_disjoint(IrFunction const* function, IrCfgSliceKind kind)
+{
+    IrCfgSliceRange previous = {0};
+    u64 split = 0;
+    u64 first = 0;
+    for (u32 index = 0; index < function->instruction_count && !split; index += 1)
+    {
+        IrCfgSliceRange range = ir_cfg_slice_range(function->instructions + index, kind);
+        if (range.end)
+        {
+            if (!first) first = range.begin;
+            if (range.begin < previous.end) split = range.end <= first ? first : previous.begin;
+            previous = range;
+        }
+    }
+    IrCfgSliceRange last[2] = {{0}};
+    u32 seen = 0;
+    u32 ascending = 0;
+    u32 descending = 0;
+    bool disjoint = true;
+    for (u32 index = 0; index < function->instruction_count && disjoint; index += 1)
+    {
+        IrCfgSliceRange range = ir_cfg_slice_range(function->instructions + index, kind);
+        if (range.end)
+        {
+            u32 partition = range.begin >= split;
+            u32 bit = 1u << partition;
+            disjoint = partition || range.end <= split;
+            if (seen & bit)
+            {
+                if (range.begin >= last[partition].end)
+                {
+                    disjoint &= !(descending & bit);
+                    ascending |= bit;
+                }
+                else if (range.end <= last[partition].begin)
+                {
+                    disjoint &= !(ascending & bit);
+                    descending |= bit;
+                }
+                else
+                {
+                    disjoint = false;
+                }
+            }
+            last[partition] = range;
+            seen |= bit;
+        }
+    }
+    return disjoint;
+}
+
+// Reuse ascending slices immediately. Only a kind whose ascent fails needs
+// the bounded address-partition proof; ambiguous or overlapping layouts are
+// copied. Reopened rows may be edited directly, so every publication proves
+// its current slices again rather than retaining a mutable certificate.
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_separate_operand_slices(Arena* arena, IrFunction* function, IrPublishedCfg* cfg)
 {
     IrValidationResult result = ir_validation_ok();
@@ -205,6 +291,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_separate_operand_slices(Arena* are
             }
         }
     }
+    if (result.error == IR_VALIDATION_NONE)
+    {
+        if (!operands_disjoint) operands_disjoint = ir_cfg_slices_disjoint(function, IR_CFG_SLICE_OPERAND);
+        if (!targets_disjoint) targets_disjoint = ir_cfg_slices_disjoint(function, IR_CFG_SLICE_TARGET);
+        if (!immediates_disjoint) immediates_disjoint = ir_cfg_slices_disjoint(function, IR_CFG_SLICE_IMMEDIATE);
+    }
     if (result.error == IR_VALIDATION_NONE && (!operands_disjoint || !targets_disjoint || !immediates_disjoint))
     {
         IrValueId* operands = operands_disjoint ? 0 : arena_allocate(arena, IrValueId, operand_count);
@@ -248,7 +340,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
     IrValidationResult result = ir_validation_ok();
     u32 count = function->instruction_count;
     IrInstructionId* remap = arena_allocate(scratch, IrInstructionId, count);
-    u32* inverse = arena_allocate(scratch, u32, count);
     memset(remap, 0xff, sizeof(*remap) * count);
     u32 cursor = 0;
     bool moved = false;
@@ -268,7 +359,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
             {
                 moved |= id.value != cursor;
                 remap[id.value].value = cursor;
-                inverse[cursor++] = id.value;
+                cursor += 1;
                 last = id;
                 // The walk already holds the row: a terminator with a successor
                 // in its chain is the one termination fault the tail check
@@ -304,11 +395,19 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
     {
         result.error = IR_VALIDATION_INVALID_ID;
     }
+    bool extras_ordered = true;
+    u32 previous_extra = 0;
     for (u32 index = 0; index < function->extra_count && result.error == IR_VALIDATION_NONE; index += 1)
     {
         if (function->extra_instructions[index].value >= count)
         {
             result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, function->extra_instructions[index]);
+        }
+        else if (moved)
+        {
+            u32 mapped = remap[function->extra_instructions[index].value].value;
+            extras_ordered &= index == 0 || mapped > previous_extra;
+            previous_extra = mapped;
         }
     }
     if (result.error == IR_VALIDATION_NONE)
@@ -317,40 +416,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
     }
     if (result.error == IR_VALIDATION_NONE)
     {
-        // One pass both permutes and drops the mutable chain, which stops
-        // existing at publication: consumers use the dense span and explicit
-        // invalidation reconstructs builder links. A row is final once its
-        // index is visited, because every cycle starts at its lowest index.
-        // The old-to-new map stays in scratch: once definitions and extras
-        // follow it below, no consumer reads prepublication IDs.
-        for (u32 index = 0; index < count; index += 1)
-        {
-            if (inverse[index] != index)
-            {
-                IrInstruction saved = function->instructions[index];
-                IrSourceRange source = function->instruction_canonical_sources ? function->instruction_canonical_sources[index] : (IrSourceRange){0};
-                u32 destination = index;
-                u32 from = inverse[destination];
-                while (from != index)
-                {
-                    function->instructions[destination] = function->instructions[from];
-                    if (function->instruction_canonical_sources)
-                    {
-                        function->instruction_canonical_sources[destination] = function->instruction_canonical_sources[from];
-                    }
-                    inverse[destination] = destination;
-                    destination = from;
-                    from = inverse[destination];
-                }
-                function->instructions[destination] = saved;
-                if (function->instruction_canonical_sources)
-                {
-                    function->instruction_canonical_sources[destination] = source;
-                }
-                inverse[destination] = destination;
-            }
-            function->instructions[index].next = IR_INSTRUCTION_ID_INVALID;
-        }
+        // Definitions and extras consume the old-to-new map before its
+        // entries become the visited marks of the in-place permutation.
         if (moved)
         {
             for (u32 value = 0; value < function->value_count; value += 1)
@@ -361,7 +428,42 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
                     *definition = remap[definition->value];
                 }
             }
-            ir_cfg_remap_extras(scratch, function, remap);
+            ir_cfg_remap_extras(scratch, function, remap, extras_ordered);
+        }
+        // Each cycle carries its original row forward to the mapped slot.
+        // A completed entry is identity. Cycles start at their lowest row,
+        // so the outer loop can also discard each final construction link.
+        for (u32 index = 0; index < count; index += 1)
+        {
+            if (remap[index].value != index)
+            {
+                IrInstruction saved = function->instructions[index];
+                IrSourceRange source = function->instruction_canonical_sources ? function->instruction_canonical_sources[index] : (IrSourceRange){0};
+                u32 from = index;
+                u32 destination = remap[from].value;
+                while (destination != index)
+                {
+                    IrInstruction next = function->instructions[destination];
+                    function->instructions[destination] = saved;
+                    saved = next;
+                    if (function->instruction_canonical_sources)
+                    {
+                        IrSourceRange next_source = function->instruction_canonical_sources[destination];
+                        function->instruction_canonical_sources[destination] = source;
+                        source = next_source;
+                    }
+                    remap[from].value = from;
+                    from = destination;
+                    destination = remap[from].value;
+                }
+                function->instructions[index] = saved;
+                if (function->instruction_canonical_sources)
+                {
+                    function->instruction_canonical_sources[index] = source;
+                }
+                remap[from].value = from;
+            }
+            function->instructions[index].next = IR_INSTRUCTION_ID_INVALID;
         }
         for (u32 index = 0; index < function->block_count; index += 1)
         {
