@@ -13722,21 +13722,29 @@ BUSTER_C_INTERNAL void c_ir_ext80_store_bytes(u8* bytes, u64 significand, u16 ex
 
 BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
 {
-    TargetDataLayout layout = target_data_layout(target);
-    return c_ir_target_supports_f80(target) && type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 &&
-           type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
+    bool result = type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16;
+    if (result)
+    {
+        TargetDataLayout layout = target_data_layout(target);
+        result = c_ir_target_supports_f80(target) && layout.endianness == TARGET_ENDIAN_LITTLE;
+    }
+    return result;
 }
 
 // Static binary128 storage needs the exact little-endian image, independently
 // of whether this target can transport runtime values through its call ABI.
 BUSTER_C_INTERNAL bool c_ir_binary128_static_target(Target target, IrType* type)
 {
-    TargetDataLayout layout = target_data_layout(target);
-    bool wasm_storage = (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64) &&
-                        layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
-                        layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
-    return type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && type->layout.size == 16 &&
-           (wasm_storage || c_ir_target_supports_f128_transport(target));
+    bool result = type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && type->layout.size == 16;
+    if (result)
+    {
+        TargetDataLayout layout = target_data_layout(target);
+        bool wasm_storage = (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64) &&
+                            layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
+                            layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
+        result = wasm_storage || c_ir_target_supports_f128_transport(target);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_f80_constant_bits(CIntegerIrBuilder* builder, IrSourceRange source, String8 literal, u64 significand,
