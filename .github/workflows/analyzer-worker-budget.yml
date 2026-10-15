@@ -1,30 +1,31 @@
-name: Analyzer worker budget qualification
+name: Analyzer Clang version comparison (4300)
 
+# Branch-only experiment; restore this manual workflow before production changes.
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: analyzer-worker-budget-${{ github.ref }}
+  group: analyzer-clang-comparison-${{ github.ref }}
   cancel-in-progress: false
-
+env:
+  BUSTER_CI_LLVM_VERSION: '23.1.3'
 jobs:
   qualify:
-    name: Hosted worker budget trial ${{ matrix.trial }}
+    name: Clang pair ${{ matrix.trial }} (${{ matrix.first }} first)
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        trial: [1, 2]
+        include:
+          - {trial: 1, first: image, second: stable}
+          - {trial: 2, first: stable, second: image}
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: >-
-            ubuntu-26.04
+          requested-runner: ubuntu-26.04
           matrix-index: ${{ strategy.job-index }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -35,53 +36,169 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
-      - name: Record source and bootstrap the native build driver
+      - name: Freeze the image compiler and one native build driver
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build "$RUNNER_TEMP/analyzer-budget"
-          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/analyzer-budget/revision.txt"
-          clang --version > "$RUNNER_TEMP/analyzer-budget/clang.txt"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-            -MMD -MF "$RUNNER_TEMP/analyzer-budget/driver.d" build.c -o build/analyzer-driver
-          sha256sum build/analyzer-driver > "$RUNNER_TEMP/analyzer-budget/driver.sha256"
-          python3 tools/analyzer_worker_budget.py host "$RUNNER_TEMP/analyzer-budget/host-before.json"
-      - name: Exercise ordinary fail-closed analyzer controls
+          mkdir -p build "$RUNNER_TEMP/analyzer-clang"
+          test -x /usr/bin/time
+          image_clang="$(command -v clang)"
+          printf 'IMAGE_CLANG=%s\n' "$image_clang" >> "$GITHUB_ENV"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/analyzer-clang/revision.txt"
+          "$image_clang" --version > "$RUNNER_TEMP/analyzer-clang/image-clang.txt"
+          sha256sum "$image_clang" > "$RUNNER_TEMP/analyzer-clang/image-clang.sha256"
+          python3 tools/analyzer_reference.py bootstrap \
+            --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
+            --repository "$GITHUB_WORKSPACE" --revision "$(git rev-parse HEAD)" \
+            --root "$GITHUB_WORKSPACE" --depfile "$RUNNER_TEMP/analyzer-clang/driver.d" \
+            --output "$RUNNER_TEMP/analyzer-clang/driver-provenance.json"
+          sha256sum build/analyzer-driver > "$RUNNER_TEMP/analyzer-clang/driver.sha256"
+          python3 tools/analyzer_worker_budget.py host "$RUNNER_TEMP/analyzer-clang/host-before.json"
+      - name: Install verified stable Clang
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci_llvm.py --target x86_64-linux --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/llvm-install.log"
+      - name: Record compiler identities and pair order
+        shell: bash
+        env:
+          FIRST_ROLE: ${{ matrix.first }}
+          SECOND_ROLE: ${{ matrix.second }}
+        run: |
+          set -euo pipefail
+          stable_clang="$BUSTER_CI_LLVM_BIN/clang"
+          "$stable_clang" --version > "$RUNNER_TEMP/analyzer-clang/stable-clang.txt"
+          sha256sum "$stable_clang" > "$RUNNER_TEMP/analyzer-clang/stable-clang.sha256"
+          "$IMAGE_CLANG" -### --analyze -x c /dev/null 2> "$RUNNER_TEMP/analyzer-clang/image-default-checkers.txt"
+          "$stable_clang" -### --analyze -x c /dev/null 2> "$RUNNER_TEMP/analyzer-clang/stable-default-checkers.txt"
+          first_clang="$IMAGE_CLANG"
+          second_clang="$stable_clang"
+          if [[ "$FIRST_ROLE" == stable ]]; then
+            first_clang="$stable_clang"
+            second_clang="$IMAGE_CLANG"
+          fi
+          printf 'FIRST_CLANG=%s\nSECOND_CLANG=%s\nFIRST_ROLE=%s\nSECOND_ROLE=%s\n' \
+            "$first_clang" "$second_clang" "$FIRST_ROLE" "$SECOND_ROLE" >> "$GITHUB_ENV"
+          printf '%s\n%s\n' "$FIRST_ROLE" "$SECOND_ROLE" > "$RUNNER_TEMP/analyzer-clang/order.txt"
+      - name: Exercise image compiler failure and coverage controls
+        id: image_controls
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$RUNNER_TEMP/analyzer-budget/self-test.log"
-          python3 tools/analyzer_worker_budget_test.py -v 2>&1 | tee "$RUNNER_TEMP/analyzer-budget/reader-test.log"
-      - name: Configure one authoritative complete split database
-        run: build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
-      - name: Run sequential counterbalanced candidate-only inventories
+          PATH="$(dirname "$IMAGE_CLANG"):$PATH" build/analyzer-driver clang_analyze --self-test \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/image-self-test.log"
+      - name: Exercise stable compiler failure and coverage controls
+        id: stable_controls
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --timeout 600 --quiet \
-            --qualify-workers --results "$RUNNER_TEMP/analyzer-budget/campaign" 2>&1 | tee "$RUNNER_TEMP/analyzer-budget/campaign.log"
-      - name: Independently verify inventories, diagnostics and worker samples
+          PATH="$BUSTER_CI_LLVM_BIN:$PATH" build/analyzer-driver clang_analyze --self-test \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/stable-self-test.log"
+      - name: Configure both canonical complete databases
+        id: configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATH="$(dirname "$IMAGE_CLANG"):$PATH" build/analyzer-driver generate --cc clang \
+            --build-directory build/analyzer-image --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT \
+            -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$RUNNER_TEMP/analyzer-clang/image-generate.log"
+          PATH="$BUSTER_CI_LLVM_BIN:$PATH" build/analyzer-driver generate --cc clang \
+            --build-directory build/analyzer-stable --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT \
+            -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$RUNNER_TEMP/analyzer-clang/stable-generate.log"
+          git status --porcelain > "$RUNNER_TEMP/analyzer-clang/source-status-before.txt"
+          test ! -s "$RUNNER_TEMP/analyzer-clang/source-status-before.txt"
+      - name: Analyze first compiler and independently aggregate
+        id: first
+        if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if /usr/bin/time -v -o "$RUNNER_TEMP/analyzer-clang/$FIRST_ROLE-time.txt" \
+            build/analyzer-driver clang_analyze "build/analyzer-$FIRST_ROLE" --config Release \
+            --shards 8 --jobs 2 --timeout 600 --quiet --clang "$FIRST_CLANG" \
+            --results "$RUNNER_TEMP/analyzer-clang/$FIRST_ROLE" \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/$FIRST_ROLE-analysis.log"; then
+            analysis_status=0
+          else
+            analysis_status=$?
+          fi
+          if build/analyzer-driver clang_analyze "build/analyzer-$FIRST_ROLE" --config Release \
+            --shards 8 --timeout 600 --clang "$FIRST_CLANG" --aggregate \
+            --results "$RUNNER_TEMP/analyzer-clang/$FIRST_ROLE" \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/$FIRST_ROLE-aggregate.log"; then
+            aggregate_status=0
+          else
+            aggregate_status=$?
+          fi
+          printf 'analysis=%s\naggregate=%s\n' "$analysis_status" "$aggregate_status" \
+            > "$RUNNER_TEMP/analyzer-clang/$FIRST_ROLE-exit.txt"
+          test "$analysis_status" -eq 0 && test "$aggregate_status" -eq 0
+      - name: Analyze second compiler and independently aggregate
+        id: second
+        if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if /usr/bin/time -v -o "$RUNNER_TEMP/analyzer-clang/$SECOND_ROLE-time.txt" \
+            build/analyzer-driver clang_analyze "build/analyzer-$SECOND_ROLE" --config Release \
+            --shards 8 --jobs 2 --timeout 600 --quiet --clang "$SECOND_CLANG" \
+            --results "$RUNNER_TEMP/analyzer-clang/$SECOND_ROLE" \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/$SECOND_ROLE-analysis.log"; then
+            analysis_status=0
+          else
+            analysis_status=$?
+          fi
+          if build/analyzer-driver clang_analyze "build/analyzer-$SECOND_ROLE" --config Release \
+            --shards 8 --timeout 600 --clang "$SECOND_CLANG" --aggregate \
+            --results "$RUNNER_TEMP/analyzer-clang/$SECOND_ROLE" \
+            2>&1 | tee "$RUNNER_TEMP/analyzer-clang/$SECOND_ROLE-aggregate.log"; then
+            aggregate_status=0
+          else
+            aggregate_status=$?
+          fi
+          printf 'analysis=%s\naggregate=%s\n' "$analysis_status" "$aggregate_status" \
+            > "$RUNNER_TEMP/analyzer-clang/$SECOND_ROLE-exit.txt"
+          test "$analysis_status" -eq 0 && test "$aggregate_status" -eq 0
+      - name: Require controls and both complete runs
         if: ${{ always() }}
         shell: bash
+        env:
+          IMAGE_CONTROLS: ${{ steps.image_controls.outcome }}
+          STABLE_CONTROLS: ${{ steps.stable_controls.outcome }}
+          FIRST_OUTCOME: ${{ steps.first.outcome }}
+          SECOND_OUTCOME: ${{ steps.second.outcome }}
         run: |
           set -euo pipefail
-          python3 tools/analyzer_worker_budget.py host "$RUNNER_TEMP/analyzer-budget/host-after.json"
-          python3 tools/analyzer_worker_budget.py verify "$RUNNER_TEMP/analyzer-budget" | tee "$RUNNER_TEMP/analyzer-budget/verification.json"
-          git diff --exit-code
+          python3 tools/analyzer_worker_budget.py host "$RUNNER_TEMP/analyzer-clang/host-after.json"
+          git status --porcelain > "$RUNNER_TEMP/analyzer-clang/source-status-after.txt"
+          test ! -s "$RUNNER_TEMP/analyzer-clang/source-status-after.txt"
+          sha256sum --check "$RUNNER_TEMP/analyzer-clang/driver.sha256"
+          test "$IMAGE_CONTROLS" = success && test "$STABLE_CONTROLS" = success
+          test "$FIRST_OUTCOME" = success && test "$SECOND_OUTCOME" = success
       - name: Retain machine records in existing evidence
         if: ${{ always() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: retain
-          retention-directory: ${{ runner.temp }}/analyzer-budget
-      - name: Retain complete qualification evidence
+          retention-directory: ${{ runner.temp }}/analyzer-clang
+      - name: Retain complete compiler comparison evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
-          name: analyzer-worker-budget-${{ github.run_id }}-${{ github.run_attempt }}-trial-${{ matrix.trial }}
+          name: analyzer-clang-${{ github.run_id }}-${{ github.run_attempt }}-trial-${{ matrix.trial }}
           path: |
-            ${{ runner.temp }}/analyzer-budget/
-            build/analyzer-tree/compile_commands.json
-            build/analyzer-tree/CMakeCache.txt
+            ${{ runner.temp }}/analyzer-clang/
+            build/analyzer-image/compile_commands.json
+            build/analyzer-image/CMakeCache.txt
+            build/analyzer-stable/compile_commands.json
+            build/analyzer-stable/CMakeCache.txt
           if-no-files-found: error
           retention-days: 30
