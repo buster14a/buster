@@ -707,10 +707,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_construction_fold_tests(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_promotion_proof_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // One invalid body must not discard its neighbors' post-promotion proofs.
+    // Reverse source order and disable promotion as the unproven-path control.
+    for (u32 variant = 0; variant < 4; variant += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        String8 source = variant & 1u
+            ? S8("void inspect(int*);int broken(int c){return c+0;}int kept(int c){inspect(&c);return c*3+0;}"
+                 "int promoted(int c){int x=3;if(c)x=7;return x+0;}")
+            : S8("void inspect(int*);int promoted(int c){int x=3;if(c)x=7;return x+0;}"
+                 "int kept(int c){inspect(&c);return c*3+0;}int broken(int c){return c+0;}");
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena, source, target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            bool promotion = variant < 2;
+            program->disable_local_promotion = !promotion;
+            program->fast_passes = IR_FAST_ALL;
+            IrFunction* kept = 0;
+            bool corrupted = false;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                if (string_equal(function->name, S8("kept"))) kept = function;
+                if (string_equal(function->name, S8("broken")))
+                {
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        if (function->instructions[row].opcode == IR_OPCODE_BINARY)
+                        {
+                            function->instructions[row].binary_operation = IR_BINARY_COUNT;
+                            corrupted = true;
+                        }
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, corrupted && kept);
+            if (corrupted && kept)
+            {
+#if BUSTER_BENCH_ALLOCATIONS
+                IrConstructionCounters before = ir_construction_counters();
+#endif
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+#if BUSTER_BENCH_ALLOCATIONS
+                IrConstructionCounters after = ir_construction_counters();
+                BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_INPUT_PROOFS_REUSED] -
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_INPUT_PROOFS_REUSED] == (promotion ? 1u : 0u));
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] -
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] == (promotion ? 2u : 0u));
+#endif
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->fast.functions == 2);
+                BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.decline_count == 1);
+                BUSTER_TEST(arguments, (module->local_promotion.promoted_locals != 0) == promotion);
+                BUSTER_TEST(arguments, module->fast.passes[IR_FAST_FOLD].changes != 0);
+                if (module->fast.decline_count == 1)
+                {
+                    BUSTER_TEST(arguments, string_equal(module->fast.declines[0].function_name, S8("broken")) &&
+                                           module->fast.declines[0].validation.error == IR_VALIDATION_OPERATION);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_OPERATION);
+                // A later preparation cannot inherit the temporary proof: a
+                // formerly valid neighbor now fails and must decline as well.
+                corrupted = false;
+                for (u32 row = 0; row < kept->instruction_count; row += 1)
+                {
+                    if (kept->instructions[row].opcode == IR_OPCODE_BINARY)
+                    {
+                        kept->instructions[row].binary_operation = IR_BINARY_COUNT;
+                        corrupted = true;
+                    }
+                }
+                BUSTER_TEST(arguments, corrupted);
+                module->fast_complete = false;
+#if BUSTER_BENCH_ALLOCATIONS
+                before = ir_construction_counters();
+#endif
+                prepared = ir_prepare_canonical_module(program, module, true);
+#if BUSTER_BENCH_ALLOCATIONS
+                after = ir_construction_counters();
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] ==
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED]);
+#endif
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->fast.functions == 1);
+                BUSTER_TEST(arguments, module->fast.validation_skips == 2 && module->fast.decline_count == 2);
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_publication_span_tests(arguments);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_decline_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_promotion_proof_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_cse_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_intern_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_construction_fold_tests);

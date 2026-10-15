@@ -1,0 +1,32 @@
+{
+  "schema": "buster-performance-evidence-v1",
+  "claim": "work-reduction",
+  "evidence_class": "work-count",
+  "zen5": "not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)",
+  "tool": "perf-stat",
+  "tool_version": "perf version 7.2.10-1",
+  "complete": false,
+  "a_a_control": true,
+  "result": "incomplete: work change not established",
+  "establishes": "less executed work (instructions, references, operations) for the measured workload and inputs",
+  "does_not_establish": "lower elapsed time; hardware-independent constants; Zen 5 behavior",
+  "problems": "required metric missing: instructions:u; required metric missing: cycles:u; required metric missing: branches:u; required metric missing: branch-misses:u",
+  "host": {"cpu_model": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics", "os": "Linux", "release": "7.2.9-2-cachyos", "machine": "x86_64", "logical_cpus": 16},
+  "baseline": {"path": "../bin/ide-baseline-native-prod", "sha256": "23b491d2336d4e6e0425b3a7e3d37c54129bc2a5264a981bfe533431f629636c", "revision": "e0d55a13095724aaa7380cf478cbe4b7a6873458", "processes": [1, 1, 1, 1, 1, 1]},
+  "candidate": {"path": "../bin/ide-baseline-native-prod", "sha256": "23b491d2336d4e6e0425b3a7e3d37c54129bc2a5264a981bfe533431f629636c", "revision": "e0d55a13095724aaa7380cf478cbe4b7a6873458", "processes": [1, 1, 1, 1, 1, 1]},
+  "arguments": ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0", "-g", "-v", "-fsource-metrics=../native-production.metrics", "src/buster/apps/ide/ide.c", "-lm", "-o", "../native-production-self"],
+  "runs": 6,
+  "warmup": 1,
+  "order": "alternating, baseline first on even pairs",
+  "minimum_effect": 0.010000,
+  "cache_sim": false,
+  "branch_sim": false,
+  "model": [],
+  "metrics": [
+    {"name": "task-clock", "unit": "msec", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": -0.006935088, "sign_test_p": 0.6875, "baseline": [2176.9899999999998, 2163.1599999999999, 2168.5599999999999, 2232.2199999999998, 2217.7199999999998, 2209.4000000000001], "candidate": [2122.3699999999999, 2181.4200000000001, 2174.5500000000002, 2260, 2226.9400000000001, 2173.0700000000002]},
+    {"name": "instructions:u", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "missing", "missing": "event absent from perf output", "relative_change": 0.000000000, "sign_test_p": 1, "baseline": [], "candidate": []},
+    {"name": "cycles:u", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "missing", "missing": "event absent from perf output", "relative_change": 0.000000000, "sign_test_p": 1, "baseline": [], "candidate": []},
+    {"name": "branches:u", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "missing", "missing": "event absent from perf output", "relative_change": 0.000000000, "sign_test_p": 1, "baseline": [], "candidate": []},
+    {"name": "branch-misses:u", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "missing", "missing": "event absent from perf output", "relative_change": 0.000000000, "sign_test_p": 1, "baseline": [], "candidate": []}
+  ]
+}

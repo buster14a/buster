@@ -1,0 +1,52 @@
+[
+  {
+    "file": "all-callgraph-open.json",
+    "sha256": "cf273135840c4a15f857bff300de4cf83bc8d8123d61ab1523098af348df9972",
+    "bytes": 113
+  },
+  {
+    "file": "all-callgraph.json",
+    "sha256": "6ccf17f88e0ecdb4c1ad2fba9a6f7ef6f8fa625bea34508be48245a0e63858ec",
+    "bytes": 27491570
+  },
+  {
+    "file": "capture.sha256",
+    "sha256": "e3e4cb1c23b0a9f342b93ba994a0a1b17477c453053540d8a1a5a3fd64f405d7",
+    "bytes": 129
+  },
+  {
+    "file": "functions.json",
+    "sha256": "ccb4af0f5cfbe0750c4854e6cdaa0430d8daa6268d440b8c2ca5426da6430183",
+    "bytes": 4078724
+  },
+  {
+    "file": "information.json",
+    "sha256": "df46cf1bc0f3379dd602669e4cee26f2920648f5eee8c662f9819766a5c21922",
+    "bytes": 164
+  },
+  {
+    "file": "main-callgraph.json",
+    "sha256": "3918ec92acb679f41f4cc04e2706ab9b01ac75c86beaca0e2e99c02221feae7a",
+    "bytes": 25331265
+  },
+  {
+    "file": "processes.json",
+    "sha256": "db0cc71539852a9e3a8f7be3b2d30d3f99d060b585e7ae36dc5571f67e963d6c",
+    "bytes": 493
+  },
+  {
+    "file": "summary.json",
+    "sha256": "6e5a69a2ca0e82ce1067c460d9599850e230a14967db1576da88ac08ced9b82d",
+    "bytes": 18204
+  },
+  {
+    "file": "thread-98-callgraph.json",
+    "sha256": "8302e38da72c15871409d96ce45307666d943f06338c3d1893e51708ccf721fb",
+    "bytes": 1750
+  },
+  {
+    "file": "threads.json",
+    "sha256": "c1c851a2456516bd649475f914cb220a4078f4a69afa8e000fd598bae20ae961",
+    "bytes": 73402
+  }
+]

@@ -165,7 +165,6 @@ BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
-BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // GNU `_Alignof(object)` answers the object's alignment, which its alignment
 // records raise; a record may itself spell `_Alignof(object)`, so each layout
 // engine counts the nested evaluations and refuses past this many rather than
@@ -198,29 +197,31 @@ BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
-// Whether the statement at `index` is the substatement a control statement is
-// waiting for. Shared by the named-label proof below and by the switch body
-// scan, which must not split a case range at a label standing there.
-BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const* preprocess, u32 body_start, u32 index);
-// The cold half of c_ir_named_label_at: the full proof, reached only for a
+// Whether the colon at `colon_index` ends a label, case or default rather than
+// a conditional expression's `? :`.
+BUSTER_C_EXTERN bool c_parse_label_colon_at(CToken* tokens, u32 body_start, u32 colon_index);
+// The cold half of c_parse_named_label_at: the full proof, reached only for a
 // token that already looks like `<identifier> :`.
-BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
-// Exclude member colons after c_ir_named_label_at proves a label shape.
+BUSTER_C_EXTERN bool c_parse_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// Exclude member colons after c_parse_named_label_at proves a label shape.
 BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // The first GNU statement-expression candidate in [from, end), or end.
 BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end);
+BUSTER_C_EXTERN bool c_parse_block_static_single_statement_expression_tail(CParseResult* parse, CPreprocessResult preprocess,
+                                                                              u32 start, u32 end, u32* tail_start_out,
+                                                                              u32* tail_end_out);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
 // line: the answer is almost always no, and an out-of-line call per body
 // token to reach it is the expensive part. The three range tests come first
 // because they are what makes the two token reads in bounds.
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index,
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index,
                                                                              u32 body_end)
 {
     return body_end <= preprocess->token_count && index < body_end && index + 1 < body_end &&
            preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess->tokens[index + 1].punctuator == C_PUNCTUATOR_COLON &&
-           c_ir_named_label_proven_at(preprocess, body_start, index, body_end);
+           c_parse_named_label_proven_at(preprocess, body_start, index, body_end);
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
@@ -234,6 +235,7 @@ BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN u32 c_symbol_find(const CSymbolTable* table, String8 name);
+BUSTER_C_EXTERN CSymbolTable* c_symbol_table_standalone(Arena* arena);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                 CDeclaration* declaration, CTypeId inherited_base);
@@ -241,6 +243,7 @@ BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* m
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);
 BUSTER_C_EXTERN CTypeId c_parse_intern_type(CParseResult* result, CType type);
+BUSTER_C_EXTERN CTypeId c_parse_expression_entity_type(CParseResult* result, CEntity const* entity, bool existing_only);
 BUSTER_C_EXTERN CTypeId c_parse_interned_type(CParseResult const* result, CType type);
 // What c_parse_primitive_type reads from a run of specifier words, before it
 // diagnoses or appends anything; see c_parse_primitive_type_read.
@@ -561,6 +564,7 @@ BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* 
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN u32 c_switch_first_overlapping_label(Arena* scratch, u64 const* lows, u64 const* highs, u64 order_flip, u32 count);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
+BUSTER_C_EXTERN TargetTypeLayout c_parse_builtin_layout(Target target, CTypeKind kind);
 BUSTER_C_EXTERN u8 c_semantic_integer_rank(CTypeKind kind);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_arithmetic_kind(Target target, CTypeKind left, CTypeKind right);
@@ -688,7 +692,7 @@ BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* res
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
 // Whether `index` is the `&&` of a GNU label address. c_ir_unsupported_gnu_construct
 // asks this of every token it scans, so the necessary condition is inline for
-// the same reason as c_ir_named_label_at above.
+// the same reason as c_parse_named_label_at above.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start,
                                                                                       u32 index)
 {
@@ -807,7 +811,8 @@ BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin,
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 BUSTER_C_EXTERN bool c_semantic_source_location_builtin(CSymbolBuiltin builtin);
 BUSTER_C_EXTERN u32 c_semantic_source_line(CPreprocessResult const* preprocess, u32 token_index);
-BUSTER_C_EXTERN String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index);
+BUSTER_C_EXTERN u32 c_macro_prefix_map_index(String8 path, CMacroPrefixMap const* mappings, u32 mapping_count);
+BUSTER_C_EXTERN String8 c_semantic_source_file(Arena* arena, CPreprocessResult const* preprocess, u32 token_index);
 BUSTER_C_EXTERN CTypeId c_semantic_source_name_type(CParseResult* result, Target target);
 
 typedef enum CIntegerTransformOperation
@@ -853,6 +858,7 @@ typedef struct CMathLibmShape
 
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
+BUSTER_C_EXTERN bool c_semantic_math_long_double_builtin_supported_on_target(Target target, String8 name);
 
 // The constant-valued special-float math builtins: positive infinity, or the
 // default quiet NaN of a `nan*("")` call, in the floating type `kind` names.
@@ -976,6 +982,11 @@ typedef enum CSymbolWellKnown
 #define C_SYMBOL_WELL_KNOWN_BIT(name) (1ull << (u64)(C_SYMBOL_WELL_KNOWN_##name))
 BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
 
+// Preserve the legacy alignment-operator spelling set. Plain C23 `alignof`
+// is handled separately by the readers that already accept it.
+#define C_ALIGNOF_WORDS (C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
+#define C_SIZEOF_ALIGNOF_WORDS (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_ALIGNOF_WORDS)
+
 // The binding walk and __has_attribute share these spelling sets. Keep the
 // interned-token fast path: querying support must not add spelling comparisons
 // to every declaration's binding scan (#666).
@@ -1075,14 +1086,18 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
     {
         result = token.symbol < 64 && ((set >> token.symbol) & 1);
     }
-    else
+    else if (c_token_may_spell_word(token))
     {
         String8 spelling = c_token_spelling(spelling_base, token);
         result = false;
-        for (u64 remaining = c_token_may_spell_word(token) ? set : 0; remaining && !result; remaining &= remaining - 1)
+        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
         }
+    }
+    else
+    {
+        result = false;
     }
     return result;
 }
@@ -1439,8 +1454,8 @@ typedef enum CConstantEvaluationMode
 // static-initializer walk through the loop over function bodies --
 // c_parse_intern_type returns the earlier row instead. The header exists only
 // when the caller asked for it (CParserResult.type_interning, which the driver
-// sets with the tree under -fc-ast-pilot), so the default path appends every
-// row as before.
+// sets with the tree under -fc-ast-pilot), so the tree-free path
+// (-fno-c-ast-pilot) appends every row as before.
 //
 // The window is what keeps the copies unobservable but for the table's size.
 // Such a row is immutable, carries no tag, link, bound or alignment record, and
@@ -1601,6 +1616,16 @@ struct CTypeParseMachine
     // the tree does not cover), and `ast_type_statistics` the optional counts.
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
+    // The facts record analysis publishes into for lowering
+    // (CParserResult.ast_facts, GitHub #4062), or null. Written only at a
+    // typed region's end (c_ast_types_facts_begin and the completion run in
+    // c_parse_region_facts) and by a top-level query's answer inside one
+    // (c_ast_types_facts_answer).
+    CAstFacts* ast_facts;
+    // The mutation count a valid root query reached before
+    // c_type_parse_root_finish dropped its records (the records stay in
+    // place): the completion run reads it to undo a run that mutated a row.
+    u32 committed_mutation_count;
     // The body binder's statement plan (c_parse_statement_plan_build) reads
     // the same tree: `ast_statement_bodies` holds the `{` of every top-level
     // function definition, ascending, and its COMPOUND_STATEMENT node, built
@@ -1658,6 +1683,7 @@ struct CTypeParseMachine
     // While c_parse_infer_file_array_bounds walks one list: where that walk
     // records its element checks. Null at every other time.
     CParseInitializerLog* initializer_log;
+    CInitializerPlan* initializer_plan;
     // The logs kept from those walks, for static-initializer validation to
     // replay instead of walking the list again. Null until the first one; in
     // the phase arena. See c_parse_initializer_replay_find.
@@ -1791,6 +1817,33 @@ BUSTER_C_EXTERN void c_ast_types_initializer_begin(CTypeParseMachine* machine, C
                                                    u32 start, u32 end);
 BUSTER_C_EXTERN void c_ast_types_initializer_end(CTypeParseMachine* machine);
 BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
+// Retained facts (GitHub #4062). At a typed region's end, before its scratch
+// goes: c_ast_types_facts_begin types a waiting initializer and publishes
+// every candidate the typer accepted, its binding and its bit-field width,
+// and returns the region; c_ast_types_facts_next then yields, in index order
+// (operands before their operators), each candidate still without a type and
+// its span, counting an unspanned one as a gap itself, so the caller can ask
+// the machine; c_ast_types_facts_record keeps such an answer.
+// c_ast_types_facts_answer keeps a top-level query's valid answer for the
+// candidate whose span it is, a string literal's in structural form
+// (c_ast_types_facts_string). c_ast_types_facts_finish settles the unit's
+// counts once analysis is done.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_EXTERN bool c_ast_types_facts_uncached(void);
+#endif
+BUSTER_C_EXTERN CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess);
+BUSTER_C_EXTERN bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out);
+BUSTER_C_EXTERN void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeId type, bool nonplace);
+// A string literal's fact in structural form from the array row the machine
+// answered for it (C_AST_FACT_STRING); false, and nothing kept, when the row
+// is not a string literal's or its element row is at or past `rows`.
+BUSTER_C_EXTERN bool c_ast_types_facts_string(CAstFacts* facts, CParseResult const* result, CAst const* ast, u32 node, CTypeId array, u32 rows);
+BUSTER_C_EXTERN bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess, u32 node, CTypeId type, u32 rows);
+BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult const* result, CAst const* ast, CPreprocessResult const* preprocess, u32 node);
+BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
+BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
+BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);
+BUSTER_C_EXTERN CInitializerPlan const* c_initializer_plan_find(CParseResult const* result, u32 node);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);
 // The machine state a tree answer leaves, as a valid machine answer with no
@@ -1835,12 +1888,6 @@ BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u3
 // Whether c_parse_pending_enum_member could answer a single identifier: an
 // enumerator list still being parsed.
 BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
-
-// The last token of the statement at `node` by the statement plan's anchor
-// rules (c_parse.c), or UINT32_MAX when no rule states it. `lasts` memoizes
-// answers per node - `begin`, zeroed by the caller; `limit` is the body's `}`.
-// Lowering's extent table (c_gen.c) reads the same rules.
-BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit);
 
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;

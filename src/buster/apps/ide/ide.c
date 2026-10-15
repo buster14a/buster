@@ -84,10 +84,11 @@
 // region. The `#pragma clang attribute` form it replaces marked every
 // function a test source merely *declared* there too, so the production
 // functions that test headers redeclare ran at -O0 in the trusted Release
-// `ide` (#1376). A production header that defines functions must still be
-// included before the region, as simd.h's fallbacks are here;
+// `ide` (#1376). A production header or source that defines functions must
+// still be included before the region, as simd.h's fallbacks are here;
 // `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
+#include <buster/apps/disk_builder_verification.c>
 #if BUSTER_COMPILER_CLANG
 #pragma clang optimize off
 #endif
@@ -2163,13 +2164,27 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
                      layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
                      layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
+        // Units the tree builder refused, which compiled without a tree.
+        if (compile.c_ast.rejections)
+        {
+            string_print(S8("C_AST_REJECTED units={u64}\n"), compile.c_ast.rejections);
+        }
+        // Counts and sizes: the facts lowering retained for the unit (GitHub #3102 step 1), with or without the pilot.
+        {
+            CAstLowerStatistics retained = compile.c_ast.lower;
+            string_print(S8("C_AST_RETAINED trees_built={u64} tree_rejections={u64} tree_nodes={u64} tree_bytes={u64} span_nodes={u64} span_bytes={u64} "
+                            "hoist_steps={u64} evaluator_steps={u64}\n"),
+                         retained.trees_built, retained.tree_rejections, retained.tree_nodes, retained.tree_bytes, retained.span_nodes,
+                         retained.span_bytes, retained.hoist_steps, retained.evaluator_steps);
+        }
         if (compile.c_ast.units)
         {
             CompilerDriverCAstPilotResult tree = compile.c_ast;
             string_print(S8("C_AST nodes={u64} tokens={u64} build_ns={u64} retained_bytes={u64} transient_high_water={u64} column_copy_bytes={u64} "
-                            "finalize_child_entries={u64} layout={S8}\n"),
+                            "parenthesis_copy_bytes={u64} parenthesis_committed_bytes={u64} finalize_child_entries={u64} layout={S8}\n"),
                          tree.nodes, tree.tokens, tree.build_nanoseconds, tree.retained_bytes, tree.transient_high_water, tree.column_copy_bytes,
-                         tree.finalize_child_entries, compiler_driver_c_ast_pilot_name(invocation.c_ast_pilot));
+                         tree.parenthesis_copy_bytes, tree.parenthesis_committed_bytes, tree.finalize_child_entries,
+                         compiler_driver_c_ast_pilot_name(invocation.c_ast_pilot));
             string_print(S8("C_AST_WALK walk_ns={u64} walk_steps={u64} scan_ns={u64} children_ns={u64} child_entries={u64} scan_calls={u64}\n"),
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
             // Counts, not times: what the tree expression typer did for the unit's function bodies and file-scope initializers.
@@ -2202,14 +2217,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF],
                          c_ast_specifier_fallback_name(specifiers.fallbacks ? specifiers.reason : C_AST_SPECIFIER_FALLBACK_NONE),
                          specifiers.fallbacks ? specifiers.fallback_token : UINT32_MAX);
-            // Counts: the extent table lowering read controlled body ranges from, and the queries its token walker answered.
-            string_print(S8("C_AST_EXTENTS bodies={u64} entries={u64} entry_declines={u64} answers={u64} walked_input={u64} walked_anchor={u64} "
-                            "walked_shape={u64} refused_input={u64} refused_anchor={u64} reason={S8} fallback_token={u32}\n"),
-                         tree.extents.bodies, tree.extents.entries, tree.extents.entry_declines, tree.extents.answers,
-                         tree.extents.walked[C_AST_EXTENT_FALLBACK_INPUT], tree.extents.walked[C_AST_EXTENT_FALLBACK_ANCHOR],
-                         tree.extents.walked[C_AST_EXTENT_FALLBACK_SHAPE], tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_INPUT],
-                         tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_ANCHOR], c_ast_extent_fallback_name(tree.extents.reason),
-                         tree.extents.reason ? tree.extents.fallback_token : UINT32_MAX);
             // Counts: the type-name runs skipped as no type name or read from the tree, and the runs left to the type machine, by reason.
             string_print(S8("C_AST_TYPE_NAMES skips={u64} retries={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
                             "storage={u64} primitive={u64} typedef={u64}\n"),
@@ -2224,9 +2231,27 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
                          specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
-            // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
-            string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
-                         tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
+            // Counts: lowering's root-conditional queries, by how each ended, and the bodies and statements the statement
+            // walker lowered from their nodes with the token ranges its adapter derived.
+            string_print(S8("C_AST_LOWER steps={u64} answers={u64} negatives={u64} statement_bodies={u64} statements={u64} range_adapters={u64}\n"),
+                         tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.statement_bodies, tree.lower.statements,
+                         tree.lower.range_adapters);
+            // Counts and bytes: the facts analysis retained for lowering, and the fact candidates left without a type, by reason.
+            CAstFactStatistics facts = tree.facts;
+            u64 missing = 0;
+            for (u32 gap = 0; gap < C_AST_FACT_GAP_COUNT; gap += 1)
+            {
+                missing += facts.gaps[gap];
+            }
+            string_print(S8("C_AST_FACTS nodes={u64} retained_bytes={u64} regions={u64} candidates={u64} tree={u64} machine={u64} completed={u64} "
+                            "missing={u64} {S8}={u64} {S8}={u64} {S8}={u64} {S8}={u64} bound={u64} bit_fields={u64} strings={u64} uncovered={u64} outside={u64} "
+                            "stale={u64} completion_queries={u64} recipes={u64} builtin_identities={u64} function_names={u64}\n"),
+                         facts.nodes, facts.retained_bytes, facts.regions, facts.candidates, facts.tree, facts.machine, facts.completed, missing,
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_UNSPANNED), facts.gaps[C_AST_FACT_GAP_UNSPANNED],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_INVALID), facts.gaps[C_AST_FACT_GAP_INVALID],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_APPENDS), facts.gaps[C_AST_FACT_GAP_APPENDS],
+                         c_ast_fact_gap_name(C_AST_FACT_GAP_BUSY), facts.gaps[C_AST_FACT_GAP_BUSY], facts.bound, facts.bit_fields, facts.strings, facts.uncovered,
+                         facts.outside, facts.stale, facts.completion_queries, facts.recipes, facts.builtin_identities, facts.function_names);
         }
         // Also report disabled passes: -O0 must expose its selected policy.
         {

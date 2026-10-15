@@ -123,6 +123,46 @@ BUSTER_GLOBAL_LOCAL int pe_self_test(void)
     pe_verdicts(r);
     PE_CHECK(!r->complete && strstr(r->problems, "cycles"), "a missing required counter leaves the comparison incomplete");
 
+    // Scoped events retain their requested identity and actual perf scope.
+    const char *scope_cases[][4] = {
+        {"instructions", "instructions", "unqualified", ""},
+        {"instructions", "instructions:u", "u", ""},
+        {"instructions", "instructions:k", "k", ""},
+        {"instructions:u", "instructions:u", "u", ""},
+        {"instructions:k", "instructions:k", "k", ""},
+        {"instructions:u", "instructions:k", "", "scope"},
+        {"instructions:k", "instructions:u", "", "scope"},
+        {"instructions:u", "instructions", "", "scope"},
+        {"instructions:u", "cycles:u", "", "absent"},
+        {"instructions", "instructions:uk", "", "unsupported"},
+    };
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(scope_cases); ++i)
+    {
+        memset(r, 0, sizeof(*r));
+        char row[128];
+        snprintf(row, sizeof(row), "123,,%s,5000,100.00,,\n", scope_cases[i][1]);
+        pe_parse_perf(r, 0, row, scope_cases[i][0]);
+        const PeMetric *m = pe_test_metric(r, scope_cases[i][0]);
+        PE_CHECK(m && (scope_cases[i][3][0] ? m->count[0] == 0 && strstr(m->missing, scope_cases[i][3]) != NULL :
+            m->count[0] == 1 && m->value[0][0] == 123 && cm_equal(m->scope, scope_cases[i][2])), "perf scoped event matching");
+    }
+    memset(r, 0, sizeof(*r));
+    pe_parse_perf(r, 0, "1,,instructions:k,1,100,,\n2,,instructions:u,1,100,,\n", "instructions:u,instructions:k");
+    PE_CHECK(pe_test_metric(r, "instructions:u")->value[0][0] == 2 && pe_test_metric(r, "instructions:k")->value[0][0] == 1,
+        "distinct explicit scopes select their own counters regardless of row order");
+    memset(r, 0, sizeof(*r));
+    pe_parse_perf(r, 0, "1,,instructions:k,1,100,,\n2,,instructions:u,1,100,,\n", "instructions");
+    PE_CHECK(r->metrics[0].count[0] == 0 && strstr(r->metrics[0].missing, "multiple"), "an ambiguous unqualified event is missing");
+    memset(r, 0, sizeof(*r));
+    pe_parse_perf(r, 0, "1,,instructions:u,1,100,,\n", "instructions");
+    pe_parse_perf(r, 1, "2,,instructions:k,1,100,,\n", "instructions");
+    PE_CHECK(r->metrics[0].count[1] == 0 && strstr(r->metrics[0].missing, "changed"), "scope cannot change across comparison arms");
+    PE_CHECK(pe_perf_events_valid("task-clock,instructions:u,cycles:k"), "supported perf event spellings are accepted");
+    const char *invalid_events[] = {"", "instructions:", "instructions:uk", "instructions:uu", "instructions:p", "instructions:u:k",
+        "instructions,", ",instructions", "instructions,,cycles", "instructions:u ", "cpu/instructions/", "sched:sched_switch"};
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(invalid_events); ++i)
+        PE_CHECK(!pe_perf_events_valid(invalid_events[i]), "unsupported perf event syntax is refused");
+
     PE_CHECK(pe_valgrind_problem("vex amd64->IR: unhandled instruction bytes: 0x62 0xF1", NULL) != NULL,
         "valgrind EVEX failure is an explicit ISA problem");
     PE_CHECK(pe_valgrind_problem("==1== Process terminating with default action of signal 4 (SIGILL)", NULL) != NULL,
@@ -172,6 +212,113 @@ BUSTER_GLOBAL_LOCAL int pe_self_test(void)
     cm_json_free(&json);
     free(text);
 
+    memset(r, 0, sizeof(*r));
+    r->complete = 1;
+    r->tool = PE_TOOL_PERF_STAT;
+    r->claim = pe_claim("work-reduction");
+    pe_parse_perf(r, 0, "1,,instructions:k,1,100,,\n2,,instructions:u,1,100,,\n", "instructions:u,instructions:k");
+    pe_result(r);
+    PE_CHECK(!r->complete && strstr(r->problems, "multiple primary") && strstr(r->result, "incomplete"),
+        "multiple primary scopes cannot establish a work reduction by selecting one counter");
+
+    // The scoped primary drives the result, and summaries bind both scopes.
+    const char *scoped_primary[] = {"instructions:u", "task-clock:k"};
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(scoped_primary); ++i)
+    {
+        memset(r, 0, sizeof(*r));
+        r->complete = 1;
+        r->runs = 6;
+        r->effect = PE_DEFAULT_EFFECT;
+        r->tool = PE_TOOL_PERF_STAT;
+        r->claim = pe_claim(i ? "native-runtime" : "work-reduction");
+        char row[128];
+        for (unsigned k = 0; k < r->runs; ++k)
+        {
+            snprintf(row, sizeof(row), "1000,,%s,1,100,,\n", scoped_primary[i]);
+            pe_parse_perf(r, 0, row, scoped_primary[i]);
+            snprintf(row, sizeof(row), "900,,%s,1,100,,\n", scoped_primary[i]);
+            pe_parse_perf(r, 1, row, scoped_primary[i]);
+        }
+        pe_verdicts(r);
+        pe_result(r);
+        PE_CHECK(r->complete && strstr(r->result, "validated") && strstr(r->result, scoped_primary[i]),
+            "a scoped primary establishes its own comparison result");
+        PE_CHECK(cm_equal(r->metrics[0].unit, i ? "msec" : "count"), "the scoped event keeps its base unit");
+        f = tmpfile();
+        pe_write_summary(f, r, identity, args, 1);
+        rewind(f);
+        text = calloc(1, 65536);
+        n = fread(text, 1, 65535, f);
+        fclose(f);
+        json = cm_json_parse(text, n);
+        PE_CHECK(json.valid && strstr(text, scoped_primary[i]) && strstr(text, i ? "\"scope\": \"k\"" : "\"scope\": \"u\""),
+            "the perf summary retains requested and observed scope");
+        cm_json_free(&json);
+        free(text);
+    }
+
+    // Missing claim primaries must fail the same finalizer that writes CLI receipts and returns its status.
+    const char *missing_primary[][3] = {
+        {"work-reduction", "cycles", "instructions"},
+        {"native-runtime", "instructions", "task-clock"},
+    };
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(missing_primary); ++i)
+    {
+        memset(r, 0, sizeof(*r));
+        r->complete = 1;
+        r->a_a = 1;
+        r->runs = 6;
+        r->effect = PE_DEFAULT_EFFECT;
+        r->tool = PE_TOOL_PERF_STAT;
+        r->claim = pe_claim(missing_primary[i][0]);
+        char row[128];
+        snprintf(row, sizeof(row), "1000,,%s,1,100,,\n", missing_primary[i][1]);
+        for (unsigned k = 0; k < r->runs; ++k)
+        {
+            pe_parse_perf(r, 0, row, missing_primary[i][1]);
+            pe_parse_perf(r, 1, row, missing_primary[i][1]);
+        }
+        PE_CHECK(r->complete && r->metric_count == 1 && r->metrics[0].count[0] == 6 && r->metrics[0].count[1] == 6,
+            "the supplied non-primary perf counter is fully observed");
+        f = tmpfile();
+        PE_CHECK(pe_finish(r, f, identity, args, 1) == 2 && !r->complete &&
+            strstr(r->problems, "missing required primary metric: ") && strstr(r->problems, missing_primary[i][2]) &&
+            strstr(r->result, "incomplete"), "missing primary fails completeness, result and CLI exit status");
+        rewind(f);
+        text = calloc(1, 65536);
+        n = fread(text, 1, 65535, f);
+        fclose(f);
+        json = cm_json_parse(text, n);
+        PE_CHECK(json.valid && cm_equal(cm_get(&json, 1, "complete"), "false") &&
+            strstr(cm_get(&json, 1, "problems"), "missing required primary metric: ") &&
+            strstr(cm_get(&json, 1, "problems"), missing_primary[i][2]) &&
+            strstr(cm_get(&json, 1, "result"), "incomplete"), "missing primary JSON agrees with result and failure status");
+        cm_json_free(&json);
+        free(text);
+    }
+
+    // Cleanup joins accept the last fitting byte and clear refusals before any path operation.
+    char joined[PE_PATH], long_parent[PE_PATH];
+    PE_CHECK(pe_path_join(joined, 10, "root", "leaf") && cm_equal(joined, "root/leaf"),
+        "cleanup join fits exactly including the terminator");
+    joined[0] = 'x';
+    PE_CHECK(!pe_path_join(joined, 9, "root", "leaf") && !joined[0], "cleanup join refuses one byte beyond capacity");
+    joined[0] = 'x';
+    PE_CHECK(!pe_path_join(joined, 0, "root", "leaf") && joined[0] == 'x', "zero-capacity join writes nothing");
+    PE_CHECK(!pe_path_join(joined, 1, "", "") && !joined[0], "cleanup join needs room for slash and terminator");
+    memset(long_parent, 'a', sizeof(long_parent) - 1);
+    long_parent[PE_PATH - 3] = 0;
+    PE_CHECK(pe_path_join(joined, sizeof(joined), long_parent, "b") && strlen(joined) == PE_PATH - 1,
+        "cleanup join accepts the full path capacity");
+    long_parent[PE_PATH - 3] = 'a';
+    long_parent[PE_PATH - 2] = 0;
+    PE_CHECK(!pe_path_join(joined, sizeof(joined), long_parent, "b") && !joined[0],
+        "cleanup join rejects an overlong parent and child");
+    long_parent[PE_PATH - 2] = 'a';
+    long_parent[PE_PATH - 1] = 0;
+    PE_CHECK(!pe_path_join(joined, sizeof(joined), "a", long_parent) && !joined[0],
+        "cleanup join rejects an overlong child");
+
     // End to end with the time tool: an A/A control, refusals and an unexpected exit.
     char root[] = "/tmp/performance-evidence-self-test-XXXXXX", truth[PE_PATH], falsity[PE_PATH];
     int have = mkdtemp(root) != NULL && pe_which("true", truth, sizeof(truth)) && pe_which("false", falsity, sizeof(falsity));
@@ -195,7 +342,13 @@ BUSTER_GLOBAL_LOCAL int pe_self_test(void)
             "an unexpected exit status leaves the comparison incomplete");
         PE_CHECK(pe_test_compare(root, "absent", "native-runtime", "time", "/nonexistent/binary", "6", 0) == 2,
             "an unreadable binary leaves the comparison incomplete");
-        pe_remove_tree(root);
+        char refused_out[PE_PATH];
+        snprintf(refused_out, sizeof(refused_out), "%s/unsupported-events", root);
+        char *perf_argv[] = {"performance-evidence", "compare", "--claim", "work-reduction", "--tool", "perf-stat", "--baseline",
+            truth, "--candidate", truth, "--out", refused_out, "--runs", "6", "--events", "instructions:uk", "--", NULL};
+        PE_CHECK(pe_compare((int)BUSTER_ARRAY_LENGTH(perf_argv) - 1, perf_argv) == 2 && access(refused_out, F_OK) != 0,
+            "unsupported modifiers are refused before creating output or running perf");
+        PE_CHECK(pe_remove_tree(root) && access(root, F_OK) != 0, "scratch cleanup removes root and nested comparison files");
     }
     free(r);
     printf("PERFORMANCE_EVIDENCE_SELF_TEST %s checks=%u failures=%u\n", failures ? "FAIL" : "PASS", checks, failures);

@@ -1,0 +1,32 @@
+{
+  "schema": "buster-performance-evidence-v1",
+  "claim": "work-reduction",
+  "evidence_class": "work-count",
+  "zen5": "not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)",
+  "tool": "perf-stat",
+  "tool_version": "perf version 7.2.10-1",
+  "complete": true,
+  "a_a_control": true,
+  "result": "A/A noise control on instructions: inconclusive (-0.000%)",
+  "establishes": "less executed work (instructions, references, operations) for the measured workload and inputs",
+  "does_not_establish": "lower elapsed time; hardware-independent constants; Zen 5 behavior",
+  "problems": "",
+  "host": {"cpu_model": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics", "os": "Linux", "release": "7.2.9-2-cachyos", "machine": "x86_64", "logical_cpus": 16},
+  "baseline": {"path": "../bin/ide-baseline-native-prod", "sha256": "23b491d2336d4e6e0425b3a7e3d37c54129bc2a5264a981bfe533431f629636c", "revision": "e0d55a13095724aaa7380cf478cbe4b7a6873458", "processes": [1, 1, 1, 1, 1, 1]},
+  "candidate": {"path": "../bin/ide-baseline-native-prod", "sha256": "23b491d2336d4e6e0425b3a7e3d37c54129bc2a5264a981bfe533431f629636c", "revision": "e0d55a13095724aaa7380cf478cbe4b7a6873458", "processes": [1, 1, 1, 1, 1, 1]},
+  "arguments": ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0", "-g", "-v", "-fsource-metrics=../native-production.metrics", "src/buster/apps/ide/ide.c", "-lm", "-o", "../native-production-self"],
+  "runs": 6,
+  "warmup": 1,
+  "order": "alternating, baseline first on even pairs",
+  "minimum_effect": 0.010000,
+  "cache_sim": false,
+  "branch_sim": false,
+  "model": [],
+  "metrics": [
+    {"name": "task-clock", "unit": "msec", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": -0.002913504, "sign_test_p": 1, "baseline": [2133.6599999999999, 2136.71, 2292.0300000000002, 2163.7800000000002, 2215.25, 2205.5300000000002], "candidate": [2158.1900000000001, 2169.0799999999999, 2268.0999999999999, 2210.98, 2166.8099999999999, 2187.5]},
+    {"name": "instructions", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": -0.000001776, "sign_test_p": 0.6875, "baseline": [23227816800, 23227816527, 23227734031, 23227816644, 23227734304, 23227734182], "candidate": [23227734007, 23227816487, 23227734142, 23227734145, 23227734173, 23227816519]},
+    {"name": "cycles", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": 0.004122972, "sign_test_p": 0.6875, "baseline": [9596884893, 9561067172, 10007819253, 9557520842, 9755854858, 9657682504], "candidate": [9687998140, 9628908772, 10052379901, 9772137985, 9604733000, 9645955303]},
+    {"name": "branches", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": -0.000000014, "sign_test_p": 0.6875, "baseline": [4177936914, 4177936703, 4177936928, 4177936823, 4177937056, 4177936959], "candidate": [4177936793, 4177936668, 4177937040, 4177936934, 4177936956, 4177936694]},
+    {"name": "branch-misses", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "inconclusive", "missing": "", "relative_change": 0.000497133, "sign_test_p": 1, "baseline": [76393602, 76695462, 77903424, 76523695, 76571410, 76765867], "candidate": [76551903, 76692750, 77151490, 76528912, 76851933, 76650316]}
+  ]
+}

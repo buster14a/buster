@@ -1,0 +1,11 @@
+PERFORMANCE_EVIDENCE claim=work-reduction class=work-count tool=perf-stat complete=no
+| metric | baseline median | candidate median | change | verdict |
+|---|---|---|---|---|
+| task-clock (msec) | 2193.19 | 2177.99 | -0.694% | inconclusive |
+| instructions:u (count) | 0 | 0 | +0.000% | missing: event absent from perf output |
+| cycles:u (count) | 0 | 0 | +0.000% | missing: event absent from perf output |
+| branches:u (count) | 0 | 0 | +0.000% | missing: event absent from perf output |
+| branch-misses:u (count) | 0 | 0 | +0.000% | missing: event absent from perf output |
+Result: incomplete: work change not established
+not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)
+Problems: required metric missing: instructions:u; required metric missing: cycles:u; required metric missing: branches:u; required metric missing: branch-misses:u

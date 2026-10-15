@@ -21,7 +21,9 @@ The upstream source stays pristine and outside Buster's tracked source.
 `tools/linux-kernel/minimal.config` is an allnoconfig input fragment, not the
 resolved configuration. The tool retains and checks the resolved x86-64
 configuration, serial console, initramfs, tmpfs, ELF userspace, timers, futex,
-IPv4, optimization, and disabled Rust/modules. The selected GCC flags keep
+IPv4, optimization, and disabled modules. `CONFIG_RUST` is required to be
+unselected if visible, while an omitted symbol remains unknown because its
+Kconfig availability depends on the toolchain. The selected GCC flags keep
 the kernel's required optimization; no `-O0` substitution is made.
 
 GCC 14 builds the reference kernel and HOSTCC utilities. The pin's x86
@@ -47,7 +49,8 @@ a future main-only recipe must retain the same records.
 Their full component license inventory and supply-chain qualification remain
 incomplete; this tool does not authorize redistribution of built binaries.
 Buster's first-party license remains undecided as documented in
-[LICENSES/README.md](../../../LICENSES/README.md).
+[LICENSES/README.md](../../../LICENSES/README.md); issue #621 remains
+unselected. No license selection is made for external assembler/linker tools.
 
 ## Execution and scheduling
 
@@ -56,15 +59,20 @@ The standalone frontier tool deliberately avoids changing that shared driver
 while independent compatibility workers are active. Its build and
 orchestration are C; existing upstream scripts remain upstream prerequisites.
 
-No workflow runs this harness. Whole external workloads belong to the single
-main-only owner in [external-project CI](../../external-project-ci.md)
-(#3501); the earlier manual/branch-push workflow was removed. A pinned
-recipe joins that shared Linux job only when its owner qualifies it.
-Development and correctness runs use disposable cloud infrastructure, never
-the maintainer's laptop or general 9700X agent work.
+The ordinary and queued lint jobs compile this first-party C tool with Clang
+and GCC and run only its fixture-based `self-test`. That control reads no
+upstream tree and starts no external project workload. The upstream frontier
+remains opt-in. Whole external workloads belong to the single main-only owner
+in [external-project CI](../../external-project-ci.md) (#3501); the earlier
+manual/branch-push workflow was removed. A pinned recipe joins that shared
+Linux job only when its owner qualifies it. Development and correctness runs
+use disposable cloud infrastructure, never the maintainer's laptop or general
+9700X agent work.
 
-Build the tool with Clang and GCC (`-std=c11 -Wall -Wextra -Wpedantic -Werror
--fwrapv -fno-strict-aliasing -funsigned-char -Isrc`). Build the init from
+Build the tool with Clang and GCC (`-O2 -std=c11 -Wall -Wextra -Wpedantic
+-Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc`). The existing
+ordinary/queued lint jobs run both builds and the fixture-only self-test. Build
+the init from
 `control_init.c` statically into an initramfs that also holds `/dev/console`
 and `/tmp`. The reference compiler defaults to `gcc-14`; set
 `BUSTER_KERNEL_REFERENCE_CC` to override it. Then run:
@@ -98,10 +106,18 @@ kills the stage's process group and remains exit 124. Job limits are not
 evidence of successful kernel work.
 
 Native controls check argument preservation (spaces and empty arguments),
-nonzero exit attribution, timeout cleanup, malformed records, ledger row/status
-parsing, C-action classification, and collision-free record names after PID
-reuse. Both the Clang and GCC builds must be
-warning-clean.
+nonzero exit attribution, timeout cleanup, malformed/truncated action results,
+ledger row/status parsing, and collision-free record names after PID reuse.
+The deterministic classifier matrix covers C `-c`, C `-S`, preprocessed
+`.S`, raw `.s`, explicit `-x` overrides and reset with `-x none`,
+including suffix overrides, GCC stage-stop precedence, and preprocessing/syntax
+probes. Stdin C actions remain inventoried but are not replayed because input
+bytes are not retained; their target-C rows stay pending and the replay summary
+reports `stdin_input_not_captured`. Config controls require
+whole-line symbol matches, treat missing symbols as unknown, and reject
+contradictory duplicates. A fixture census proves that host `.S` records do
+not count as target assembly and that missing action results cannot pass.
+Both the Clang and GCC builds must be warning-clean.
 
 `kernel_source_controls` runs the source-pin gate against a disposable Git
 fixture.
@@ -118,11 +134,42 @@ fixture.
 
 `*.argv` files use NUL-delimited fields: working directory followed by the
 actual command argv. `commands/target-*.argv` and
-`commands/host-*.argv` separate CC from HOSTCC; sibling result files retain
-their exit status and role. Full verbose Kbuild logs and generated `.cmd`
-files preserve assembly/archive/link actions. The earlier hosted artifacts also
-included the resolved config, generated headers, linker scripts, object/archive/image
-hashes, upstream Git file inventory, and exact Buster compiler hash.
+`commands/host-*.argv` separate trusted CC from HOSTCC; `buster-*.argv`
+records are candidate-only. Each action result is parsed fail-closed, bound to the output named by its
+recorded argv, and records the exit status, role, resolved executable path
+(path identity only), output path, and a local device/inode/size tuple when
+that output exists. The tuple is syntax-checked metadata, not a content hash
+or a cross-run identity.
+
+`actions.tsv` inventories recorded target, host, and candidate CC-wrapper
+invocations. Its classifier applies each `-x` setting only to following inputs,
+including joined `-xc`, and recognizes C `.c`/`.i`, preprocessed `.S`, and
+raw `.s`. GCC stop-stage precedence is preprocessing (`-E`), assembly
+generation (`-S`), then object compilation (`-c`), independent of argument
+order. Joined and split `-o` outputs are captured; response files are recorded
+as ambiguous because their contents are not expanded. Unknown inputs remain
+visible as other-input rows, and host assembly stays outside target counters.
+`action-census.txt` reconciles wrapper record totals, all classifier classes,
+and success/failure/missing-result totals. Reference C replays use the separate
+`target-c.tsv` ledger and are explicitly excluded from wrapper totals.
+`mechanisms.tsv` reports exact-line values from the resolved trusted and
+candidate configurations as enabled, disabled, or unknown. Missing symbols stay
+unknown; contradictory duplicates make the census fail. `HAVE_*` entries are capabilities, not proof of callsite use. Alternative
+callsite use, exception-table use, and static-call callsites remain unknown.
+The permanent static-call trampoline obligation is retained when inline support
+is unavailable. The ledger checks configured `CONFIG_MITIGATION_RETPOLINE`,
+`CONFIG_MITIGATION_RETHUNK`, `CONFIG_MITIGATION_SLS`, and `CONFIG_OBJTOOL`
+when those symbols are present; missing symbols remain unknown. Every row
+keeps runtime execution unattempted.
+
+`tool-coverage.tsv` leaves direct assembler, linker, archive, objcopy,
+objdump, objtool, post-link and nested compiler-child identities unobserved
+unless a dedicated record exists. The trusted GNU/LLVM standalone assembler
+invocations are not parsed; candidate external-assembler and native-Buster
+assembler cells remain unattempted. Raw Kbuild logs and generated `.cmd` files
+remain useful evidence, but this harness does not parse them into a complete
+tool census. It also does not compute object content hashes or prove that an
+object was included in the final image; those statuses remain explicit.
 
 The trusted kernel must produce all seven expected passes and a clean guest
 poweroff, and QEMU must exit zero before any candidate frontier runs.
@@ -137,11 +184,12 @@ CLI diagnostics Kbuild redirects away; the preprocessing reduction uses empty
 retained as a blocker in `buster-configure.log` and `stages.txt`.
 Independent target-C replays then use reference-generated headers explicitly
 marked unqualified for a candidate kernel. They are diagnostic reductions,
-not a candidate build or boot. Required target C-to-object and C-to-assembly generator actions are
-inventoried in `target-c.tsv`; compiler feature probes remain separately
-available in the raw command records. At most 24 required actions are selected
-in lexical output-path order. Their second rows record attempted/pass/fail status; all remaining
-actions stay unattempted.
+not a candidate build or boot. Required C-to-object and C-to-assembly generator
+actions remain inventoried in `target-c.tsv`; the wider `actions.tsv` ledger
+also distinguishes assembly input and host actions. Compiler feature probes
+remain separately available in raw command records. At most 24 required target-C
+actions are selected in lexical output-path order. Their second rows record
+attempted/pass/fail status; all remaining actions stay unattempted.
 
 Only output and dependency-file destinations change during replay; all
 semantic options and pristine source arguments remain. Original and replay
@@ -169,9 +217,11 @@ Integrate separately qualified #3179 userspace only after independent kernel
 and userspace controls pass. Keep #3186 open until its staged acceptance is
 actually satisfied.
 
-The harness adds build-category code over the 32 KiB change limit. That
-growth is acknowledged in
+The original frontier growth is acknowledged in
 [`docs/source-size/acks/3186-linux-kernel-frontier.txt`](../../source-size/acks/3186-linux-kernel-frontier.txt).
+This assembly-census change adds 58,603 build-category bytes including its
+bounded first-party lint control; that incremental growth is acknowledged in
+[`docs/source-size/acks/4079-linux-assembly-census.txt`](../../source-size/acks/4079-linux-assembly-census.txt).
 The harness changes no compiler behavior or native-retirement identity
 bindings.
 
@@ -195,7 +245,7 @@ The passing frontier reports `qualified_kernel=no` and leaves #3186 open.
 A later container rerun against main `897275fb9e3c` used GCC 14.2.0 and
 QEMU 8.2.2 on Ubuntu 24.04. Source verification passed on all 86,680 tracked
 entries, both before and after the run. The `max` reference again passes all
-seven controls. The census again records 932 required actions.
+seven controls. The earlier target-C census records 932 required actions; it predates the assembly, tool-coverage and mechanism ledgers described above.
 
 - **Configuration** still stops at `-P` (#1418).
 - **Bounded replays:** the depfile and macro-prefix-map blockers are fixed.

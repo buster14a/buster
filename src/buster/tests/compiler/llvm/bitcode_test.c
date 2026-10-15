@@ -14,6 +14,8 @@
 // llvm_bitcode_test_weak_consumers checks ELF bindings and linked behavior.
 // llvm_bitcode_test_section_index pins ordered section IDs and scaling work;
 // the weak-record fixture also checks mixed global/function section operands.
+// llvm_bitcode_test_type_index pins exact type IDs under collisions and growth,
+// with geometric work bounds for distinct and repeated wide operand keys.
 // Scalar ABI coverage: llvm_bitcode_test_scalar_abi_wire pins target attributes;
 // llvm_bitcode_test_scalar_abi_runtime exchanges original C with independent compilers.
 // llvm_bitcode_test_lifecycle checks canonical registrations and independently
@@ -4486,6 +4488,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
 
 // First-seen IDs depend on content, never storage or lexical order. The
 // generated common-prefix family counts real hash probes at N through 16N.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_type_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 words[] = {0, UINT64_MAX, UINT64_C(1) << 63, 1, 0};
+    u64 copy[] = {0, UINT64_MAX, UINT64_C(1) << 63, 1, 0};
+    u64 first[] = {UINT64_C(1) << 63, UINT64_MAX, UINT64_C(1) << 63, 1, 0};
+    u64 last[] = {0, UINT64_MAX, UINT64_C(1) << 63, 1, 1};
+    LlvmBitcodeTestType mixed[] = {
+        {.code = 2}, {.code = 2}, {.code = 3},
+        {.code = 18, .operand_count = 5, .operands = words},
+        {.code = 18, .operand_count = 5, .operands = copy},
+        {.code = 18, .operand_count = 4, .operands = words},
+        {.code = 19, .operand_count = 5, .operands = words},
+        {.code = 18, .operand_count = 5, .operands = first},
+        {.code = 18, .operand_count = 5, .operands = last},
+        {.code = 18, .operand_count = 5, .operands = words},
+    };
+    u32 expected[] = {0, 0, 1, 2, 2, 3, 4, 5, 6, 2};
+    u32 ids[BUSTER_ARRAY_LENGTH(mixed)];
+    for (u32 collision = 0; collision < 2; collision += 1)
+    {
+        LlvmBitcodeTestTypes indexed = llvm_bitcode_test_type_ids(arena, mixed, BUSTER_ARRAY_LENGTH(mixed), collision != 0, ids);
+        BUSTER_TEST(arguments, indexed.record_count == 7 && !memcmp(ids, expected, sizeof(expected)));
+    }
+
+    u64 colliding_words[128];
+    LlvmBitcodeTestType colliding[256];
+    u32 colliding_ids[BUSTER_ARRAY_LENGTH(colliding)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(colliding_words); index += 1)
+    {
+        colliding_words[index] = (u64)index << 32;
+        colliding[index] = (LlvmBitcodeTestType){.code = 7, .operand_count = 1, .operands = colliding_words + index};
+        colliding[128 + index] = (LlvmBitcodeTestType){.code = 7, .operand_count = 1, .operands = colliding_words + 127 - index};
+    }
+    LlvmBitcodeTestTypes collided = llvm_bitcode_test_type_ids(arena, colliding, BUSTER_ARRAY_LENGTH(colliding), true, colliding_ids);
+    BUSTER_TEST(arguments, collided.record_count == 128);
+    for (u32 index = 0; index < 128; index += 1)
+    {
+        BUSTER_TEST(arguments, colliding_ids[index] == index && colliding_ids[128 + index] == 127 - index);
+    }
+
+    u32 widths[] = {2, 129};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+    {
+        u32 width = widths[width_index];
+        for (u32 shape = 0; shape < 3; shape += 1)
+        {
+            u64 initial_probes = 0;
+            for (u32 count = 128; count <= 2048; count *= 16)
+            {
+                TemporalArena temporary = scratch_begin(&arena, 1);
+                Arena* scratch = temporary.arena;
+                u64* keys = arena_allocate(scratch, u64, (u64)count * width);
+                LlvmBitcodeTestType* requests = arena_allocate(scratch, LlvmBitcodeTestType, (u64)count * 3);
+                u32* actual = arena_allocate(scratch, u32, (u64)count * 3);
+                memset(keys, 0, (size_t)count * width * sizeof(*keys));
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    keys[(u64)index * width + (shape ? 0 : width - 1)] = shape == 2 ? 0 : index;
+                    requests[index] = (LlvmBitcodeTestType){.code = 18, .operand_count = width, .operands = keys + (u64)index * width};
+                }
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    requests[count + index] = requests[count - 1 - index];
+                    requests[2 * count + index] = requests[index];
+                }
+                LlvmBitcodeTestTypes measured = llvm_bitcode_test_type_ids(scratch, requests, count * 3, false, actual);
+                BUSTER_TEST(arguments, measured.record_count == (shape == 2 ? 1 : count));
+                BUSTER_TEST(arguments, measured.probes >= (u64)count * 3 && measured.probes <= (u64)count * 18);
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    u32 forward = shape == 2 ? 0 : index;
+                    u32 reverse = shape == 2 ? 0 : count - 1 - index;
+                    BUSTER_TEST(arguments, actual[index] == forward && actual[count + index] == reverse && actual[2 * count + index] == forward);
+                }
+                if (count == 128) initial_probes = measured.probes;
+                else BUSTER_TEST(arguments, measured.probes <= initial_probes * 24);
+                arguments->show(arguments, S8("LLVM_TYPE_INDEX shape={u32} width={u32} records={u32} probes={u64}\n"),
+                                shape, width, count, measured.probes);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_section_index(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5408,6 +5497,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult constant_handoff = llvm_bitcode_test_constant_handoff(arguments);
     result.test_count += constant_handoff.test_count;
     result.succeeded_test_count += constant_handoff.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_type_index);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_section_index);
     UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
     result.test_count += indexed_lookups.test_count;

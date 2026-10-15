@@ -149,13 +149,18 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_C17,
     COMPILER_DRIVER_C_DIALECT_C23,
     COMPILER_DRIVER_C_DIALECT_GNU89,
+    COMPILER_DRIVER_C_DIALECT_C89,
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
 // -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
 // tree of each C input after preprocessing and before c_parse_ast, inside the
-// parse phase. The tree feeds no later stage yet; a unit the tree builder
-// rejects fails with the parse error class. OFF is the default.
+// parse phase, for analysis and lowering to read; a unit the tree builder
+// rejects on syntax compiles without a tree
+// (CompilerDriverCAstPilotResult.rejections); one that cannot reserve its
+// storage fails with the parse error class. compiler_driver_parse_arguments
+// defaults to IMPLICIT; -fno-c-ast-pilot selects OFF, the tree-free reference
+// path, until #4058 deletes it. A zero-initialized invocation is OFF.
 typedef enum CompilerDriverCAstPilot
 {
     COMPILER_DRIVER_C_AST_PILOT_OFF,
@@ -574,7 +579,8 @@ struct CompilerDriverFallbackRecord
 };
 
 // What the -fc-ast-pilot hook measured, summed over the inputs that built a
-// tree. `units` is zero when the hook did not run. The walk, scan and
+// tree. `units` is zero when the hook did not run; `rejections` counts the
+// units whose tree the builder refused on syntax, which compiled without one. The walk, scan and
 // children rows are diagnostic passes over the finished tree and are timed
 // only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
 // over the kinds column counting CALL nodes (`scan_calls`), and
@@ -584,12 +590,15 @@ typedef struct CompilerDriverCAstPilotResult CompilerDriverCAstPilotResult;
 struct CompilerDriverCAstPilotResult
 {
     u64 units;
+    u64 rejections;
     u64 nodes;
     u64 tokens;
     u64 build_nanoseconds;
     u64 retained_bytes;
     u64 transient_high_water;
     u64 column_copy_bytes;
+    u64 parenthesis_copy_bytes;
+    u64 parenthesis_committed_bytes;
     u64 finalize_child_entries;
     u64 walk_nanoseconds;
     u64 walk_steps;
@@ -611,13 +620,13 @@ struct CompilerDriverCAstPilotResult
     // answered, and runs left to the type machine and why. Zero when the
     // analysis had no tree to use.
     CAstSpecifierStatistics specifiers;
-    // The extent table lowering read controlled body ranges from
-    // (c_gen.c): bodies, entries and answers, and the queries the token
-    // walker answered and why. Zero when lowering had no tree to use.
-    CAstExtentStatistics extents;
-    // What lowering read from the tree (CAstLowerStatistics). Zero for
-    // -fsyntax-only and when lowering had no tree.
+    // What lowering read from the tree (CAstLowerStatistics), on every
+    // compile that lowers: lowering builds the unit's tree itself when the
+    // pilot did not (GitHub #3102 step 1). Zero for -fsyntax-only.
     CAstLowerStatistics lower;
+    // The facts analysis retained for lowering (CAstFactStatistics, GitHub
+    // #4062). Zero for -fsyntax-only, which does not lower.
+    CAstFactStatistics facts;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
@@ -695,6 +704,11 @@ struct CompilerDriverResult
     bool has_llvm_bitcode;
     bool has_ebpf;
     bool has_spirv;
+    // Physical C source/header files kept alive for the enclosing native-link
+    // output guard. Virtual builtin headers are absent; the system bit only
+    // classifies depfile text and never filters this safety closure.
+    CPreprocessDependency* physical_inputs;
+    u32 physical_input_count;
 };
 
 // Prepare the target-independent frontend, ABI and opcode tables. Serial

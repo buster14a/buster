@@ -1,0 +1,2 @@
+[ perf record: Woken up 5 times to write data ]
+[ perf record: Captured and wrote 1.232 MB ../edge-split-profile/perf.data (8747 samples) ]

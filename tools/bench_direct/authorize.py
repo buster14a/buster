@@ -23,10 +23,12 @@ historical recipe ("historical").
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -41,6 +43,8 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 DECIMAL = re.compile(r"[1-9][0-9]*")
 API = "https://api.github.com"
+API_FETCH_ATTEMPTS = 3
+API_FETCH_BACKOFF_SECONDS = 1
 COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
 # Kept equal to compiler_receipt.SCALING_REQUEST; this file imports nothing local.
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
@@ -314,12 +318,26 @@ def fetch(path: str, token: str) -> object:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     })
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    # Only repeat this read-only GET, never an authorization verdict or host run.
+    for attempt in range(API_FETCH_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as error:
+            if not 500 <= error.code < 600 or attempt + 1 == API_FETCH_ATTEMPTS:
+                raise
+            error.close()
+        except (OSError, urllib.error.URLError, http.client.IncompleteRead):
+            if attempt + 1 == API_FETCH_ATTEMPTS:
+                raise
+        else:
+            break
+        time.sleep(API_FETCH_BACKOFF_SECONDS * (2 ** attempt))
+    return result
 
 
 # Data transport for the native qualification admission command. This adapter
-# performs no campaign selection, budget decision, retry or physical work.
+# performs no campaign selection, budget decision, campaign retry or physical work.
 SAMPLING_PREFIX = "profile: compiler-main-sampling-"
 SAMPLING_FREEZE = "docs/compiler-main-sampling-freeze-v1.tsv"
 SAMPLING_ALLOWLIST = "docs/compiler-main-sampling-admission-v1.tsv"

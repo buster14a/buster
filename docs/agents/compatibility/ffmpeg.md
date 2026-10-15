@@ -171,23 +171,56 @@ Artifacts include source Git-object inventory; compiler SHA-256 identities;
 argv/cwd/stdout/stderr/status for every candidate CC action and top-level stage;
 generated configurations; feature manifests; NASM version/hash provenance;
 checkasm logs and counts; FATE reports; and a receipt separating reference and
-candidate configure/build/checkasm/media/FATE outcomes. Per-command deadlines
-are 60 seconds for compiler/runtime probes and 900 seconds for
-configure/build/FATE. Capture overflow, launch failure, timeout or incomplete
-process cleanup fails the command. Hosted elapsed values are diagnostic; there
-is no performance qualification or ranking.
+candidate configure/build/checkasm/media/FATE outcomes. Every command retains
+elapsed time, CPU totals, peak memory and their availability/error statuses.
+The Linux portfolio collector checks the exact successful Buster CC action,
+complete captures, cleanup status and nonempty object for both
+`libavcodec/h264_cabac.c` and `libavcodec/h264_loopfilter.c`; its TSV records
+the measured values and action names. The portable result still requires the
+entire census, matching reference/candidate configurations and pristine input
+afterward. Per-command deadlines are 60 seconds for compiler/runtime probes
+and 900 seconds for configure/build/FATE. Capture overflow, launch failure,
+timeout or incomplete process cleanup fails the command. These are functional
+and resource-observation records, not a performance qualification or ranking.
 
 ## Hosted scheduling
 
-FFmpeg has no workflow of its own. The no-input `--harness-self-test` runs in
-both existing native-driver lint blocks; it checks configuration
-construction, the complete pinned x86 feature floor, tool identity, checkasm
-summary and count controls without an external checkout or build. Full portable
-or optimized external builds are reserved for
-the approved shared main-only external-projects workflow under
-[main-only scheduling](../../external-project-ci.md) (#3501). This change adds
-no PR, merge-group, branch-push or manual full-build workload. A qualified
-pinned recipe still needs its own runner-cost review.
+The no-input `--harness-self-test` runs in both existing native-driver
+lint blocks; it checks configuration construction, the complete pinned x86
+feature floor, tool identity, checkasm summary and count controls without an
+external checkout or build. The shared Linux x86-64 main-only portfolio now
+checks out the exact pin and runs the existing `--portable` census after the
+current Linux projects. It does not run the optimized/NASM profile. The route
+preserves the full reference-versus-Buster build, media, no-sample FATE,
+configuration-match and pristine-after gates; unrelated census failures remain
+failures.
+
+The run records elapsed time, user/system CPU, peak memory, and resource
+availability/error fields for each candidate process. Acceptance of the two
+H.264 translation units requires one successful Buster `cc` action and a
+nonempty candidate object for each target, complete argv/stdout/stderr/status
+files, successful capture/process cleanup and observed CPU/memory measurements.
+The immediate FFmpeg artifact allowlist contains text evidence, configuration
+files and logs only; it excludes the upstream checkout, generated objects and
+binaries. No full-build route is added to PR, merge-group, branch-push or manual
+events.
+
+The four stages on each of two sides have a configured 900-second child
+deadline, and probes and preparation add at most 660 seconds. Their command
+ceiling is 131 minutes. The pristine-input check runs before and after the
+harness; each check has six Git child commands with 600-second deadlines, adding
+up to 120 minutes. The configured child-deadline sum is therefore 251 minutes.
+This is the sum of limits, not a measured runtime; spawn and cleanup work, file
+operations, checkout/verification, and artifact upload are outside that sum.
+The existing Linux portfolio job keeps its unchanged 360-minute limit, and
+FFmpeg remains after all current projects. The 251-minute sum does not establish
+available headroom after those earlier stages. Run 38428249840 took 31 minutes 49 seconds and retained a
+3,290,671,945 byte artifact, but its functional-admission stage failed; that run
+does not
+establish a green end-to-end receipt or guaranteed headroom. No existing
+watchdog is raised. The original #4050 acceptance remains pending until the
+pristine pinned H.264 translation units complete with reviewed time/RSS evidence
+on the main-only route; a synthetic control or PR run cannot close that gate.
 
 ## Remaining qualification
 
