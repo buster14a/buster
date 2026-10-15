@@ -2040,6 +2040,17 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     };
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_x86_aarch64_feature));
 #if BUSTER_CPU_ARCH_X86_64
+    X86_64CpuFeatureInput mmx_cpuid = {.maximum_basic_leaf = 1,
+                                     .basic = {.edx = UINT32_C(0x00800000)}};
+    BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(mmx_cpuid),
+                                                        TARGET_CPU_FEATURE_X86_MMX));
+    mmx_cpuid.basic.edx = 0;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(mmx_cpuid),
+                                                         TARGET_CPU_FEATURE_X86_MMX));
+    mmx_cpuid.basic.edx = UINT32_C(0x00800000);
+    mmx_cpuid.maximum_basic_leaf = 0;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(mmx_cpuid),
+                                                         TARGET_CPU_FEATURE_X86_MMX));
     X86_64CpuFeatureInput rdtscp_cpuid = {.maximum_extended_leaf = UINT32_C(0x80000001),
                                         .extended_basic = {.edx = UINT32_C(0x08000000)}};
     BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(rdtscp_cpuid),

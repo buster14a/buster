@@ -61,6 +61,11 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE);
     CpuId basic = input.basic;
     bool has_basic_leaf_1 = input.maximum_basic_leaf >= UINT32_C(1);
+    // CPUID.01H:EDX[23] advertises MMX independently of OS-managed vector state.
+    if (has_basic_leaf_1 && (basic.edx & UINT32_C(0x00800000)))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MMX);
+    }
     if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x1))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE3);
