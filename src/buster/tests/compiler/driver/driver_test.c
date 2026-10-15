@@ -6730,88 +6730,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_alias_direct_emitters(Un
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_numeric_declarators(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    struct
-    {
-        String8 source;
-        String8 message;
-    } cases[] = {
-        {S8("typedef int (*Callback)(int,int,int);\nvoid bad(void) { Callback(1,2,3); }\n"), S8("expected a declarator name")},
-        {S8("typedef int T;\nvoid bad(void) { T (((1))); }\n"), S8("expected a declarator name")},
-        {S8("typedef int T;\nvoid bad(void) { T (*1); }\n"), S8("expected a declarator name")},
-        {S8("typedef int T;\nvoid bad(void) { int x; T (1,x); }\n"), S8("expected a declarator name")},
-        {S8("typedef int (*Callback)(int,int,int);\nint bad(void) { return sizeof(Callback(1,2,3)); }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T;\nint bad(void) { return sizeof(T ((1))); }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T;\nint bad(void) { return sizeof(int (*)(1,2,3)); }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T;\nint bad(void) { return sizeof(int (*)(int,2)); }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T;\nint bad(void) { return _Alignof(T(1,2)); }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T;\nint bad(void) { static unsigned long n = sizeof(T(1,2)); return n; }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T; typedef int (*Callback)(int);\nint inc(int x) { return x+1; } int good(void) { Callback (*table)[16]; T ((x))=3; Callback p=inc; (void)table; return x + sizeof(Callback(*)(int)) + sizeof(Callback(*)[16]) + sizeof(int (*[3])(int)) + sizeof(int (*(*)[4])[5]) + _Alignof(Callback(*)[16]) + _Generic((Callback(*)[3])0, Callback(*)[3]:1, default:0) + p(1); }\n"), {0}},
-        {S8("typedef int (*Callback)(int,int,int);\nint sum(int a,int b,int c) { return a+b+c; } int good(void) { Callback p=sum; { Callback Callback=p; Callback(1,2,3); return sizeof(Callback(1,2,3)); } }\n"), {0}},
-    };
-    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
-    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 routes[] = {S8("-fc-ast-pilot"), S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot=explicit")};
-    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
-    {
-        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
-        {
-            for (u32 route = 0; route < BUSTER_ARRAY_LENGTH(routes); route += 1)
-            {
-                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
-                {
-                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    Arena* arena = temporary.arena;
-                    String8 input = buster_test_temporary_path(arena, S8("buster-numeric-declarator"), S8(".c"));
-                    String8 output = buster_test_temporary_path(arena, S8("buster-numeric-declarator"), S8(".o"));
-                    bool valid = !cases[index].message.length;
-                    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source))))
-                    {
-                        String8 syntax_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-fsyntax-only"), input};
-                        String8 object_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-c"), S8("-o"), output, input};
-                        CompilerDriverResult syntax = compiler_driver_execute_invocation(
-                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
-                        CompilerDriverResult object = compiler_driver_execute_invocation(
-                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
-                        String8 description = string_format(arena, S8("source={S8}\ndialect={S8} form={S8} route={S8}\nsyntax={S8}\nobject={S8}"),
-                            cases[index].source, dialects[dialect], forms[form], routes[route], syntax.diagnostic, object.diagnostic);
-                        BUSTER_TEST_RAW(arguments, syntax.error == (valid ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ANALYSIS), description);
-                        BUSTER_TEST_RAW(arguments, syntax.error == object.error, description);
-                        BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
-                        BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == (valid ? 0u : 1u), description);
-                        BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
-                        BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
-                        if (!valid && BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 1 && object.diagnostic_count == 1))
-                        {
-                            CompilerDiagnostic first = syntax.diagnostics[0];
-                            CompilerDiagnostic second = object.diagnostics[0];
-                            BUSTER_TEST_RAW(arguments, string_first_sequence(first.message, cases[index].message) != BUSTER_STRING_NO_MATCH, description);
-                            BUSTER_TEST(arguments, first.primary.position.line == 2);
-                            BUSTER_TEST(arguments, compiler_driver_test_unit_location_equal(first.primary, second.primary));
-                            BUSTER_TEST(arguments, first.severity == second.severity);
-                            BUSTER_STRING_TEST(arguments, first.code, second.code);
-                            BUSTER_STRING_TEST(arguments, first.message, second.message);
-                            BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second));
-                        }
-                        OsFileDescriptor* emitted = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
-                        BUSTER_TEST_RAW(arguments, (emitted != 0) == valid, description);
-                        if (emitted)
-                        {
-                            BUSTER_TEST(arguments, os_file_close(emitted));
-                            BUSTER_TEST(arguments, os_file_delete(output));
-                        }
-                        BUSTER_TEST(arguments, os_file_delete(input));
-                    }
-                    c_test_scratch_end(temporary);
-                }
-            }
-        }
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7864,6 +7782,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_gro
          true},
     };
     return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_numeric_declarators(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {S8("typedef int (*Callback)(int,int,int);\nvoid bad(void) { Callback(1,2,3); }\n"), S8("expected a declarator name")},
+        {S8("typedef int T;\nvoid bad(void) { T (((1))); }\n"), S8("expected a declarator name")},
+        {S8("typedef int T;\nvoid bad(void) { T (*1); }\n"), S8("expected a declarator name")},
+        {S8("typedef int T;\nvoid bad(void) { int x; T (1,x); }\n"), S8("expected a declarator name")},
+        {S8("typedef int (*Callback)(int,int,int);\nint bad(void) { return sizeof(Callback(1,2,3)); }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T;\nint bad(void) { return sizeof(T ((1))); }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T;\nint bad(void) { return sizeof(int (*)(1,2,3)); }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T;\nint bad(void) { return sizeof(int (*)(int,2)); }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T;\nint bad(void) { return _Alignof(T(1,2)); }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T;\nint bad(void) { static unsigned long n = sizeof(T(1,2)); return n; }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T; typedef int (*Callback)(int);\nint inc(int x) { return x+1; } int good(void) { Callback (*table)[16]; T ((x))=3; Callback p=inc; (void)table; return x + sizeof(Callback(*)(int)) + sizeof(Callback(*)[16]) + sizeof(int (*[3])(int)) + sizeof(int (*(*)[4])[5]) + _Alignof(Callback(*)[16]) + _Generic((Callback(*)[3])0, Callback(*)[3]:1, default:0) + p(1); }\n"), {0}},
+        {S8("typedef int (*Callback)(int,int,int);\nint sum(int a,int b,int c) { return a+b+c; } int good(void) { Callback p=sum; { Callback Callback=p; Callback(1,2,3); return sizeof(Callback(1,2,3)); } }\n"), {0}},
+    };
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 routes[] = {S8("-fc-ast-pilot"), S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot=explicit")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 route = 0; route < BUSTER_ARRAY_LENGTH(routes); route += 1)
+            {
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Arena* arena = temporary.arena;
+                    String8 input = buster_test_temporary_path(arena, S8("buster-numeric-declarator"), S8(".c"));
+                    String8 output = buster_test_temporary_path(arena, S8("buster-numeric-declarator"), S8(".o"));
+                    bool valid = !cases[index].message.length;
+                    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source))))
+                    {
+                        String8 syntax_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-fsyntax-only"), input};
+                        String8 object_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-c"), S8("-o"), output, input};
+                        CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                        CompilerDriverResult object = compiler_driver_execute_invocation(
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                        String8 description = string_format(arena, S8("source={S8}\ndialect={S8} form={S8} route={S8}\nsyntax={S8}\nobject={S8}"),
+                            cases[index].source, dialects[dialect], forms[form], routes[route], syntax.diagnostic, object.diagnostic);
+                        BUSTER_TEST_RAW(arguments, syntax.error == (valid ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ANALYSIS), description);
+                        BUSTER_TEST_RAW(arguments, syntax.error == object.error, description);
+                        BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+                        BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == (valid ? 0u : 1u), description);
+                        BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
+                        BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
+                        if (!valid && BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 1 && object.diagnostic_count == 1))
+                        {
+                            CompilerDiagnostic first = syntax.diagnostics[0];
+                            CompilerDiagnostic second = object.diagnostics[0];
+                            BUSTER_TEST_RAW(arguments, string_first_sequence(first.message, cases[index].message) != BUSTER_STRING_NO_MATCH, description);
+                            BUSTER_TEST(arguments, first.primary.position.line == 2);
+                            BUSTER_TEST(arguments, compiler_driver_test_unit_location_equal(first.primary, second.primary));
+                            BUSTER_TEST(arguments, first.severity == second.severity);
+                            BUSTER_STRING_TEST(arguments, first.code, second.code);
+                            BUSTER_STRING_TEST(arguments, first.message, second.message);
+                            BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second));
+                        }
+                        OsFileDescriptor* emitted = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+                        BUSTER_TEST_RAW(arguments, (emitted != 0) == valid, description);
+                        if (emitted)
+                        {
+                            BUSTER_TEST(arguments, os_file_close(emitted));
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(input));
+                    }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
 }
 
 // Rejected wide escapes must leave both absent and existing output paths
